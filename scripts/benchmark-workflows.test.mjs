@@ -93,6 +93,29 @@ test("explicit selections and ARM64 profiles retain their separate execution pat
   }
 });
 
+test("suite measurement survives a skipped dispatch ancestor only with a successful matrix", () => {
+  const suite = job(heliodor, "linux-suite");
+  assert.match(suite, /needs: linux-suite-matrix/);
+  const condition = expression(suite, "if").replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+  // GitHub implicitly adds success() unless a status function is present.
+  // That default checks the dependency chain, including validate-dispatch,
+  // which is deliberately skipped on schedules even when the matrix succeeds.
+  const hasStatusCheck = /\b(?:success|failure|cancelled|always)\s*\(/.test(condition);
+  const evaluate = new Function("needs", "cancelled", `return (${condition});`);
+  for (const dispatch of ["success", "skipped"]) {
+    for (const matrix of ["success", "failure", "cancelled", "skipped"]) {
+      for (const cancelled of [false, true]) {
+        const implicitSuccess = dispatch === "success" && matrix === "success" && !cancelled;
+        const actual = (hasStatusCheck || implicitSuccess) && evaluate(
+          { "linux-suite-matrix": { result: matrix } }, () => cancelled,
+        );
+        assert.equal(actual, matrix === "success" && !cancelled,
+          `dispatch=${dispatch}, matrix=${matrix}, cancelled=${cancelled}`);
+      }
+    }
+  }
+});
+
 test("measurement queues are independent and retain only one pending run", () => {
   for (const workflow of [heliodor, bench]) {
     const concurrency = workflow.match(/^concurrency:\n([\s\S]*?)\njobs:/m)[1];

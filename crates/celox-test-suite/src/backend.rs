@@ -84,9 +84,9 @@ pub trait Backend {
     fn run_testbench(&mut self) -> Result<()> {
         Err("this adapter does not support native testbench execution".into())
     }
-    /// Take the text the design printed with `$display` (each followed by a
+    /// Take the bytes the design printed with `$display` (each followed by a
     /// newline) and `$write` since the previous call.
-    fn take_output(&mut self) -> Result<String> {
+    fn take_output(&mut self) -> Result<Vec<u8>> {
         Err("this adapter does not capture design output".into())
     }
 }
@@ -196,7 +196,7 @@ impl Simulator {
         self.backend.run_testbench()
     }
 
-    pub fn take_output(&mut self) -> Result<String> {
+    pub fn take_output(&mut self) -> Result<Vec<u8>> {
         self.backend.take_output()
     }
 

@@ -33,6 +33,7 @@ import {
 	FourState,
 	type FourStateSignalValue,
 	type NativeFrontendSimulatorHandle,
+	type SignalLayout,
 	SimulationTimeoutError,
 	X,
 } from "./types.js";
@@ -3315,6 +3316,137 @@ describe("E2E: non-byte-aligned unpacked array port", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bug fix: scalar port writes stay inside the port's own bytes
+// ---------------------------------------------------------------------------
+
+const SCALAR_WRITE_BOUNDARY_SOURCE = `
+module ScalarWriteBoundary (
+    flags: input logic<8>,
+    clk:   input clock,
+    rst:   input reset,
+    wide:  input logic<40>,
+    sum:   output logic<32>,
+    addr:  input logic<24>,
+) {
+    always_comb {
+        sum = addr ^ (wide as 24) ^ (flags as 24);
+    }
+}
+`;
+
+describe("E2E: scalar port write boundary", () => {
+	interface Ports {
+		flags: bigint;
+		rst: bigint;
+		wide: bigint;
+		addr: bigint;
+		readonly sum: bigint;
+	}
+
+	function createBoundarySim(fourState: boolean): {
+		sim: Simulator<Ports>;
+		layout: Record<string, SignalLayout>;
+		bytes: Uint8Array;
+	} {
+		const bridge = createSimulatorBridge(loadNativeAddon());
+		let captured: ReturnType<typeof bridge> | undefined;
+		const sim = Simulator.create<Ports>(
+			{
+				__celox_module: true,
+				name: "ScalarWriteBoundary",
+				sources: [{ path: "", content: SCALAR_WRITE_BOUNDARY_SOURCE }],
+				ports: {},
+				events: ["clk"],
+			},
+			{
+				fourState,
+				__nativeCreate: (sources, name, options) => {
+					const result = bridge(sources, name, options);
+					captured = result;
+					return result;
+				},
+			},
+		);
+		if (!captured) {
+			throw new Error("native create was not called");
+		}
+		return {
+			sim,
+			layout: captured.layout,
+			bytes: new Uint8Array(captured.buffer),
+		};
+	}
+
+	test.each([false, true])(
+		"scalar writes stay inside the port's bytes (fourState=%s)",
+		(fourState) => {
+			const { sim, layout, bytes } = createBoundarySim(fourState);
+			const flags = layout.flags!;
+			const wide = layout.wide!;
+			const addr = layout.addr!;
+			expect(addr.byteSize).toBe(3);
+			expect(wide.byteSize).toBe(5);
+			expect(flags.byteSize).toBe(1);
+			const planes = fourState ? 2 : 1;
+
+			// The allocator packs the next state object directly behind this
+			// port's bytes, so a write that spills past them corrupts a
+			// neighbouring signal rather than unused padding.
+			const nextOffset = Math.min(
+				...Object.values(layout)
+					.filter((sig) => sig.offset > addr.offset)
+					.map((sig) => sig.offset),
+			);
+			expect(nextOffset).toBe(addr.offset + addr.byteSize * planes);
+
+			sim.dut.flags = 0x5an;
+			sim.dut.addr = 0n;
+			sim.dut.wide = 0n;
+
+			const beforeAddr = Uint8Array.from(bytes);
+			sim.dut.addr = 0xa1_b2c3n;
+			expectOnlyRangeChanged(
+				bytes,
+				beforeAddr,
+				addr.offset,
+				planes * 3,
+				"addr",
+			);
+			expect(sim.dut.addr).toBe(0xa1_b2c3n);
+			expect(sim.dut.flags).toBe(0x5an);
+
+			const beforeWide = Uint8Array.from(bytes);
+			sim.dut.wide = 0x12_3456_789an;
+			expectOnlyRangeChanged(
+				bytes,
+				beforeWide,
+				wide.offset,
+				planes * 5,
+				"wide",
+			);
+			expect(sim.dut.wide).toBe(0x12_3456_789an);
+			expect(sim.dut.addr).toBe(0xa1_b2c3n);
+
+			expect(sim.dut.sum).toBe(0xa1_b2c3n ^ 0x56_789an ^ 0x5an);
+			sim.dispose();
+		},
+	);
+
+	function expectOnlyRangeChanged(
+		after: Uint8Array,
+		before: Uint8Array,
+		offset: number,
+		length: number,
+		label: string,
+	): void {
+		for (let i = 0; i < after.length; i++) {
+			if (i >= offset && i < offset + length) continue;
+			expect(after[i], `${label} write changed byte ${i}`).toBe(before[i]);
+		}
+	}
+});
+
+// ---------------------------------------------------------------------------
 // Native testbench (run_test / run_test_detailed)
 // ---------------------------------------------------------------------------
 
@@ -3424,6 +3556,34 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(result.assertions[0]!.passed).toBe(false);
 	});
 
+	test("testbench assertion messages preserve binary output as Uint8Array", () => {
+		const result = runTest(
+			[
+				{
+					content: `
+            #[test(t)]
+            module t {
+                initial {
+                    $assert(1'b1, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $assert_continue(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $assert(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $finish();
+                }
+            }
+        `,
+					path: "binary.veryl",
+				},
+			],
+			"t",
+		);
+		expect(result.passed).toBe(false);
+		expect(result.assertions).toHaveLength(3);
+		for (const assertion of result.assertions) {
+			expect(assertion.message).toBeInstanceOf(Uint8Array);
+			expect(assertion.message).toEqual(new Uint8Array([255, 0, 128, 254, 0]));
+		}
+	});
+
 	test("multiple test modules run independently after one fails", () => {
 		const sources = [{ content: TB_MULTIPLE_TESTS_SOURCE, path: "test.veryl" }];
 
@@ -3431,7 +3591,9 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(first.passed).toBe(false);
 		expect(first.assertions.length).toBe(1);
 		expect(first.assertions[0]!.passed).toBe(false);
-		expect(first.assertions[0]!.message).toBe("fail first");
+		expect(first.assertions[0]!.message).toEqual(
+			new TextEncoder().encode("fail first"),
+		);
 
 		const second: NapiTestResult = addon.runTest(
 			sources,
@@ -3440,7 +3602,9 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(second.passed).toBe(true);
 		expect(second.assertions.length).toBe(1);
 		expect(second.assertions[0]!.passed).toBe(true);
-		expect(second.assertions[0]!.message).toBe("pass second");
+		expect(second.assertions[0]!.message).toEqual(
+			new TextEncoder().encode("pass second"),
+		);
 	});
 
 	test("assertion results include source location", () => {
@@ -3709,6 +3873,35 @@ describe("E2E: tiered + VCD", () => {
 			expect(dumped).toBe(expected);
 		} finally {
 			rmSync(vcdPath, { force: true });
+		}
+	});
+});
+
+describe("E2E: four-state wildcard comparison", () => {
+	test("both operators produce X for unknown compared bits", () => {
+		const source = `module Wildcard (
+            a: input logic<4>, b: input logic<4>,
+            eqw: output logic, newq: output logic,
+        ) { assign eqw = a ==? b; assign newq = a !=? b; }`;
+		const sim = Simulator.fromSource<{
+			a: bigint | FourStateSignalValue;
+			b: bigint | FourStateSignalValue;
+			readonly eqw: bigint;
+			readonly newq: bigint;
+		}>(source, "Wildcard", { fourState: true });
+		try {
+			for (const value of [4n, 7n]) {
+				sim.dut.a = FourState(value, 3n);
+				sim.dut.b = 4n;
+				expect(sim.fourState("eqw")).toEqual(FourState(1n, 1n));
+				expect(sim.fourState("newq")).toEqual(FourState(1n, 1n));
+			}
+			sim.dut.a = FourState(4n, 3n);
+			sim.dut.b = FourState(4n, 3n);
+			expect(sim.fourState("eqw")).toEqual(FourState(1n, 0n));
+			expect(sim.fourState("newq")).toEqual(FourState(0n, 0n));
+		} finally {
+			sim.dispose();
 		}
 	});
 });

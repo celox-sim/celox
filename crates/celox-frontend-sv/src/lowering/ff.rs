@@ -1696,6 +1696,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.with_kernel(ProcessKernelBuilder::finish);
             return Ok(false);
         }
+        let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
+            let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
+                return Err(unsupported(format!("condition of `{name}`")));
+            };
+            Some(self.eval_truth(condition)?)
+        } else {
+            None
+        };
         let (template, values) = system_task_template(&kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
@@ -1729,11 +1737,29 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
         }
+        // Argument effects happen before branching, and the condition register
+        // retains the value it had before those effects.
+        let resume = match assertion {
+            Some((_, Some(true))) => return Ok(true),
+            Some((truth, None)) => {
+                let resume = self.b.new_block();
+                let fail = self.b.new_block();
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: truth,
+                    true_block: (resume, Vec::new()),
+                    false_block: (fail, Vec::new()),
+                });
+                self.b.switch_to_block(fail);
+                Some(resume)
+            }
+            _ => None,
+        };
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
+            SystemTaskKind::Assertion(kind) => *kind,
         };
         let site_id = self.m.event_site(RuntimeEventSite {
             kind: event_kind,
@@ -1748,12 +1774,19 @@ impl<'p, 'a> Ff<'p, 'a> {
             site_id,
             args: regs,
         });
-        if matches!(kind, SystemTaskKind::Fatal) {
+        if kind.is_fatal() {
             let code = self
                 .m
                 .runtime_error(template.unwrap_or_else(|| "$fatal".to_string()));
             self.b.seal_block(SIRTerminator::Error(code));
-            return Ok(false);
+            if resume.is_none() {
+                return Ok(false);
+            }
+        } else if let Some(resume) = resume {
+            self.jump(resume);
+        }
+        if let Some(resume) = resume {
+            self.b.switch_to_block(resume);
         }
         Ok(true)
     }
@@ -1789,6 +1822,17 @@ impl<'p, 'a> Ff<'p, 'a> {
                             },
                         }],
                     },
+                    (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => {
+                        sv::ir::Expr::Binary {
+                            left: Box::new(sv::ir::Expr::Binary {
+                                left: Box::new(selector.clone()),
+                                op: sv::ir::BinaryOp::EqWildcard,
+                                right: Box::new(value.clone()),
+                            }),
+                            op: sv::ir::BinaryOp::NeCase,
+                            right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
+                        }
+                    }
                     (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
                         left: Box::new(selector.clone()),
                         op: if kind == sv::ir::CaseKind::Exact {

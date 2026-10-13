@@ -120,7 +120,7 @@ all_backends! {
         sim.modify(|io| io.set(a, 7u8)).unwrap();
         sim.tick(clk).unwrap();
         let first = sim.drain_runtime_events();
-        assert_eq!(first, vec![RuntimeEvent::Display { message: "a=7".into() }]);
+        assert_eq!(first, vec![RuntimeEvent::Display { message: b"a=7".to_vec() }]);
         sim.restore(&checkpoint).unwrap();
         // Events already emitted are not withdrawn or repeated by a restore;
         // re-executing the cycle emits them again.

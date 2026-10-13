@@ -4920,6 +4920,7 @@ fn lower_expr_with_context(
                     operation_context,
                     Some(left_signed),
                 )?;
+                let base = coerce_node_width(arena, base, operation_context, left_signed).ok()?;
                 let exponent_signed = sv_expr_is_signed_with_parameters(
                     right,
                     variables,
@@ -6597,8 +6598,12 @@ fn sv_expr_natural_width(
                 Some(1)
             } else if matches!(
                 op,
-                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+                sv::ir::BinaryOp::Shl
+                    | sv::ir::BinaryOp::Shr
+                    | sv::ir::BinaryOp::Sar
+                    | sv::ir::BinaryOp::Pow
             ) {
+                // Shift counts and exponents are self-determined (Table 11-21).
                 sv_expr_natural_width(left, variables, name_to_id, constants, parameter_types)
             } else {
                 Some(

@@ -154,7 +154,7 @@ standard library dependency follow this workspace's Veryl version.
 `TestCase::tags` exposes reviewed expectations that require additional or
 different behavior from portable SystemVerilog. `TestTag::as_str()` supplies
 stable machine-readable names and `TestTag::reason()` supplies the rationale
-with IEEE 1800-2023 clauses. These are properties of the shared assertions,
+with IEEE 1800-2023 clauses where applicable. These are properties of the shared assertions,
 independent of backend ignores, emission failures, and simulator bugs. A tagged
 case still runs its original assertions by default.
 
@@ -163,7 +163,7 @@ case still runs its original assertions by default.
 | `evaluation_order` | A specific order for effectful input arguments or expression operands (13.5, 11.4.2) |
 | `assignment_pattern_evaluation` | Source order or evaluation count for effectful array-pattern items (10.9.1, 11.4.2) |
 | `deferred_function_effects` | Celox FF function effects are deferred so later statements read old state, whereas SV copy-out is blocking (4.9.7) |
-| `eager_assertion_messages` | Assertion message effects occur even on success, whereas an SV fail action only executes on failure (16.3) |
+| `eager_assertion_messages` | Veryl `$assert` / `$assert_continue` message argument effects occur even on success; these calls have no standard SV counterpart |
 | `two_state_zero_division` | The suite's two-state model returns zero for division/remainder by zero, including four-state `logic` destinations in emitted SV (11.3.4, 11.4.3) |
 | `two_state_initialization` | An explicit check of zero-initialized storage even for emitted four-state `logic` (6.8, Table 6-7) |
 
@@ -468,3 +468,7 @@ The retained [result matrix](verification/README.md) and
 and what remains unresolved. These extracted regressions include behavior
 specific to Celox; the entire catalogue is not yet a verified Veryl conformance
 suite. Keep the distinctions when reusing it with another compiler.
+
+`(expect_output "text")` compares UTF-8 bytes. For arbitrary output use
+`(expect_output (bytes 128 255 0))`; each decimal value must be in `0..255`.
+The Celox and external simulator adapters compare bytes without UTF-8 replacement.

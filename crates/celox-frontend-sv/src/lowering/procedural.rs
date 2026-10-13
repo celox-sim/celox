@@ -569,6 +569,18 @@ pub(super) enum SystemTaskKind {
     Message,
     /// `$fatal`: a message, then the simulation ends with an error.
     Fatal,
+    /// Veryl's assertion calls: eagerly evaluate every argument, then report
+    /// only if the condition fails. These are not standard SV assertions.
+    Assertion(RuntimeEventKind),
+}
+
+impl SystemTaskKind {
+    pub(super) fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            Self::Fatal | Self::Assertion(RuntimeEventKind::AssertFatal)
+        )
+    }
 }
 
 pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
@@ -582,6 +594,8 @@ pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
         "$finish" => SystemTaskKind::Finish,
         "$error" | "$warning" | "$info" => SystemTaskKind::Message,
         "$fatal" => SystemTaskKind::Fatal,
+        "$assert" => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
+        "$assert_continue" => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
         _ => return None,
     })
 }
@@ -604,7 +618,7 @@ fn template_arguments(template: &str) -> usize {
         }
         while chars.next_if(char::is_ascii_digit).is_some() {}
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsS".contains(spec)
+            && "bBoOhHxXdDiIcCsStT".contains(spec)
         {
             count += 1;
         }
@@ -625,6 +639,7 @@ pub(super) fn system_task_template(
         SystemTaskKind::Fatal if matches!(args.first(), Some(sv::ir::SystemTaskArg::Expr(_))) => {
             &args[1..]
         }
+        SystemTaskKind::Assertion(_) => &args[1..],
         SystemTaskKind::Finish => &[][..],
         _ => args,
     };
@@ -634,12 +649,22 @@ pub(super) fn system_task_template(
         }
         _ => (None, args.to_vec()),
     };
+    if matches!(kind, SystemTaskKind::Assertion(_)) && template.is_none() {
+        template = Some("assertion failed".to_string());
+    }
     if let SystemTaskKind::Print(_, radix) = kind {
         let converted = template.as_deref().map_or(0, template_arguments);
         let rest = values.len().saturating_sub(converted);
         if rest > 0 {
             let mut text = template.unwrap_or_default();
-            text.push_str(&format!("%{radix}").repeat(rest));
+            for value in &values[converted..] {
+                text.push('%');
+                text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
+                    's'
+                } else {
+                    *radix
+                });
+            }
             template = Some(text);
         }
     }

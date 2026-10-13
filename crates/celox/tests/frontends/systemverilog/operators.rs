@@ -145,4 +145,12 @@ sv_backends! {
     fn unknown_logical_operand_evaluates_effectful_right_operand(sim) {
         @case "operators::unknown_logical_operand_evaluates_effectful_right_operand";
     }
+
+    fn wildcard_comparisons_normalize_unknown_to_x(sim) {
+        @case "operators::wildcard_comparisons_normalize_unknown_to_x";
+    }
+
+    fn wide_wildcard_comparisons_normalize_unknown_to_x(sim) {
+        @case "operators::wide_wildcard_comparisons_normalize_unknown_to_x";
+    }
 }

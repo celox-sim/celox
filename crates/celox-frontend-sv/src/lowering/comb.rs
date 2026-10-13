@@ -2022,6 +2022,16 @@ impl<'p, 'a> Comb<'p, 'a> {
                 let node = coerce_node_width(self.arena, node, Some(width), all_signed)
                     .map_err(slt_error)?;
                 let matched = self.alloc(SLTNode::Binary(selector_node, op, node))?;
+                let matched = if kind == sv::ir::CaseKind::X {
+                    // A wildcard comparison returns X when only selector
+                    // unknowns prevent a definite match. casex ignores those
+                    // bits too, so only a definite zero rejects the label.
+                    // IEEE 1800-2023 12.5.1.
+                    let zero = self.constant(0, 1)?;
+                    self.alloc(SLTNode::Binary(matched, BinaryOp::NeCase, zero))?
+                } else {
+                    matched
+                };
                 let matched = slt_truth(self.arena, matched)?;
                 sources.extend(selector_sources.iter().copied());
                 condition = Some(match condition {
@@ -3079,9 +3089,20 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
             system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
-        let (template, values) = system_task_template(&kind, args);
         let observer_store = store.fork();
         let mut observed = Sources::default();
+        let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
+            let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
+                return Err(unsupported(format!("condition of `{name}`")));
+            };
+            let (node, sources) = self.eval(store, frames, condition, None)?;
+            observed.extend(sources);
+            let truth = slt_truth(self.arena, node)?;
+            Some(self.capture(truth)?)
+        } else {
+            None
+        };
+        let (template, values) = system_task_template(&kind, args);
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
@@ -3118,19 +3139,34 @@ impl<'p, 'a> Comb<'p, 'a> {
             SystemTaskKind::Finish => RuntimeEventKind::Finish,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
+            SystemTaskKind::Assertion(kind) => *kind,
         };
         let condition = self.path_condition()?;
-        let guard = match (&kind, condition) {
-            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
-            (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+        let guard = if let Some(passed) = assertion {
+            // An assertion fires only on failure and only on the active path.
+            Some(if let Some((node, sources)) = condition {
                 observed.extend(sources);
-                Some(node)
-            }
-            // Assertion sites fire when their guard is false.
-            (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => Some(self.constant(0, 1)?),
-            (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
-                observed.extend(sources);
-                Some(slt_not(self.arena, &mut self.consts, node)?)
+                let inactive = slt_not(self.arena, &mut self.consts, node)?;
+                slt_or(self.arena, &mut self.consts, inactive, passed)?
+            } else {
+                passed
+            })
+        } else {
+            match (&kind, condition) {
+                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
+                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+                    observed.extend(sources);
+                    Some(node)
+                }
+                // Assertion sites fire when their guard is false.
+                (SystemTaskKind::Message | SystemTaskKind::Fatal, None) => {
+                    Some(self.constant(0, 1)?)
+                }
+                (SystemTaskKind::Message | SystemTaskKind::Fatal, Some((node, sources))) => {
+                    observed.extend(sources);
+                    Some(slt_not(self.arena, &mut self.consts, node)?)
+                }
+                (SystemTaskKind::Assertion(_), _) => unreachable!("assertion guard handled above"),
             }
         };
         let guard = guard.map(|guard| self.capture(guard)).transpose()?;
@@ -3149,8 +3185,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 guard,
                 emit_on_true: matches!(kind, SystemTaskKind::Print(..) | SystemTaskKind::Finish),
                 args: captured.clone(),
-                fatal_error_code: matches!(kind, SystemTaskKind::Fatal)
-                    .then_some(i64::from(site_id)),
+                fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
             });
             true
         } else {

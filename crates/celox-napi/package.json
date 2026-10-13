@@ -37,7 +37,7 @@
     "index.d.ts"
   ],
   "devDependencies": {
-    "@napi-rs/cli": "3.10.6"
+    "@napi-rs/cli": "3.10.8"
   },
   "repository": {
     "type": "git",

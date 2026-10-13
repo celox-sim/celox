@@ -39,15 +39,15 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
         self.0.tick(self.0.event(event)).map_err(Into::into)
     }
 
-    fn take_output(&mut self) -> Result<String> {
-        let mut output = String::new();
+    fn take_output(&mut self) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
         for event in self.0.drain_runtime_events() {
             match event {
                 celox::RuntimeEvent::Display { message } => {
-                    output.push_str(&message);
-                    output.push('\n');
+                    output.extend_from_slice(&message);
+                    output.push(b'\n');
                 }
-                celox::RuntimeEvent::Write { message } => output.push_str(&message),
+                celox::RuntimeEvent::Write { message } => output.extend_from_slice(&message),
                 celox::RuntimeEvent::Missed { count } => {
                     return Err(format!("{count} runtime events were missed").into());
                 }
