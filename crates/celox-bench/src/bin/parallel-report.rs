@@ -163,6 +163,17 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
             if !self.window.running.load(Ordering::Relaxed) {
                 return;
             }
+            // Composite selections can invoke nested selectors. The outer call
+            // owns the window until all of its lane work and choice events finish.
+            if ctx.event_scope(event).is_some_and(|scope| {
+                scope
+                    .from_root()
+                    .filter(|span| span.metadata().name() == "kernel_selection")
+                    .count()
+                    > 1
+            }) {
+                return;
+            }
             let call = self.window.calls.fetch_add(1, Ordering::Relaxed);
             let capture =
                 call >= self.window.after && call < self.window.after + self.window.length;
@@ -368,10 +379,22 @@ fn exercise_testbench<B: SimBackend>(
     )
 }
 
+fn discover_project_root(project: &std::path::Path) -> Result<PathBuf, Error> {
+    let project = fs::canonicalize(project)?;
+    let metadata = veryl_metadata::Metadata::search_from(if project.is_file() {
+        project.parent().ok_or("Project file has no parent")?
+    } else {
+        &project
+    })?;
+    Ok(fs::canonicalize(
+        metadata.parent().ok_or("Metadata has no project root")?,
+    )?)
+}
+
 fn main() -> Result<(), Error> {
     let mut args = Args::parse();
     if let Some(project) = &args.project {
-        args.project = Some(fs::canonicalize(project)?);
+        args.project = Some(discover_project_root(project)?);
         args.output = std::path::absolute(&args.output)?;
     }
     let project_sources = if let Some(project) = &args.project {
@@ -662,6 +685,88 @@ mod tests {
                         })
                     })
             }));
+        }
+    }
+
+    #[test]
+    fn nested_selections_keep_the_last_outer_capture_active() {
+        let window = Arc::new(Window {
+            running: AtomicBool::new(true),
+            length: 1,
+            ..Window::default()
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let enabled = window.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(Capture {
+                events: events.clone(),
+                window: window.clone(),
+                omit_sir: false,
+            })
+            .with(tracing_subscriber::filter::dynamic_filter_fn(
+                move |m, _| enabled.enables(m),
+            ));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                let _outer =
+                    tracing::trace_span!(target: "celox::parallel::call", "kernel_selection")
+                        .entered();
+                tracing::trace!(target: "celox::parallel::call", event = "kernel_call");
+                for _ in 0..2 {
+                    let _inner =
+                        tracing::trace_span!(target: "celox::parallel::call", "kernel_selection")
+                            .entered();
+                    tracing::trace!(target: "celox::parallel::call", event = "kernel_call");
+                    tracing::trace!(target: "celox::parallel", event = "dispatch");
+                    tracing::trace!(target: "celox::parallel", event = "task_run");
+                    tracing::trace!(target: "celox::parallel", event = "task_wait");
+                    tracing::trace!(target: "celox::parallel", event = "kernel_choice");
+                }
+                tracing::trace!(target: "celox::parallel", event = "kernel_choice");
+            }
+        });
+        let events = events.lock().unwrap();
+        assert_eq!(window.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            events.iter().filter(|e| e["event"] == "dispatch").count(),
+            2
+        );
+        assert_eq!(
+            events.iter().filter(|e| e["event"] == "task_run").count(),
+            2
+        );
+        assert_eq!(
+            events.iter().filter(|e| e["event"] == "task_wait").count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "kernel_choice")
+                .count(),
+            3
+        );
+        assert!(events.iter().all(|e| e["kernel_call"] == 1));
+        assert!(!window.active.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn project_root_discovery_accepts_root_child_and_metadata_file() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Veryl.toml"),
+            "[project]\nname = \"test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let child = temp.path().join("src/nested");
+        fs::create_dir_all(&child).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        for input in [
+            temp.path().to_path_buf(),
+            child,
+            temp.path().join("Veryl.toml"),
+        ] {
+            assert_eq!(discover_project_root(&input).unwrap(), root);
         }
     }
 
