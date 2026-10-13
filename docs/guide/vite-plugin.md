@@ -106,6 +106,21 @@ export default defineConfig({
 });
 ```
 
+### Build Watch
+
+`vite build --watch` tracks source additions and deletions as well as configuration
+changes. The plugin uses the bundler's directory watcher and excludes `.celox/`,
+`target/`, `node_modules/`, `.git/`, and the resolved build output directory.
+The output directory can be inside the Veryl project.
+
+With Vite 8, build watch requires **Rolldown 1.2.13 or newer**. Earlier versions
+[ignore exclusions beneath watched directories](https://github.com/rolldown/rolldown/pull/11008),
+which causes generated output to trigger rebuild loops. Update Vite's transitive
+Rolldown dependency and lockfile (for example, `pnpm update rolldown --depth 10`).
+The plugin reports an error before watching directories on affected versions.
+This restriction does not affect development mode, one-shot builds, or Vite 5–7
+with Rollup.
+
 ### TypeScript Testbench Components
 
 Native Vitest testbenches can use synchronous components created with
