@@ -238,7 +238,7 @@ fn expanded_timed_source(source: &str, defines: &[&str]) -> Result<String> {
         .map(|name| format!("`define {name}\n"))
         .collect::<String>();
     let syntax = celox_sv_analyzer::syntax::parse_source(
-        &format!("{prefix}{source}"),
+        &format!("{prefix}`line 1 \"timed.sv\" 0\n{source}"),
         Path::new("timed.sv"),
     )?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;

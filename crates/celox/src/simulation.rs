@@ -471,6 +471,9 @@ impl<B: SimBackend> Simulation<B> {
                 .is_some_and(|next| next <= time)
         {
             self.settle_host_writes()?;
+            while self.state.next_event_time().is_some_and(|next| next <= time) {
+                self.state.step(&mut self.simulator)?;
+            }
             self.state.settle_at(&mut self.simulator, time)?;
         } else {
             self.state.poll_waiting(&mut self.simulator)?;
@@ -1420,4 +1423,29 @@ mod direct_finish_tests {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(builder().build_native().unwrap()));
     }
+}
+
+#[cfg(all(test, feature="systemverilog"))]
+mod current_time_settle_tests {
+ use super::*;
+ #[test]
+ fn settle_consumes_current_time_clock_events() {
+  fn check<B:SimBackend>(mut sim:Simulation<B>) {
+   sim.run_until(0).unwrap();
+   sim.schedule("clk",0,1).unwrap();
+   sim.settle().unwrap();
+   assert_eq!(sim.get(sim.signal("q")),1u8.into());
+   assert_eq!(sim.time(),0);
+   assert_eq!(sim.next_event_time(),None);
+   sim.settle().unwrap();
+   assert_eq!(sim.get(sim.signal("q")),1u8.into());
+  }
+  let source="module Top(input bit clk,output bit[7:0]q);always @(posedge clk)q<=q+1;endmodule";
+  let builder=||Simulator::from_sv_sources(vec![(source,std::path::Path::new("settle.sv"))],"Top");
+  check(Simulation::new(builder().build_interpreter().unwrap()));
+  check(Simulation::new(builder().build_cranelift().unwrap()));
+  check(Simulation::new(builder().build_wasm().unwrap()));
+  #[cfg(any(target_arch="x86_64",target_arch="aarch64"))]
+  check(Simulation::new(builder().build_native().unwrap()));
+ }
 }
