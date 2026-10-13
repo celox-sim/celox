@@ -8494,7 +8494,7 @@ fn publishes_ff_output_actuals_whose_index_calls_a_function() {
         assert_eq!(
             sim.drain_runtime_events(),
             vec![celox::RuntimeEvent::Display {
-                message: format!("active={}", 1u8 << index)
+                message: format!("active={}", 1u8 << index).into_bytes()
             }]
         );
         assert_eq!(sim.get_as::<u8>(bits), 4);
