@@ -567,6 +567,13 @@ pub fn schedule_symbolic_rtl(
     trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, ParserError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SOURCE_PROGRAM: AtomicU64 = AtomicU64::new(1);
+    let _diagnostic = tracing::trace_span!(target: "celox::parallel", "source_program",
+        source_program = NEXT_SOURCE_PROGRAM
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("source program identity exhausted").to_string())
+    .entered();
     let SymbolicRtl {
         modules,
         module_names,
@@ -1441,6 +1448,14 @@ pub fn schedule_symbolic_rtl(
             active_ff_events: HashSet::default(),
         },
     };
+
+    if tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
+        for source in scheduled.frontend_lookup.source_to_state.keys() {
+            tracing::trace!(target: "celox::parallel", event = "source_signal",
+                source_address = %source, name = scheduled.frontend_lookup.get_path(source),
+                instance = source.instance_id.0, source_object = source.var_id.0);
+        }
+    }
 
     Ok(ScheduledRtlOutput {
         scheduled,

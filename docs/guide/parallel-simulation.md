@@ -77,3 +77,145 @@ separated by guard bytes, so lanes never write to the same cache line except
 for objects that several lanes write by design (for example, different
 elements of one array). See [Parallel Execution](/internals/parallel-simulation)
 for the design.
+
+## Inspecting partitioning and execution
+
+Generate an offline, interactive HTML report (no server or network required):
+
+```sh
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --output work/parallel-auto
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --always --output work/parallel-forced
+```
+
+The built-in workload contains 16 independent clocked datapaths. The automatic
+run shows the normal cost model and measured fallback. `--always` exposes the
+available parallel implementation even when it is slower. Open `report.html`
+in each output directory; `report.json` retains the underlying records.
+
+The report includes:
+
+- Source dependency graphs down to individual LogicPaths and SLT expressions.
+  Click an atomic item to inspect its paths, source signals, ownership group,
+  lane-0 constraints, shared-expression merges and lowering into SIR units.
+- Every item/subtree candidate's lane assignment and estimated cost, plus the
+  selected assignment and acceptance threshold. FF part costs, locality votes,
+  ownership and placement decisions are available in the event inspector.
+- Dependencies recomputed from optimized SIR and, for native backends, from
+  final compiled task effects. Select a node to inspect RAW/WAR/WAW conflicts,
+  state byte ranges, widened write envelopes, and shared runtime resources.
+- Each captured dispatch, task duration and individual dependency wait/check,
+  with arrows to producer tasks, measured overlap and ordering checks. Click a
+  task for its merged SIR inputs and signal names. The SIR listing precedes
+  native instruction-selection rewrites; the final footprint graph reflects
+  those rewrites. Final native SIR is included in task details as well. IDs are local to their phase, and the view keeps those phases
+  separate rather than assuming optimizer unit indices preserve source IDs.
+- Measured selector medians and decisions in the event inspector. Their records
+  are captured during untraced warmup as well. A fused sequential fast path can
+  bypass individual selector calls and produce no lane dispatch.
+
+Run on a self-contained Veryl design with constant inputs and an explicit clock:
+
+```sh
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --source design.veryl --top Top --clock clk --threads 4 \
+  --set enable=1 --observe result --observe count --backend cranelift \
+  --warmup 256 --cycles 1000 --capture 8 --output work/my-scheduler
+```
+
+Repeat `--source`, `--set` and `--observe` as needed. Input integers are decimal
+u64 values. This runner repeatedly triggers the specified event with `tick`;
+it does not run an arbitrary testbench, change inputs per cycle, or synthesize a
+reset sequence. Supply observations appropriate to that stimulus. Without
+`--observe`, custom designs are timed but functional equivalence is not checked.
+The demo checks all 16 outputs against a separately compiled one-thread build
+after each captured tick. These checks cover the specified stimulus, not every
+possible behavior of a design.
+
+The speedup measurement uses the median of six alternating untraced blocks,
+after warmup. Use release builds for performance conclusions. Task tracing
+adds allocation and timestamp overhead and can change scheduling; its timeline
+is for debugging. A recorded overlap is overlapping wall-clock intervals, not
+a measurement of physical CPU residency. Wait intervals include checking an
+already-satisfied dependency. Cost-model units are not nanoseconds. For automatic
+selection, allow enough warmup to finish calibration before tracing (the default
+is 256 ticks). A forced run may legitimately be slower.
+
+Existing applications can capture the same structured `tracing` events by
+enabling `celox::parallel=trace` and `celox::parallel::selection=debug` in their
+subscriber. Detailed runtime buffers are allocated only when the trace target
+is enabled. Events are emitted after all worker lanes finish; ordinary execution
+does not format SIR or record timestamps. Use short capture windows because
+per-expression and per-conflict compilation records can be large.
+
+Viewer analysis tests: `node --test scripts/parallel-report.test.mjs`.
+
+Use `--demo-stages 512` to increase work per worker when comparing synchronization
+cost against useful computation. To refresh the viewer from an existing capture:
+
+```sh
+node scripts/render-parallel-report.mjs work/parallel-auto/report.json work/parallel-auto/report.html
+```
+
+For a Veryl project with an initial testbench, preserve project metadata and
+source paths with `--project` (root, descendant directory, or `Veryl.toml`) and execute the original stimulus with
+`--testbench-ticks LIMIT`:
+
+```sh
+cargo run --locked --release -p celox-bench --bin parallel-report -- \
+  --project /path/to/heliodor --top test_soc_smp_linux_boot_4hart \
+  --threads 4 --testbench-ticks 10000 --warmup 256 --capture 16 \
+  --omit-sir --output work/heliodor-4core
+```
+
+In this mode, `--warmup` and `--capture` count outermost selected-kernel calls,
+not ticks. Nested selections inside a captured composite call stay in the same
+window until that outer call finishes.
+A separate trace marker opens the window before the selected call starts, so
+worker timestamps are disabled outside the capture window. Selector decisions
+are retained throughout execution; decisions made during the capture window
+may include perturbed timings. The original reset, memory images and testbench
+processes run, but reaching the tick limit does not establish completed boot or
+sequential equivalence. This mode does not report a speedup. Use repeated
+`--source` arguments relative to the project root to restrict compilation to the
+relevant source files. `--omit-sir` omits expanded SIR text while retaining
+source expressions, placement candidates, physical footprints and runtime waits.
+Each memory hazard includes one representative conflicting byte-range pair;
+the footprints retain the full read/write effects. Source graphs display up to
+300 nodes at a time; narrow the filter to inspect further nodes. The allocation
+tables distinguish RTL instances from simulator lanes and count source paths,
+not measured runtime work.
+In testbench mode, `--observe SIGNAL` records the final value as a hexadecimal
+snapshot; it does not compare it against another simulator. Constant `--set`
+assignments are rejected because the testbench owns the input stimulus.
+
+To attribute long waits to their producers and physical memory conflicts:
+
+```sh
+node scripts/analyze-parallel-waits.mjs work/heliodor-4core/report.json
+```
+
+Open `wait-analysis.html` next to the report. It ranks dependency edges by
+recorded blocking time, separates the time until producer completion from the
+remaining notification/check delay, and links each edge to its reported
+RAW/WAR/WAW byte-range witness and overlapping signal names. Filter by a signal
+or task number and select a row for the original ranges and compiled units.
+Missing or inconsistent producer records are reported instead of silently
+attributed. Signal names include aliases and are approximate for strided array
+storage; a physical ordering edge does not alone establish a semantic circuit
+dependency. Summed waits across lanes are not wall-clock time or a promised
+speedup from eliminating that edge.
+
+Comb task formation compares unbounded merging with task budgets of 32 and 16
+times the synchronization cost, charging the additional task and wait overhead
+in each estimate. With zero synchronization cost (forced partitioning), the
+budget interval has a floor of one, keeping the bounded candidates finite.
+An indivisible item larger than the budget remains one task.
+The candidate table's `Task budget` column and
+`partition_decision.task_budget` expose this choice. After physical dependence
+analysis, each consumer retains a publication boundary after its latest producer
+on each other lane, so unrelated following work cannot delay notification.
+Earlier producers only retain boundaries needed by another consumer. More tasks
+and waits can still reduce execution time by releasing consumers sooner; verify the effect with
+repeated untraced measurements.
