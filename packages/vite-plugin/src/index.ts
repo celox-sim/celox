@@ -21,6 +21,8 @@ const PROJECT_QUERY = "celox-project";
 const WATCH_QUERY = "celox-watch";
 const CONFIG_FILES = ["Veryl.toml", "celox.toml", "Veryl.lock"];
 
+type Regeneration = false | { componentChanged: boolean };
+
 /**
  * Vite plugin for importing `.veryl` files as typed `ModuleDefinition` objects.
  *
@@ -48,7 +50,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let pendingRegeneration: Promise<void> | undefined;
 	// Vite shares one read callback across environments for each event. Unlike
 	// timestamps, its identity distinguishes rapid events and survives interleaving.
-	const updates = new WeakMap<object, Promise<boolean>>();
+	const updates = new WeakMap<object, Promise<Regeneration>>();
 
 	function projectFile(name: string): string {
 		return normalizePath(resolve(projectRoot, name));
@@ -58,15 +60,21 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		file: string,
 		read?: () => string | Promise<string>,
 		event?: object,
-	): Promise<boolean> {
+	): Promise<Regeneration> {
 		file = normalizePath(file);
 		const existing = event && updates.get(event);
 		if (existing) return existing;
 		// Capture membership before an earlier load replaces its dependency set.
-		const componentChanged = testbenchComponentDependencies.has(
+		const wasComponent = testbenchComponentDependencies.has(
 			normalizeTestbenchComponentPath(file),
 		);
-		const run = async () => {
+		const run = async (): Promise<Regeneration> => {
+			// Earlier queued loads may discover this dependency or remove it.
+			const componentChanged =
+				wasComponent ||
+				testbenchComponentDependencies.has(
+					normalizeTestbenchComponentPath(file),
+				);
 			if (
 				!file.endsWith(".veryl") &&
 				!componentChanged &&
@@ -111,7 +119,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				sidecarPaths = nextPaths;
 				generatedData = data;
 			}
-			return true;
+			return { componentChanged };
 		};
 		// Share one queue across raw watcher and HMR events. A failed edit must
 		// still allow the next edit to regenerate and recover.
@@ -123,6 +131,20 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		pendingRegeneration = pending;
 		if (event) updates.set(event, result);
 		return result;
+	}
+
+	function directLockfileConsumers<T extends { id: string | null }>(
+		modules: T[] = [],
+	): T[] {
+		// Suppress Celox's generated graph only; raw/custom lockfile imports
+		// still need Vite's ordinary invalidation and propagation.
+		return modules.filter(
+			({ id }) =>
+				id === null ||
+				(id !== projectId &&
+					!loadedIds.has(id) &&
+					!id.endsWith(`?${WATCH_QUERY}`)),
+		);
 	}
 
 	function affectedModules<T>(
@@ -254,9 +276,6 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
-				const componentChanged = testbenchComponentDependencies.has(
-					normalizeTestbenchComponentPath(file),
-				);
 				if (
 					notifyingProject &&
 					normalizePath(file) === projectFile("Veryl.toml")
@@ -273,7 +292,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 							affectedModules(server.moduleGraph);
 						}
 						if (
-							componentChanged ||
+							changed.componentChanged ||
 							normalizePath(file) === projectFile("Veryl.lock")
 						)
 							notifyProject();
@@ -438,7 +457,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				false
 			)
 				return normalizePath(file) === projectFile("Veryl.lock")
-					? []
+					? directLockfileConsumers(modules)
 					: undefined;
 			return affectedModules(this.environment.moduleGraph, modules);
 		},
@@ -447,7 +466,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		async handleHotUpdate({ file, server, modules, read }) {
 			if ((await regenerate(file, read)) === false)
 				return normalizePath(file) === projectFile("Veryl.lock")
-					? []
+					? directLockfileConsumers(modules)
 					: undefined;
 			return affectedModules(server.moduleGraph, modules);
 		},

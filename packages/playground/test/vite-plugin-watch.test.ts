@@ -187,7 +187,7 @@ test.each(["Main.veryl", "Veryl.toml", "celox.toml", "Veryl.lock"])(
 );
 
 test.each(["hotUpdate", "handleHotUpdate"] as const)(
-	"%s suppresses unchanged lockfile notifications",
+	"%s preserves direct consumers while suppressing unchanged lockfile project updates",
 	async (hook) => {
 		const root = mkdtempSync(join(tmpdir(), "celox-watch-lock-"));
 		roots.push(root);
@@ -197,9 +197,14 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 		const moduleGraph = graph();
 		const result = await (plugin[hook] as Function).call(
 			{ environment: { moduleGraph } },
-			{ file, timestamp: 1, modules: [{ id: file }], server: { moduleGraph } },
+			{
+				file,
+				timestamp: 1,
+				modules: [{ id: `${file}?raw` }],
+				server: { moduleGraph },
+			},
 		);
-		expect(result).toEqual([]);
+		expect(result).toEqual([{ id: `${file}?raw` }]);
 		expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
 		expect(runGenTs).toHaveBeenCalledTimes(1);
 	},
@@ -700,5 +705,98 @@ test.each([
 		httpServer.emit("close");
 		watcher.emit("add", helper);
 		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(5);
+	},
+);
+
+test.each(["hotUpdate", "handleHotUpdate"] as const)(
+	"%s preserves direct consumers of a generation-owned lockfile write",
+	async (hook) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-direct-lock-"));
+		roots.push(root);
+		const file = join(root, "Veryl.lock");
+		vi.mocked(runGenTs).mockImplementationOnce((projectPath) => {
+			writeFileSync(file, "generated lock");
+			return { projectPath, modules: [], fileModules: {} };
+		});
+		const { plugin, context } = await initialize(root);
+		const source = normalizePath(join(root, "Main.veryl"));
+		(plugin.load as Function).call(context, source);
+		const direct = { id: `${normalizePath(file)}?raw` };
+		const moduleGraph = graph();
+		const modules = [
+			direct,
+			{ id: source },
+			{ id: `${normalizePath(root)}/Veryl.toml?celox-project` },
+			{ id: `${normalizePath(file)}?celox-watch` },
+		];
+		const result = await (plugin[hook] as Function).call(
+			{ environment: { moduleGraph } },
+			{ file, modules, server: { moduleGraph } },
+		);
+		expect(result).toEqual([direct]);
+		expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+	},
+);
+
+test.each(["hotUpdate", "handleHotUpdate", "watcher"])(
+	"%s rechecks dependencies discovered by a preceding queued load",
+	async (hook) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-discovered-"));
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const added = join(root, "added.ts");
+		writeFileSync(entry, "export {};");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const moduleGraph = graph();
+		const logger = { error: vi.fn() };
+		(plugin.configureServer as Function)({
+			watcher,
+			moduleGraph,
+			config: { server: { hmr: false }, logger },
+		});
+		const notifications = vi.fn();
+		watcher.on("change", (file) => {
+			if (file === normalizePath(join(root, "Veryl.toml"))) notifications();
+		});
+		let finish!: () => void;
+		vi.mocked(loadTestbenchComponentModule).mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finish = () =>
+						resolve({
+							manifests: {},
+							dependencies: new Set(
+								[entry, added].map(normalizeTestbenchComponentPath),
+							),
+						});
+				}),
+		);
+		const invoke = (file: string) =>
+			hook === "watcher"
+				? watcher.emit("change", file)
+				: (plugin[hook as "hotUpdate" | "handleHotUpdate"] as Function).call(
+						{ environment: { moduleGraph } },
+						{
+							file,
+							type: "update",
+							read: () => "edited",
+							modules: [],
+							server: { moduleGraph },
+						},
+					);
+		const first = invoke(entry);
+		await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+		const second = invoke(added);
+		finish();
+		await Promise.all([first, second]);
+		await vi.waitFor(() =>
+			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(3),
+		);
+		expect(runGenTs).toHaveBeenCalledTimes(3);
+		// The mock's final load drops added.ts again: notification must use
+		// membership at execution time, not the dependency set after that load.
+		if (hook === "watcher") expect(notifications).toHaveBeenCalledTimes(2);
+		expect(logger.error).not.toHaveBeenCalled();
 	},
 );
