@@ -238,7 +238,7 @@ fn expanded_timed_source(source: &str, defines: &[&str]) -> Result<String> {
         .map(|name| format!("`define {name}\n"))
         .collect::<String>();
     let syntax = celox_sv_analyzer::syntax::parse_source(
-        &format!("{prefix}{source}"),
+        &format!("{prefix}`line 1 \"timed.sv\" 0\n{source}"),
         Path::new("timed.sv"),
     )?;
     let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
@@ -345,7 +345,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -395,7 +395,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -422,7 +422,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -450,7 +450,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

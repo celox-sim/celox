@@ -3,6 +3,7 @@
 use super::*;
 
 sv_backends! {
+    fn casex_ignores_unknown_selector_bits(sim) { @case "synthesizable::casex_ignores_unknown_selector_bits"; }
     fn named_calls_preserve_defaults_and_declaration_scope(sim) { @case "synthesizable::named_calls_preserve_defaults_and_declaration_scope"; }
     fn named_calls_in_constant_contexts(sim) { @case "synthesizable::named_calls_in_constant_contexts"; }
     fn named_calls_respect_generate_signatures(sim) { @case "synthesizable::named_calls_respect_generate_signatures"; }

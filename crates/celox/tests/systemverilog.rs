@@ -221,3 +221,9 @@ sv_backends! {
  fn escaped_timed_tasks_do_not_replay_setup_edges(sim) { @case "timing::escaped_timed_tasks_do_not_replay_setup_edges"; }
  fn control_names_do_not_rewrite_the_dut_type(sim) { @case "timing::control_names_do_not_rewrite_the_dut_type"; }
 }
+
+sv_backends! {
+ fn attributes_preserve_single_generate_arms(sim) { @case "timing::attributes_preserve_single_generate_arms"; }
+ fn adapter_defines_preserve_line_macros(sim) { @case "timing::adapter_defines_preserve_line_macros"; }
+ fn callable_timing_keeps_generate_scope(sim) { @case "timing::callable_timing_keeps_generate_scope"; }
+}

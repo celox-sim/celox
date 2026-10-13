@@ -93,8 +93,8 @@ const OUTPUT_MARKER: &str = "@suite output ";
 /// the whole script has run.
 const END_MARKER: &str = "@suite end";
 
-fn hex_encode(text: &str) -> String {
-    text.bytes().map(|byte| format!("{byte:02x}")).collect()
+fn hex_encode(text: &[u8]) -> String {
+    text.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Whether a line is a simulator's own notice of a `$finish` call, which is
@@ -156,19 +156,13 @@ fn notice_file(line: &str) -> Option<&str> {
 }
 
 /// `text` without the simulators' `$finish` notices for `sources`.
-fn design_output(text: &str, sources: &[String]) -> String {
-    let mut output = String::new();
-    let mut rest = text;
-    while let Some(at) = rest.find('\n') {
-        let line = &rest[..at];
-        if !is_source_finish_notice(line, sources) {
-            output.push_str(line);
-            output.push('\n');
-        }
-        rest = &rest[at + 1..];
-    }
-    if !is_source_finish_notice(rest, sources) {
-        output.push_str(rest);
+fn design_output(text: &[u8], sources: &[String]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for chunk in text.split_inclusive(|byte| *byte == b'\n') {
+        let line = chunk.strip_suffix(b"\n").unwrap_or(chunk);
+        let notice = std::str::from_utf8(line).ok()
+            .is_some_and(|line| is_source_finish_notice(line, sources));
+        if !notice { output.extend_from_slice(chunk); }
     }
     output
 }
@@ -176,23 +170,31 @@ fn design_output(text: &str, sources: &[String]) -> String {
 /// Check a generated testbench's stdout. The script must have run to its
 /// end: a design's `$finish` can end some simulators' runs early without a
 /// failure. Before that, the text before each `expect_output` marker, since
-/// the previous one, must equal the text the marker encodes. A simulator's
-/// notice of a `$finish` call in one of the simulation's source files
-/// (`sources`, file names) is not design output.
-pub fn check_output(log: &str, sources: &[String]) -> Result<(), String> {
-    let Some(end) = log.find(&format!("\n{END_MARKER}\n")) else {
+/// the previous one, must equal the text the marker encodes.
+pub fn check_output(log: &[u8], sources: &[String]) -> Result<(), String> {
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+    let Some(end) = find(log, format!("\n{END_MARKER}\n").as_bytes()) else {
         return Err("the simulation ended before the script did".into());
     };
     let separator = format!("\n{OUTPUT_MARKER}");
     let mut rest = &log[..end];
-    while let Some(at) = rest.find(&separator) {
+    while let Some(at) = find(rest, separator.as_bytes()) {
         let output = &rest[..at];
         let marker = &rest[at + separator.len()..];
-        let end = marker.find('\n').ok_or("unterminated output marker")?;
-        let (hex, location) = marker[..end]
+        let end = marker
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or("unterminated output marker")?;
+        let marker_text =
+            std::str::from_utf8(&marker[..end]).map_err(|_| "non-ASCII output marker")?;
+        let (hex, location) = marker_text
             .split_once(' ')
             .ok_or("output marker without a location")?;
-        let bytes = (0..hex.len())
+        let expected = (0..hex.len())
             .step_by(2)
             .map(|i| {
                 hex.get(i..i + 2)
@@ -200,7 +202,6 @@ pub fn check_output(log: &str, sources: &[String]) -> Result<(), String> {
             })
             .collect::<Option<Vec<_>>>()
             .ok_or("malformed output marker")?;
-        let expected = String::from_utf8_lossy(&bytes);
         let output = design_output(output, sources);
         if output != expected {
             return Err(format!(
@@ -1154,25 +1155,11 @@ mod tests {
 
     #[test]
     fn finish_notices_are_not_design_output() {
-        let sources = ["timed_control.sv".to_string(), "source_0.sv".to_string()];
-        let icarus = "done\n/tmp/case/timed_control.sv:17: $finish called at 18000 (1ps)\n";
-        assert_eq!(design_output(icarus, &sources), "done\n");
-        let verilator = "done\n- /tmp/case/timed_control.sv:19: Verilog $finish\n";
-        assert_eq!(design_output(verilator, &sources), "done\n");
-        assert_eq!(
-            design_output(
-                "done\n/tmp/case/timed_control.sv:17: $finish(1) called at 18000 (1ps)\n",
-                &sources
-            ),
-            "done\n"
-        );
-        assert_eq!(
-            design_output("a: $finish called at x\n", &sources),
-            "a: $finish called at x\n"
-        );
-        assert_eq!(design_output("no newline", &sources), "no newline");
-        // A design's line of the same shape names no source file.
-        let printed = "source_0.sv:17: $finish called at 0 (1ps)\n";
+        let sources = vec!["timed_control.sv".to_string()];
+        for log in [b"done\ntimed_control.sv:3: $finish called at 5 (1ns)\n".as_slice(), b"done\n- timed_control.sv:3: Verilog $finish\n"] {
+            assert_eq!(design_output(log, &sources), b"done\n");
+        }
+        let printed = b"\x80\xffsource_0.sv:3: $finish called at 5 (1ns)\n";
         assert_eq!(design_output(printed, &sources), printed);
     }
 
@@ -1257,16 +1244,33 @@ mod tests {
         assert!(text.contains(r#"$write("\n@suite output 610a62 g::t at"#));
         assert!(text.contains(r#"$write("\n@suite end\n");"#));
         let log = "a\nb\n@suite output 610a62 here\n\n@suite output  there\n\n@suite end\nfinish\n";
-        assert_eq!(check_output(log, &[]), Ok(()));
+        assert_eq!(check_output(log.as_bytes(), &[]), Ok(()));
         assert_eq!(
-            check_output("a\n@suite output 610a62 here\n\n@suite end\n", &[]),
-            Err(r#"here: expect_output: expected "a\nb", got "a""#.into())
+            check_output(b"a\n@suite output 610a62 here\n\n@suite end\n", &[]),
+            Err("here: expect_output: expected [97, 10, 98], got [97]".into())
         );
         // A design's $finish ended the run before the script did.
         assert_eq!(
-            check_output("a\nb\n@suite output 610a62 here\n", &[]),
+            check_output(b"a\nb\n@suite output 610a62 here\n", &[]),
             Err("the simulation ended before the script did".into())
         );
+    }
+
+    #[test]
+    fn checks_non_utf8_output_without_replacement() {
+        assert_eq!(
+            check_output(b"\x80\xff\0\n@suite output 80ff00 here\n\n@suite end\n", &[]),
+            Ok(())
+        );
+        assert!(
+            check_output(b"\xef\xbf\xbd\xff\0\n@suite output 80ff00 here\n\n@suite end\n", &[]).is_err()
+        );
+        let text = testbench(
+            &case("(tick clk) (expect_output (bytes 128 255 0))"),
+            &design(),
+        )
+        .unwrap();
+        assert!(text.contains("@suite output 80ff00"));
     }
 
     #[test]

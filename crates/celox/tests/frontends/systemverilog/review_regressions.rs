@@ -8446,7 +8446,7 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
     let ticks = |n: usize| {
         (0..n)
             .map(|i| celox::RuntimeEvent::Display {
-                message: format!("tick {i}"),
+                message: format!("tick {i}").into_bytes(),
             })
             .collect::<Vec<_>>()
     };
@@ -8494,7 +8494,7 @@ fn publishes_ff_output_actuals_whose_index_calls_a_function() {
         assert_eq!(
             sim.drain_runtime_events(),
             vec![celox::RuntimeEvent::Display {
-                message: format!("active={}", 1u8 << index)
+                message: format!("active={}", 1u8 << index).into_bytes()
             }]
         );
         assert_eq!(sim.get_as::<u8>(bits), 4);

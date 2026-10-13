@@ -389,7 +389,7 @@ pub(super) fn expr_from_primary(
     expr_from_primary_with_types(primary, syntax_tree, &PackedDimensions::default())
 }
 
-fn expr_from_primary_with_types(
+pub(super) fn expr_from_primary_with_types(
     primary: &sv_parser::Primary,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,

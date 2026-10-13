@@ -3,6 +3,18 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn constant_parameter_initializers_preserve_inferred_dimensions(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_inferred_dimensions";
+    }
+    fn constant_parameter_initializers_short_circuit_wide_operands(sim) {
+        @case "indexed_select::constant_parameter_initializers_short_circuit_wide_operands";
+    }
+    fn constant_parameter_initializers_short_circuit_repetitions_and_selections(sim) {
+        @case "indexed_select::constant_parameter_initializers_short_circuit_repetitions_and_selections";
+    }
+    fn constant_parameter_initializers_short_circuit_four_state_bindings(sim) {
+        @case "indexed_select::constant_parameter_initializers_short_circuit_four_state_bindings";
+    }
     fn nested_array_indices_preserve_cast_widths(sim) {
         @case "indexed_select::nested_array_indices_preserve_cast_widths";
     }
@@ -137,6 +149,26 @@ sv_backends! {
         @case "indexed_select::indexed_ternaries_preserve_both_arm_types";
     }
 
+    fn constant_parameter_initializers_preserve_selections(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_selections";
+    }
+
+    fn constant_parameter_initializers_preserve_imported_shapes(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_imported_shapes";
+    }
+
+    fn constant_parameter_initializers_preserve_overhanging_parts(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_overhanging_parts";
+    }
+
+    fn constant_parameter_initializers_preserve_unknown_indices(sim) {
+        @case "indexed_select::constant_parameter_initializers_preserve_unknown_indices";
+    }
+
+    fn constant_parameter_initializers_shape_ports_and_generate(sim) {
+        @case "indexed_select::constant_parameter_initializers_shape_ports_and_generate";
+    }
+
     fn indexed_parameter_initializers_preserve_selections(sim) {
         @case "indexed_select::indexed_parameter_initializers_preserve_selections";
     }
@@ -269,4 +301,22 @@ fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
     )
     .build_cranelift()
     .expect_err("an unused unresolved indexed initializer must be rejected");
+}
+
+#[test]
+fn rejects_unresolved_logical_parameter_type_queries() {
+    for expression in [
+        "missing && 0",
+        "0 && missing",
+        "missing || 1",
+        "1 || missing",
+    ] {
+        let source = format!("module Top; localparam N = $bits({expression}); endmodule");
+        Simulator::from_sv_sources(
+            vec![(&source, Path::new("unresolved_logical_query.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .expect_err("unresolved operands must not acquire a logical result type");
+    }
 }

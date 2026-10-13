@@ -291,6 +291,7 @@ pub struct SimulationState<B: SimBackend> {
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
     signal_to_id: FxHashMap<SignalRef, usize>,
+    signal_index_by_id: Vec<usize>,
     processes: Vec<ProcessRefs<B>>,
     process_event_counters: Vec<(usize, SignalRef, SignalRef)>,
     active_ff_domains: BitSet,
@@ -375,6 +376,18 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
+        let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+            return true;
+        };
+        let was = (self.last_clock_values.contains(id), self.unknown_clock_values.contains(id));
+        let is = sample_event_signal(backend, *signal);
+        match self.domain_kinds[id] {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh | DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => self.edge_triggers(id, was, is),
+            _ => was != is,
+        }
+    }
+
     fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
         backend.clear_triggered_bits();
         for (signal, id, _) in &self.topo_signals {
@@ -409,11 +422,13 @@ impl<B: SimBackend> SimulationState<B> {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
         let mut unknown_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
-        for (signal, id, _) in topo_signals.iter().copied() {
+        let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
+        for (index, (signal, id, _)) in topo_signals.iter().copied().enumerate() {
             if id == usize::MAX {
                 continue;
             }
             signal_to_id.insert(signal, id);
+            signal_index_by_id[id] = index;
             let (is_nonzero, is_unknown) = sample_event_signal(backend, signal);
             if is_nonzero {
                 last_clock_values.insert(id);
@@ -432,6 +447,7 @@ impl<B: SimBackend> SimulationState<B> {
             domain_kinds,
             event_info,
             signal_to_id,
+            signal_index_by_id,
             process_wakeups: (0..processes.len())
                 .map(|process| Reverse((0, process)))
                 .collect(),
@@ -500,7 +516,9 @@ impl<B: SimBackend> SimulationState<B> {
         if event_id >= self.scheduler.clocks.len() {
             self.scheduler.clocks.resize(event_id + 1, None);
         }
-        self.scheduler.clocks[event_id] = Some(ClockDef { period });
+        self.scheduler.clocks[event_id] = Some(ClockDef {
+            period: period.max(2),
+        });
         self.push_periodic_event(SimEvent {
             time: initial_delay,
             event_ref: event,
@@ -1455,7 +1473,7 @@ impl<B: SimBackend> SimulationState<B> {
         });
         if !self.finished
             && !self.tick_budget_spent()
-            && (reset_edge_due || !events_to_process.is_empty() || !process_driven.is_empty())
+            && (reset_edge_due || !events_to_process.is_empty() || !process_driven.is_empty() || !generated_events.is_empty())
         {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
@@ -1595,12 +1613,17 @@ impl<B: SimBackend> SimulationState<B> {
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
-                    discovered_in_this_step.insert(id);
-
                     let info = self.event_info[id];
                     if triggered_domains.contains(info.canonical_id) {
                         continue;
                     }
+                    // Native trigger bits can be coarse hints raised by a
+                    // working-region write before its commit. A derived clock
+                    // must have the requested stable edge before its FFs run.
+                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                        continue;
+                    }
+                    discovered_in_this_step.insert(id);
                     triggered_domains.insert(info.canonical_id);
                     newly_triggered.push(info.canonical_id);
 
@@ -1842,8 +1865,20 @@ impl<B: SimBackend> SimulationState<B> {
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
+                // Keep the extra odd-period tick in the high phase, matching
+                // the process/testbench clock model.
+                // A clock needs at least one time unit in each phase.
+                let period = clock.period.max(2);
+                let half = (period / 2) + ((period & 1) & u64::from(event.next_val != 0));
+                let time =
+                    current_time
+                        .checked_add(half)
+                        .ok_or_else(|| SimulatorErrorCode::Runtime {
+                            message: format!("event {event_id} overflows simulation time"),
+                            signals: Vec::new(),
+                        })?;
                 self.push_periodic_event(SimEvent {
-                    time: current_time + clock.period / 2,
+                    time,
                     event_ref: event.event_ref,
                     signal: event.signal,
                     next_val: 1 - event.next_val,
@@ -1927,7 +1962,7 @@ impl<B: SimBackend> SimulationState<B> {
             .clocks
             .iter()
             .enumerate()
-            .filter_map(|(id, clock)| Some((id, clock.as_ref()?.period)))
+            .filter_map(|(id, clock)| Some((id, clock.as_ref()?.period.max(2))))
             .collect()
     }
 
@@ -2046,6 +2081,9 @@ pub struct ScheduleParts<B: SimBackend> {
     pub done_processes: Vec<usize>,
     /// Rising edges of process clocks so far.
     pub ticks: u64,
+    /// Timestamp and one-shot clock drives already consumed at that time.
+    pub scheduled_clock_time: u64,
+    pub scheduled_clock_drives: Vec<B::Event>,
     pub inactive_processes: Vec<usize>,
     /// A process requested the end of the simulation.
     pub finished: bool,
@@ -2119,6 +2157,8 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             done_processes: self.done.iter().copied().collect(),
             ticks: self.ticks,
+            scheduled_clock_time: self.scheduled_clock_time,
+            scheduled_clock_drives: self.scheduled_clock_drives.iter().map(|id| events[id]).collect(),
             inactive_processes: self.inactive.iter().copied().collect(),
             finished: self.finished,
         }
@@ -2189,6 +2229,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.pending_releases = parts.pending_releases.into_iter().collect();
         self.done = parts.done_processes.into_iter().collect();
         self.ticks = parts.ticks;
+        self.scheduled_clock_time = parts.scheduled_clock_time;
+        self.scheduled_clock_drives = parts.scheduled_clock_drives.into_iter().map(|event| event.id()).collect();
         self.inactive = parts.inactive_processes.into_iter().collect();
         self.finished = parts.finished;
     }

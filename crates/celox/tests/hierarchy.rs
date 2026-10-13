@@ -149,7 +149,7 @@ assign seen_o = seen;
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "seen=1".to_string(),
+            message: b"seen=1".to_vec(),
         }],
     );
 

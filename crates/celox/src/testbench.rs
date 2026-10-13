@@ -14,7 +14,7 @@ use crate::backend::memory_layout::{
 };
 use crate::backend::traits::{EventHandle, SimBackend};
 use crate::ir::SignalRef;
-use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
+use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator, message_diagnostic};
 pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
@@ -46,7 +46,8 @@ pub enum TestResult {
 #[derive(Debug, Clone)]
 pub struct AssertionResult {
     pub passed: bool,
-    pub message: Option<String>,
+    /// Byte-exact HDL message; decode explicitly when text is required.
+    pub message: Option<Vec<u8>>,
     pub location: Option<SourceLocation>,
 }
 
@@ -123,7 +124,7 @@ fn format_assert_arg<B: SimBackend>(
     arg: &CompiledAssertArg,
     spec: char,
     field: FieldSpec,
-) -> String {
+) -> Vec<u8> {
     let value = eval_expr(sim, &arg.expr);
     let value = value.to_biguint();
     format_veryl_display_arg(
@@ -143,60 +144,63 @@ fn render_assert_message<B: SimBackend>(
     sim: &mut Simulator<B>,
     message: &Option<AssertMessage>,
     current_time: u64,
-) -> Option<String> {
+) -> Option<Vec<u8>> {
     match message {
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
                 .map(|arg| format_assert_arg(sim, arg, 'x', FieldSpec::default()))
                 .collect::<Vec<_>>()
-                .join(" "),
+                .join(&b' '),
         ),
         Some(AssertMessage::Formatted { template, args }) => {
-            let mut rendered = String::new();
+            let mut rendered = Vec::new();
             let mut chars = template.chars().peekable();
             let mut arg_idx = 0usize;
             while let Some(ch) = chars.next() {
                 if ch != '%' {
-                    rendered.push(ch);
+                    rendered.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
                     continue;
                 }
                 match chars.peek().copied() {
                     Some('%') => {
                         chars.next();
-                        rendered.push('%');
+                        rendered.push(b'%');
                     }
                     Some(_) => {
                         let field = FieldSpec::parse(&mut chars, true);
                         let Some(spec) = chars.next() else {
-                            rendered.push('%');
+                            rendered.push(b'%');
                             break;
                         };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
                             | 'B' | 'c' | 'C' | 's' | 'S' => {
                                 if let Some(arg) = args.get(arg_idx) {
-                                    rendered.push_str(&format_assert_arg(sim, arg, spec, field));
+                                    rendered.extend_from_slice(&format_assert_arg(
+                                        sim, arg, spec, field,
+                                    ));
                                 }
                                 arg_idx += 1;
                             }
-                            'm' | 'M' => rendered.push_str(&pad_veryl_field(
-                                "<hierarchy>".to_string(),
+                            'm' | 'M' => rendered.extend_from_slice(&pad_veryl_field(
+                                b"<hierarchy>".to_vec(),
                                 spec,
                                 field,
                             )),
-                            't' | 'T' => rendered.push_str(&pad_veryl_field(
-                                current_time.to_string(),
+                            't' | 'T' => rendered.extend_from_slice(&pad_veryl_field(
+                                current_time.to_string().into_bytes(),
                                 spec,
                                 field,
                             )),
                             _ => {
-                                rendered.push('%');
-                                rendered.push(spec);
+                                rendered.push(b'%');
+                                rendered
+                                    .extend_from_slice(spec.encode_utf8(&mut [0; 4]).as_bytes());
                             }
                         }
                     }
-                    None => rendered.push('%'),
+                    None => rendered.push(b'%'),
                 }
             }
             Some(rendered)
@@ -1111,7 +1115,8 @@ fn run_testbench_limited<B: SimBackend>(
         .map(|assertion| {
             assertion
                 .message
-                .clone()
+                .as_deref()
+                .map(message_diagnostic)
                 .unwrap_or_else(|| "assertion failed".to_string())
         })
         .collect::<Vec<_>>();
@@ -1313,8 +1318,8 @@ fn store_u64_release(base: *mut u8, byte_offset: usize, value: u64) {
 }
 
 struct DrainedAssertionEvents {
-    last_message: Option<String>,
-    fatal_message: Option<String>,
+    last_message: Option<Vec<u8>>,
+    fatal_message: Option<Vec<u8>>,
     /// The design executed `$finish`, which ends the run (IEEE 1800-2023 20.2).
     finished: bool,
 }
@@ -1322,12 +1327,12 @@ struct DrainedAssertionEvents {
 /// Forward testbench `$display` / `$write` output without contaminating the
 /// machine-readable test result emitted by the CLI on stdout.  In particular,
 /// UART models commonly use one `$write("%c", ...)` per transmitted byte, so
-/// preserve the event text verbatim and flush it promptly.
-fn forward_display(message: &str, newline: bool) {
+/// preserve the event bytes verbatim and flush it promptly.
+fn forward_display(message: &[u8], newline: bool) {
     use std::io::Write as _;
 
     let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.write_all(message);
     if newline {
         let _ = stderr.write_all(b"\n");
     }
@@ -1445,7 +1450,7 @@ fn drain_runtime_assertions<B: SimBackend>(
                 });
             }
             RuntimeEvent::Missed { count } => {
-                let message = format!("missed {count} runtime events");
+                let message = format!("missed {count} runtime events").into_bytes();
                 last_message = Some(message.clone());
                 ctx.assertions.push(AssertionResult {
                     passed: false,
@@ -1920,7 +1925,7 @@ fn step_process_events<B: SimBackend>(
     }
     let drained = drain_runtime_assertions(sim, ctx, None);
     if let Some(message) = drained.fatal_message {
-        return ExecResult::Fail(message);
+        return ExecResult::Fail(message_diagnostic(&message));
     }
     if let Err(error) = result {
         return ExecResult::Fail(error.to_string());
@@ -2003,7 +2008,7 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Err(e) = result {
                         let drained = drain_runtime_assertions(sim, ctx, None);
                         if let Some(message) = drained.fatal_message {
-                            return ExecResult::Fail(message);
+                            return ExecResult::Fail(message_diagnostic(&message));
                         }
                         return ExecResult::Fail(e);
                     }
@@ -2015,7 +2020,7 @@ fn exec_one_detailed<B: SimBackend>(
                     }
                     let drained = drain_runtime_assertions(sim, ctx, None);
                     if let Some(message) = drained.fatal_message {
-                        return ExecResult::Fail(message);
+                        return ExecResult::Fail(message_diagnostic(&message));
                     }
                     if drained.finished || sim.components.finish_requested() {
                         return ExecResult::Finished;
@@ -2071,13 +2076,13 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Err(e) = result {
                         let drained = drain_runtime_assertions(sim, ctx, None);
                         if let Some(message) = drained.fatal_message {
-                            return ExecResult::Fail(message);
+                            return ExecResult::Fail(message_diagnostic(&message));
                         }
                         return ExecResult::Fail(format!("reset: {e}"));
                     }
                     let drained = drain_runtime_assertions(sim, ctx, None);
                     if let Some(message) = drained.fatal_message {
-                        return ExecResult::Fail(message);
+                        return ExecResult::Fail(message_diagnostic(&message));
                     }
                     if drained.finished || sim.components.finish_requested() {
                         return ExecResult::Finished;
@@ -2113,9 +2118,9 @@ fn exec_one_detailed<B: SimBackend>(
                     .last_message
                     .or_else(|| render_assert_message(sim, message, ctx.simulation_time()));
                 if !continue_on_fail {
-                    ExecResult::Fail(
-                        rendered_message.unwrap_or_else(|| "assertion failed".to_string()),
-                    )
+                    ExecResult::Fail(message_diagnostic(
+                        &rendered_message.unwrap_or_else(|| b"assertion failed".to_vec()),
+                    ))
                 } else {
                     ExecResult::Continue
                 }

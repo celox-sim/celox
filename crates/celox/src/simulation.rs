@@ -314,12 +314,11 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .collect();
 
     let mut domain_kinds = vec![None; num_events];
+    let kinds = simulator.program.design.event_kinds();
     for (_, id, _) in topo_signals.iter().copied() {
         if id != usize::MAX {
             let addr = simulator.backend.id_to_addr_slice()[id];
-            if let Some(info) = simulator.program.get_variable_info(&addr) {
-                domain_kinds[id] = Some(info.kind);
-            }
+            domain_kinds[id] = kinds.get(&addr).copied();
         }
     }
 
@@ -555,6 +554,8 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
+    /// Odd periods alternate floor/ceil half periods. Periods below two
+    /// time units use a two-unit period so both phases advance time.
     /// `initial_delay` specifies when the first rising edge occurs.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
         let signal = self.simulator.signal(port);
@@ -609,7 +610,14 @@ impl<B: SimBackend> Simulation<B> {
                 .is_some_and(|next| next <= time)
         {
             self.settle_host_writes()?;
-            self.state.settle_at(&mut self.simulator, time)?;
+            let mut drained = false;
+            while self.state.next_event_time().is_some_and(|next| next <= time) {
+                self.state.step(&mut self.simulator)?;
+                drained = true;
+            }
+            if !drained {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
         } else {
             self.state.poll_waiting(&mut self.simulator)?;
         }
@@ -998,6 +1006,196 @@ mod process_tests {
     #[test]
     fn long_processes_dispatch_through_two_switch_levels() {
         check_all_backends(false, 300);
+    }
+    #[test]
+    fn odd_clock_phase_survives_checkpoint_across_backends() {
+        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
+            // Use a known low initial clock in both state representations.
+            let clock = backend.signal("clk");
+            let count = backend.signal("count");
+            backend
+                .modify(|io| {
+                    io.set(clock, 0u8);
+                    io.set(count, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("clk", 3, 5);
+            sim.run_until(11).unwrap();
+            assert_eq!(sim.get(count), 3u8.into());
+            assert_eq!(sim.get(clock), 1u8.into());
+            assert_eq!(sim.next_event_time(), Some(13));
+            let saved = sim.checkpoint().unwrap();
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(clock), 1u8.into());
+            sim.run_until(13).unwrap();
+            assert_eq!(sim.get(clock), 0u8.into());
+            sim.run_until(14).unwrap();
+            assert_eq!(sim.get(count), 4u8.into());
+            sim.restore(&saved).unwrap();
+            assert_eq!(sim.time(), 11);
+            assert_eq!(sim.get(count), 3u8.into());
+            assert_eq!(sim.get(clock), 1u8.into());
+            assert_eq!(sim.next_event_time(), Some(13));
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(clock), 1u8.into());
+            sim.run_until(13).unwrap();
+            assert_eq!(sim.get(clock), 0u8.into());
+            sim.run_until(14).unwrap();
+            assert_eq!(sim.get(count), 4u8.into());
+        }
+        let code = "module Top (clk: input clock, count: output logic<8>) { always_ff (clk) { count += 1; } }";
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::builder(code, "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            check(build().build_interpreter().unwrap());
+            check(build().build_cranelift().unwrap());
+            check(build().build_wasm().unwrap());
+            check(build().build_tiered().unwrap());
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            check(build().build_native().unwrap());
+        }
+    }
+    #[cfg(feature = "systemverilog")]
+    const GENERATED_ALIAS_SOURCE: &str = r#"
+module Generator(input logic clk, output logic g);
+    initial g = 0;
+    always_ff @(posedge clk) g <= ~g;
+endmodule
+module Top(input logic cp, cn, output logic [7:0] p, n);
+    logic gp, gn;
+    Generator up(.clk(cp), .g(gp));
+    Generator un(.clk(cn), .g(gn));
+    initial begin p = 0; n = 0; end
+    always_ff @(posedge gp) p <= p + 1;
+    always_ff @(negedge gn) n <= n + 1;
+endmodule
+"#;
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn generated_alias_edges_keep_their_instances_and_stable_phases() {
+        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
+            for (expected, address) in backend
+                .program
+                .design
+                .events
+                .ordered_events
+                .iter()
+                .enumerate()
+            {
+                let event = backend.backend.resolve_event(address);
+                assert_eq!(
+                    celox_runtime::backend::EventHandle::id(&event),
+                    expected,
+                    "event handles must match IDs embedded in trigger instructions"
+                );
+            }
+            let cp = backend.signal("cp");
+            let cn = backend.signal("cn");
+            backend
+                .modify(|io| {
+                    io.set(cp, 0u8);
+                    io.set(cn, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("cp", 10, 2);
+            sim.add_clock("cn", 10, 7);
+            sim.run_until(27).unwrap();
+            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
+        }
+        let source = GENERATED_ALIAS_SOURCE;
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("generated_alias.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers()
+            };
+            check(build().build_interpreter().unwrap());
+            check(build().build_cranelift().unwrap());
+            check(build().build_wasm().unwrap());
+            check(build().build_tiered().unwrap());
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            check(build().build_native().unwrap());
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn timed_alias_edges_and_checkpoint_survive_tiered_promotion() {
+        for four_state in [false, true] {
+            let mut backend = crate::Simulator::from_sv_sources(
+                vec![(
+                    GENERATED_ALIAS_SOURCE,
+                    std::path::Path::new("promoted_alias.sv"),
+                )],
+                "Top",
+            )
+            .four_state(four_state)
+            .emit_triggers()
+            .tier_promotion(crate::TierPromotion::AfterSteps(32))
+            .build_tiered()
+            .unwrap();
+            let cp = backend.signal("cp");
+            let cn = backend.signal("cn");
+            backend
+                .modify(|io| {
+                    io.set(cp, 0u8);
+                    io.set(cn, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("cp", 10, 2);
+            sim.add_clock("cn", 10, 7);
+            let saved = sim.checkpoint().unwrap();
+            assert!(!sim.simulator.is_compiled());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut until = 27u64;
+            loop {
+                sim.run_until(until).unwrap();
+                assert_eq!(
+                    sim.get(sim.signal("p")),
+                    (((until - 2) / 20 + 1) & 255).into()
+                );
+                assert_eq!(
+                    sim.get(sim.signal("n")),
+                    (((until - 17) / 20 + 1) & 255).into()
+                );
+                if sim.simulator.is_compiled() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed tiered backend did not promote"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                until += 10;
+            }
+            sim.restore(&saved).unwrap();
+            assert!(sim.simulator.is_compiled());
+            sim.run_until(27).unwrap();
+            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
+        }
     }
 }
 
@@ -2021,6 +2219,31 @@ mod clock_provenance_checkpoint_tests {
         assert!(error.contains("already driven by schedule"), "{error}");
         assert_eq!(sim.ticks(), 0);
     }
+    fn check_transfer<B: SimBackend>(mut from: Simulation<B>, mut to: Simulation<B>) {
+        from.schedule("clk",0,1).unwrap();
+        from.step().unwrap();
+        let design = from.simulator.checkpoint().unwrap();
+        let mut parts = from.state.export_schedule(&from.simulator.backend);
+        parts.process_wakeups = vec![(0,0)];
+        to.simulator.restore(&design).unwrap();
+        to.state.import_schedule(parts);
+        let error = to.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"),"{error}");
+        assert_eq!(to.ticks(),0);
+    }
+    #[test]
+    fn exported_schedule_retains_consumed_clock_drives() {
+        let build=|| Simulation::from_frontend(design()).build_interpreter().unwrap();
+        check_transfer(build(),build());
+        let build=|| Simulation::from_frontend(design()).build_cranelift().unwrap();
+        check_transfer(build(),build());
+        let build=|| Simulation::from_frontend(design()).build_wasm().unwrap();
+        check_transfer(build(),build());
+        #[cfg(any(target_arch="x86_64",target_arch="aarch64"))] {
+            let build=|| Simulation::from_frontend(design()).build_native().unwrap();
+            check_transfer(build(),build());
+        }
+    }
     #[test]
     fn restored_clock_drive_provenance_rejects_a_same_time_generator() {
         check(
@@ -2321,7 +2544,7 @@ mod idle_settle_tests {
             assert!(
                 sim.drain_runtime_events()
                     .iter()
-                    .any(|e| matches!(e,crate::RuntimeEvent::Display { message } if message=="x"))
+                    .any(|e| matches!(e,crate::RuntimeEvent::Display { message } if message.as_slice()==b"x"))
             );
             sim.settle().unwrap();
             sim.settle().unwrap();
@@ -2439,4 +2662,70 @@ mod direct_finish_tests {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(builder().build_native().unwrap()));
     }
+}
+
+#[cfg(test)]
+mod pending_generated_clock_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant,Edge,ModuleBuilder,Statement,UnaryOp,ValueType};
+    fn design()->crate::frontend_sdk::FrontendArtifact {
+        let mut m=ModuleBuilder::new("Top").unwrap();
+        let bit=ValueType::bits(1).unwrap();
+        let a=m.internal("a",bit).unwrap();let b=m.internal("b",bit).unwrap();
+        let qa=m.output("qa",bit).unwrap();let qb=m.output("qb",bit).unwrap();
+        let old=m.read(qb).unwrap();let next=m.unary(UnaryOp::BitNot,old,bit).unwrap();
+        let qa_target=m.whole(qa).unwrap();let qb_target=m.whole(qb).unwrap();
+        m.register(qa_target,old,a,Edge::Posedge,None,None).unwrap();
+        m.register(qb_target,next,b,Edge::Posedge,None,None).unwrap();
+        m.clock_period(a,4).unwrap();m.clock_period(b,4).unwrap();
+        let two=m.constant(Constant::two_state(2u8,64).unwrap());
+        let one=m.constant(Constant::two_state(1u8,64).unwrap());
+        let four=m.constant(Constant::two_state(4u8,64).unwrap());
+        m.process(vec![Statement::ClockCycles{clock:b,count:two}]).unwrap();
+        m.process(vec![Statement::Delay{amount:four},Statement::ClockCycles{clock:a,count:one}]).unwrap();
+        m.finish()
+    }
+    fn check<B:SimBackend>(mut sim:Simulation<B>) {
+        sim.run_until(3).unwrap();
+        assert_eq!(sim.get(sim.signal("qb")),1u8.into());
+        // A failed round can leave this generated drive high without publishing its FF batch.
+        sim.simulator.backend.set(sim.signal("b"),1u8);
+        sim.step().unwrap();
+        assert_eq!(sim.get(sim.signal("qa")),1u8.into());
+        assert_eq!(sim.get(sim.signal("qb")),0u8.into());
+        assert_eq!(sim.ticks(),2);
+    }
+    #[test]
+    fn pending_rises_share_pre_edge_state_with_new_clocks() {
+        check(Simulation::from_frontend(design()).build_interpreter().unwrap());
+        check(Simulation::from_frontend(design()).build_cranelift().unwrap());
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch="x86_64",target_arch="aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
+
+#[cfg(all(test, feature="systemverilog"))]
+mod current_time_settle_tests {
+ use super::*;
+ #[test]
+ fn settle_consumes_current_time_clock_events() {
+  fn check<B:SimBackend>(mut sim:Simulation<B>) {
+   sim.run_until(0).unwrap();
+   sim.schedule("clk",0,1).unwrap();
+   sim.settle().unwrap();
+   assert_eq!(sim.get(sim.signal("q")),1u8.into());
+   assert_eq!(sim.time(),0);
+   assert_eq!(sim.next_event_time(),None);
+   sim.settle().unwrap();
+   assert_eq!(sim.get(sim.signal("q")),1u8.into());
+  }
+  let source="module Top(input bit clk,output bit[7:0]q);always @(posedge clk)q<=q+1;endmodule";
+  let builder=||Simulator::from_sv_sources(vec![(source,std::path::Path::new("settle.sv"))],"Top");
+  check(Simulation::new(builder().build_interpreter().unwrap()));
+  check(Simulation::new(builder().build_cranelift().unwrap()));
+  check(Simulation::new(builder().build_wasm().unwrap()));
+  #[cfg(any(target_arch="x86_64",target_arch="aarch64"))]
+  check(Simulation::new(builder().build_native().unwrap()));
+ }
 }

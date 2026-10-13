@@ -411,6 +411,33 @@ describe("Simulation", () => {
 		expect(mock.handle.runUntil).not.toHaveBeenCalled();
 	});
 
+	test.each([undefined, { maxSteps: 0 }])(
+		"runUntil preserves dirty inputs for an earlier target (%j)",
+		(opts) => {
+			const mock = createMockNative();
+			const sim = Simulation.create(TopModule, { __nativeCreate: mock.create });
+			sim.runUntil(10);
+			vi.mocked(mock.handle.runUntil).mockClear();
+			sim.dut.d = 42n;
+			sim.runUntil(5, opts);
+			expect(sim.time()).toBe(10);
+			expect(mock.handle.runUntil).not.toHaveBeenCalled();
+			expect(mock.handle.step).not.toHaveBeenCalled();
+			expect(sim.dut.q).toBe(42n);
+			expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+		},
+	);
+
+	test("runUntil with maxSteps preserves dirty inputs at the current time", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: mock.create });
+		sim.runUntil(10);
+		sim.dut.d = 42n;
+		sim.runUntil(10, { maxSteps: 0 });
+		expect(sim.dut.q).toBe(42n);
+		expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+	});
+
 	test("waitUntil: returns time when condition is met", () => {
 		const mock = createMockNative();
 		const sim = Simulation.create(TopModule, {
