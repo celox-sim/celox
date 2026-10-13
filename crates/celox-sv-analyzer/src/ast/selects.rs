@@ -1695,8 +1695,37 @@ pub(super) fn validate_parameter_initializer_selections(
 ) -> Converted<()> {
     let mut dimensions = dimensions.clone();
     dimensions.constant_indexed_base = true;
+    let bound = |expression: &sv_parser::ConstantExpression, allow_unknown: bool| {
+        let expression = indexed_select_base(
+            RefNode::ConstantExpression(expression),
+            syntax_tree,
+            &dimensions,
+        )?;
+        if eval_ast_const_expr(&expression, &dimensions.const_env).is_none()
+            && !(allow_unknown && const_index_has_unknown_value(&expression, &dimensions))
+        {
+            return Err(unsupported(
+                "parameter selection bound that is not constant",
+            ));
+        }
+        Ok(())
+    };
     for node in initializer.into_iter() {
         match node {
+            RefNode::ConstantBitSelect(select) => {
+                for index in &select.nodes.0 {
+                    bound(&index.nodes.1, true)?;
+                }
+            }
+            RefNode::ConstantRangeExpression(
+                sv_parser::ConstantRangeExpression::ConstantExpression(index),
+            ) => {
+                bound(index, true)?;
+            }
+            RefNode::ConstantRange(range) => {
+                bound(&range.nodes.0, false)?;
+                bound(&range.nodes.2, false)?;
+            }
             RefNode::ConstantPrimary(sv_parser::ConstantPrimary::PsParameter(parameter))
                 if !parameter.nodes.1.nodes.1.nodes.0.is_empty()
                     || parameter.nodes.1.nodes.2.is_some() =>

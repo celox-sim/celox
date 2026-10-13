@@ -818,6 +818,11 @@ fn validates_shapes_in_short_circuited_parameter_operands() {
         "W[0][0 +: 1]",
         "{W}[0 +: 0]",
         "{W}[missing +: 1]",
+        "{W}[missing]",
+        "{W}[missing:0]",
+        "{W}[0:missing]",
+        "W[missing]",
+        "W[missing:0]",
         "$bits(W[0][0 +: 1])",
     ] {
         let source = format!(
@@ -828,7 +833,14 @@ fn validates_shapes_in_short_circuited_parameter_operands() {
             "{selection}"
         );
     }
-    for selection in ["W[0 +: 1]", "{W}[0 +: 1]", "{W}['x +: 1]"] {
+    for selection in [
+        "W[0 +: 1]",
+        "{W}[0 +: 1]",
+        "{W}['x +: 1]",
+        "{W}[0]",
+        "{W}['x]",
+        "{W}[3:0]",
+    ] {
         let source = format!(
             "module Top; localparam logic [7:0] W = 0; localparam N = 0 && ({selection} || 1000000000'd0); endmodule"
         );
@@ -854,6 +866,23 @@ fn validates_user_calls_in_short_circuited_parameter_operands() {
         );
         let ir = analyze_source(&source, Path::new("skipped_valid_user_call.sv")).unwrap();
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn local_values_shadow_imported_bare_function_calls() {
+    for declaration in ["localparam f = 0;", "typedef enum logic { f = 0 } E;"] {
+        let source = format!(
+            "package p; function automatic int f(input int x); return x; endfunction endpackage module Top; import p::*; {declaration} localparam N = 0 && (f || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("shadowed_bare_function.sv")).unwrap();
+        let n = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == "N")
+            .unwrap();
+        assert_eq!(n.resolved_value(), Some(0));
+        assert_eq!(n.resolved_width(), Some(1));
     }
 }
 

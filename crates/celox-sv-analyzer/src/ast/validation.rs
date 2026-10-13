@@ -293,7 +293,13 @@ fn reject_silently_ignored_constructs_with_dimensions(
                         // Bare parameter identifiers also parse as TfCall.
                         // A registered function with omitted parentheses still
                         // binds an empty argument list and must check defaults.
-                        if call.nodes.2.is_none() && !const_functions::is_constant_function(&name) {
+                        // Visible values take precedence over imported functions.
+                        if call.nodes.2.is_none()
+                            && (const_env.contains_key(&name)
+                                || indexed_dimensions.parameter_values.contains_key(&name)
+                                || indexed_dimensions.get(&name).is_some()
+                                || !const_functions::is_constant_function(&name))
+                        {
                             continue;
                         }
                         let (bindings, _) = expressions::bind_call_arguments(
