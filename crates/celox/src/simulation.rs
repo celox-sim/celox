@@ -466,8 +466,32 @@ impl<B: SimBackend> Simulation<B> {
         }
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
-        let parts = self.simulator.resolve_schedule(record)?;
+        let mut parts = self.simulator.resolve_schedule(record)?;
         self.simulator.load_state(file)?;
+        if record.unknown_events.is_none() {
+            // Version 1 lacks masks for edge baselines. Resolve them from the
+            // loaded backend so aliases and two-state conversions agree too.
+            let samples: Vec<_> = self
+                .simulator
+                .backend
+                .id_to_event_slice()
+                .iter()
+                .copied()
+                .map(|event| {
+                    let signal = self.simulator.backend.resolve_signal(&event.addr());
+                    let (value, mask) = self.simulator.backend.get_four_state(signal);
+                    (event, value.bit(0), mask.bit(0))
+                })
+                .collect();
+            parts.high_events = samples
+                .iter()
+                .filter_map(|(event, high, _)| high.then_some(*event))
+                .collect();
+            parts.unknown_events = samples
+                .iter()
+                .filter_map(|(event, _, unknown)| unknown.then_some(*event))
+                .collect();
+        }
         self.state.import_schedule(parts);
         Ok(())
     }
@@ -3087,6 +3111,210 @@ mod failed_ff_progress_tests {
                     .parallel_partition(crate::ParallelPartition::Always)
                     .build_native()
                     .unwrap(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod generated_phase_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design(unknown: Option<u8>, edge: Edge) -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("ClockPhases").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let clk = m.internal("clk", ValueType::logic(1).unwrap()).unwrap();
+        m.set_initial(
+            clk,
+            match unknown {
+                Some(value) => Constant::four_state(value, 1u8, 1).unwrap(),
+                None => Constant::two_state(0u8, 1).unwrap(),
+            },
+        )
+        .unwrap();
+        let q = m.output("q", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(q).unwrap();
+        m.register(target, one, clk, edge, None, None).unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let three = m.constant(Constant::two_state(3u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn fall<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 2).unwrap(), Some(2));
+        assert_eq!(sim.time(), 2);
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), Some(4));
+    }
+    fn unknown<B: SimBackend>(mut sim: Simulation<B>, payload: u8, edge: Edge) {
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (payload.into(), 1u8.into())
+        );
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (1u8.into(), 0u8.into())
+        );
+        assert_eq!(sim.ticks(), 1);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    #[test]
+    fn settle_at_drains_a_generated_fall_at_the_target() {
+        let build = || Simulator::from_frontend(design(None, Edge::Negedge));
+        fall(Simulation::new(build().build_interpreter().unwrap()));
+        fall(Simulation::new(build().build_cranelift().unwrap()));
+        fall(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        fall(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn unknown_initial_clock_payloads_have_the_same_edge_sequence() {
+        for (payload, edge) in [
+            (0, Edge::Posedge),
+            (1, Edge::Posedge),
+            (0, Edge::Negedge),
+            (1, Edge::Negedge),
+        ] {
+            let build = || Simulator::from_frontend(design(Some(payload), edge)).four_state(true);
+            unknown(
+                Simulation::new(build().build_interpreter().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_cranelift().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_wasm().unwrap()),
+                payload,
+                edge,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            unknown(
+                Simulation::new(build().build_native().unwrap()),
+                payload,
+                edge,
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod lazy_host_clock_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, mask: u8) {
+        let clk = sim.signal("clk");
+        let q = sim.signal("q");
+        sim.set_four_state(clk, 1u8.into(), 0u8.into());
+        sim.settle().unwrap();
+        assert_eq!(sim.get(q), 1u8.into());
+        sim.set_four_state(clk, 0u8.into(), mask.into());
+        let _ = sim.get(q);
+        sim.settle().unwrap();
+        sim.set_four_state(clk, 1u8.into(), 0u8.into());
+        let _ = sim.get(q);
+        sim.settle().unwrap();
+        assert_eq!(sim.get(q), 2u8.into(), "inactive mask {mask}");
+    }
+    #[test]
+    fn lazy_reads_do_not_hide_inactive_clock_transitions() {
+        let source =
+            "module Top(input logic clk,output int q);always @(posedge clk)q<=q+1;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("lazy-clock.sv"))], "Top")
+                .four_state(true)
+        };
+        for mask in [0, 1] {
+            check(Simulation::new(build().build_interpreter().unwrap()), mask);
+            check(Simulation::new(build().build_cranelift().unwrap()), mask);
+            check(Simulation::new(build().build_wasm().unwrap()), mask);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), mask);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod legacy_clock_state_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>, known: u8) {
+        let clk = source.signal("clk");
+        source.set_four_state(clk, 1u8.into(), 0u8.into());
+        source.settle().unwrap();
+        source.set_four_state(clk, known.into(), 1u8.into());
+        source.settle().unwrap();
+        let file = source.save_state().unwrap();
+        let unknown_bytes = 4 + file
+            .schedule
+            .as_ref()
+            .unwrap()
+            .unknown_events
+            .iter()
+            .flatten()
+            .map(|name| 4 + name.len())
+            .sum::<usize>();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes.truncate(bytes.len() - unknown_bytes);
+        let legacy = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+        target.load_state(&legacy).unwrap();
+        let q = target.signal("q");
+        let before = target.get(q);
+        let clk = target.signal("clk");
+        target.set_four_state(clk, known.into(), 0u8.into());
+        target.settle().unwrap();
+        assert_eq!(target.get(q), before + 1u8);
+    }
+    #[test]
+    fn legacy_files_restore_unknown_clock_baselines() {
+        for (edge, known) in [("posedge", 1u8), ("negedge", 0u8)] {
+            let source = format!(
+                "module Top(input logic clk,output int q);always @({edge} clk)q<=q+1;endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("legacy-clock.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                Simulation::new(build().build_interpreter().unwrap()),
+                known,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                Simulation::new(build().build_cranelift().unwrap()),
+                known,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                Simulation::new(build().build_wasm().unwrap()),
+                known,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                Simulation::new(build().build_native().unwrap()),
+                known,
             );
         }
     }

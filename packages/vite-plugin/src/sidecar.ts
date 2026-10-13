@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { GenTsJsonOutput } from "./types.js";
 
@@ -43,7 +49,11 @@ export function generateSidecars(
 		const content = combineDtsContents(modules.map((m) => m.dtsContent));
 
 		mkdirSync(dirname(sidecarPath), { recursive: true });
-		writeFileSync(sidecarPath, content, "utf-8");
+		if (
+			!existsSync(sidecarPath) ||
+			readFileSync(sidecarPath, "utf8") !== content
+		)
+			writeFileSync(sidecarPath, content, "utf-8");
 		written.push(sidecarPath);
 	}
 

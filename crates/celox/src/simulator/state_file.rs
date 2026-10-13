@@ -375,7 +375,7 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (named(event), *count))
                 .collect(),
             high_events: parts.high_events.into_iter().map(event_path).collect(),
-            unknown_events: parts.unknown_events.into_iter().map(event_path).collect(),
+            unknown_events: Some(parts.unknown_events.into_iter().map(event_path).collect()),
         }
     }
 
@@ -406,7 +406,7 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .map(|(name, _)| name)
             .chain(&record.high_events)
-            .chain(&record.unknown_events)
+            .chain(record.unknown_events.iter().flatten())
             .chain(scheduled.clone().map(|event| &event.event))
             .filter(|name| !events.contains_key(*name))
             .chain(
@@ -447,6 +447,7 @@ impl<B: SimBackend> Simulator<B> {
             unknown_events: record
                 .unknown_events
                 .iter()
+                .flatten()
                 .map(|name| events[name])
                 .collect(),
             // State files are rejected for designs with processes.
