@@ -74,8 +74,10 @@ Each change is validated where it matters rather than repeatedly:
 - Pull requests run the Linux jobs (lint, Rust tests, Linux and WASI NAPI, JS
   on Ubuntu, Playground). Windows NAPI/JS and the ARM64 NAPI and backend jobs
   are skipped there, which their required checks accept, and run in the merge
-  group instead. They rarely fail when the Linux jobs pass. Dispatch `ci.yml` on
-  a branch to run them before queueing.
+  group instead. `Rust Test & NAPI Build` requires the ARM64 backend job to
+  succeed in merge groups when Rust checks are selected; only pull requests
+  and changes that do not need Rust checks may skip it. Dispatch `ci.yml` on
+  a branch to run platform checks before queueing.
 - Pull requests run only the Rust tests their changes can affect
   (`scripts/ci-rust-scope.mjs`):
     - A library change runs its package and every package that depends on it.

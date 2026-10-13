@@ -21,18 +21,25 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: always\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, sv-tests, napi-linux, napi-wasm, external-suites\]/,
+    /needs: \[changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
   );
   assert.match(
     gate,
     /if: .*outputs\.rust == 'true' \|\| needs\.changes\.outputs\.napi == 'true'/,
   );
+  assert.match(
+    gate,
+    /ARM64_REQUIRED: \$\{\{ github\.event_name != 'pull_request' && needs\.changes\.outputs\.rust != 'false' \}\}/,
+  );
+  assert.match(gate, /ARM64_RESULT: \$\{\{ needs\.arm64-backend\.result \}\}/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
   const success = {
     CHANGES_RESULT: "success",
     RUST_REQUIRED: "true",
     RUST_RESULT: "success",
     SV_TESTS_RESULT: "success",
+    ARM64_REQUIRED: "true",
+    ARM64_RESULT: "success",
     NAPI_REQUIRED: "true",
     NATIVE_RESULT: "success",
     WASM_RESULT: "success",
@@ -59,6 +66,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     "CHANGES_RESULT",
     "RUST_RESULT",
     "SV_TESTS_RESULT",
+    "ARM64_RESULT",
     "NATIVE_RESULT",
     "WASM_RESULT",
   ]) {
@@ -78,6 +86,17 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
+  // PRs and non-Rust changes may skip ARM64; other results fail closed.
+  for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
+    cases.push({
+      env: { ...success, ARM64_REQUIRED: "false", ARM64_RESULT: status },
+      passes: status === "success" || status === "skipped",
+    });
+  }
+  cases.push({
+    env: { ...success, ARM64_REQUIRED: "", ARM64_RESULT: "skipped" },
+    passes: false,
+  });
   const rustOnly = {
     ...success,
     NAPI_REQUIRED: "false",
@@ -261,7 +280,11 @@ test("platform jobs run in merge groups and full runs, not on pull requests", ()
   }
   // Linux jobs still give pull requests their feedback.
   for (const name of ["lint", "rust-tests", "napi-linux", "js-ubuntu", "rust"]) {
-    assert.doesNotMatch(job(name), /github\.event_name != 'pull_request'/, name);
+    assert.doesNotMatch(
+      job(name).match(/^    if: (.*)$/m)[1],
+      /github\.event_name != 'pull_request'/,
+      name,
+    );
   }
 });
 
