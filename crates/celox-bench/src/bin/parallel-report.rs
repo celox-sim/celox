@@ -246,15 +246,6 @@ fn exercise<B: SimBackend>(
     outputs: &[String],
 ) -> Result<Value, Error> {
     active.store(true, Ordering::Relaxed);
-    for address in parallel.program().design.state_objects.keys() {
-        let name = parallel.program().design.get_path(address);
-        if let Some(variable) = parallel.program().design.variable(address) {
-            tracing::trace!(target: "celox::parallel", event = "source_signal", address = %address,
-                name, instance = address.instance_id.0, object = address.var_id.0,
-                source_address = format!("AbsoluteAddr({}, {})", address.instance_id, variable.source_id),
-                source_object = variable.source_id.0);
-        }
-    }
 
     active.store(false, Ordering::Relaxed);
     let pclk = parallel.try_event(&args.clock)?;
@@ -338,15 +329,6 @@ fn exercise_testbench<B: SimBackend>(
     ticks: u64,
     window: &Window,
 ) -> Result<Value, Error> {
-    for address in sim.program().design.state_objects.keys() {
-        let name = sim.program().design.get_path(address);
-        if let Some(variable) = sim.program().design.variable(address) {
-            tracing::trace!(target: "celox::parallel", event = "source_signal", address = %address,
-                name, instance = address.instance_id.0, object = address.var_id.0,
-                source_address = format!("AbsoluteAddr({}, {})", address.instance_id, variable.source_id),
-                source_object = variable.source_id.0);
-        }
-    }
     let tb =
         celox::testbench::compile_initial_testbench(&sim).ok_or("No initial testbench found")?;
     window.active.store(false, Ordering::Relaxed);
@@ -644,6 +626,39 @@ mod tests {
             })
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(partitions.len(), 4);
+        let source_program = |e: &Value| {
+            e["scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|scope| scope["source_program"].as_str())
+                .unwrap()
+                .to_owned()
+        };
+        let source_signals = events
+            .iter()
+            .filter(|e| e["event"] == "source_signal")
+            .collect::<Vec<_>>();
+        let source_programs = source_signals
+            .iter()
+            .map(|e| source_program(e))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(source_programs.len(), 4);
+        for path in events.iter().filter(|e| e["event"] == "path") {
+            assert!(source_programs.contains(&source_program(path)));
+        }
+        assert!(
+            source_signals
+                .iter()
+                .all(|e| e["source_address"].is_string() && e["source_object"].is_number())
+        );
+        assert!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "signal")
+                .any(|e| e["source_object"].is_number())
+        );
+
         let tasks = events
             .iter()
             .filter(|e| e["event"] == "compiled_task")

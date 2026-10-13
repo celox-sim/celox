@@ -152,3 +152,23 @@ test('source plans isolate reused spans and local item IDs across builds', () =>
  assert.equal(sourcePlanKey({source_partition:'first'}),sourcePlanKey(candidate));
  assert.equal(sourcePlanKey({scopes:[{id:'old'}]}),'legacy:old');
 });
+
+test('source names remain scoped across programs, nested details and runtime events', async () => {
+ const {createSourceFormatter}=await import('./parallel-report.mjs');
+ const events=['first','second'].flatMap((id,i)=>[
+  {event:'source_signal',scopes:[{id:'reused',source_program:id}],source_address:'AbsoluteAddr(inst0, var0)',instance:0,source_object:0,name:`${id}.source`},
+  {event:'signal',program:id,address:'AbsoluteAddr(inst0, state0)',instance:0,object:0,name:`${id}.state`},
+  {event:'compiled_task',schedule:id,program:id},
+  {event:'dispatch',pool:id,epoch:1,schedule:id},
+ ]);
+ const format=createSourceFormatter(events);
+ const a={scopes:[{id:'reused',source_program:'first'}],target:'AbsoluteAddr(inst0, var0)'};
+ const b={scopes:[{id:'reused',source_program:'second'}],target:'AbsoluteAddr(inst0, var0)'};
+ const result=JSON.parse(format({paths:[a,b],sir:{program:'first',text:'instance_id: InstanceId(0), var_id: StateObjectId(0)'},execution:{pool:'second',epoch:1,text:'AbsoluteAddr(inst0, state0)'}}));
+ assert.equal(result.paths[0].target,'first.source');assert.equal(result.paths[1].target,'second.source');
+ assert.equal(result.sir.text,'first.state');assert.equal(result.execution.text,'second.state');
+ assert.equal(JSON.parse(format(a.target,a)),'first.source');
+ assert.equal(JSON.parse(format(a.target)),a.target);
+ const legacy=createSourceFormatter([{event:'source_signal',source_address:a.target,name:'one'},{event:'source_signal',source_address:a.target,name:'two'}]);
+ assert.equal(JSON.parse(legacy(a.target)),a.target);
+});

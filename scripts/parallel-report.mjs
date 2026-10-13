@@ -106,6 +106,43 @@ export function sourcePlanKey(event) {
     return partition !== undefined ? `partition:${partition}` : `legacy:${scopeKey(event)}`;
 }
 
+// Resolve each nested record in its own program, including detail bundles
+// containing runtime records, compiled SIR and source paths together.
+export function createSourceFormatter(events) {
+    const field = (e, name) => e?.[name] ?? [...(e?.scopes ?? [])].reverse().find(s => s[name] !== undefined)?.[name];
+    const identity = e => field(e, "source_program") !== undefined
+        ? `source:${field(e, "source_program")}`
+        : field(e, "program") !== undefined ? `program:${field(e, "program")}` : undefined;
+    const schedules = new Map(events.filter(e => e.event === "compiled_task").map(e => [e.schedule, identity(e)]));
+    const dispatches = new Map(events.filter(e => e.event === "dispatch").map(e => [`${e.pool}/${e.epoch}`, schedules.get(e.schedule)]));
+    const key = e => identity(e) ?? schedules.get(e?.schedule) ?? dispatches.get(`${e?.pool}/${e?.epoch}`);
+    const maps = new Map();
+    for (const s of events.filter(e => e.event === "signal" || e.event === "source_signal")) {
+        const id = key(s) ?? "legacy";
+        if (!maps.has(id)) maps.set(id, new Map());
+        const names = maps.get(id);
+        for (const address of [s.address, s.source_address,
+            s.object !== undefined ? `instance_id: InstanceId(${s.instance}), var_id: StateObjectId(${s.object})` : undefined,
+            s.source_object != null ? `instance_id: InstanceId(${s.instance}), var_id: SourceVarId(${s.source_object})` : undefined]) {
+            if (!address) continue;
+            // Ambiguous legacy records stay raw instead of acquiring a wrong name.
+            names.set(address, names.has(address) && names.get(address) !== s.name ? null : s.name);
+        }
+    }
+    function transform(value, inherited) {
+        if (typeof value === "string") {
+            const names = maps.get(inherited ?? "legacy");
+            return value.replace(/AbsoluteAddr\(inst\d+, (?:state|var)\d+\)|instance_id: InstanceId\(\d+\), var_id: (?:StateObjectId|SourceVarId)\(\d+\)/g,
+                address => names?.get(address) ?? address);
+        }
+        if (!value || typeof value !== "object") return value;
+        const id = key(value) ?? inherited;
+        if (Array.isArray(value)) return value.map(v => transform(v, id));
+        return Object.fromEntries(Object.entries(value).map(([k,v]) => [k, transform(v, id)]));
+    }
+    return (value, context = value) => JSON.stringify(transform(value, key(context)), null, 2);
+}
+
 export function scopeKey(event) {
 	return (event.scopes ?? []).map((s) => s.id).join("/");
 }
@@ -147,40 +184,11 @@ function startViewer(data) {
 		);
 	};
 	const signals = events.filter((e) => e.event === "signal" || e.event === "source_signal");
-	const symbolNames = new Map(
-		signals.flatMap((s) => [
-			[s.address, s.name],
-			[s.source_address, s.name],
-		]),
-	);
-	const objectNames = new Map(
-		signals.map((s) => [`${s.instance}/${s.object}`, s.name]),
-	);
-	const sourceObjectNames = new Map(
-		signals
-			.filter((s) => s.source_object !== undefined)
-			.map((s) => [`${s.instance}/${s.source_object}`, s.name]),
-	);
-	const sourceNames = (value) =>
-		JSON.stringify(value, null, 2)
-			.replace(
-				/AbsoluteAddr\(inst\d+, (?:state|var)\d+\)/g,
-				(address) => `${symbolNames.get(address) ?? address}`,
-			)
-			.replace(
-				/instance_id: InstanceId\((\d+)\), var_id: StateObjectId\((\d+)\)/g,
-				(full, instance, object) =>
-					`${objectNames.get(`${instance}/${object}`) ?? full}`,
-			)
-			.replace(
-				/instance_id: InstanceId\((\d+)\), var_id: SourceVarId\((\d+)\)/g,
-				(full, instance, object) =>
-					`${sourceObjectNames.get(`${instance}/${object}`) ?? full}`,
-			);
+    const sourceNames = createSourceFormatter(events);
+    function details(value, context = value) {
+        $("details").textContent = sourceNames(value, context);
+    }
 
-	function details(value) {
-		$("details").textContent = sourceNames(value);
-	}
 	function text(tag, content, parent, className) {
 		const el = document.createElement(tag);
 		el.textContent = content;
@@ -572,7 +580,7 @@ function startViewer(data) {
             const groups = new Map(), blocks = new Map();
             for (const item of scopedItems) {
                 for (const id of item.paths) {
-                    const name = sourceNames(pathById.get(id)?.target ?? "unknown").replaceAll('"', "");
+                    const name = sourceNames(pathById.get(id)?.target ?? "unknown", pathById.get(id)).replaceAll('"', "");
                     const core = name.match(/.*?u_core\[\d+\]/);
                     const group = core?.[0] ?? name.split(".").slice(0, -1).join(".");
                     if (!groups.has(group)) groups.set(group, Array(data.threads).fill(0));
@@ -655,7 +663,7 @@ function startViewer(data) {
 						.filter((p) => neighborhood.has(p.path))
 						.map((p) => ({
 							id: p.path,
-							label: `p${p.path} ${sourceNames(p.target).replaceAll('"', "")}`,
+							label: `p${p.path} ${sourceNames(p.target, p).replaceAll('"', "")}`,
 							subtitle: `expression ${p.expression}`,
 							predecessors: deps.get(p.path),
 							record: p,
