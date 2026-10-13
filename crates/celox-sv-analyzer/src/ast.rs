@@ -2434,3 +2434,11 @@ fn generate_scope_head(name: &str) -> Option<&str> {
     };
     Some(&name[..end])
 }
+
+/// Source ranges of generate scopes, including single-item bodies.
+/// Offsets refer to the parsed, preprocessed source text.
+pub fn generate_scope_ranges(tree: &SyntaxTree) -> Vec<(usize, usize)> {
+    tree.into_iter()
+        .flat_map(imports::generate_blocks)
+        .collect()
+}

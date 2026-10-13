@@ -394,6 +394,9 @@ fn has_timing(source: &str) -> bool {
 #[derive(Default)]
 pub(super) struct TaskTiming {
     tasks: BTreeMap<(String, Vec<usize>, String), bool>,
+    generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
+    imports: BTreeMap<String, Vec<(String, Option<String>)>>,
+    exports: BTreeMap<String, Vec<(Option<String>, Option<String>)>>,
 }
 
 fn container_at(source: &str, at: usize) -> String {
@@ -418,7 +421,7 @@ fn container_at(source: &str, at: usize) -> String {
 
 // Scope identities include their source offsets so closed sibling blocks
 // cannot make their imports visible at a later module item.
-fn lexical_scope_at(source: &str, at: usize) -> Vec<usize> {
+fn lexical_scope_at(source: &str, at: usize, generates: &[(usize, usize)]) -> Vec<usize> {
     let mut scopes = Vec::new();
     for (start, _, word) in sv_words(&source[..at]) {
         match word {
@@ -432,24 +435,135 @@ fn lexical_scope_at(source: &str, at: usize) -> Vec<usize> {
             _ => {}
         }
     }
+    scopes.extend(
+        generates
+            .iter()
+            .filter_map(|(start, end)| (*start <= at && at < *end).then_some(*start)),
+    );
+    scopes.sort_unstable();
+    scopes.dedup();
     scopes
 }
 
-fn callable_key(source: &str, at: usize, name: &str) -> (String, Vec<usize>, String) {
-    let container = container_at(source, at);
-    let mut scope = lexical_scope_at(source, at);
-    if !container.is_empty() && !scope.is_empty() {
-        scope.remove(0);
-    }
-    (container, scope, name.to_owned())
-}
-
 impl TaskTiming {
+    fn lexical_scope(&self, source: &str, at: usize) -> Vec<usize> {
+        lexical_scope_at(
+            source,
+            at,
+            self.generate_scopes.get(source).map_or(&[], Vec::as_slice),
+        )
+    }
+
+    fn callable_key(&self, source: &str, at: usize, name: &str) -> (String, Vec<usize>, String) {
+        let container = container_at(source, at);
+        let mut scope = self.lexical_scope(source, at);
+        if !container.is_empty() && !scope.is_empty() {
+            scope.remove(0);
+        }
+        (container, scope, name.to_owned())
+    }
+
+    fn package_callable(
+        &self,
+        package: &str,
+        name: &str,
+        visiting: &mut std::collections::BTreeSet<String>,
+    ) -> Option<bool> {
+        let package = if package == "$unit" { "" } else { package };
+        if let Some(value) = self
+            .tasks
+            .get(&(package.to_owned(), Vec::new(), name.to_owned()))
+        {
+            return Some(*value);
+        }
+        if !visiting.insert(package.to_owned()) {
+            return None;
+        }
+        let mut result = None;
+        if let (Some(imports), Some(exports)) =
+            (self.imports.get(package), self.exports.get(package))
+        {
+            for (origin, selected) in imports {
+                if selected.as_deref().is_some_and(|selected| selected != name) {
+                    continue;
+                }
+                if !exports.iter().any(|(exported, member)| {
+                    exported.as_deref().is_none_or(|p| p == origin)
+                        && member.as_deref().is_none_or(|n| n == name)
+                }) {
+                    continue;
+                }
+                if let Some(timed) = self.package_callable(origin, name, visiting) {
+                    result = Some(result.unwrap_or(false) || timed);
+                }
+            }
+        }
+        visiting.remove(package);
+        result
+    }
     pub(super) fn new(sources: &[String]) -> Self {
         let mut result = Self::default();
         let mut records = Vec::new();
         for source in sources {
+            if let Ok(tree) = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))
+            {
+                result.generate_scopes.insert(
+                    source.clone(),
+                    celox_sv_analyzer::ast::generate_scope_ranges(&tree),
+                );
+            }
             let words = sv_words(source);
+            for (start, end, word) in &words {
+                if !matches!(*word, "import" | "export")
+                    || result.lexical_scope(source, *start).len() != 1
+                {
+                    continue;
+                }
+                let container = container_at(source, *start);
+                // Only package exports participate in qualified resolution.
+                if !sv_words(&source[..*start])
+                    .iter()
+                    .rev()
+                    .find(|(_, _, word)| {
+                        matches!(
+                            *word,
+                            "package"
+                                | "module"
+                                | "interface"
+                                | "endpackage"
+                                | "endmodule"
+                                | "endinterface"
+                        )
+                    })
+                    .is_some_and(|(_, _, word)| *word == "package")
+                {
+                    continue;
+                }
+                let tail = &source[*end..];
+                let Some(end) = tail.find(';') else {
+                    continue;
+                };
+                for item in tail[..end].split(',') {
+                    let item_words = sv_words(item);
+                    let package = item_words.first().map(|x| x.2.to_owned());
+                    let selected = item_words.get(1).map(|x| x.2.to_owned());
+                    if *word == "import" {
+                        if let Some(package) = package {
+                            result
+                                .imports
+                                .entry(container.clone())
+                                .or_default()
+                                .push((package, selected));
+                        }
+                    } else {
+                        result
+                            .exports
+                            .entry(container.clone())
+                            .or_default()
+                            .push((package, selected));
+                    }
+                }
+            }
             for (index, (start, end, word)) in words.iter().enumerate() {
                 if *word == "function" {
                     let header_end = source[*end..]
@@ -461,7 +575,7 @@ impl TaskTiming {
                     if let Some((_, _, name)) = sv_words(&header[..name_end]).last() {
                         result
                             .tasks
-                            .insert(callable_key(source, *start, name), false);
+                            .insert(result.callable_key(source, *start, name), false);
                     }
                     continue;
                 }
@@ -479,7 +593,7 @@ impl TaskTiming {
                 else {
                     continue;
                 };
-                let key = callable_key(source, *start, name);
+                let key = result.callable_key(source, *start, name);
                 let header_end = source[*end..*body_end]
                     .find(';')
                     .map_or(*end, |offset| end + offset + 1);
@@ -507,10 +621,7 @@ impl TaskTiming {
         let prefix = source[..at].trim_end();
         if let Some(prefix) = prefix.strip_suffix("::") {
             let package = sv_words(prefix).last()?.2;
-            return self
-                .tasks
-                .get(&(package.to_string(), Vec::new(), name.to_owned()))
-                .copied();
+            return self.package_callable(package, name, &mut Default::default());
         }
         if let Some(prefix) = prefix.strip_suffix('.') {
             let instance = sv_words(prefix).last()?.2;
@@ -530,7 +641,7 @@ impl TaskTiming {
             return None;
         }
         let scope = container_at(source, at);
-        let mut key = callable_key(source, at, name);
+        let mut key = self.callable_key(source, at, name);
         loop {
             if let Some(value) = self.tasks.get(&key) {
                 return Some(*value);
@@ -539,7 +650,7 @@ impl TaskTiming {
                 break;
             }
         }
-        let call_scope = lexical_scope_at(source, at);
+        let call_scope = self.lexical_scope(source, at);
         let mut imports: BTreeMap<usize, (Option<bool>, Option<bool>)> = BTreeMap::new();
         for (start, end, word) in sv_words(&source[..at]) {
             if word != "import" {
@@ -549,7 +660,7 @@ impl TaskTiming {
             if !import_scope.is_empty() && import_scope != scope {
                 continue;
             }
-            let lexical = lexical_scope_at(source, start);
+            let lexical = self.lexical_scope(source, start);
             if !call_scope.starts_with(&lexical) {
                 continue;
             }
@@ -564,13 +675,12 @@ impl TaskTiming {
                 let selected = words.get(1).map(|word| word.2);
                 if selected == Some(name) || (selected.is_none() && item.contains('*')) {
                     if let Some(value) =
-                        self.tasks
-                            .get(&(package.to_string(), Vec::new(), name.to_owned()))
+                        self.package_callable(package, name, &mut Default::default())
                     {
                         if selected == Some(name) {
-                            *explicit = Some(*value);
+                            *explicit = Some(value);
                         } else {
-                            *wildcard = Some(wildcard.unwrap_or(false) || *value);
+                            *wildcard = Some(wildcard.unwrap_or(false) || value);
                         }
                     }
                 }
@@ -630,6 +740,31 @@ mod callable_analysis_tests {
             &tasks
         ));
     }
+    #[test]
+    fn qualified_and_exported_callable_timing_uses_the_declaring_scope() {
+        for delay in ["", "#1;"] {
+            let source = format!(
+                "package A; task tick; {delay} endtask endpackage
+                package B; import A::tick; export A::*; endpackage
+                package C; import B::*; export B::tick; endpackage
+                module Top; import C::*; always @(posedge clk) tick(); endmodule"
+            );
+            let tasks = TaskTiming::new(std::slice::from_ref(&source));
+            assert_eq!(
+                tasks.package_callable("C", "tick", &mut Default::default()),
+                Some(!delay.is_empty())
+            );
+            let at = source.rfind("tick()").unwrap();
+            assert_eq!(tasks.resolve(&source, at, "tick"), Some(!delay.is_empty()));
+        }
+        let source = "task tick; endtask module Top; task tick; #1; endtask always @(posedge clk) $unit::tick(); endmodule".to_owned();
+        let tasks = TaskTiming::new(std::slice::from_ref(&source));
+        assert_eq!(
+            tasks.resolve(&source, source.rfind("tick()").unwrap(), "tick"),
+            Some(false)
+        );
+    }
+
     #[test]
     fn escaped_callable_names_remain_whole_tokens() {
         let source = r"task \pause.task ; #1; endtask";
