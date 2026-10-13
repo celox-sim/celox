@@ -11,17 +11,30 @@ impl<B: SimBackend> TimedBackend<B> {
     fn new(sim: Simulation<B>) -> Self {
         Self(sim, Vec::new(), false)
     }
-    fn capture_events(&mut self) {
+    fn capture_events(&mut self) -> Result<()> {
         let events = self.0.drain_runtime_events();
         self.2 |= events
             .iter()
             .any(|event| matches!(event, RuntimeEvent::Finish));
+        let error = events.iter().find_map(|event| match event {
+            RuntimeEvent::AssertFatal { message } => Some(format!(
+                "fatal assertion: {}",
+                String::from_utf8(message.clone()).unwrap_or_else(|_| format!("{message:?}"))
+            )),
+            RuntimeEvent::Missed { count } => Some(format!("{count} runtime events were missed")),
+            _ => None,
+        });
         self.1.extend(events);
+        if let Some(error) = error {
+            Err(error.into())
+        } else {
+            Ok(())
+        }
     }
     fn settle_checked(&mut self) -> Result<()> {
         let already_finished = self.finished();
         self.0.settle()?;
-        self.capture_events();
+        self.capture_events()?;
         if !already_finished && self.finished() {
             return Err("the design finished outside run_to_finish during settling".into());
         }
@@ -98,8 +111,9 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
         if time < now {
             return Err(format!("run_until {time}: the simulation is already at {now}").into());
         }
+        self.0.settle()?;
         self.0.run_until(time)?;
-        self.capture_events();
+        self.capture_events()?;
         if self.finished() {
             return Err(format!(
                 "run_until {time}: the design finished the simulation at {}",
@@ -111,7 +125,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_to_finish(&mut self) -> Result<()> {
-        self.capture_events();
+        self.capture_events()?;
         if self.finished() {
             return Err(
                 "run_to_finish: the design already finished before the operation began".into(),
@@ -119,7 +133,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
         }
         while !self.finished() {
             let step = self.0.step()?;
-            self.capture_events();
+            self.capture_events()?;
             if step.is_none() {
                 break;
             }
@@ -319,6 +333,82 @@ fn run_to_finish_rejects_a_finish_during_an_earlier_settle() {
                 .unwrap_err()
                 .to_string()
                 .contains("already finished")
+        );
+    }
+}
+
+#[test]
+fn run_until_settles_a_host_edge_without_a_runtime_process() {
+    let source = "module Top(input bit clk);always_ff @(posedge clk)$finish;endmodule";
+    for name in [
+        "native",
+        "cranelift",
+        "native-parallel",
+        "cranelift-parallel",
+        "wasm",
+    ] {
+        let design = celox_test_suite::load_group(
+            "finish-edge.vtest",
+            &format!(
+                "(group protocol (category sequential))(case finish (source \"finish-edge.sv\" #\"{source}\"#)(top Top)(set clk 1)(run_until 0))"
+            ),
+            celox_test_suite::no_std_library,
+        )[0];
+        let mut backend = build(&design.design(), name).unwrap();
+        backend
+            .write(
+                &SignalPath {
+                    instances: Vec::new(),
+                    name: "clk".into(),
+                },
+                1u8.into(),
+                0u8.into(),
+            )
+            .unwrap();
+        assert!(
+            backend
+                .run_until(0)
+                .unwrap_err()
+                .to_string()
+                .contains("finished"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn buffered_host_fatal_cannot_be_hidden_by_a_later_finish() {
+    let source = "module Top(input bit go);always_comb if(go)$fatal(1,\"host fatal\");initial #1 $finish;endmodule";
+    let text = format!(
+        "(group protocol (category sequential))(case fatal (source \"fatal.sv\" #\"{source}\"#)(top Top)(set go 1)(run_to_finish))"
+    );
+    let case =
+        celox_test_suite::load_group("fatal.vtest", &text, celox_test_suite::no_std_library)[0];
+    for name in [
+        "native",
+        "cranelift",
+        "native-parallel",
+        "cranelift-parallel",
+        "wasm",
+    ] {
+        let mut backend = build(&case.design(), name).unwrap();
+        backend
+            .write(
+                &SignalPath {
+                    instances: Vec::new(),
+                    name: "go".into(),
+                },
+                1u8.into(),
+                0u8.into(),
+            )
+            .unwrap();
+        assert!(
+            backend
+                .run_to_finish()
+                .unwrap_err()
+                .to_string()
+                .contains("fatal"),
+            "{name}"
         );
     }
 }

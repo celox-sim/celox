@@ -227,3 +227,8 @@ sv_backends! {
  fn adapter_defines_preserve_line_macros(sim) { @case "timing::adapter_defines_preserve_line_macros"; }
  fn callable_timing_keeps_generate_scope(sim) { @case "timing::callable_timing_keeps_generate_scope"; }
 }
+
+sv_backends! {
+ fn timed_file_macros_keep_each_source_path(sim) { @case "timing::timed_file_macros_keep_each_source_path"; }
+ fn escaped_identifiers_do_not_collide_with_control_names(sim) { @case "timing::escaped_identifiers_do_not_collide_with_control_names"; }
+}

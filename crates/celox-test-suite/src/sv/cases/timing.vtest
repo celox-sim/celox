@@ -734,3 +734,12 @@ endmodule"#)
  endmodule"#)
  (top Top)(set clk 1)(run_until 1)(assert_eq q 1)(assert_eq r 0)
  (set clk 0)(eval)(set clk 1)(run_until 2)(assert_eq r 1))
+
+(case timed_file_macros_keep_each_source_path
+ (source "first.sv" #"module Leaf;initial $display("%s",`__FILE__);endmodule"#)
+ (source "second.sv" #"module Top;Leaf u();initial #1 $display("%s",`__FILE__);endmodule"#)
+ (top Top)(run_until 1)(expect_output "first.sv\nsecond.sv\n"))
+(case escaped_identifiers_do_not_collide_with_control_names
+ (source "escaped-control.sv" #"package \celox_suite_timed_control ;parameter bit Q=1;endpackage
+ module Top(output bit q);initial q=\celox_suite_timed_control ::Q;endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 1))
