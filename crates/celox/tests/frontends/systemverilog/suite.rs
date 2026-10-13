@@ -131,6 +131,8 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
                 "run_to_finish: the design already finished before the operation began".into(),
             );
         }
+        self.0.settle()?;
+        self.capture_events()?;
         while !self.finished() {
             let step = self.0.step()?;
             self.capture_events()?;

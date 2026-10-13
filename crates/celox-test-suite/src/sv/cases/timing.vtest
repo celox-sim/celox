@@ -793,3 +793,13 @@ endmodule"#)
  $display("- timed_control.sv:3: Verilog $finish"); #5; $finish; end endmodule"#)
  (top Top)(run_to_finish)
  (expect_output "timed_control.sv:3: $finish called at 5 (1ns)\n- timed_control.sv:3: Verilog $finish\n"))
+
+(case staged_ff_edge_can_finish_without_scheduled_work
+ (source "host-finish.sv" #"module Top(input bit clk);always @(posedge clk)$finish;endmodule"#)
+ (top Top)(set clk 1)(run_to_finish))
+
+(case coalesced_setup_writes_do_not_invent_ff_edges
+ (source "setup-pulse.sv" #"module Top(input bit clk,rst,output bit [7:0] q,r);
+ always @(posedge clk) q<=q+1;always @(negedge rst)r<=r+1;endmodule"#)
+ (top Top)(set clk 1)(set clk 0)(set rst 1)(set rst 0)
+ (run_until 0)(assert_eq q 0)(assert_eq r 0))

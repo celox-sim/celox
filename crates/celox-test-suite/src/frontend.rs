@@ -155,6 +155,10 @@ pub(crate) fn stage(
 
 const TIMED_CONTROL: &str = r#"package celox_suite_timed_control;
   bit started = 0;
+  bit setup_started = 0;
+  function automatic void celox_suite_begin_setup();
+    setup_started = 1;
+  endfunction
   bit finished = 0;
   function automatic void celox_suite_start_design();
     started = 1;
@@ -173,6 +177,7 @@ endpackage
 struct TimedNames {
     package: String,
     start: String,
+    setup: String,
     finish: String,
 }
 
@@ -196,9 +201,10 @@ fn timed_names(sources: &[String]) -> TimedNames {
         let names = TimedNames {
             package: name("celox_suite_timed_control"),
             start: name("celox_suite_start_design"),
+            setup: name("celox_suite_begin_setup"),
             finish: name("celox_suite_finish_design"),
         };
-        if [&names.package, &names.start, &names.finish]
+        if [&names.package, &names.start, &names.finish, &names.setup]
             .into_iter()
             .all(|name| !words.contains(name.as_str()))
         {
@@ -227,6 +233,7 @@ impl TimedNames {
                 {
                     &self.package
                 }
+                "celox_suite_begin_setup" if tail.starts_with('(') => &self.setup,
                 "celox_suite_start_design" if tail.starts_with('(') => &self.start,
                 "celox_suite_finish_design" if tail.starts_with('(') => &self.finish,
                 _ => continue,

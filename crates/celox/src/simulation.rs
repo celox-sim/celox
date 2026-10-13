@@ -344,10 +344,7 @@ impl<B: SimBackend> Simulation<B> {
                     (event, value.bit(0), mask.bit(0))
                 })
                 .collect();
-            parts.high_events = samples
-                .iter()
-                .filter_map(|(event, high, _)| high.then_some(*event))
-                .collect();
+
             parts.unknown_events = samples
                 .iter()
                 .filter_map(|(event, _, unknown)| unknown.then_some(*event))
@@ -1888,5 +1885,51 @@ mod legacy_clock_state_review_tests {
                 known,
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod staged_edge_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, mut restored: Simulation<B>) {
+        let a = sim.signal("a");
+        let qa = sim.signal("qa");
+        let qb = sim.signal("qb");
+        sim.set_wide(a, 1u8.into());
+        let mut file = sim.save_state().unwrap();
+        file.schedule.as_mut().unwrap().unknown_events = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+        restored.load_state(&file).unwrap();
+        restored.settle().unwrap();
+        assert_eq!(restored.get(qa), 1u8.into());
+        sim.schedule("b", 0, 1).unwrap();
+        sim.settle().unwrap();
+        assert_eq!(sim.get(qa), 1u8.into());
+        assert_eq!(sim.get(qb), 1u8.into());
+    }
+    #[test]
+    fn host_edges_join_current_time_events_and_survive_legacy_state_files() {
+        let source = "module Top(input bit a,b,output bit[7:0]qa,qb);always @(posedge a)qa<=qb+1;always @(posedge b)qb<=qa+1;endmodule";
+        let build =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("staged.sv"))], "Top");
+        check(
+            Simulation::new(build().build_interpreter().unwrap()),
+            Simulation::new(build().build_interpreter().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_cranelift().unwrap()),
+            Simulation::new(build().build_cranelift().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_wasm().unwrap()),
+            Simulation::new(build().build_wasm().unwrap()),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulation::new(build().build_native().unwrap()),
+            Simulation::new(build().build_native().unwrap()),
+        );
     }
 }
