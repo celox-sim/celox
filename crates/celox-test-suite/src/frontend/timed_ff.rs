@@ -484,7 +484,7 @@ impl TaskTiming {
             let package = sv_words(prefix).last()?.2;
             return self
                 .tasks
-                .get(&(package.to_owned(), Vec::new(), name.to_owned()))
+                .get(&(package.to_string(), Vec::new(), name.to_owned()))
                 .copied();
         }
         if let Some(prefix) = prefix.strip_suffix('.') {
@@ -540,7 +540,7 @@ impl TaskTiming {
                 if selected == Some(name) || (selected.is_none() && item.contains('*')) {
                     if let Some(value) =
                         self.tasks
-                            .get(&(package.to_owned(), Vec::new(), name.to_owned()))
+                            .get(&(package.to_string(), Vec::new(), name.to_owned()))
                     {
                         if selected == Some(name) {
                             *explicit = Some(*value);
