@@ -552,7 +552,10 @@ fn timed_state_files_preserve_unknown_edge_detection_baselines() {
         source.settle().unwrap();
         let expected = source.get(q) + 1u8;
         let file = through_bytes(&source.save_state().unwrap());
-        assert_eq!(file.schedule.as_ref().unwrap().unknown_events, ["clk"]);
+        assert_eq!(
+            file.schedule.as_ref().unwrap().unknown_events,
+            Some(vec!["clk".to_owned()])
+        );
         let mut restored = builder();
         restored.load_state(&file).unwrap();
         let clk = restored.signal("clk");
