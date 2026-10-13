@@ -2388,13 +2388,14 @@ fn compile_program(
             native_memory_size,
             options: NativeRuntimeOptions {
                 four_state: options.four_state,
-                // A generated loop cannot distinguish a failed pre-edge
-                // phase from a published tick. Run fallible comb separately.
+                // A generated loop cannot distinguish a failed phase from
+                // a published tick. Run fallible comb and FF phases separately.
                 native_tick_loop: options.x86_options.native_tick_loop
                     && !sir
                         .sir
                         .eval_comb
                         .iter()
+                        .chain(sir.sir.eval_apply_ffs.values().flatten())
                         .flat_map(|unit| unit.blocks.values())
                         .any(|block| {
                             matches!(block.terminator, celox_sir::SIRTerminator::Error(_))
@@ -3128,7 +3129,8 @@ impl super::super::SimBackend for NativeBackend {
             if let Err(error) = self.eval_comb() {
                 return (0, Err(error));
             }
-            return (1, self.eval_apply_ff_at(event));
+            let result = self.eval_apply_ff_at(event);
+            return (u64::from(result.is_ok()), result);
         }
         if self.compiled.options.native_tick_loop {
             let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
@@ -3149,7 +3151,10 @@ impl super::super::SimBackend for NativeBackend {
                 self.lane_selectors
                     .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
             }
-            (1, self.eval_apply_ff_at(event))
+            {
+                let result = self.eval_apply_ff_at(event);
+                (u64::from(result.is_ok()), result)
+            }
         }
     }
 

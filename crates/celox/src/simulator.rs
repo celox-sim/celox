@@ -100,6 +100,8 @@ mod host {
         pub(crate) program: RuntimeProgram,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
+        pub(crate) pending_host_writes: Vec<SignalRef>,
+        host_clock_signals: Vec<SignalRef>,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
@@ -706,11 +708,20 @@ mod host {
             program: RuntimeProgram,
             warnings: Vec<CompilationWarning>,
         ) -> Self {
+            let host_clock_signals = program
+                .runtime_schema
+                .processes
+                .iter()
+                .flat_map(|process| &process.clocks)
+                .map(|clock| backend.resolve_signal(&clock.signal))
+                .collect();
             let mut sim = Self {
+                host_clock_signals,
                 backend,
                 program,
                 vcd_writer: None,
                 dirty: false,
+                pending_host_writes: Vec::new(),
                 warnings,
                 components: Default::default(),
                 component_simulation: None,
@@ -1199,6 +1210,11 @@ mod host {
         /// values and truncating bits beyond the signal width. Integer type
         /// size does not need to match the signal storage size.
         pub fn set<T: Copy>(&mut self, signal: SignalRef, val: T) {
+            if self.host_clock_signals.contains(&signal)
+                && !self.pending_host_writes.contains(&signal)
+            {
+                self.pending_host_writes.push(signal);
+            }
             self.backend.set(signal, val);
             self.dirty = true;
             self.settle_dirty_for_runtime_event_drain();
@@ -1206,6 +1222,11 @@ mod host {
 
         /// Sets a wide signal value and marks combinational logic as dirty.
         pub fn set_wide(&mut self, signal: SignalRef, val: BigUint) {
+            if self.host_clock_signals.contains(&signal)
+                && !self.pending_host_writes.contains(&signal)
+            {
+                self.pending_host_writes.push(signal);
+            }
             self.backend.set_wide(signal, val);
             self.dirty = true;
             self.settle_dirty_for_runtime_event_drain();
@@ -1213,6 +1234,11 @@ mod host {
 
         /// Sets a four-state signal value and marks combinational logic as dirty.
         pub fn set_four_state(&mut self, signal: SignalRef, val: BigUint, mask: BigUint) {
+            if self.host_clock_signals.contains(&signal)
+                && !self.pending_host_writes.contains(&signal)
+            {
+                self.pending_host_writes.push(signal);
+            }
             self.backend.set_four_state(signal, val, mask);
             self.dirty = true;
             self.settle_dirty_for_runtime_event_drain();
@@ -1225,6 +1251,8 @@ mod host {
         {
             let mut ctx = IOContext {
                 backend: &mut self.backend,
+                host_writes: &mut self.pending_host_writes,
+                host_clock_signals: &self.host_clock_signals,
             };
             f(&mut ctx);
             self.dirty = true;
@@ -1232,6 +1260,10 @@ mod host {
                 self.eval_comb_for_runtime_event_drain()?;
             }
             Ok(())
+        }
+
+        pub(crate) fn take_host_writes(&mut self) -> Vec<SignalRef> {
+            std::mem::take(&mut self.pending_host_writes)
         }
 
         pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {
@@ -1550,7 +1582,8 @@ mod host {
                 return (0, Ok(()));
             }
             if !self.program.runtime_schema.comb_observers.is_empty() || !self.dirty {
-                return (1, self.tick_deferred_comb(event));
+                let result = self.tick_deferred_comb(event);
+                return (u64::from(result.is_ok()), result);
             }
             let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
             self.dirty = true;

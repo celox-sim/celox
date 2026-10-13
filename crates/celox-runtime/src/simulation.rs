@@ -60,7 +60,10 @@ pub trait SimulationExecutor {
         if let Err(error) = self.eval_comb() {
             return (0, Err(error));
         }
-        (1, self.eval_apply_ff_at(event))
+        {
+            let result = self.eval_apply_ff_at(event);
+            (u64::from(result.is_ok()), result)
+        }
     }
 
     /// Whether clock waits may be served by fused ticks, which skip the
@@ -604,6 +607,25 @@ impl<B: SimBackend> SimulationState<B> {
             let result = executor.run_process(process, time);
             executor.backend_mut().set(refs.delay, delay);
             result?;
+        }
+        Ok(())
+    }
+
+    /// A generated process clock owns its signal, including before its first wait.
+    pub fn validate_host_write(&self, signal: SignalRef) -> Result<(), SimulatorErrorCode> {
+        if let Some(clock) = self
+            .processes
+            .iter()
+            .flat_map(|process| &process.clocks)
+            .find(|clock| clock.signal == signal)
+        {
+            return Err(SimulatorErrorCode::Runtime {
+                message: format!(
+                    "process clock {} is driven by a direct host write",
+                    clock.event.id()
+                ),
+                signals: Vec::new(),
+            });
         }
         Ok(())
     }
