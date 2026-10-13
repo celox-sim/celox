@@ -3961,12 +3961,11 @@ fn lower_glue_parent_expr(
             );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
-            let operation_context = context_width.map(|context_width| {
-                context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
-                        .unwrap_or(context_width),
-                )
-            });
+            let natural_width =
+                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types);
+            let operation_context = context_width
+                .map(|width| width.max(natural_width.unwrap_or(width)))
+                .or(natural_width);
             let comparison_context = comparison
                 .then(|| {
                     sv_comparison_operand_width(
@@ -4096,6 +4095,16 @@ fn lower_glue_parent_expr(
             source_ids.extend(right_source_ids);
             source_ids.sort();
             source_ids.dedup();
+            if context_determined {
+                left = coerce_node_width(
+                    arena,
+                    left,
+                    left_context,
+                    if shift { left_signed } else { operands_signed },
+                )
+                .ok()?;
+                right = coerce_node_width(arena, right, right_context, operands_signed).ok()?;
+            }
             if context_sized_comparison {
                 let common_width =
                     celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
@@ -5097,12 +5106,11 @@ fn lower_expr_with_context(
             } else {
                 operands_signed
             };
-            let operation_context = context_width.map(|context_width| {
-                context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
-                        .unwrap_or(context_width),
-                )
-            });
+            let natural_width =
+                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types);
+            let operation_context = context_width
+                .map(|width| width.max(natural_width.unwrap_or(width)))
+                .or(natural_width);
             if matches!(op, sv::ir::BinaryOp::Pow) {
                 // The base is context-determined and gives the result its
                 // type; the exponent is self-determined (IEEE 1800-2023 11.6.1).
@@ -5116,6 +5124,7 @@ fn lower_expr_with_context(
                     operation_context,
                     Some(left_signed),
                 )?;
+                let base = coerce_node_width(arena, base, operation_context, left_signed).ok()?;
                 let exponent_signed = sv_expr_is_signed_with_parameters(
                     right,
                     variables,
@@ -5262,6 +5271,16 @@ fn lower_expr_with_context(
                     ),
                 };
             sources.extend(right_sources);
+            if context_determined {
+                left = coerce_node_width(
+                    arena,
+                    left,
+                    left_context,
+                    if shift { left_signed } else { operands_signed },
+                )
+                .ok()?;
+                right = coerce_node_width(arena, right, right_context, operands_signed).ok()?;
+            }
             if comparison {
                 let common_width =
                     celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
@@ -6783,8 +6802,12 @@ fn sv_expr_natural_width(
                 Some(1)
             } else if matches!(
                 op,
-                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+                sv::ir::BinaryOp::Shl
+                    | sv::ir::BinaryOp::Shr
+                    | sv::ir::BinaryOp::Sar
+                    | sv::ir::BinaryOp::Pow
             ) {
+                // Shift counts and exponents are self-determined (Table 11-21).
                 sv_expr_natural_width(left, variables, name_to_id, constants, parameter_types)
             } else {
                 Some(

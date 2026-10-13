@@ -61,6 +61,8 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
 }
 
 sv_backends! {
+    fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
+
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
     fn time_format_consumes_its_expression_argument(sim) { @case "system_functions::time_format_consumes_its_expression_argument"; }
     fn string_literals_follow_numeric_format_specifiers(sim) { @case "system_functions::string_literals_follow_numeric_format_specifiers"; }
