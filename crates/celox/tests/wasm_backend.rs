@@ -23,7 +23,7 @@ fn test_wasm_comb_constant_display_runtime_event() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "hi".to_string(),
+            message: b"hi".to_vec(),
         }],
     );
 
@@ -59,7 +59,7 @@ fn test_wasm_comb_store_enables_downstream_display() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "x=7".to_string(),
+            message: b"x=7".to_vec(),
         }],
     );
 
@@ -108,7 +108,7 @@ fn test_wasm_comb_dynamic_store_enables_downstream_display() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "slice=171".to_string(),
+            message: b"slice=171".to_vec(),
         }],
     );
 
@@ -157,7 +157,7 @@ fn test_wasm_comb_wide_store_enables_downstream_display() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "lo=52 hi=18".to_string(),
+            message: b"lo=52 hi=18".to_vec(),
         }],
     );
 

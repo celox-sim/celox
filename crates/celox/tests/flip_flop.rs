@@ -53,10 +53,10 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
         events,
         vec![
             celox::RuntimeEvent::Display {
-                message: "a=3".to_string(),
+                message: b"a=3".to_vec(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "bad a=3".to_string(),
+                message: b"bad a=3".to_vec(),
             },
         ],
     );
@@ -96,7 +96,7 @@ fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "inside=10".to_string(),
+            message: b"inside=10".to_vec(),
         }],
     );
 
@@ -110,10 +110,10 @@ fn test_ff_assert_message_runtime_effect_is_eager(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inside=20".to_string(),
+                message: b"inside=20".to_vec(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "value=22".to_string(),
+                message: b"value=22".to_vec(),
             },
         ],
     );
@@ -173,7 +173,7 @@ fn test_ff_unknown_ternary_retains_then_arm_output_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "written=11".to_string(),
+            message: b"written=11".to_vec(),
         }],
     );
 }
@@ -201,7 +201,7 @@ fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "arm=1".to_string(),
+            message: b"arm=1".to_vec(),
         }],
     );
 
@@ -210,7 +210,7 @@ fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "arm=2".to_string(),
+            message: b"arm=2".to_vec(),
         }],
     );
 }
@@ -246,10 +246,10 @@ fn test_ff_effectful_function_input_is_evaluated_once(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inner=7".to_string(),
+                message: b"inner=7".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "outer=7".to_string(),
+                message: b"outer=7".to_vec(),
             },
         ],
     );
@@ -283,7 +283,7 @@ fn test_ff_assert_message_args_preserve_left_to_right_snapshots(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertContinue {
-            message: "5 6".to_string(),
+            message: b"5 6".to_vec(),
         }],
     );
 }
@@ -319,7 +319,7 @@ fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "x=5".to_string(),
+            message: b"x=5".to_vec(),
         }],
     );
 }
@@ -359,7 +359,7 @@ fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "pattern=1".to_string(),
+            message: b"pattern=1".to_vec(),
         }],
     );
 }
@@ -399,10 +399,10 @@ fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "case 1=1".to_string(),
+                message: b"case 1=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "case 2=1".to_string(),
+                message: b"case 2=1".to_vec(),
             },
         ],
     );
@@ -462,7 +462,7 @@ fn test_ff_case_controls_apply_nested_output_writes_to_function_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "state=10 11".to_string(),
+            message: b"state=10 11".to_vec(),
         }],
     );
     assert_eq!(sim.get(effect), 11u8.into());
@@ -503,7 +503,7 @@ fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "pattern 1=1".to_string(),
+            message: b"pattern 1=1".to_vec(),
         }],
     );
 }
@@ -538,7 +538,7 @@ fn test_ff_assignment_snapshots_dynamic_rhs_access(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "captured=1".to_string(),
+            message: b"captured=1".to_vec(),
         }],
     );
 }
@@ -573,7 +573,7 @@ fn test_ff_assignment_substitutes_through_evaluating_system_function(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "captured=5".to_string(),
+            message: b"captured=5".to_vec(),
         }],
     );
 }
@@ -611,7 +611,7 @@ fn test_ff_if_snapshots_dynamic_predicate_before_state_merge(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "result=1".to_string(),
+            message: b"result=1".to_vec(),
         }],
     );
 }
@@ -650,7 +650,7 @@ fn test_ff_case_snapshots_dynamic_target_before_state_merge(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "result=1".to_string(),
+            message: b"result=1".to_vec(),
         }],
     );
 }
@@ -712,7 +712,7 @@ fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "written=11".to_string(),
+            message: b"written=11".to_vec(),
         }],
     );
 
@@ -727,7 +727,7 @@ fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "written=20".to_string(),
+            message: b"written=20".to_vec(),
         }],
     );
 }
@@ -783,7 +783,7 @@ fn test_ff_variable_select_captures_nested_output(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bit=1".to_string(),
+            message: b"bit=1".to_vec(),
         }],
     );
 }
@@ -844,7 +844,7 @@ fn test_ff_effectful_assignment_executes_only_on_selected_if_path(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "assigned=6".to_string(),
+            message: b"assigned=6".to_vec(),
         }],
     );
 }
@@ -899,7 +899,7 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "live=8".to_string(),
+            message: b"live=8".to_vec(),
         }],
     );
 }
@@ -972,7 +972,7 @@ fn test_ff_case_after_conditional_return_preserves_returned_path(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "case=0".to_string(),
+            message: b"case=0".to_vec(),
         }],
     );
 
@@ -987,7 +987,7 @@ fn test_ff_case_after_conditional_return_preserves_returned_path(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "case=1".to_string(),
+            message: b"case=1".to_vec(),
         }],
     );
 }
@@ -1022,7 +1022,7 @@ fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "input=9".to_string(),
+            message: b"input=9".to_vec(),
         }],
     );
 }
@@ -1052,7 +1052,7 @@ fn test_ff_top_level_statement_call_evaluates_discarded_effectful_input(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "direct=13".to_string(),
+            message: b"direct=13".to_vec(),
         }],
     );
 }
@@ -1101,7 +1101,7 @@ fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "value=9".to_string(),
+            message: b"value=9".to_vec(),
         }],
     );
 }
@@ -1149,7 +1149,7 @@ fn test_ff_nested_output_to_module_variable_survives_runtime_function(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "outer".to_string(),
+            message: b"outer".to_vec(),
         }],
     );
 }
@@ -1198,7 +1198,7 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "captured=0".to_string(),
+            message: b"captured=0".to_vec(),
         }],
     );
     assert_eq!(sim.get(q), 0u8.into());
@@ -1257,7 +1257,7 @@ fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "values=1,9".to_string(),
+            message: b"values=1,9".to_vec(),
         }],
     );
 }
@@ -1349,7 +1349,7 @@ fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "captured=0".to_string(),
+            message: b"captured=0".to_vec(),
         }],
     );
 }
@@ -1404,10 +1404,10 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "update=0".to_string(),
+                message: b"update=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "global=0".to_string(),
+                message: b"global=0".to_vec(),
             },
         ],
     );
@@ -1418,7 +1418,7 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "global=2".to_string(),
+            message: b"global=2".to_vec(),
         }],
     );
 }
@@ -1463,7 +1463,7 @@ fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "set".to_string(),
+            message: b"set".to_vec(),
         }],
     );
 }
@@ -1503,7 +1503,7 @@ fn test_ff_nested_dynamic_nonlocal_store_flushes_pending_outer_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "result=0 global=4".to_string(),
+            message: b"result=0 global=4".to_vec(),
         }],
     );
 }
@@ -1543,7 +1543,7 @@ fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "result=1 global=1".to_string(),
+            message: b"result=1 global=1".to_vec(),
         }],
     );
 }
@@ -1598,7 +1598,7 @@ fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "global=0".to_string(),
+            message: b"global=0".to_vec(),
         }],
     );
 
@@ -1608,7 +1608,7 @@ fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "global=2".to_string(),
+            message: b"global=2".to_vec(),
         }],
     );
 }
@@ -1677,10 +1677,10 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "and=0".to_string(),
+                message: b"and=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "or=1".to_string(),
+                message: b"or=1".to_vec(),
             },
         ],
     );
@@ -1697,10 +1697,10 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "and=1".to_string(),
+                message: b"and=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "or=1".to_string(),
+                message: b"or=1".to_vec(),
             },
         ],
     );
@@ -1717,10 +1717,10 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "and=x".to_string(),
+                message: b"and=x".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "or=1".to_string(),
+                message: b"or=1".to_vec(),
             },
         ],
     );
@@ -1778,7 +1778,7 @@ fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "predicate=13".to_string(),
+            message: b"predicate=13".to_vec(),
         }],
     );
 }
@@ -1836,7 +1836,7 @@ fn test_ff_nested_wrapper_predicate_output_updates_caller_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "wrapper=13".to_string(),
+            message: b"wrapper=13".to_vec(),
         }],
     );
 }
@@ -1896,7 +1896,7 @@ fn test_ff_nested_call_predicate_uses_pre_copyout_input(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "wrapper=42".to_string(),
+            message: b"wrapper=42".to_vec(),
         }],
     );
 }
@@ -1950,7 +1950,7 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bits=8 size=8".to_string(),
+            message: b"bits=8 size=8".to_vec(),
         }],
     );
 }
@@ -2016,7 +2016,7 @@ fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "statement=17".to_string(),
+            message: b"statement=17".to_vec(),
         }],
     );
 }
@@ -2060,7 +2060,7 @@ fn test_ff_nested_statement_call_copies_outputs_in_declaration_order(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "written=2".to_string(),
+            message: b"written=2".to_vec(),
         }],
     );
 }
@@ -2100,7 +2100,7 @@ fn test_ff_nested_statement_call_coerces_output_to_actual_width(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "written=1".to_string(),
+            message: b"written=1".to_vec(),
         }],
     );
 }
@@ -2160,7 +2160,7 @@ fn test_ff_state_only_statement_call_materializes_nested_input_output(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "wrapped=17".to_string(),
+            message: b"wrapped=17".to_vec(),
         }],
     );
 }
@@ -2209,10 +2209,10 @@ fn test_ff_statement_call_copies_outputs_in_declaration_order(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "index=0".to_string(),
+                message: b"index=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "index=1".to_string(),
+                message: b"index=1".to_vec(),
             },
         ],
     );
@@ -2263,7 +2263,7 @@ fn test_ff_composite_runtime_arg_preserves_left_to_right_snapshot(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "sum=22".to_string(),
+            message: b"sum=22".to_vec(),
         }],
     );
 }
@@ -2331,7 +2331,7 @@ fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "ordered=22".to_string(),
+            message: b"ordered=22".to_vec(),
         }],
     );
 }
@@ -2380,7 +2380,7 @@ fn test_ff_nested_call_freezes_all_outputs_before_copy_out(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "sum=16".to_string(),
+            message: b"sum=16".to_vec(),
         }],
     );
 }
@@ -2435,10 +2435,10 @@ fn test_ff_nested_call_output_preserves_conditional_early_return_path(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inner=11".to_string(),
+                message: b"inner=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "written=1".to_string(),
+                message: b"written=1".to_vec(),
             },
         ],
     );
@@ -2451,10 +2451,10 @@ fn test_ff_nested_call_output_preserves_conditional_early_return_path(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "inner=22".to_string(),
+                message: b"inner=22".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "written=2".to_string(),
+                message: b"written=2".to_vec(),
             },
         ],
     );
@@ -2524,13 +2524,13 @@ fn test_ff_short_circuit_state_reuses_evaluated_lhs(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "lhs=20".to_string(),
+                message: b"lhs=20".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "logic=0".to_string(),
+                message: b"logic=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "result=21".to_string(),
+                message: b"result=21".to_vec(),
             },
         ],
     );
@@ -2592,13 +2592,13 @@ fn test_ff_concatenation_effects_follow_source_order(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "first=10".to_string(),
+                message: b"first=10".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "second=11".to_string(),
+                message: b"second=11".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "concat=2827".to_string(),
+                message: b"concat=2827".to_vec(),
             },
         ],
     );
@@ -2633,7 +2633,7 @@ fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "inner=175".to_string(),
+            message: b"inner=175".to_vec(),
         }],
     );
 }
@@ -2675,7 +2675,7 @@ fn test_ff_runtime_event_reads_updated_formal_slice(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "slice=15".to_string(),
+            message: b"slice=15".to_vec(),
         }],
     );
 }
@@ -2725,7 +2725,7 @@ fn test_ff_case_assignment_is_visible_to_later_runtime_event(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "case=11".to_string(),
+            message: b"case=11".to_vec(),
         }],
     );
 
@@ -2739,7 +2739,7 @@ fn test_ff_case_assignment_is_visible_to_later_runtime_event(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "case=22".to_string(),
+            message: b"case=22".to_vec(),
         }],
     );
 }
@@ -2773,7 +2773,7 @@ fn test_ff_statement_function_with_output_emits_runtime_effect(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "statement=12".to_string(),
+            message: b"statement=12".to_vec(),
         }],
     );
 }
@@ -2819,7 +2819,7 @@ fn test_ff_effectful_if_predicate_is_evaluated_once(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "predicate=7".to_string(),
+            message: b"predicate=7".to_vec(),
         }],
     );
 }
@@ -2868,7 +2868,7 @@ fn test_ff_nested_output_is_captured_through_signed_cast(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "cast=9".to_string(),
+            message: b"cast=9".to_vec(),
         }],
     );
 }
@@ -2924,28 +2924,28 @@ fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "arg=1".to_string(),
+                message: b"arg=1".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=2".to_string(),
+                message: b"arg=2".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=3".to_string(),
+                message: b"arg=3".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=4".to_string(),
+                message: b"arg=4".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=5".to_string(),
+                message: b"arg=5".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=6".to_string(),
+                message: b"arg=6".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=7".to_string(),
+                message: b"arg=7".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "arg=8".to_string(),
+                message: b"arg=8".to_vec(),
             },
         ],
     );
@@ -3002,7 +3002,7 @@ fn test_ff_runtime_event_arguments_use_per_argument_state(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "args=10 12".to_string(),
+            message: b"args=10 12".to_vec(),
         }],
     );
 }
@@ -3038,7 +3038,7 @@ fn test_ff_runtime_event_formal_uses_declared_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "formal=-1".to_string(),
+            message: b"formal=-1".to_vec(),
         }],
     );
 }
@@ -3080,7 +3080,7 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "observed=17".to_string(),
+            message: b"observed=17".to_vec(),
         }],
     );
 }
@@ -3161,7 +3161,7 @@ fn test_ff_runtime_effectful_return_uses_declared_signed_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "return".to_string(),
+            message: b"return".to_vec(),
         }],
     );
 }
@@ -3209,7 +3209,7 @@ fn test_ff_runtime_effectful_output_uses_declared_formal_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "output".to_string(),
+            message: b"output".to_vec(),
         }],
     );
 }
@@ -3247,7 +3247,7 @@ fn test_ff_runtime_effectful_merge_preserves_signed_return_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "choose=1".to_string(),
+            message: b"choose=1".to_vec(),
         }],
     );
 
@@ -3257,7 +3257,7 @@ fn test_ff_runtime_effectful_merge_preserves_signed_return_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "choose=0".to_string(),
+            message: b"choose=0".to_vec(),
         }],
     );
 }
@@ -3297,7 +3297,7 @@ fn test_ff_runtime_effectful_local_assignment_uses_declared_type(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "temporary=-1".to_string(),
+            message: b"temporary=-1".to_vec(),
         }],
     );
 }
@@ -3331,7 +3331,7 @@ fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "signed=-1".to_string(),
+            message: b"signed=-1".to_vec(),
         }],
     );
 }
@@ -3354,7 +3354,7 @@ fn test_ff_runtime_events_format_verilog_radices(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "bin=00101010 hex=2a HEX=2a".to_string(),
+            message: b"bin=00101010 hex=2a HEX=2a".to_vec(),
         }],
     );
 }
@@ -3389,10 +3389,10 @@ fn test_ff_runtime_events_follow_veryl_field_widths(sim) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "[    7][7    ][00007][9][00000009][0007]".to_string(),
+                message: b"[    7][7    ][00007][9][00000009][0007]".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "07 00000009".to_string(),
+                message: b"07 00000009".to_vec(),
             },
         ],
     );
@@ -3428,10 +3428,10 @@ fn test_ff_runtime_events_preserve_four_state_args(sim) {
                     test_utils::Frontend::Veryl => "a=1z10 hex=Z dec=x",
                     test_utils::Frontend::Sv => "a=1z10 hex=Z dec=Z",
                 }
-                .to_string(),
+                .as_bytes().to_vec(),
             },
             celox::RuntimeEvent::AssertContinue {
-                message: "bad=1z10".to_string(),
+                message: b"bad=1z10".to_vec(),
             },
         ],
     );
@@ -3473,7 +3473,7 @@ fn test_ff_runtime_events_support_design_sized_arg_count(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "1 2 3 4 5".to_string(),
+            message: b"1 2 3 4 5".to_vec(),
         }],
     );
 }
@@ -3507,7 +3507,7 @@ fn test_ff_runtime_events_support_wide_four_state_args(sim) {
                 test_utils::Frontend::Veryl => "a=123456789abcdef0123X dec=x",
                 test_utils::Frontend::Sv => "a=123456789abcdef0123X dec=X",
             }
-            .to_string(),
+            .as_bytes().to_vec(),
         }],
     );
 }
@@ -3562,7 +3562,7 @@ fn test_ff_runtime_event_drain_handle_can_run_during_simulation(sim) {
         })
         .collect::<Vec<_>>();
     let expected = (0..128u16)
-        .map(|value| format!("a={value}"))
+        .map(|value| format!("a={value}").into_bytes())
         .collect::<Vec<_>>();
     assert_eq!(messages, expected);
 }
@@ -3593,7 +3593,7 @@ fn test_runtime_event_drain_handle_is_exclusive(sim) {
     assert_eq!(
         drain.drain(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=9".to_string(),
+            message: b"a=9".to_vec(),
         }],
     );
 
@@ -3603,7 +3603,7 @@ fn test_runtime_event_drain_handle_is_exclusive(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "a=10".to_string(),
+            message: b"a=10".to_vec(),
         }],
     );
 }
@@ -3627,7 +3627,7 @@ fn test_ff_runtime_fatal_assert_records_event(sim) {
     assert_eq!(
         events,
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "fatal a=7".to_string(),
+            message: b"fatal a=7".to_vec(),
         }],
     );
 }
@@ -3650,7 +3650,7 @@ fn test_ff_message_less_runtime_fatal_assert_uses_default_message(sim) {
     assert_eq!(
         events,
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "assertion failed".to_string(),
+            message: b"assertion failed".to_vec(),
         }],
     );
 }
@@ -4196,7 +4196,7 @@ fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "upper".to_string(),
+            message: b"upper".to_vec(),
         }],
     );
 }
