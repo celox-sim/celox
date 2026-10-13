@@ -582,10 +582,11 @@ impl<B: SimBackend> SimulationState<B> {
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
-                // Alternate floor/ceil half periods so odd periods stay exact.
+                // Keep the extra odd-period tick in the high phase, matching
+                // the process/testbench clock model.
                 // A clock needs at least one time unit in each phase.
                 let period = clock.period.max(2);
-                let half = (period / 2) + ((period & 1) & u64::from(event.next_val == 0));
+                let half = (period / 2) + ((period & 1) & u64::from(event.next_val != 0));
                 let time =
                     current_time
                         .checked_add(half)

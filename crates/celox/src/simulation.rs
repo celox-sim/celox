@@ -747,12 +747,24 @@ mod process_tests {
             sim.add_clock("clk", 3, 5);
             sim.run_until(11).unwrap();
             assert_eq!(sim.get(count), 3u8.into());
+            assert_eq!(sim.get(clock), 1u8.into());
+            assert_eq!(sim.next_event_time(), Some(13));
             let saved = sim.checkpoint().unwrap();
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(clock), 1u8.into());
+            sim.run_until(13).unwrap();
+            assert_eq!(sim.get(clock), 0u8.into());
             sim.run_until(14).unwrap();
             assert_eq!(sim.get(count), 4u8.into());
             sim.restore(&saved).unwrap();
             assert_eq!(sim.time(), 11);
             assert_eq!(sim.get(count), 3u8.into());
+            assert_eq!(sim.get(clock), 1u8.into());
+            assert_eq!(sim.next_event_time(), Some(13));
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(clock), 1u8.into());
+            sim.run_until(13).unwrap();
+            assert_eq!(sim.get(clock), 0u8.into());
             sim.run_until(14).unwrap();
             assert_eq!(sim.get(count), 4u8.into());
         }
@@ -767,7 +779,10 @@ mod process_tests {
             check(build().build_cranelift().unwrap());
             check(build().build_wasm().unwrap());
             check(build().build_tiered().unwrap());
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             check(build().build_native().unwrap());
         }
     }

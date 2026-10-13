@@ -245,6 +245,7 @@ fn test_odd_clock_period_is_exact() {
 
     let clk = vsim.signal("clk");
     let mut rising = Vec::new();
+    let mut falling = Vec::new();
     while let Some(time) = vsim.next_event_time() {
         if time > 30 {
             break;
@@ -252,12 +253,19 @@ fn test_odd_clock_period_is_exact() {
         vsim.step().unwrap();
         if vsim.get(clk) == 1u8.into() {
             rising.push(time);
+        } else {
+            falling.push(time);
         }
     }
     assert_eq!(
         rising,
         (0..=10).map(|edge| edge * 3).collect::<Vec<_>>(),
         "rising edges of a period-3 clock"
+    );
+    assert_eq!(
+        falling,
+        (0..10).map(|edge| edge * 3 + 2).collect::<Vec<_>>(),
+        "the extra odd-period tick belongs to the high phase"
     );
 }
 

@@ -8,29 +8,39 @@ const VERYL = `
 module Top (
     clk: input clock,
     cnt: output logic<32>,
+    clock_level: output logic,
 ) {
     var r: logic<32>;
     always_ff (clk) {
         r = r + 1;
     }
     assign cnt = r;
+    assign clock_level = clk;
 }
 `;
 
-const Counter: ModuleDefinition<{ readonly cnt: bigint }> = {
+const Counter: ModuleDefinition<{
+	readonly cnt: bigint;
+	readonly clock_level: bigint;
+}> = {
 	__celox_module: true,
 	name: "Top",
 	sources: [{ path: "Top.veryl", content: VERYL }],
 	ports: {
 		clk: { direction: "input", type: "clock", width: 1 },
 		cnt: { direction: "output", type: "logic", width: 32 },
+		clock_level: { direction: "output", type: "logic", width: 1 },
 	},
 	events: ["clk"],
 };
 
-let live: Simulation<{ readonly cnt: bigint }>[] = [];
+let live: Simulation<{ readonly cnt: bigint; readonly clock_level: bigint }>[] =
+	[];
 
-function counter(): Simulation<{ readonly cnt: bigint }> {
+function counter(): Simulation<{
+	readonly cnt: bigint;
+	readonly clock_level: bigint;
+}> {
 	const addon = loadNativeAddon();
 	const sim = Simulation.create(Counter, {
 		__nativeCreate: createSimulationBridge(addon),
@@ -45,11 +55,16 @@ afterEach(() => {
 });
 
 describe("timed Simulation through the addon", () => {
-	test("an odd period keeps rising edges one period apart", () => {
+	test("an odd period keeps the extra tick in the high phase", () => {
 		const sim = counter();
 		sim.addClock("clk", { period: 3 });
 
-		sim.runUntil(2); // rising edges at 0 and 3
+		sim.runUntil(0);
+		expect(sim.dut.clock_level).toBe(1n);
+		sim.runUntil(1);
+		expect(sim.dut.clock_level).toBe(1n);
+		sim.runUntil(2); // falling edge; rising edges at 0 and 3
+		expect(sim.dut.clock_level).toBe(0n);
 		expect(sim.dut.cnt).toBe(1n);
 		sim.runUntil(3);
 		expect(sim.dut.cnt).toBe(2n);
