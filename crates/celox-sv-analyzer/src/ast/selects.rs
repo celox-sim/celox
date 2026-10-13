@@ -1731,6 +1731,33 @@ pub(super) fn validate_parameter_initializer_selections(
             RefNode::AssignmentPatternRepeat(pattern) => {
                 repeat_count(RefNode::ConstantExpression(&pattern.nodes.0.nodes.1.0))?;
             }
+            RefNode::SliceSize(size) => {
+                // Validate only the shape; a skipped stream can contain an
+                // arbitrarily large payload that must never be materialized.
+                let valid = match size {
+                    sv_parser::SliceSize::ConstantExpression(expression) => {
+                        let expression = indexed_select_base(
+                            RefNode::ConstantExpression(expression),
+                            syntax_tree,
+                            &dimensions,
+                        )?;
+                        eval_ast_const_expr(&expression, &dimensions.const_env)
+                            .is_some_and(|size| size > 0)
+                    }
+                    sv_parser::SliceSize::SimpleType(simple_type) => casts::cast_target_type(
+                        &sv_parser::CastingType::SimpleType(simple_type.clone()),
+                        syntax_tree,
+                        &dimensions.const_env,
+                        &dimensions.type_aliases,
+                    )
+                    .is_some_and(|r#type| r#type.width > 0),
+                };
+                if !valid {
+                    return Err(unsupported(
+                        "streaming slice size must be a positive known constant or a sized type",
+                    ));
+                }
+            }
             RefNode::ConstantBitSelect(select) => {
                 for index in &select.nodes.0 {
                     bound(&index.nodes.1, true)?;

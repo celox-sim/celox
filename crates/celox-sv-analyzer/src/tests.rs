@@ -1018,6 +1018,37 @@ fn folded_parameter_replication_counts_are_validated() {
 }
 
 #[test]
+fn folded_parameter_streaming_slice_sizes_are_validated() {
+    // IEEE 1800-2023 11.4.14.2 requires a positive constant slice size.
+    for size in [
+        "0", "-1", "1'bx", "1'bz", "missing", "ZERO", "UNKNOWN", "(2 - 2)",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam ZERO = 0; localparam UNKNOWN = 1'bx; localparam N = 0 && (f({{<< {size} {{1'b0}}}}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_stream_size.sv")).is_err(),
+            "{size}"
+        );
+    }
+    for size in ["", "1", "(2 + 2)", "STEP", "byte", "word_t"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction typedef logic [3:0] word_t; localparam STEP = 4; localparam N = 0 && (f({{<< {size} {{1000000000'd0}}}}) || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_stream_size_valid.sv"))
+            .unwrap_or_else(|error| panic!("{size}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+}
+
+#[test]
 fn folded_array_queries_allow_out_of_range_dimensions() {
     // IEEE 1800-2023 20.7 returns X for an out-of-range dimension;
     // the call remains legal and may be skipped by a logical operator.
