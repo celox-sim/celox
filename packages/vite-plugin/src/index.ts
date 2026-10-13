@@ -45,6 +45,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let viteConfig: ResolvedConfig;
 	let projectId: string;
 	const loadedIds = new Set<string>();
+	let pendingRegeneration: Promise<void> | undefined;
 	let lastUpdate:
 		| { file: string; timestamp: number; result: Promise<boolean> }
 		| undefined;
@@ -53,7 +54,11 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		return normalizePath(resolve(projectRoot, name));
 	}
 
-	function regenerate(file: string, timestamp?: number): Promise<boolean> {
+	function regenerate(
+		file: string,
+		timestamp?: number,
+		read?: () => string | Promise<string>,
+	): Promise<boolean> {
 		file = normalizePath(file);
 		if (
 			timestamp !== undefined &&
@@ -61,16 +66,19 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			lastUpdate.timestamp === timestamp
 		)
 			return lastUpdate.result;
-		const result = (async () => {
-			const componentChanged = testbenchComponentDependencies.has(
-				normalizeTestbenchComponentPath(file),
-			);
+		// Capture membership before an earlier load replaces its dependency set.
+		const componentChanged = testbenchComponentDependencies.has(
+			normalizeTestbenchComponentPath(file),
+		);
+		const run = async () => {
 			if (
 				!file.endsWith(".veryl") &&
 				!componentChanged &&
 				!CONFIG_FILES.some((name) => projectFile(name) === file)
 			)
 				return false;
+			// Vite waits for editor writes to stabilize before this read resolves.
+			if (read) await read();
 			if (componentChanged && testbenchComponents) {
 				const loaded = await loadTestbenchComponentModule(
 					testbenchComponents,
@@ -108,7 +116,15 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				generatedData = data;
 			}
 			return true;
-		})();
+		};
+		// Share one queue across raw watcher and HMR events. A failed edit must
+		// still allow the next edit to regenerate and recover.
+		const result = pendingRegeneration ? pendingRegeneration.then(run) : run();
+		const settled = () => {
+			if (pendingRegeneration === pending) pendingRegeneration = undefined;
+		};
+		const pending = result.then(settled, settled);
+		pendingRegeneration = pending;
 		if (timestamp !== undefined) lastUpdate = { file, timestamp, result };
 		return result;
 	}
@@ -406,8 +422,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async hotUpdate({ file, timestamp, modules }) {
-			if ((await regenerate(file, timestamp)) === false)
+		async hotUpdate({ file, timestamp, modules, type, read }) {
+			if (
+				(await regenerate(
+					file,
+					timestamp,
+					type === "update" ? read : undefined,
+				)) === false
+			)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
 					: undefined;
@@ -415,8 +437,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		},
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
-		async handleHotUpdate({ file, server, modules }) {
-			if ((await regenerate(file)) === false)
+		async handleHotUpdate({ file, server, modules, read }) {
+			if ((await regenerate(file, undefined, read)) === false)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
 					: undefined;

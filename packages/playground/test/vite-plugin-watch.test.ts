@@ -490,3 +490,106 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(2);
 	},
 );
+
+test.each([false, true])(
+	"raw component regenerations serialize and recover after failure=%s",
+	async (failFirst) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-queued-"));
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const helper = join(root, "helper.ts");
+		writeFileSync(entry, "export {};");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const logger = { error: vi.fn() };
+		(plugin.configureServer as Function)({
+			watcher,
+			config: { server: { hmr: false }, logger },
+			environments: { ssr: { moduleGraph: graph() } },
+		});
+		let finish!: () => void;
+		vi.mocked(loadTestbenchComponentModule).mockImplementationOnce(
+			() =>
+				new Promise((resolve, reject) => {
+					finish = () =>
+						failFirst
+							? reject(new Error("incomplete first edit"))
+							: resolve({ manifests: {}, dependencies: new Set([entry]) });
+				}),
+		);
+		const latestDependencies = new Set([entry, join(root, "latest.ts")]);
+		vi.mocked(loadTestbenchComponentModule).mockResolvedValueOnce({
+			manifests: {},
+			dependencies: latestDependencies,
+		});
+		const notifications = vi.fn();
+		watcher.on("change", (file) => {
+			if (file === join(root, "Veryl.toml")) notifications();
+		});
+		watcher.emit("change", helper);
+		watcher.emit("change", helper);
+		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(2);
+		finish();
+		await vi.waitFor(() => {
+			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(3);
+			expect(notifications).toHaveBeenCalledTimes(failFirst ? 1 : 2);
+		});
+		expect(logger.error).toHaveBeenCalledTimes(failFirst ? 1 : 0);
+		// The final dependency set, rather than the older load's set, is active.
+		watcher.emit("change", join(root, "latest.ts"));
+		await vi.waitFor(() =>
+			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(4),
+		);
+	},
+);
+
+test.each(
+	(["hotUpdate", "handleHotUpdate"] as const).flatMap((hook) =>
+		["Veryl.toml", "celox.toml", "Veryl.lock"].map((name) => ({ hook, name })),
+	),
+)("$hook waits for stabilized $name contents", async ({ hook, name }) => {
+	const root = mkdtempSync(join(tmpdir(), "celox-watch-read-"));
+	roots.push(root);
+	const file = join(root, name);
+	writeFileSync(file, "before");
+	const { plugin } = await initialize(root);
+	writeFileSync(file, "");
+	let finish!: () => void;
+	const read = vi.fn(
+		() =>
+			new Promise<string>((resolve) => {
+				finish = () => {
+					writeFileSync(file, "complete edit");
+					resolve("complete edit");
+				};
+			}),
+	);
+	const moduleGraph = graph();
+	const result = (plugin[hook] as Function).call(
+		{ environment: { moduleGraph } },
+		{ file, type: "update", timestamp: 1, read, server: { moduleGraph } },
+	);
+	expect(read).toHaveBeenCalledTimes(1);
+	expect(runGenTs).toHaveBeenCalledTimes(1);
+	expect(moduleGraph.invalidateModule).not.toHaveBeenCalled();
+	finish();
+	await result;
+	expect(runGenTs).toHaveBeenCalledTimes(2);
+	expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+});
+
+test.each(["create", "delete"])(
+	"hotUpdate does not read %s events",
+	async (type) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-no-read-"));
+		roots.push(root);
+		const { plugin } = await initialize(root);
+		const read = vi.fn(() => Promise.reject(new Error("file unavailable")));
+		await (plugin.hotUpdate as Function).call(
+			{ environment: { moduleGraph: graph() } },
+			{ file: join(root, "celox.toml"), timestamp: 1, type, read },
+		);
+		expect(read).not.toHaveBeenCalled();
+		expect(runGenTs).toHaveBeenCalledTimes(2);
+	},
+);
