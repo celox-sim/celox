@@ -88,6 +88,17 @@ export function signalsForFootprints(footprints, signals, program) {
     return matches;
 }
 
+// Tracing span IDs may be recycled after a span closes. Compiler plan IDs
+// survive that lifetime and distinguish preliminary units from final tasks.
+export function physicalPlanKey(event) {
+    const scopes = [...(event.scopes ?? [])].reverse();
+    const field = name => event[name] ?? scopes.find(s => s[name] !== undefined)?.[name];
+    const program = field("program"), schedule = field("schedule"), level = field("hazard_level");
+    return program !== undefined && schedule !== undefined && level !== undefined
+        ? JSON.stringify([program, schedule, level])
+        : `legacy:${scopeKey(event)}`;
+}
+
 export function scopeKey(event) {
 	return (event.scopes ?? []).map((s) => s.id).join("/");
 }
@@ -660,7 +671,7 @@ function startViewer(data) {
 	showItems(initialCandidate);
 	const plans = new Map();
 	for (const e of events.filter((e) => e.event === "physical_dependencies")) {
-		const key = scopeKey(e);
+		const key = physicalPlanKey(e);
 		if (!plans.has(key)) plans.set(key, []);
 		plans.get(key).push(e);
 	}
@@ -676,7 +687,7 @@ function startViewer(data) {
 	function physical() {
 		const key = $("plan").value,
 			rows = plans.get(key) ?? [];
-		const scoped = events.filter((e) => scopeKey(e) === key);
+		const scoped = events.filter((e) => physicalPlanKey(e) === key);
 		graph(
 			"physical-graph",
 			rows.map((e) => ({
