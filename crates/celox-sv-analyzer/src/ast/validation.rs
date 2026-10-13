@@ -284,14 +284,18 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 )?;
                 let signatures = const_functions::argument_names();
                 for node in expression.into_iter() {
-                    if let RefNode::TfCall(call) = node
-                        && call.nodes.2.is_some()
-                    {
+                    if let RefNode::TfCall(call) = node {
                         let name = reference_name(
                             RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                             syntax_tree,
                         )
                         .ok_or_else(|| unsupported("subroutine name"))?;
+                        // Bare parameter identifiers also parse as TfCall.
+                        // A registered function with omitted parentheses still
+                        // binds an empty argument list and must check defaults.
+                        if call.nodes.2.is_none() && !const_functions::is_constant_function(&name) {
+                            continue;
+                        }
                         let (bindings, _) = expressions::bind_call_arguments(
                             &name,
                             call.nodes.2.as_ref().map(|paren| &paren.nodes.1),

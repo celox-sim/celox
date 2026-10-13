@@ -1710,9 +1710,29 @@ pub(super) fn validate_parameter_initializer_selections(
                 expressions::expr_from_primary_with_types(primary, syntax_tree, &dimensions)?;
             }
             // Concatenation selections have no named primary to lower. Check
-            // the width independently without inspecting the concatenated bits.
-            RefNode::ConstantIndexedRange(range) => {
-                indexed_select_width(&range.nodes.2, syntax_tree, &dimensions)?;
+            // their start and width without inspecting the concatenated bits,
+            // retaining the ordinary lowering path's support for X/Z bases.
+            RefNode::ConstantIndexedRange(range)
+                if unknown_indexed_part_select(
+                    range,
+                    &ConstExpr::Literal("1".into()),
+                    syntax_tree,
+                    &dimensions,
+                )?
+                .is_none() =>
+            {
+                indexed_select_bounds(
+                    indexed_select_base(
+                        RefNode::ConstantExpression(&range.nodes.0),
+                        syntax_tree,
+                        &dimensions,
+                    )?,
+                    &range.nodes.1,
+                    &range.nodes.2,
+                    syntax_tree,
+                    (None, 0),
+                    &dimensions,
+                )?;
             }
             _ => {}
         }

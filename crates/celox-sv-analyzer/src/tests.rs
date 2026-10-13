@@ -817,6 +817,7 @@ fn validates_shapes_in_short_circuited_parameter_operands() {
         "W[0 -: -1]",
         "W[0][0 +: 1]",
         "{W}[0 +: 0]",
+        "{W}[missing +: 1]",
         "$bits(W[0][0 +: 1])",
     ] {
         let source = format!(
@@ -827,16 +828,18 @@ fn validates_shapes_in_short_circuited_parameter_operands() {
             "{selection}"
         );
     }
-    let ir = analyze_source(
-        "module Top; localparam logic [7:0] W = 0; localparam N = 0 && (W[0 +: 1] || 1000000000'd0); endmodule",
-        Path::new("skipped_valid_parameter_shape.sv"),
-    ).unwrap();
-    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+    for selection in ["W[0 +: 1]", "{W}[0 +: 1]", "{W}['x +: 1]"] {
+        let source = format!(
+            "module Top; localparam logic [7:0] W = 0; localparam N = 0 && ({selection} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_parameter_shape.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+    }
 }
 
 #[test]
 fn validates_user_calls_in_short_circuited_parameter_operands() {
-    for call in ["f(.missing(1))", "f(.x(1), .x(2))", "f(1, 2)", "f()"] {
+    for call in ["f(.missing(1))", "f(.x(1), .x(2))", "f(1, 2)", "f()", "f"] {
         let source = format!(
             "module Top; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
         );
@@ -845,7 +848,7 @@ fn validates_user_calls_in_short_circuited_parameter_operands() {
             "{call}"
         );
     }
-    for call in ["f(.x(1000000000'd0))", "f()"] {
+    for call in ["f(.x(1000000000'd0))", "f()", "f"] {
         let source = format!(
             "module Top; function automatic int f(input int x = 1); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
         );
