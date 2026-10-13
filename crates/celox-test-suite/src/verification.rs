@@ -621,7 +621,14 @@ fn run_script(
                 .map(|entries| {
                     entries
                         .filter_map(|entry| entry.ok())
-                        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                        .map(|entry| {
+                            entry
+                                .path()
+                                .canonicalize()
+                                .unwrap_or_else(|_| entry.path())
+                                .to_string_lossy()
+                                .into_owned()
+                        })
                         .filter(|name| name.ends_with(".sv") || name.ends_with(".v"))
                         .collect()
                 })
