@@ -615,6 +615,25 @@ const activeSections = computed(() =>
   tabData.value.get(activeTab.value) ?? [],
 );
 
+// Share the legend across cards so CPU names never consume plot space.
+const activeSeries = computed(() =>
+  activeSections.value.flatMap((section) => section.cards.flatMap((card) => card.series)),
+);
+const legendRuntimes = computed(() =>
+  [...new Set(activeSeries.value.map((series) => series.runtime))].sort(),
+);
+const legendCpus = computed(() =>
+  [...new Set(activeSeries.value.map((series) => series.cpu))]
+    .sort((a, b) => cpuRank(a) - cpuRank(b)),
+);
+const hiddenRuntimes = ref(new Set<string>());
+const hiddenCpus = ref(new Set<string>());
+
+function toggleLegend(hidden: Set<string>, key: string) {
+  if (hidden.has(key)) hidden.delete(key);
+  else hidden.add(key);
+}
+
 // --- Chart data builder per card ---
 
 function buildChartData(card: ChartCard) {
@@ -630,6 +649,7 @@ function buildChartData(card: ChartCard) {
     const dateToValue = new Map(s.points.map((p) => [p.date, p.value]));
     return {
       label: seriesLabel(s),
+      hidden: hiddenRuntimes.value.has(s.runtime) || hiddenCpus.value.has(s.cpu),
       data: dates.map((d) => dateToValue.get(d) ?? null),
       borderColor: color,
       backgroundColor: color + "1a",
@@ -652,7 +672,7 @@ function makeChartOptions() {
     },
     plugins: {
       legend: {
-        labels: { color: "#e5e7eb", boxWidth: 12, padding: 8, font: { size: 11 } },
+        display: false,
       },
       tooltip: {
         callbacks: {
@@ -791,6 +811,42 @@ onBeforeUnmount(() => {
         Execution time includes the testbench for both simulators.
       </p>
 
+      <div v-if="activeSeries.length" class="bench-legend">
+        <p class="bench-legend-help">Click a runtime or CPU to show / hide its results.</p>
+        <div class="bench-legend-group" role="group" aria-label="Runtimes">
+          <span class="bench-legend-label">Runtime · color</span>
+          <div class="bench-legend-items">
+            <button
+              v-for="runtime in legendRuntimes"
+              :key="runtime"
+              class="bench-legend-item"
+              :aria-pressed="!hiddenRuntimes.has(runtime)"
+              @click="toggleLegend(hiddenRuntimes, runtime)"
+            >
+              <span class="bench-legend-color" :style="{ background: RUNTIME_COLORS[runtime] }" />
+              <span>{{ RUNTIME_LABELS[runtime] ?? runtime }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="bench-legend-group" role="group" aria-label="CPUs">
+          <span class="bench-legend-label">CPU · line style</span>
+          <div class="bench-legend-items">
+            <button
+              v-for="cpu in legendCpus"
+              :key="cpu"
+              class="bench-legend-item"
+              :aria-pressed="!hiddenCpus.has(cpu)"
+              @click="toggleLegend(hiddenCpus, cpu)"
+            >
+              <svg width="36" height="12" viewBox="0 0 36 12" aria-hidden="true">
+                <line x1="0" y1="6" x2="36" y2="6" stroke="currentColor" stroke-width="2" :stroke-dasharray="cpuDash(cpu).join(' ')" />
+              </svg>
+              <span>{{ cpu || 'CPU not recorded' }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Tab content: sections with chart card grids -->
       <div
         v-if="activeSections.length > 0"
@@ -856,6 +912,7 @@ onBeforeUnmount(() => {
 
 .bench-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0;
   border-bottom: 2px solid var(--vp-c-divider);
   margin-bottom: 1.25rem;
@@ -885,6 +942,79 @@ onBeforeUnmount(() => {
 
 /* --- Sections --- */
 
+.bench-legend {
+  margin-bottom: 1.25rem;
+  padding: 0.75rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+}
+
+.bench-legend-help {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--vp-c-text-2);
+}
+
+.bench-legend-group + .bench-legend-group {
+  margin-top: 0.75rem;
+}
+
+.bench-legend-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+}
+
+.bench-legend-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+}
+
+.bench-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  color: var(--vp-c-text-1);
+  background: var(--vp-c-bg-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.bench-legend-item:hover {
+  border-color: var(--vp-c-brand-1);
+}
+
+.bench-legend-item:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+}
+
+.bench-legend-item[aria-pressed="false"] {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.bench-legend-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.bench-legend-color,
+.bench-legend-item svg {
+  flex-shrink: 0;
+}
+
 .bench-sections {
   display: flex;
   flex-direction: column;
@@ -893,7 +1023,7 @@ onBeforeUnmount(() => {
 
 .bench-sections-columns {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 1rem;
   align-items: start;
 }

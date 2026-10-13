@@ -53,3 +53,36 @@ mod host {
 
 #[cfg(feature = "host-runtime")]
 pub use host::*;
+
+/// Trigger instructions use the semantic event order. Every execution engine
+/// must assign those same IDs rather than enumerating hash-map keys.
+#[cfg(feature = "host-runtime")]
+fn event_ids(
+    program: &crate::ir::LaidOutProgram,
+) -> (
+    crate::HashMap<crate::ir::AbsoluteAddr, usize>,
+    Vec<crate::ir::AbsoluteAddr>,
+) {
+    let mut addresses = program.design.events.ordered_events.clone();
+    let mut seen: crate::HashSet<_> = addresses.iter().copied().collect();
+    // Preserve legacy/directly constructed programs whose event topology does
+    // not list every kernel, after the semantic IDs used by trigger code.
+    let mut extra: Vec<_> = program
+        .sir
+        .eval_apply_ffs
+        .keys()
+        .chain(program.sir.eval_only_ffs.keys())
+        .chain(program.sir.apply_ffs.keys())
+        .map(|address| program.design.events.canonical(*address))
+        .filter(|address| seen.insert(*address))
+        .collect();
+    extra.sort_unstable();
+    addresses.extend(extra);
+    let ids = addresses
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(id, address)| (address, id))
+        .collect();
+    (ids, addresses)
+}

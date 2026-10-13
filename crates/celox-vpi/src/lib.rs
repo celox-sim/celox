@@ -1295,20 +1295,25 @@ fn process_runtime_events() {
     for event in events {
         match event {
             RuntimeEvent::Display { message } => {
-                let _ = writeln!(std::io::stdout().lock(), "{message}");
+                let mut output = std::io::stdout().lock();
+                let _ = output.write_all(&message);
+                let _ = output.write_all(b"\n");
             }
             RuntimeEvent::Write { message } => {
-                let _ = write!(std::io::stdout().lock(), "{message}");
+                let _ = std::io::stdout().lock().write_all(&message);
             }
             RuntimeEvent::AssertContinue { message } => {
-                let _ = writeln!(std::io::stderr().lock(), "assertion failed: {message}");
+                let mut output = std::io::stderr().lock();
+                let _ = output.write_all(b"assertion failed: ");
+                let _ = output.write_all(&message);
+                let _ = output.write_all(b"\n");
             }
             RuntimeEvent::AssertFatal { message } => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "fatal assertion failed: {message}"
-                );
-                callbacks::fail(message);
+                let mut output = std::io::stderr().lock();
+                let _ = output.write_all(b"fatal assertion failed: ");
+                let _ = output.write_all(&message);
+                let _ = output.write_all(b"\n");
+                callbacks::fail(celox_message_diagnostic(&message));
             }
             RuntimeEvent::Finish => callbacks::request_finish(),
             RuntimeEvent::Missed { count } => {
@@ -1342,4 +1347,10 @@ pub unsafe extern "C" fn vpi_free_object(reference: VpiHandle) -> i32 {
     // Safety: the handle came from `Box::into_raw` and ownership returns here.
     drop(unsafe { Box::from_raw(reference) });
     1
+}
+
+fn celox_message_diagnostic(message: &[u8]) -> String {
+    std::str::from_utf8(message)
+        .map(str::to_owned)
+        .unwrap_or_else(|_| message.escape_ascii().to_string())
 }

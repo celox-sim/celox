@@ -443,7 +443,9 @@ impl NativeProgramInstance {
             context,
         );
         if let Some(message) = events.into_iter().find_map(|event| match event {
-            RuntimeEvent::AssertFatal { message } => Some(message),
+            RuntimeEvent::AssertFatal { message } => {
+                Some(crate::simulator::message_diagnostic(&message))
+            }
             RuntimeEvent::Missed { count } => Some(format!(
                 "missed {count} runtime events; a fatal assertion may have been overwritten"
             )),

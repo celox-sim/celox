@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn cast_target_type(
+pub(super) fn cast_target_type(
     casting_type: &sv_parser::CastingType,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
@@ -50,6 +50,17 @@ fn cast_target_type(
         }
         _ => None,
     }
+}
+
+/// Check a skipped cast's target without evaluating its operand.
+pub(super) fn cast_target_is_supported(
+    casting_type: &sv_parser::CastingType,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> bool {
+    matches!(casting_type, sv_parser::CastingType::Signing(_))
+        || cast_target_type(casting_type, tree, env, aliases).is_some()
 }
 
 pub(super) fn expr_type_from_type(

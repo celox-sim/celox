@@ -1,4 +1,5 @@
-import { type Dirent, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { runGenTs } from "./generator.js";
 import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
@@ -6,6 +7,8 @@ import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
 export class GenTsCache {
 	private _data: GenTsJsonOutput | undefined;
 	private _sourceKey = "";
+	private _configKey = "";
+	private _lockfileKey = "";
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -17,14 +20,26 @@ export class GenTsCache {
 		this.invalidate();
 	}
 
-	/** Get cached data, refreshing if any .veryl file has changed. */
+	/** Refresh when a source or generator configuration file changes. */
 	get(): GenTsJsonOutput {
 		const key = this.computeSourceKey();
-		if (this._data && this._sourceKey === key) {
+		const configKey = this.computeConfigKey(["Veryl.toml", "celox.toml"]);
+		const lockfileKey = this.computeContentKey("Veryl.lock");
+		if (
+			this._data &&
+			this._sourceKey === key &&
+			this._configKey === configKey &&
+			this._lockfileKey === lockfileKey
+		) {
 			return this._data;
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
 		this._sourceKey = key;
+		// Preserve every pre-generation fingerprint: an external process can
+		// change even Veryl.lock after the generator has read it. A lockfile
+		// written by generation also triggers one conservative refresh.
+		this._configKey = configKey;
+		this._lockfileKey = lockfileKey;
 		return this._data;
 	}
 
@@ -32,6 +47,25 @@ export class GenTsCache {
 	invalidate(): void {
 		this._sourceKey = "";
 		this._data = undefined;
+	}
+
+	private computeConfigKey(names: readonly string[]): string {
+		return JSON.stringify(
+			names.map((name) => [name, this.computeContentKey(name)]),
+		);
+	}
+
+	private computeContentKey(name: string): string {
+		try {
+			// External edits may preserve metadata; generator rewrites may change
+			// metadata without changing dependency resolution. Compare contents.
+			return createHash("sha256")
+				.update(readFileSync(join(this._projectRoot, name)))
+				.digest("hex");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			return "missing";
+		}
 	}
 
 	/**

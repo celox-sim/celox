@@ -2759,7 +2759,7 @@ pub fn clear_jit_cache() {}
 #[napi(object)]
 pub struct NapiAssertionResult {
     pub passed: bool,
-    pub message: Option<String>,
+    pub message: Option<Uint8Array>,
     pub file: Option<String>,
     pub line: Option<u32>,
     pub column: Option<u32>,
@@ -2789,7 +2789,7 @@ fn convert_test_result(r: celox::TestResultDetailed) -> NapiTestResult {
                 };
                 NapiAssertionResult {
                     passed: a.passed,
-                    message: a.message,
+                    message: a.message.map(Uint8Array::from),
                     file,
                     line,
                     column,

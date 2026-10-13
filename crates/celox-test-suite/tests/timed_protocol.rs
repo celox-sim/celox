@@ -44,7 +44,7 @@ fn early_finish_and_event_exhaustion_do_not_skip_script_checks() {
         )
         .unwrap();
         let result = verilator.run_testbench();
-        let log = std::fs::read_to_string(root.join(name).join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join(name).join("verilator/protocol.log")).unwrap();
         assert!(
             result.is_err() || celox_test_suite::script::sv::check_output(&log, &[]).is_err(),
             "Verilator accepted {name}"
@@ -69,7 +69,7 @@ fn qualified_ff_if_actions_are_not_truncated_during_staging() {
     let mut backend =
         celox_test_suite::verilator::Verilator::build_script(&frontend, case, &root).unwrap();
     backend.run_testbench().unwrap();
-    let log = std::fs::read_to_string(root.join("protocol.log")).unwrap();
+    let log = std::fs::read(root.join("protocol.log")).unwrap();
     celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }

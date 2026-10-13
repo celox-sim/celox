@@ -8446,7 +8446,7 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
     let ticks = |n: usize| {
         (0..n)
             .map(|i| celox::RuntimeEvent::Display {
-                message: format!("tick {i}"),
+                message: format!("tick {i}").into_bytes(),
             })
             .collect::<Vec<_>>()
     };

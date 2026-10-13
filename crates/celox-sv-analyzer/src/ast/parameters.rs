@@ -271,15 +271,15 @@ impl<'a> ParameterEnvironment<'a> {
             bind_parameter(&mut values, &mut types, &mut literals, parameter);
         }
         let mut constants = base.clone();
-        constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
-        let has_inherited_literal_shadow = literals
-            .keys()
-            .any(|name| !values.contains_key(name) && base.contains_key(name));
-        for name in literals.keys() {
-            if !values.contains_key(name) {
-                constants.remove(name);
+        let has_inherited_literal_shadow = parameters.iter().any(|parameter| {
+            !values.contains_key(parameter.name()) && base.contains_key(parameter.name())
+        });
+        for parameter in parameters {
+            for key in binding_keys(parameter.name(), &constants, parameter.packed_ranges.len()) {
+                constants.remove(&key);
             }
         }
+        constants.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
         Self {
             base,
             values,
@@ -291,12 +291,22 @@ impl<'a> ParameterEnvironment<'a> {
     }
 
     fn append(&mut self, parameter: &Parameter) {
-        if !bind_parameter(
+        let bound = bind_parameter(
             &mut self.values,
             &mut self.types,
             &mut self.literals,
             parameter,
+        );
+        for key in binding_keys(
+            parameter.name(),
+            &self.constants,
+            parameter.packed_ranges.len(),
         ) {
+            self.constants.remove(&key);
+        }
+        self.has_inherited_literal_shadow |=
+            !self.values.contains_key(parameter.name()) && self.base.contains_key(parameter.name());
+        if !bound {
             // A type query does not evaluate its operand. Preserve a known
             // rank for following declarations even when an imported alias's
             // value is deferred; do not publish an inherited numeric value.
@@ -399,6 +409,9 @@ pub(super) fn parameters_from_ref_node_with_environment(
         type_aliases,
         parameter_overrides,
     );
+    // Check the source width before normalizing fill literals or building
+    // declaration-order value environments, even for a narrow later select.
+    validate_parameter_materialization_width(parameter_width)?;
     let has_declared_type = type_node.clone().into_iter().any(|child| {
         matches!(
             child,
@@ -452,26 +465,59 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 continue;
             }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
+            // The declaration already binds its name while its initializer is
+            // analyzed. Neither an imported value nor an earlier projection
+            // of this binding may resolve a self-reference.
+            for key in binding_keys(&name, &environment.constants, parameter_ranges.len()) {
+                environment.constants.remove(&key);
+            }
+            environment.literals.remove(&name);
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
-                if expr.into_iter().any(|node| {
-                    matches!(
-                        node,
-                        RefNode::ConstantIndexedRange(_)
-                            | RefNode::IndexedRange(_)
-                            | RefNode::ConstantCast(_)
-                    )
-                }) {
+                let imported = scope::imported();
+                if let Some(value) = validate_parameter_initializer_literal_widths(
+                    expr,
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                    &|reference| {
+                        environment.literals.get(reference).cloned().or_else(|| {
+                            // An unresolved local binding still shadows imports.
+                            (reference != name
+                                && !parameters
+                                    .iter()
+                                    .any(|parameter| parameter.name() == reference))
+                            .then(|| imported.parameter_values.get(reference).cloned())
+                            .flatten()
+                        })
+                    },
+                    &|primary| {
+                        let mut dimensions = PackedDimensions::new(
+                            parameter_packed_dimensions_with_imported(parameters, &imported),
+                            const_env,
+                            type_aliases,
+                        );
+                        dimensions.parameter_values =
+                            parameter_value_env_with_imported(parameters, const_env, &imported)
+                                .into();
+                        dimensions.parameter_values.remove(&name);
+                        dimensions.remove(&name);
+                        selects::bounded_parameter_selection(primary, syntax_tree, &dimensions)
+                    },
+                )? {
+                    Some(value)
+                } else if selects::parameter_initializer_needs_typed_lowering(expr) {
                     let mut dimensions = PackedDimensions::new(
-                        parameter_packed_dimensions(parameters),
+                        parameter_packed_dimensions_with_imported(parameters, &imported),
                         const_env,
                         type_aliases,
                     );
-                    dimensions.parameter_values = parameter_value_env(parameters, const_env).into();
+                    dimensions.parameter_values =
+                        parameter_value_env_with_imported(parameters, const_env, &imported).into();
                     // Enum constants are unavailable during preliminary collection.
                     // Leave unresolved values for the subsequent lowering pass;
                     // final validation rejects anything that still cannot be lowered.
-                    selects::indexed_parameter_initializer(
+                    selects::selected_parameter_initializer(
                         expr,
                         syntax_tree,
                         &dimensions,
@@ -536,11 +582,315 @@ pub(super) fn parameters_from_ref_node_with_environment(
             parameter.packed_ranges = parameter_ranges.clone();
             parameter.members = parameter_members.clone();
             parameter.signed_element_depth = parameter_signed_element_depth;
+            validate_parameter_materialization_width(
+                parameter
+                    .resolved_type(&environment.types)
+                    .map(|ty| ty.width),
+            )?;
             environment.append(&parameter);
             parameters.push(parameter);
         }
     }
     Ok(())
+}
+
+fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), AnalyzerError> {
+    if let Some(width) = width
+        && width > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
+        return Err(unsupported(format!(
+            "parameter width {width} exceeds the {}-bit constant materialization limit",
+            constant_folding::MAX_CONSTANT_CONCAT_BITS
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_parameter_initializer_literal_widths(
+    initializer: &sv_parser::ConstantParamExpression,
+    tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_literal: &impl Fn(&str) -> Option<Expr>,
+    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
+) -> Result<Option<ConstExpr>, AnalyzerError> {
+    let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
+    let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
+    let mut evaluated_constants = HashSet::<*const sv_parser::ConstantExpression>::default();
+    let mut evaluation_stack = vec![true];
+    let mut shape_stack = vec![false];
+    let mut oversized_value = None;
+    let mut has_replication_value = false;
+    for event in initializer.into_iter().event() {
+        let (entering, node) = match event {
+            sv_parser::NodeEvent::Enter(node) => (true, node),
+            sv_parser::NodeEvent::Leave(node) => (false, node),
+        };
+        if !entering {
+            evaluation_stack.pop();
+            shape_stack.pop();
+            continue;
+        }
+        if let RefNode::SystemTfCall(call) = node
+            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "$bits"
+                        | "$size"
+                        | "$left"
+                        | "$right"
+                        | "$low"
+                        | "$high"
+                        | "$increment"
+                        | "$dimensions"
+                        | "$unpacked_dimensions"
+                )
+            })
+            && let sv_parser::SystemTfCall::ArgExpression(call) = call
+            && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
+        {
+            query_operands.insert(argument as *const sv_parser::Expression);
+            // Dimension arguments are values, even when the query itself
+            // occurs inside another query's unevaluated operand.
+            for argument in call
+                .nodes
+                .1
+                .nodes
+                .1
+                .0
+                .contents()
+                .into_iter()
+                .skip(1)
+                .flatten()
+            {
+                evaluated_expressions.insert(argument as *const sv_parser::Expression);
+            }
+        }
+        match node {
+            RefNode::MultipleConcatenation(concat) => {
+                evaluated_expressions
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::Expression);
+            }
+            RefNode::ConstantMultipleConcatenation(concat) => {
+                evaluated_constants
+                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            RefNode::AssignmentPatternRepeat(pattern) => {
+                evaluated_constants
+                    .insert(&pattern.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
+            }
+            _ => {}
+        }
+        let evaluated_operand = match node {
+            RefNode::Expression(expression) => {
+                evaluated_expressions.contains(&(expression as *const sv_parser::Expression))
+            }
+            RefNode::ConstantExpression(expression) => {
+                evaluated_constants.contains(&(expression as *const sv_parser::ConstantExpression))
+            }
+            _ => false,
+        };
+        let query_operand = matches!(node, RefNode::Expression(expression)
+            if query_operands.contains(&(expression as *const sv_parser::Expression)));
+        let shape_operand = evaluated_operand
+            || matches!(
+                node,
+                RefNode::ConstantRange(_)
+                    | RefNode::ConstantIndexedRange(_)
+                    | RefNode::IndexedRange(_)
+                    | RefNode::BitSelect(_)
+                    | RefNode::ConstantBitSelect(_)
+                    | RefNode::CastingType(_)
+                    | RefNode::SliceSize(_)
+                    | RefNode::ArrayRangeExpression(_)
+                    | RefNode::ArrayPatternKey(_)
+            );
+        let evaluated = if let RefNode::Expression(expression) = node
+            && query_operands.contains(&(expression as *const sv_parser::Expression))
+        {
+            false
+        } else if shape_operand {
+            // Type queries do not evaluate the value, but selecting its type
+            // still evaluates bounds, widths, counts and cast sizes. A nested
+            // type query can in turn exempt its own first operand.
+            true
+        } else {
+            *evaluation_stack.last().unwrap()
+        };
+        let shape = !query_operand && (shape_operand || *shape_stack.last().unwrap());
+        evaluation_stack.push(evaluated);
+        shape_stack.push(shape);
+        // A replication can be enormous without any oversized Size token.
+        // Give the bounded proof a chance before ordinary concatenation lowering.
+        has_replication_value |= evaluated
+            && !shape
+            && matches!(
+                node,
+                RefNode::MultipleConcatenation(_) | RefNode::ConstantMultipleConcatenation(_)
+            );
+        // Inspect a sized literal's prefix without parsing its payload.
+        // Query operands are types; trailing dimension arguments are values.
+        if evaluated && let RefNode::Size(size) = node {
+            let width = tree
+                .get_str(&size.nodes.0.nodes.0)
+                .and_then(|size| size.replace('_', "").parse::<usize>().ok())
+                .ok_or_else(|| unsupported("parameter literal width"))?;
+            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+                if shape {
+                    validate_parameter_materialization_width(Some(width))?;
+                }
+                oversized_value.get_or_insert(width);
+            }
+        }
+    }
+    if oversized_value.is_some() || has_replication_value {
+        // Build a bounded proof, preserving precedence and associativity.
+        // Oversized/unsupported operands cannot produce a proof value, but
+        // logical short circuiting can skip them without parsing their bits.
+        if let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(initializer) =
+            initializer
+            && let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer
+            && let Some(proof) = expr_to_const(bounded_parameter_proof(
+                expression,
+                tree,
+                parameter_literal,
+                parameter_selection,
+            ))
+            && let Some(ty) = infer_const_expr_type_inner(
+                &proof,
+                &parameter_types_from_const_env(const_env),
+                true,
+            )
+            && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
+            && let Some(value) = eval_ast_const_expr(&proof, const_env)
+        {
+            for node in initializer.into_iter() {
+                // Short circuiting skips evaluation, not catalogue/site/arity
+                // validation. Inspect calls without materializing arguments.
+                if let RefNode::SystemTfCall(call) = node {
+                    let (name, args) = system_tf_call_parts(call, tree)
+                        .ok_or_else(|| unsupported("system call in parameter operand"))?;
+                    system_functions::check_call(
+                        name,
+                        args.as_deref(),
+                        system_functions::CallSite::Expression,
+                    )?;
+                }
+                let target = match node {
+                    RefNode::Cast(cast) => Some(&cast.nodes.0),
+                    RefNode::ConstantCast(cast) => Some(&cast.nodes.0),
+                    _ => None,
+                };
+                if let Some(target) = target
+                    && !casts::cast_target_is_supported(target, tree, const_env, type_aliases)
+                {
+                    return Err(unsupported(
+                        "cast target type in short-circuited parameter operand",
+                    ));
+                }
+            }
+            return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
+                value, ty.width, ty.signed,
+            ))));
+        }
+        validate_parameter_materialization_width(oversized_value)?;
+    }
+    Ok(None)
+}
+
+fn bounded_parameter_proof(
+    expression: &sv_parser::ConstantExpression,
+    tree: &SyntaxTree,
+    parameter_literal: &impl Fn(&str) -> Option<Expr>,
+    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
+) -> Expr {
+    // NUL cannot occur in an HDL binding. The unresolved proof operand is
+    // never published: it either stays unevaluated or makes the proof fail.
+    let unknown = || Expr::Ident("\0unmaterialized-parameter-operand".into());
+    let binding = |name: String| parameter_literal(&name).unwrap_or(Expr::Ident(name));
+    let primary = |primary: &sv_parser::ConstantPrimary| match primary {
+        sv_parser::ConstantPrimary::PrimaryLiteral(literal) => {
+            let text = tree.get_str(literal).unwrap_or_default();
+            if typecheck::integral_literal_type_metadata(text)
+                .is_some_and(|(width, _)| width <= constant_folding::MAX_CONSTANT_CONCAT_BITS)
+            {
+                Expr::Literal(text.to_string())
+            } else {
+                unknown()
+            }
+        }
+        sv_parser::ConstantPrimary::PsParameter(parameter)
+            if parameter.nodes.1.nodes.0.is_none()
+                && parameter.nodes.1.nodes.1.nodes.0.is_empty()
+                && parameter.nodes.1.nodes.2.is_none() =>
+        {
+            reference_name(RefNode::PsParameterIdentifier(&parameter.nodes.0), tree)
+                .map(binding)
+                .unwrap_or_else(unknown)
+        }
+        sv_parser::ConstantPrimary::PsParameter(_) => {
+            parameter_selection(primary).unwrap_or_else(unknown)
+        }
+        sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+            // The parser also represents bare parameter names as TfCall nodes.
+            if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
+                && call.nodes.2.is_none()
+            {
+                reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
+                    .map(binding)
+                    .unwrap_or_else(unknown)
+            } else {
+                unknown()
+            }
+        }
+        sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {
+            if let sv_parser::ConstantMintypmaxExpression::Unary(expression) =
+                &grouped.nodes.0.nodes.1
+            {
+                bounded_parameter_proof(expression, tree, parameter_literal, parameter_selection)
+            } else {
+                unknown()
+            }
+        }
+        _ => unknown(),
+    };
+    match expression {
+        sv_parser::ConstantExpression::ConstantPrimary(value) => primary(value),
+        sv_parser::ConstantExpression::Unary(value) => unary_expr_from_symbol(
+            &value.nodes.0.nodes.0.nodes.0,
+            primary(&value.nodes.2),
+            tree,
+        )
+        .unwrap_or_else(unknown),
+        sv_parser::ConstantExpression::Binary(value) => {
+            let Some(op) = binary_op_from_symbol(&value.nodes.1.nodes.0.nodes.0, tree) else {
+                return unknown();
+            };
+            let expression = Expr::Binary {
+                left: Box::new(bounded_parameter_proof(
+                    &value.nodes.0,
+                    tree,
+                    parameter_literal,
+                    parameter_selection,
+                )),
+                op,
+                right: Box::new(bounded_parameter_proof(
+                    &value.nodes.3,
+                    tree,
+                    parameter_literal,
+                    parameter_selection,
+                )),
+            };
+            if matches!(&value.nodes.3, sv_parser::ConstantExpression::ConstantPrimary(primary)
+                if matches!(&**primary, sv_parser::ConstantPrimary::MintypmaxExpression(_)))
+            {
+                expression
+            } else {
+                left_associate_expr_binary(expression)
+            }
+        }
+        _ => unknown(),
+    }
 }
 
 fn parameter_declared_width(
@@ -741,6 +1091,11 @@ pub(super) fn bind_parameter(
 ) -> bool {
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
+    for key in binding_keys(parameter.name(), env, parameter.packed_ranges.len()) {
+        env.remove(&key);
+    }
+    types.remove(parameter.name());
+    literals.remove(parameter.name());
     // `$` is an elaboration value, never an integer sentinel. Preserve it
     // separately so typed parameters, aliases and overrides cannot turn it
     // into an ordinary number (IEEE 1800-2023 6.20.7, 20.6.3).
@@ -1188,6 +1543,9 @@ fn parameter_value_env_filtered(
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
+        if parameter.value().is_none() {
+            continue;
+        }
         if parameter
             .value()
             .is_some_and(|value| is_unbounded(value, const_env))
@@ -1618,6 +1976,16 @@ pub(super) fn infer_const_expr_type(
     expr: &ConstExpr,
     parameter_types: &HashMap<String, ExprType>,
 ) -> Option<ExprType> {
+    infer_const_expr_type_inner(expr, parameter_types, false)
+}
+
+// Only the bounded proof may infer a logical result without resolving its
+// opaque skipped operands. Ordinary type queries must resolve both operands.
+fn infer_const_expr_type_inner(
+    expr: &ConstExpr,
+    parameter_types: &HashMap<String, ExprType>,
+    bounded_proof: bool,
+) -> Option<ExprType> {
     match expr {
         ConstExpr::Literal(literal) => {
             let literal = typecheck::parse_integral_literal(literal)?;
@@ -1648,7 +2016,7 @@ pub(super) fn infer_const_expr_type(
         ConstExpr::Function { name, args, .. } => match name.as_str() {
             "$signed" | "$unsigned" => {
                 let [arg] = args.as_slice() else { return None };
-                let mut ty = infer_const_expr_type(arg, parameter_types)?;
+                let mut ty = infer_const_expr_type_inner(arg, parameter_types, bounded_proof)?;
                 ty.signed = name == "$signed";
                 Some(ty)
             }
@@ -1663,7 +2031,7 @@ pub(super) fn infer_const_expr_type(
             _ => None,
         },
         ConstExpr::Unary { op, expr } => {
-            let operand = infer_const_expr_type(expr, parameter_types)?;
+            let operand = infer_const_expr_type_inner(expr, parameter_types, bounded_proof)?;
             if matches!(
                 op,
                 UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
@@ -1677,8 +2045,14 @@ pub(super) fn infer_const_expr_type(
             }
         }
         ConstExpr::Binary { left, op, right } => {
-            let left = infer_const_expr_type(left, parameter_types)?;
-            let right = infer_const_expr_type(right, parameter_types)?;
+            if bounded_proof && matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                return Some(ExprType {
+                    width: 1,
+                    signed: false,
+                });
+            }
+            let left = infer_const_expr_type_inner(left, parameter_types, bounded_proof)?;
+            let right = infer_const_expr_type_inner(right, parameter_types, bounded_proof)?;
             match op {
                 BinaryOp::LogicAnd
                 | BinaryOp::LogicOr
@@ -1707,8 +2081,8 @@ pub(super) fn infer_const_expr_type(
             else_expr,
             ..
         } => {
-            let then_type = infer_const_expr_type(then_expr, parameter_types)?;
-            let else_type = infer_const_expr_type(else_expr, parameter_types)?;
+            let then_type = infer_const_expr_type_inner(then_expr, parameter_types, bounded_proof)?;
+            let else_type = infer_const_expr_type_inner(else_expr, parameter_types, bounded_proof)?;
             Some(ExprType {
                 width: then_type.width.max(else_type.width),
                 signed: then_type.signed && else_type.signed,

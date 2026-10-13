@@ -345,7 +345,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -395,7 +395,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -422,7 +422,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -450,7 +450,7 @@ mod timed_staging_tests {
         )
         .unwrap();
         verilator.run_testbench().unwrap();
-        let log = std::fs::read_to_string(root.join("verilator/protocol.log")).unwrap();
+        let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
         celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

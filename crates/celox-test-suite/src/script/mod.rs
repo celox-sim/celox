@@ -23,7 +23,7 @@
 //! | `(if EXPR STMT [STMT])`, `(do STMT...)` | Conditionals and blocks. |
 //! | `(expand NAME (ITEM...) STMT...)` | Repeat the statements with `{NAME}` replaced by each item's text (in names and messages); `(expand (A B) ((a1 b1) ...) ...)` binds several. |
 //! | `(run_testbench)` | Run the design's native testbench to `$finish`. |
-//! | `(expect_output TEXT)` | The design printed exactly TEXT with `$display`/`$write` since the start or the previous `expect_output`. |
+//! | `(expect_output TEXT)` | TEXT is UTF-8, or `(bytes 128 255 0)` specifies raw bytes. The design printed exactly TEXT with `$display`/`$write` since the start or the previous `expect_output`. |
 //! | `(run_until TIME)` | Advance simulation time to TIME, running the design's processes, delays and clocks. TIME counts the design's time units and must not be in the past; a design that finishes first fails the case. |
 //! | `(run_to_finish)` | Run until a process of the design calls `$finish`; a simulation that runs out of events first fails the case. Only `assert_eq`, `assert` and `expect_output` may follow, and read the final state. |
 //!
