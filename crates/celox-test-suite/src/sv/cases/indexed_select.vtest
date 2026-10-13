@@ -192,6 +192,96 @@
 
 ; IEEE 1800-2023 11.5.1 and 7.4.1: use declared indices, retain
 ; the selected width, and make packed part-selects unsigned.
+(case constant_parameter_initializers_preserve_inferred_dimensions
+  ; IEEE 1800-2023 6.20.2: an implicit integral parameter inherits
+  ; the value's size and has the implied packed range [size-1:0].
+  (source "inferred_parameter_selections.sv" #"
+    module Child #(parameter W = 18, parameter N = W[3:0])(
+        output logic [3:0] y, output int width);
+      assign y = N;
+      assign width = $bits(N);
+    endmodule
+    module Top(output logic [3:0] default_y, output logic [3:0] overridden_y,
+               output int width);
+      int default_width, overridden_width;
+      Child a(default_y, default_width);
+      Child #(.W(35)) b(overridden_y, overridden_width);
+      assign width = default_width + overridden_width;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq default_y 2)
+  (assert_eq overridden_y 3)
+  (assert_eq width 8))
+
+(case constant_parameter_initializers_short_circuit_wide_operands
+  ; IEEE 1800-2023 11.3.5: logical operands that cannot affect the
+  ; result are not evaluated. Keep shared literals within external limits.
+  (source "short_circuit_parameter_operands.sv" #"
+    module Top(output logic [2:0] checks, output int width);
+      parameter FLAG = 0;
+      localparam A = 0 && 65536'd0;
+      localparam B = 1 || 65536'd0;
+      localparam C = FLAG && 65536'd0;
+      assign checks = {A === 1'b0, B === 1'b1, C === 1'b0};
+      assign width = $bits(A) + $bits(B) + $bits(C);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 7)
+  (assert_eq width 3))
+
+(case constant_parameter_initializers_short_circuit_repetitions_and_selections
+  ; Keep computed widths above Celox's materialization limit, but small
+  ; enough for independent simulators. IEEE 1800-2023 Table 11-2: ** is left-associative.
+  (source "short_circuit_repetitions_and_selections.sv" #"
+    module Top(output logic [5:0] checks, output int width);
+      localparam logic [3:4] UP = 2'b10;
+      localparam logic [4:3] DOWN = 2'b10;
+      localparam A = 0 && {65537{1'b0}};
+      localparam B = 1 || {65537{1'b0}};
+      localparam C = UP[3] || {65537{1'b0}};
+      localparam D = DOWN[3] && {65537{1'b0}};
+      localparam E = ((2 ** 3 ** 2) == 512) && {65537{1'b0}};
+      localparam F = ((2 ** (3 ** 2)) == 512) || {65537{1'b0}};
+      assign checks = {A === 1'b0, B === 1'b1, C === 1'b1,
+                       D === 1'b0, E === 1'b0, F === 1'b1};
+      assign width = $bits(A) + $bits(B) + $bits(C) + $bits(D) + $bits(E) + $bits(F);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 63)
+  (assert_eq width 6))
+
+(case constant_parameter_initializers_short_circuit_four_state_bindings
+  ; IEEE 1800-2023 11.3.5: X/Z combined with a deciding logical
+  ; operand produces a known truth value before the wide operand.
+  ; Cross Celox's 65536-bit materialization guard without evaluating it.
+  (four_state)
+  (source "short_circuit_four_state_bindings.sv" #"
+    package flags;
+      localparam IMPORTED_X = 1'bx;
+      localparam IMPORTED_Z = 1'bz;
+    endpackage
+    module Top(output logic [5:0] checks, output int width);
+      import flags::*;
+      localparam FLAG = 1'bx;
+      localparam ZFLAG = 1'bz;
+      localparam A = FLAG && 0 && 65537'd0;
+      localparam B = FLAG || 1 || 65537'd0;
+      localparam C = ZFLAG && 0 && 65537'd0;
+      localparam D = ZFLAG || 1 || 65537'd0;
+      localparam E = IMPORTED_X && 0 && 65537'd0;
+      localparam F = IMPORTED_Z || 1 || 65537'd0;
+      assign checks = {A === 1'b0, B === 1'b1, C === 1'b0,
+                       D === 1'b1, E === 1'b0, F === 1'b1};
+      assign width = $bits(A) + $bits(B) + $bits(C) + $bits(D) + $bits(E) + $bits(F);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq checks 63)
+  (assert_eq width 6))
+
 (case constant_parameter_initializers_preserve_selections
   (source "constant_parameter_selections.sv" #"
     module Top(output int n, down, up, negative, shifted, width, cast_value,

@@ -744,6 +744,592 @@ fn resolves_function_scope_size_casts() {
 }
 
 #[test]
+fn selects_inferred_constant_parameter_dimensions() {
+    for (initializer, selection, expected) in [
+        ("18", "W[3:0]", 2),
+        ("18", "W[0 +: 4]", 2),
+        ("64'habcdef", "W[11:8]", 13),
+        ("-1", "W[31:28]", 15),
+    ] {
+        let source = format!(
+            "module Top; parameter W = {initializer}; \
+            localparam N = {selection}; localparam BITS = $bits(N); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("inferred_parameter_select.sv")).unwrap();
+        let parameters = ir.modules()[0].parameters();
+        assert_eq!(parameters[1].resolved_value(), Some(expected));
+        assert_eq!(parameters[1].resolved_width(), Some(4));
+        assert_eq!(parameters[2].resolved_value(), Some(4));
+    }
+}
+
+#[test]
+fn permits_short_circuited_constant_parameter_operands() {
+    for (expression, expected) in [
+        ("0 && 65537'd0", 0),
+        ("1 || 65537'bx", 1),
+        ("0 && 1000000000'd0", 0),
+        ("1 || 1000000000'bx", 1),
+        ("0 && 1000000000'd0 || 1", 1),
+        ("1 || 1000000000'd0 && 0", 1),
+        ("(0 && 1000000000'd0) || 1", 1),
+        ("0 && 8'(1000000000'd0)", 0),
+        ("1'bx && 0 && 1000000000'd0", 0),
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("short_circuit_parameter.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(expected)
+        );
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_width(), Some(1));
+    }
+    for expression in [
+        "1 && 1000000000'd0",
+        "0 || 1000000000'd0",
+        "0 && 1000000000'd0 || 1000000000'd0",
+        "1'bx && 1000000000'd0",
+        "1000000000'd0 === 1000000000'd0",
+        "0 && $bits(data[0 +: 1000000000'd1])",
+    ] {
+        let source =
+            format!("module Top(input logic [7:0] data); localparam N = {expression}; endmodule");
+        let error =
+            analyze_source(&source, Path::new("evaluated_parameter_operand.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("constant materialization limit"),
+            "{expression}: {error}"
+        );
+    }
+    assert!(
+        analyze_source(
+            "module Top; localparam N = 0 && missing_type'(65537'd0); endmodule",
+            Path::new("skipped_invalid_cast.sv"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn validates_shapes_in_short_circuited_parameter_operands() {
+    for selection in [
+        "W[0 +: 0]",
+        "W[0 -: -1]",
+        "W[0][0 +: 1]",
+        "{W}[0 +: 0]",
+        "{W}[missing +: 1]",
+        "{W}[missing]",
+        "{W}[missing:0]",
+        "{W}[0:missing]",
+        "W[missing]",
+        "W[missing:0]",
+        "$bits(W[0][0 +: 1])",
+    ] {
+        let source = format!(
+            "module Top; localparam logic [7:0] W = 0; localparam N = 0 && ({selection} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_shape.sv")).is_err(),
+            "{selection}"
+        );
+    }
+    for selection in [
+        "W[0 +: 1]",
+        "{W}[0 +: 1]",
+        "{W}['x +: 1]",
+        "{W}[0]",
+        "{W}['x]",
+        "{W}[3:0]",
+    ] {
+        let source = format!(
+            "module Top; localparam logic [7:0] W = 0; localparam N = 0 && ({selection} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_parameter_shape.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn validates_user_calls_in_short_circuited_parameter_operands() {
+    for call in ["f(.missing(1))", "f(.x(1), .x(2))", "f(1, 2)", "f()", "f"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_user_call.sv")).is_err(),
+            "{call}"
+        );
+    }
+    for call in ["f(.x(1000000000'd0))", "f()", "f"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x = 1); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_user_call.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn validates_names_in_short_circuited_parameter_operands() {
+    for operand in [
+        "missing",
+        "missing[0]",
+        "f(missing)",
+        "f(.x(missing))",
+        "$clog2(missing)",
+        "{missing, 1'b0}",
+        "(1 ? 0 : missing)",
+        "data",
+        "f(data)",
+        "$bits(missing)",
+        "$bits(f(missing))",
+        "$size(data, missing)",
+    ] {
+        let source = format!(
+            "module Top(input logic [7:0] data); function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_name.sv")).is_err(),
+            "accepted invalid operand: {operand}"
+        );
+    }
+    for operand in [
+        "W",
+        "W[0]",
+        "f(W)",
+        "f(.x(W))",
+        "p::W",
+        "E",
+        "X",
+        "$bits(data)",
+        "$bits(word_t)",
+        "$bits(f(data))",
+        "$size(data)",
+        "$bits(1000000000'd0)",
+        "f(1000000000'd0)",
+    ] {
+        let source = format!(
+            "package p; localparam W = 1; endpackage module Top(input logic [7:0] data); localparam W = 1; localparam X = 1'bx; typedef logic [7:0] word_t; typedef enum logic {{ E = 0 }} enum_t; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_parameter_name.sv"))
+            .unwrap_or_else(|error| panic!("{operand}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+}
+
+#[test]
+fn folded_parameter_names_require_a_declaration_prefix() {
+    for body in [
+        "localparam A = 0 && A && 1000000000'd0;",
+        "localparam A = 0 && B && 1000000000'd0; localparam B = 1;",
+        "localparam A = 0 && f(A) && 1000000000'd0;",
+        "localparam A = 0 && $bits(A) && 1000000000'd0;",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction {body} endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_prefix.sv")).is_err(),
+            "{body}"
+        );
+    }
+    let source = "module Top; localparam A = 1; localparam B = 0 && A && 1000000000'd0; endmodule";
+    let ir = analyze_source(source, Path::new("folded_prefix_valid.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+}
+
+#[test]
+fn logical_query_types_resolve_both_operands() {
+    for expression in [
+        "missing && 0",
+        "0 && missing",
+        "missing || 1",
+        "1 || missing",
+    ] {
+        let source = format!("module Top; localparam N = $bits({expression}); endmodule");
+        assert!(
+            analyze_source(&source, Path::new("logical_query_name.sv")).is_err(),
+            "{expression}"
+        );
+    }
+    for expression in ["data && 0", "0 && data", "data || 1", "1 || data"] {
+        let source = format!(
+            "module Top(input logic [7:0] data); localparam N = $bits({expression}); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("logical_query_valid.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    }
+}
+
+#[test]
+fn folded_parameter_queries_validate_member_paths() {
+    for member in ["missing", "a.missing"] {
+        let source = format!(
+            "module Top; struct packed {{ logic a; }} value; localparam N = 0 && ($bits(value.{member}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_member.sv")).is_err(),
+            "{member}"
+        );
+    }
+    let source = "module Top; struct packed { logic a; } value; localparam N = 0 && ($bits(value.a) || 1000000000'd0); endmodule";
+    let ir = analyze_source(source, Path::new("folded_member_valid.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
+fn folded_parameter_replication_counts_are_validated() {
+    for count in ["-1", "1'bx", "1'bz", "missing"] {
+        for operand in [
+            format!("{{{count}{{1'b0}}}}"),
+            format!("f({{{count}{{1'b0}}}})"),
+            format!("word_t'('{{{count}{{1'b0}}}})"),
+        ] {
+            let source = format!(
+                "module Top; typedef logic [1:0] word_t; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("folded_repeat.sv")).is_err(),
+                "{operand}"
+            );
+        }
+    }
+    for operand in [
+        "{2{1'b0}}",
+        "{1000000000{1'b0}}",
+        "{2{1000000000'd0}}",
+        "{1'b0, {0{1'b0}}}",
+        "word_t'('{2{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef logic [1:0] word_t; localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_repeat_valid.sv"))
+            .unwrap_or_else(|error| panic!("{operand}: {error}"));
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn folded_parameter_streaming_slice_sizes_are_validated() {
+    // IEEE 1800-2023 11.4.14.2 requires a positive constant slice size.
+    for size in [
+        "0", "-1", "1'bx", "1'bz", "missing", "ZERO", "UNKNOWN", "(2 - 2)",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam ZERO = 0; localparam UNKNOWN = 1'bx; localparam N = 0 && (f({{<< {size} {{1'b0}}}}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_stream_size.sv")).is_err(),
+            "{size}"
+        );
+    }
+    for size in ["", "1", "(2 + 2)", "STEP", "byte", "word_t"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction typedef logic [3:0] word_t; localparam STEP = 4; localparam N = 0 && (f({{<< {size} {{1000000000'd0}}}}) || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_stream_size_valid.sv"))
+            .unwrap_or_else(|error| panic!("{size}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+}
+
+#[test]
+fn folded_parameter_streaming_with_ranges_are_validated() {
+    for range in [
+        "0 +: 0",
+        "0 -: -1",
+        "0 +: 1'bx",
+        "0 -: 1'bz",
+        "missing",
+        "0 : missing",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam logic [7:0] W [0:1] = '{{0, 0}}; localparam N = 0 && (f({{<< 1 {{W with [{range}]}}}}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_stream_range.sv")).is_err(),
+            "{range}"
+        );
+    }
+    for range in ["0", "0:1", "0 +: 2", "1 -: 2"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam logic [7:0] W [0:1] = '{{0, 0}}; localparam N = 0 && (f({{<< 1 {{W with [{range}]}}}}) || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_stream_range_valid.sv"))
+            .unwrap_or_else(|error| panic!("{range}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+
+    for declaration in [
+        "localparam W = 8'b0;",
+        "localparam logic [7:0] W [0:1][0:1] = '{'{0, 0}, '{0, 0}};",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction {declaration} localparam N = 0 && (f({{<< 1 {{W with [0 +: 1]}}}}) || 1000000000'd0); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("folded_stream_array_shape.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("one-dimensional unpacked array"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn folded_array_queries_allow_out_of_range_dimensions() {
+    // IEEE 1800-2023 20.7 returns X for an out-of-range dimension;
+    // the call remains legal and may be skipped by a logical operator.
+    for name in ["$size", "$left", "$right", "$low", "$high", "$increment"] {
+        for dimension in ["0", "-1", "2", "1'bx", "1'bz"] {
+            let source = format!(
+                "module Top(input logic [7:0] data); localparam N = 0 && ({name}(data, {dimension}) || 1000000000'd0); endmodule"
+            );
+            let ir = analyze_source(&source, Path::new("folded_query_dimension.sv"))
+                .unwrap_or_else(|error| panic!("{name}/{dimension}: {error}"));
+            assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+        }
+    }
+}
+
+#[test]
+fn bounded_parameter_proofs_preserve_left_associative_power() {
+    // IEEE 1800-2023 Table 11-2: ** is left-associative.
+    for expression in [
+        "((2 ** 3 ** 2) == 512) && 1000000000'bx",
+        "((2 ** 3 ** 2) == 64) || 1000000000'bx",
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("bounded_power.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(i128::from(expression.contains("||")))
+        );
+    }
+    for expression in [
+        "((2 ** 3 ** 2) == 64) && 1000000000'bx",
+        "((2 ** (3 ** 2)) == 512) && 1000000000'bx",
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        assert!(
+            analyze_source(&source, Path::new("evaluated_power.sv")).is_err(),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn bounded_parameter_proofs_skip_computed_repetitions() {
+    for (expression, expected) in [
+        ("0 && {1000000000{1'b0}}", 0),
+        ("1 || {1000000000{1'bx}}", 1),
+        ("0 && {2{65536'b0}}", 0),
+        ("0 && {2{{1000000000{1'b0}}}}", 0),
+    ] {
+        let source = format!("module Top; localparam N = {expression}; endmodule");
+        let ir = analyze_source(&source, Path::new("bounded_repetition.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(expected),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn bounded_parameter_proofs_use_typed_constant_selections() {
+    for (declaration, selected, expected) in [
+        ("localparam P = 2'b00;", "P[0]", 0),
+        ("localparam P = 2'b10;", "P[1]", 1),
+        ("localparam logic [4:3] P = 2'b10;", "P[3]", 0),
+        ("localparam logic [3:4] P = 2'b10;", "P[3]", 1),
+        ("localparam logic [1:0][1:0] P = 4'b0011;", "P[1]", 0),
+        ("localparam P = 4'b1000;", "P[2:1]", 0),
+        ("localparam P = 4'b1000;", "P[0 +: 2]", 0),
+    ] {
+        let operator = if expected == 0 { "&&" } else { "||" };
+        let source = format!(
+            "module Top; {declaration} localparam N = {selected} {operator} 1000000000'd0; endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("bounded_parameter_select.sv"))
+            .unwrap_or_else(|error| panic!("{selected}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(expected)
+        );
+    }
+    for selected in ["P[0]", "P[2]", "P['x]"] {
+        let source = format!(
+            "module Top; localparam P = 2'b1x; localparam N = {selected} && 1000000000'd0; endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("bounded_unknown_select.sv")).is_err(),
+            "{selected}"
+        );
+    }
+}
+
+#[test]
+fn folded_parameter_patterns_validate_target_shapes() {
+    for pattern in [
+        "pair_t'('{1'b0})",
+        "pair_t'('{1'b0, 1'b1, 1'b0})",
+        "pair_t'('{missing: 1'b0, default: 1'b0})",
+        "pair_t'('{a: 1'b0})",
+        "pair_t'{a: 1'b0}",
+        "nested_t'{p: '{a: 1'b0}}",
+        "f('{a: 1'b0})",
+        "word_t'('{2: 1'b0, default: 1'b0})",
+        "word_t'('{0: 1'b0})",
+        "word_t'('{1000000000{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef struct packed {{ logic a; logic b; }} pair_t; typedef logic [1:0] word_t; typedef struct packed {{ pair_t p; }} nested_t; typedef logic [999999999:0] giant_t; function automatic int f(input pair_t p); return p.a; endfunction localparam N = 0 && ({pattern} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_pattern_shape.sv")).is_err(),
+            "{pattern}"
+        );
+    }
+    for pattern in [
+        "pair_t'('{1'b0, 1'b1})",
+        "pair_t'('{a: 1'b0, default: 1'b1})",
+        "pair_t'{default: 1000000000'd0}",
+        "word_t'('{2{1000000000'd0}})",
+        "word_t'('{0: 1'b0, default: 1'b0})",
+        "nested_t'{p: '{default: 1'b0}}",
+        "f('{default: 1000000000'd0})",
+        "giant_t'('{default: 1'b0})",
+        "giant_t'('{1000000000{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef struct packed {{ logic a; logic b; }} pair_t; typedef logic [1:0] word_t; typedef struct packed {{ pair_t p; }} nested_t; typedef logic [999999999:0] giant_t; function automatic int f(input pair_t p); return p.a; endfunction localparam N = 0 && ({pattern} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_pattern_shape_valid.sv"))
+            .unwrap_or_else(|error| panic!("{pattern}: {error}"));
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn local_values_shadow_imported_bare_function_calls() {
+    for declaration in ["localparam f = 0;", "typedef enum logic { f = 0 } E;"] {
+        let source = format!(
+            "package p; function automatic int f(input int x); return x; endfunction endpackage module Top; import p::*; {declaration} localparam N = 0 && (f || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("shadowed_bare_function.sv")).unwrap();
+        let n = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == "N")
+            .unwrap();
+        assert_eq!(n.resolved_value(), Some(0));
+        assert_eq!(n.resolved_width(), Some(1));
+    }
+}
+
+#[test]
+fn current_parameter_shadows_imports_in_its_initializer() {
+    for flag in ["1'b0", "1'bx"] {
+        let source = format!(
+            "package p; localparam FLAG = {flag}; endpackage module Top; import p::*; localparam FLAG = FLAG && 1000000000'd0; endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("self_referencing_parameter.sv")).is_err(),
+            "{flag}"
+        );
+    }
+    let ir = analyze_source(
+        "package p; localparam FLAG = 0; endpackage module Top; import p::*; localparam FLAG = p::FLAG && 1000000000'd0; endmodule",
+        Path::new("qualified_parameter_import.sv"),
+    ).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
+fn validates_calls_in_short_circuited_constant_parameter_operands() {
+    for call in ["$random()", "$unknown()", "$clog2()", "$bits()"] {
+        let source =
+            format!("module Top; localparam N = 0 && ({call} || 1000000000'd0); endmodule");
+        let error =
+            analyze_source(&source, Path::new("skipped_parameter_call.sv")).expect_err(call);
+        assert!(
+            error.to_string().contains(call.split('(').next().unwrap()),
+            "{error}"
+        );
+    }
+    let ir = analyze_source(
+        "module Top; localparam N = 0 && $clog2(1000000000'd0); endmodule",
+        Path::new("skipped_valid_parameter_call.sv"),
+    )
+    .unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
+fn short_circuits_four_state_parameter_bindings() {
+    for flag in ["1'bx", "1'bz", "4'bx001"] {
+        for (expression, expected) in [
+            ("FLAG && 0 && 1000000000'd0", 0),
+            ("FLAG || 1 || 1000000000'd0", 1),
+        ] {
+            for declaration in [
+                format!("module Top; localparam FLAG = {flag};"),
+                format!("package p; localparam FLAG = {flag}; endpackage module Top; import p::*;"),
+                format!(
+                    "package p; localparam FLAG = 1; endpackage module Top; import p::*; localparam FLAG = {flag};"
+                ),
+            ] {
+                let source = format!("{declaration} localparam N = {expression}; endmodule");
+                let ir = analyze_source(&source, Path::new("four_state_parameter_proof.sv"))
+                    .unwrap_or_else(|error| panic!("{source}: {error}"));
+                let n = ir.modules()[0]
+                    .parameters()
+                    .iter()
+                    .find(|p| p.name() == "N")
+                    .unwrap();
+                assert_eq!(n.resolved_value(), Some(expected), "{source}");
+                assert_eq!(n.resolved_width(), Some(1), "{source}");
+            }
+        }
+        let source = format!(
+            "module Top; localparam FLAG = {flag}; localparam N = FLAG && 1000000000'd0; endmodule"
+        );
+        let error =
+            analyze_source(&source, Path::new("evaluated_four_state_parameter.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("constant materialization limit"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn resolves_constant_parameter_part_selects() {
     for (declaration, selection, expected, width, signed) in [
         ("logic [31:0] W = 18", "W[3:0] + 1", 3, 32, false),

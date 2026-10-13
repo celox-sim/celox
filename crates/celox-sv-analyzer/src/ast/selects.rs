@@ -1686,6 +1686,264 @@ pub(super) fn parameter_initializer_needs_typed_lowering(
     })
 }
 
+/// Validate selections independently of a short-circuited initializer's value.
+/// Lower only the selected primary so unrelated oversized values remain skipped.
+pub(super) fn validate_parameter_initializer_selections(
+    initializer: &sv_parser::ConstantParamExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
+    let bound = |expression: &sv_parser::ConstantExpression, allow_unknown: bool| {
+        let expression = indexed_select_base(
+            RefNode::ConstantExpression(expression),
+            syntax_tree,
+            &dimensions,
+        )?;
+        if eval_ast_const_expr(&expression, &dimensions.const_env).is_none()
+            && !(allow_unknown && const_index_has_unknown_value(&expression, &dimensions))
+        {
+            return Err(unsupported(
+                "parameter selection bound that is not constant",
+            ));
+        }
+        Ok(())
+    };
+    let repeat_count = |count: RefNode<'_>| {
+        let count = indexed_select_base(count, syntax_tree, &dimensions)?;
+        if !eval_ast_const_expr(&count, &dimensions.const_env).is_some_and(|count| count >= 0) {
+            return Err(unsupported(
+                "parameter repetition count must be a nonnegative known constant",
+            ));
+        }
+        Ok(())
+    };
+    let mut discovered_dimensions = None;
+    for node in initializer.into_iter() {
+        match node {
+            RefNode::MultipleConcatenation(concat) => {
+                repeat_count(RefNode::Expression(&concat.nodes.0.nodes.1.0))?;
+            }
+            RefNode::ConstantMultipleConcatenation(concat) => {
+                repeat_count(RefNode::ConstantExpression(&concat.nodes.0.nodes.1.0))?;
+            }
+            RefNode::AssignmentPatternRepeat(pattern) => {
+                repeat_count(RefNode::ConstantExpression(&pattern.nodes.0.nodes.1.0))?;
+            }
+            RefNode::StreamExpression(stream) if stream.nodes.1.is_some() => {
+                validate_streaming_with_range(stream, syntax_tree, &dimensions)?;
+            }
+            RefNode::SliceSize(size) => {
+                // Validate only the shape; a skipped stream can contain an
+                // arbitrarily large payload that must never be materialized.
+                let valid = match size {
+                    sv_parser::SliceSize::ConstantExpression(expression) => {
+                        let expression = indexed_select_base(
+                            RefNode::ConstantExpression(expression),
+                            syntax_tree,
+                            &dimensions,
+                        )?;
+                        eval_ast_const_expr(&expression, &dimensions.const_env)
+                            .is_some_and(|size| size > 0)
+                    }
+                    sv_parser::SliceSize::SimpleType(simple_type) => casts::cast_target_type(
+                        &sv_parser::CastingType::SimpleType(simple_type.clone()),
+                        syntax_tree,
+                        &dimensions.const_env,
+                        &dimensions.type_aliases,
+                    )
+                    .is_some_and(|r#type| r#type.width > 0),
+                };
+                if !valid {
+                    return Err(unsupported(
+                        "streaming slice size must be a positive known constant or a sized type",
+                    ));
+                }
+            }
+            RefNode::ConstantBitSelect(select) => {
+                for index in &select.nodes.0 {
+                    bound(&index.nodes.1, true)?;
+                }
+            }
+            RefNode::ConstantRangeExpression(
+                sv_parser::ConstantRangeExpression::ConstantExpression(index),
+            ) => {
+                bound(index, true)?;
+            }
+            RefNode::ConstantRange(range) => {
+                bound(&range.nodes.0, false)?;
+                bound(&range.nodes.2, false)?;
+            }
+            RefNode::ConstantPrimary(sv_parser::ConstantPrimary::PsParameter(parameter))
+                if !parameter.nodes.1.nodes.1.nodes.0.is_empty()
+                    || parameter.nodes.1.nodes.2.is_some()
+                    || packed_structs::has_member_access(
+                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                        RefNode::ConstantSelect(&parameter.nodes.1),
+                    ) =>
+            {
+                indexed_constant_expression(node, syntax_tree, &dimensions)?;
+            }
+            RefNode::Primary(primary @ sv_parser::Primary::Hierarchical(parameter))
+                if !parameter.nodes.2.nodes.1.nodes.0.is_empty()
+                    || parameter.nodes.2.nodes.2.is_some()
+                    || packed_structs::has_member_access(
+                        RefNode::HierarchicalIdentifier(&parameter.nodes.1),
+                        RefNode::Select(&parameter.nodes.2),
+                    ) =>
+            {
+                // A skipped query may refer to a port/signal member before
+                // final module declaration metadata has been installed.
+                let context = if dimensions.scope_types_complete {
+                    &dimensions
+                } else {
+                    discovered_dimensions.get_or_insert_with(|| {
+                        let mut context = dimensions.clone();
+                        if let Some(discovered) = dimensions::containing_packed_dimensions(
+                            node,
+                            syntax_tree,
+                            &dimensions.const_env,
+                            &dimensions.type_aliases,
+                        ) {
+                            for (name, metadata) in discovered.iter() {
+                                if context.get(name).is_none() {
+                                    context.insert(name.clone(), metadata.clone());
+                                }
+                            }
+                        }
+                        context
+                    })
+                };
+                expressions::expr_from_primary_with_types(primary, syntax_tree, context)?;
+            }
+            // Concatenation selections have no named primary to lower. Check
+            // their start and width without inspecting the concatenated bits,
+            // retaining the ordinary lowering path's support for X/Z bases.
+            RefNode::ConstantIndexedRange(range)
+                if unknown_indexed_part_select(
+                    range,
+                    &ConstExpr::Literal("1".into()),
+                    syntax_tree,
+                    &dimensions,
+                )?
+                .is_none() =>
+            {
+                indexed_select_bounds(
+                    indexed_select_base(
+                        RefNode::ConstantExpression(&range.nodes.0),
+                        syntax_tree,
+                        &dimensions,
+                    )?,
+                    &range.nodes.1,
+                    &range.nodes.2,
+                    syntax_tree,
+                    (None, 0),
+                    &dimensions,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Check a skipped stream's selector without lowering the streamed value.
+fn validate_streaming_with_range(
+    stream: &sv_parser::StreamExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let Some((_, range)) = &stream.nodes.1 else {
+        return Ok(());
+    };
+    let bound = |expression: &sv_parser::Expression| {
+        let expression =
+            indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)?;
+        eval_ast_const_expr(&expression, &dimensions.const_env).ok_or_else(|| {
+            unsupported("streaming with range bound must be a known integral constant")
+        })
+    };
+    match &range.nodes.1 {
+        sv_parser::ArrayRangeExpression::Expression(index) => {
+            bound(index)?;
+        }
+        sv_parser::ArrayRangeExpression::Colon(range) => {
+            bound(&range.nodes.0)?;
+            bound(&range.nodes.2)?;
+        }
+        range => {
+            let (start, width, plus) = match range {
+                sv_parser::ArrayRangeExpression::PlusColon(range) => {
+                    (&range.nodes.0, &range.nodes.2, true)
+                }
+                sv_parser::ArrayRangeExpression::MinusColon(range) => {
+                    (&range.nodes.0, &range.nodes.2, false)
+                }
+                _ => unreachable!(),
+            };
+            let start = bound(start)?;
+            let width = bound(width)?;
+            if width <= 0 {
+                return Err(unsupported("streaming with range width must be positive"));
+            }
+            let end = if plus {
+                start.checked_add(width - 1)
+            } else {
+                start.checked_sub(width - 1)
+            };
+            end.ok_or_else(|| unsupported("streaming with range bounds overflow"))?;
+        }
+    }
+    // IEEE 1800-2023 11.4.14.4 restricts `with` to one-dimensional
+    // unpacked arrays. Query the shape, not the array's element values.
+    if dimensions::unpacked_expression_dimensions(
+        &stream.nodes.0,
+        syntax_tree,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+        Some(dimensions),
+    ) != Some(1)
+    {
+        return Err(unsupported(
+            "streaming with requires a one-dimensional unpacked array",
+        ));
+    }
+    Ok(())
+}
+
+/// Evaluate only a resolved parameter selection, with both its source and
+/// result bounded. Reuse typed lowering for declared directions and ranks.
+pub(super) fn bounded_parameter_selection(
+    primary: &sv_parser::ConstantPrimary,
+    tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Expr> {
+    let sv_parser::ConstantPrimary::PsParameter(parameter) = primary else {
+        return None;
+    };
+    let name = reference_name(RefNode::PsParameterIdentifier(&parameter.nodes.0), tree)?;
+    if !dimensions.parameter_values.contains_key(&name) && !dimensions.const_env.contains_key(&name)
+    {
+        return None;
+    }
+    if expr_static_width(&Expr::Ident(name), dimensions)?
+        > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
+        return None;
+    }
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
+    let expression =
+        indexed_constant_expression(RefNode::ConstantPrimary(primary), tree, &dimensions).ok()?;
+    let expression = substitute_indexed_parameter_values(expression, &dimensions);
+    if expr_static_width(&expression, &dimensions)? > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+        return None;
+    }
+    let expression = fold_const_integral_expr_preserving_mask(expression, &dimensions.const_env);
+    matches!(expression, Expr::Literal(_)).then_some(expression)
+}
+
 // Parameter arithmetic receives the assignment width after self-determined
 // selection operands have been folded, rather than the index expression context.
 pub(super) fn selected_parameter_initializer(
@@ -2309,5 +2567,46 @@ fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) ->
             else_expr: go(else_expr),
         },
         expr => expr,
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_streaming_with_validates_ranges_without_lowering_arrays() {
+        for (range, valid) in [
+            ("0", true),
+            ("0:1", true),
+            ("0 +: 2", true),
+            ("1 -: 2", true),
+            ("-1 +: 4", true),
+            ("0 +: (2 - 2)", false),
+            ("0 -: -1", false),
+            ("0 +: 1'bx", false),
+            ("0 -: 1'bz", false),
+            ("missing", false),
+            ("0:missing", false),
+            ("missing:0", false),
+            ("1.5", false),
+            ("170141183460469231731687303715884105727 +: 2", false),
+        ] {
+            let code = format!(
+                "module Top(input logic [7:0] data [0:1]); initial $display({{<< 1 {{data with [{range}]}}}}); endmodule"
+            );
+            let tree = crate::syntax::parse_source(&code, std::path::Path::new("stream_range.sv"))
+                .unwrap();
+            let stream = tree
+                .into_iter()
+                .find_map(|node| match node {
+                    RefNode::StreamExpression(stream) => Some(stream),
+                    _ => None,
+                })
+                .unwrap();
+            let dimensions = PackedDimensions::default();
+            let result = validate_streaming_with_range(stream, &tree, &dimensions);
+            assert_eq!(result.is_ok(), valid, "{range}: {result:?}");
+        }
     }
 }
