@@ -134,7 +134,7 @@ pub(crate) fn plan_lane_kernels(
             .find(|kernel| kernel.units == units)
             .map(|kernel| kernel.diagnostic_id.clone())
             .unwrap_or_else(celox_runtime::parallel::new_diagnostic_id);
-        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "kernel_plan", schedule = diagnostic_id.as_str(), hazard_level = "units", kind = ?kind, codegen = ?codegen).entered();
+        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "kernel_plan", program = program.as_str(), schedule = diagnostic_id.as_str(), hazard_level = "units", kind = ?kind, codegen = ?codegen).entered();
         if let Some(index) = planned.iter().position(|kernel| kernel.units == units) {
             let tasks = planned[index].tasks.clone();
             planned.push(PlannedLaneKernel {

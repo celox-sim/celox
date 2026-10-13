@@ -129,6 +129,16 @@ struct Window {
     after: u64,
     length: u64,
 }
+impl Window {
+    fn enables(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        match metadata.target() {
+            "celox::parallel" => self.active.load(Ordering::Relaxed),
+            "celox::parallel::selection" => true,
+            "celox::parallel::call" => self.running.load(Ordering::Relaxed),
+            _ => false,
+        }
+    }
+}
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let mut fields = Fields::default();
@@ -142,6 +152,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
         ctx.span(id).unwrap().extensions_mut().insert(fields);
     }
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        if event.metadata().target() == "celox::parallel::call"
+            && !self.window.running.load(Ordering::Relaxed)
+        {
+            return;
+        }
         let mut fields = Fields(serde_json::Map::new(), self.omit_sir);
         event.record(&mut fields);
         if event.metadata().target() == "celox::parallel::call" {
@@ -424,21 +439,14 @@ fn main() -> Result<(), Error> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let enabled = window.clone();
     tracing_subscriber::registry()
-        .with(
-            Capture {
-                events: events.clone(),
-                window: window.clone(),
-                omit_sir: args.omit_sir,
-            }
-            .with_filter(tracing_subscriber::filter::dynamic_filter_fn(
-                move |metadata, _| {
-                    (metadata.target() == "celox::parallel"
-                        && enabled.active.load(Ordering::Relaxed))
-                        || metadata.target() == "celox::parallel::selection"
-                        || metadata.target() == "celox::parallel::call"
-                },
-            )),
-        )
+        .with(Capture {
+            events: events.clone(),
+            window: window.clone(),
+            omit_sir: args.omit_sir,
+        })
+        .with(tracing_subscriber::filter::dynamic_filter_fn(
+            move |metadata, _| enabled.enables(metadata),
+        ))
         .init();
     let builder = || {
         let b = if let Some((sources, metadata)) = &project_sources {
@@ -526,20 +534,15 @@ mod tests {
         });
         let events = Arc::new(Mutex::new(Vec::new()));
         let enabled = window.clone();
-        let subscriber = tracing_subscriber::registry().with(
-            Capture {
+        let subscriber = tracing_subscriber::registry()
+            .with(Capture {
                 events: events.clone(),
                 window: window.clone(),
                 omit_sir: false,
-            }
-            .with_filter(tracing_subscriber::filter::dynamic_filter_fn(
-                move |metadata, _| {
-                    metadata.target() == "celox::parallel::call"
-                        || (metadata.target() == "celox::parallel"
-                            && enabled.active.load(Ordering::Relaxed))
-                },
-            )),
-        );
+            })
+            .with(tracing_subscriber::filter::dynamic_filter_fn(
+                move |metadata, _| enabled.enables(metadata),
+            ));
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..6 {
                 tracing::trace!(target: "celox::parallel::call", event = "kernel_call");
@@ -554,6 +557,30 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(calls, [3, 4]);
         assert!(!window.active.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn call_markers_are_disabled_before_field_evaluation_outside_testbench_capture() {
+        let window = Arc::new(Window::default());
+        let enabled = window.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(Capture {
+                events: Arc::new(Mutex::new(Vec::new())),
+                window: window.clone(),
+                omit_sir: true,
+            })
+            .with(tracing_subscriber::filter::dynamic_filter_fn(
+                move |metadata, _| enabled.enables(metadata),
+            ));
+        let evaluated = AtomicU64::new(0);
+        tracing::subscriber::with_default(subscriber, || {
+            for running in [false, true, false] {
+                window.running.store(running, Ordering::Relaxed);
+                tracing::trace!(target: "celox::parallel::call", event = "kernel_call",
+                    probe = evaluated.fetch_add(1, Ordering::Relaxed));
+            }
+        });
+        assert_eq!(evaluated.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -611,6 +638,16 @@ mod tests {
                     .iter()
                     .all(|t| t["program"] == metadata[0]["program"])
             );
+        }
+        let native_sir = events
+            .iter()
+            .filter(|e| e["event"] == "native_task_sir")
+            .collect::<Vec<_>>();
+        assert!(!native_sir.is_empty());
+        for sir in native_sir {
+            assert!(tasks.iter().any(|t| t["schedule"] == sir["schedule"]
+                && t["program"] == sir["program"]
+                && t["task"] == sir["task"]));
         }
         for level in ["units", "tasks"] {
             assert!(events.iter().any(|e| {
