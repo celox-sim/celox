@@ -230,6 +230,8 @@ pub enum ProcessStatus {
     /// It ran no statement, so no state other than its own wait bookkeeping
     /// changed.
     Pending,
+    /// An event occurred while sampling queued drives; resume its body after the batch.
+    Ready,
 }
 
 impl ProcessStatus {
@@ -243,6 +245,7 @@ impl ProcessStatus {
             Self::Finish => 3,
             Self::Wait => 4,
             Self::Pending => 5,
+            Self::Ready => 11,
         }
     }
 
@@ -254,6 +257,7 @@ impl ProcessStatus {
             3 => Some(Self::Finish),
             4 => Some(Self::Wait),
             5 => Some(Self::Pending),
+            11 => Some(Self::Ready),
             _ => None,
         }
     }

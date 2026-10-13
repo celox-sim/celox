@@ -1536,3 +1536,116 @@ mod direct_finish_tests {
         check(Simulation::new(builder().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod drained_finish_tests {
+    use super::*;
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>, mode: u8) {
+        sim.schedule("clk", 10, 1).unwrap();
+        sim.run_until(0).unwrap();
+        let before = sim.checkpoint().unwrap();
+        let mut drain = (mode == 1)
+            .then(|| sim.simulator.runtime_event_drain())
+            .flatten();
+        sim.simulator.set(sim.signal("go"), 1u8);
+        let events = if let Some(drain) = &mut drain {
+            drain.drain()
+        } else if mode == 2 {
+            sim.simulator.eval_comb().unwrap();
+            Vec::new()
+        } else {
+            sim.drain_runtime_events()
+        };
+        drop(drain);
+        if mode != 2 {
+            assert!(events.contains(&crate::RuntimeEvent::Finish));
+        }
+        sim.run_until(20).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        let finished = sim.checkpoint().unwrap();
+        sim.restore(&before).unwrap();
+        sim.run_until(20).unwrap();
+        assert!(!sim.is_finished());
+        assert_eq!(sim.time(), 20);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.restore(&finished).unwrap();
+        sim.run_until(20).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), 0);
+    }
+
+    #[test]
+    fn consuming_finish_events_does_not_clear_the_request() {
+        let source = "module Top(input bit clk,go,output bit q);always_comb if(go)$finish;always @(posedge clk)q<=1;endmodule";
+        let builder = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("finish-drain.sv"))],
+                "Top",
+            )
+        };
+        for mode in 0..3 {
+            check(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                mode,
+            );
+            check(Simulation::new(builder().build_cranelift().unwrap()), mode);
+            check(Simulation::new(builder().build_wasm().unwrap()), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(builder().build_native().unwrap()), mode);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod scheduled_pulse_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        for name in ["any_woke", "neg_woke", "pos_woke", "ffneg"] {
+            assert_eq!(sim.get(sim.signal(name)), 0u8.into());
+        }
+        sim.schedule("clk", 1, 0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        for name in ["any_woke", "neg_woke", "pos_woke", "ffneg", "sampled"] {
+            assert_eq!(sim.get(sim.signal(name)), 1u8.into(), "{name}");
+        }
+        assert_eq!(sim.get(sim.signal("level_woke")), 0u8.into());
+    }
+    #[test]
+    fn scheduled_pulses_wake_waiters_after_the_batch() {
+        let source = "module Top(output bit any_woke,neg_woke,pos_woke,ffneg,sampled,level_woke);bit clk=1;initial begin wait(clk==0);level_woke=1;end always @(negedge clk)ffneg<=1;initial begin @(clk);any_woke=1;sampled=clk;end initial begin @(negedge clk);neg_woke=1;end initial begin @(posedge clk);pos_woke=1;end endmodule";
+        let compound = source
+            .replace("@(clk)", "@({clk,1'b0})")
+            .replace("@(negedge clk);", "@(negedge (clk | 1'b0));")
+            .replace("@(posedge clk);", "@(posedge (clk | 1'b0));");
+        for source in [source, compound.as_str()] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("scheduled-pulse.sv"))],
+                    "Top",
+                )
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()));
+            check(Simulation::new(build().build_cranelift().unwrap()));
+            check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            {
+                check(Simulation::new(build().build_native().unwrap()));
+                let image = build().compile_native().unwrap().into_program_image();
+                let image = crate::NativeProgramImage::from_container_bytes(
+                    &image.to_container_bytes().unwrap(),
+                )
+                .unwrap();
+                check(Simulation::new(
+                    Simulator::from_sources(Vec::new(), "Top")
+                        .build_native_from_image(image)
+                        .unwrap(),
+                ));
+            }
+        }
+    }
+}
