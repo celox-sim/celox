@@ -592,8 +592,10 @@ impl<B: SimBackend> SimulationState<B> {
             .tick_clocks
             .iter()
             .filter(|(id, clock)| {
-                let high = executor.backend().get_as::<u8>(clock.signal) != 0;
-                let pending_rise = high && !self.last_clock_values.contains(**id);
+                let high = sample_event_signal(executor.backend(), clock.signal) == (true, false);
+                let pending_rise = high
+                    && (!self.last_clock_values.contains(**id)
+                        || self.unknown_clock_values.contains(**id));
                 (!events_to_process.is_empty() || pending_rise)
                     && clock.next_edge == current_time
                     && self.clock_has_waiters(**id)
@@ -705,14 +707,14 @@ impl<B: SimBackend> SimulationState<B> {
         let mut rising = Vec::with_capacity(due.len());
         for id in due {
             let clock = &self.tick_clocks[id];
-            let high: u8 = executor.backend().get_as(clock.signal);
+            let high = sample_event_signal(executor.backend(), clock.signal) == (true, false);
             events.push(SimEvent {
                 time,
                 event_ref: clock.event,
                 signal: clock.signal,
-                next_val: u8::from(high == 0),
+                next_val: u8::from(!high),
             });
-            if high == 0 {
+            if !high {
                 rising.push(*id);
             }
         }
@@ -827,10 +829,8 @@ impl<B: SimBackend> SimulationState<B> {
             || self.clock_waits.values().any(|wait| wait.clock != clock)
             || self.clock_waits.len() + self.done.len() != self.processes.len()
             || self.event_info.iter().any(|info| info.is_cascaded)
-            || executor
-                .backend()
-                .get_as::<u8>(self.tick_clocks[&clock].signal)
-                != 0
+            || sample_event_signal(executor.backend(), self.tick_clocks[&clock].signal)
+                != (false, false)
         {
             return Ok(false);
         }
@@ -1161,11 +1161,15 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        while self.next_event_time().is_some_and(|next| next < time) {
-            self.step_until(executor, time)?;
+        let mut settled_target = false;
+        while self.next_event_time().is_some_and(|next| next <= time) {
+            settled_target |= self.step_until(executor, time)? == Some(time);
         }
         if self.finished {
             return Ok(None);
+        }
+        if settled_target {
+            return Ok(Some(time));
         }
         let ready = self.take_ready_processes(time);
         let result = self.step_round(executor, time, Vec::new(), Vec::new(), ready, true);
@@ -1288,7 +1292,7 @@ impl<B: SimBackend> SimulationState<B> {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
                     && self.clock_has_waiters(*id)
-                    && executor.backend().get_as::<u8>(clock.signal) == 0
+                    && sample_event_signal(executor.backend(), clock.signal) != (true, false)
                     && !events_to_process
                         .iter()
                         .any(|event| event.signal == clock.signal && event.next_val == 0)

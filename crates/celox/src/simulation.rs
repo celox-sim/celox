@@ -2908,3 +2908,102 @@ mod failed_ff_progress_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod generated_phase_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design(unknown: Option<u8>, edge: Edge) -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("ClockPhases").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let clk = m.internal("clk", ValueType::logic(1).unwrap()).unwrap();
+        m.set_initial(
+            clk,
+            match unknown {
+                Some(value) => Constant::four_state(value, 1u8, 1).unwrap(),
+                None => Constant::two_state(0u8, 1).unwrap(),
+            },
+        )
+        .unwrap();
+        let q = m.output("q", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(q).unwrap();
+        m.register(target, one, clk, edge, None, None).unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let three = m.constant(Constant::two_state(3u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn fall<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 2).unwrap(), Some(2));
+        assert_eq!(sim.time(), 2);
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), Some(4));
+    }
+    fn unknown<B: SimBackend>(mut sim: Simulation<B>, payload: u8, edge: Edge) {
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (payload.into(), 1u8.into())
+        );
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (1u8.into(), 0u8.into())
+        );
+        assert_eq!(sim.ticks(), 1);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    #[test]
+    fn settle_at_drains_a_generated_fall_at_the_target() {
+        let build = || Simulator::from_frontend(design(None, Edge::Negedge));
+        fall(Simulation::new(build().build_interpreter().unwrap()));
+        fall(Simulation::new(build().build_cranelift().unwrap()));
+        fall(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        fall(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn unknown_initial_clock_payloads_have_the_same_edge_sequence() {
+        for (payload, edge) in [
+            (0, Edge::Posedge),
+            (1, Edge::Posedge),
+            (0, Edge::Negedge),
+            (1, Edge::Negedge),
+        ] {
+            let build = || Simulator::from_frontend(design(Some(payload), edge)).four_state(true);
+            unknown(
+                Simulation::new(build().build_interpreter().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_cranelift().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_wasm().unwrap()),
+                payload,
+                edge,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            unknown(
+                Simulation::new(build().build_native().unwrap()),
+                payload,
+                edge,
+            );
+        }
+    }
+}
