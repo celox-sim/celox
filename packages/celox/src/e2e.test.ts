@@ -3556,6 +3556,34 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(result.assertions[0]!.passed).toBe(false);
 	});
 
+	test("testbench assertion messages preserve binary output as Uint8Array", () => {
+		const result = runTest(
+			[
+				{
+					content: `
+            #[test(t)]
+            module t {
+                initial {
+                    $assert(1'b1, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $assert_continue(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $assert(1'b0, "%s%c%c", 24'hff0080, 8'hfe, 8'h00);
+                    $finish();
+                }
+            }
+        `,
+					path: "binary.veryl",
+				},
+			],
+			"t",
+		);
+		expect(result.passed).toBe(false);
+		expect(result.assertions).toHaveLength(3);
+		for (const assertion of result.assertions) {
+			expect(assertion.message).toBeInstanceOf(Uint8Array);
+			expect(assertion.message).toEqual(new Uint8Array([255, 0, 128, 254, 0]));
+		}
+	});
+
 	test("multiple test modules run independently after one fails", () => {
 		const sources = [{ content: TB_MULTIPLE_TESTS_SOURCE, path: "test.veryl" }];
 
@@ -3563,7 +3591,9 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(first.passed).toBe(false);
 		expect(first.assertions.length).toBe(1);
 		expect(first.assertions[0]!.passed).toBe(false);
-		expect(first.assertions[0]!.message).toBe("fail first");
+		expect(first.assertions[0]!.message).toEqual(
+			new TextEncoder().encode("fail first"),
+		);
 
 		const second: NapiTestResult = addon.runTest(
 			sources,
@@ -3572,7 +3602,9 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(second.passed).toBe(true);
 		expect(second.assertions.length).toBe(1);
 		expect(second.assertions[0]!.passed).toBe(true);
-		expect(second.assertions[0]!.message).toBe("pass second");
+		expect(second.assertions[0]!.message).toEqual(
+			new TextEncoder().encode("pass second"),
+		);
 	});
 
 	test("assertion results include source location", () => {

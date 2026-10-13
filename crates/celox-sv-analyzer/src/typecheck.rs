@@ -1491,6 +1491,25 @@ fn literal_as_i128(value: &str) -> Option<i128> {
     })
 }
 
+/// Static type of a syntax-validated literal, without expanding a sized value.
+/// Type queries need only the size/sign prefix, including for huge operands.
+pub(crate) fn integral_literal_type_metadata(value: &str) -> Option<(usize, bool)> {
+    let normalized = value.trim().replace('_', "");
+    if let Some((size, based)) = normalized.split_once('\'')
+        && !size.is_empty()
+    {
+        let width = size.parse::<usize>().ok()?.max(1);
+        let based = based.to_ascii_lowercase();
+        let signed = based.starts_with('s');
+        let based = based.strip_prefix('s').unwrap_or(&based);
+        if based.len() > 1 && matches!(based.as_bytes()[0], b'b' | b'o' | b'd' | b'h') {
+            return Some((width, signed));
+        }
+        return None;
+    }
+    parse_integral_literal(&normalized).map(|literal| (literal.width, literal.signed))
+}
+
 pub fn parse_integral_literal(value: &str) -> Option<IntegralLiteral> {
     let normalized = value.trim().replace('_', "");
     if let Some(literal) = parse_unbased_unsized_literal(&normalized) {

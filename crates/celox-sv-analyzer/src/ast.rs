@@ -581,7 +581,7 @@ impl Module {
             &const_env,
             &type_aliases,
             &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-            &parameter_value_env(&parameters, &const_env),
+            &parameter_value_env_with_imported(&parameters, &const_env, &imported),
         ) {
             Ok(()) => {}
             // A parameter initializer may inspect a port or signal type
@@ -640,7 +640,7 @@ impl Module {
                     &const_env,
                     &type_aliases,
                     &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                    &parameter_value_env(&parameters, &const_env),
+                    &parameter_value_env_with_imported(&parameters, &const_env, &imported),
                 )?;
             }
             Err(error) => return Err(error),
@@ -2281,6 +2281,11 @@ fn parameter_packed_dimensions_with_imported(
     imported: &scope::ScopeSymbols,
 ) -> VariablePackedDimensions {
     let mut dimensions = parameter_packed_dimensions(&imported.parameters);
+    // A local scalar or implicitly typed parameter also shadows an imported
+    // packed parameter, even though it contributes no explicit packed ranges.
+    for parameter in parameters {
+        dimensions.remove(parameter.name());
+    }
     dimensions.extend(parameter_packed_dimensions(parameters));
     dimensions
 }
@@ -2293,8 +2298,11 @@ fn parameter_value_env_with_imported(
     imported: &scope::ScopeSymbols,
 ) -> HashMap<String, Expr> {
     let mut values = parameter_value_env(parameters, const_env);
+    let local_names: HashSet<_> = parameters.iter().map(Parameter::name).collect();
     for (name, value) in &imported.parameter_values {
-        values.entry(name.clone()).or_insert_with(|| value.clone());
+        if !local_names.contains(name.as_str()) {
+            values.entry(name.clone()).or_insert_with(|| value.clone());
+        }
     }
     values
 }

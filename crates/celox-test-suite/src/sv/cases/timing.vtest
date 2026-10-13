@@ -712,3 +712,25 @@
 (case control_names_do_not_rewrite_the_dut_type
  (source "collision.sv" #"module celox_suite_timed_control(output bit q);initial q=1;endmodule"#)
  (top celox_suite_timed_control)(run_until 0)(assert_eq q 1))
+
+(case attributes_preserve_single_generate_arms
+ (source "attributes.sv" #"module Top(input bit clk,output bit q,r);
+ if(0) always_ff @(posedge clk)q<=0;
+ else (* keep *) always_ff @(posedge clk)q<=1;
+ case(0)
+ 0: (* keep *) always_ff @(posedge clk)r<=1;
+ default: (* keep *) always_ff @(posedge clk)r<=0;
+ endcase endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1)(assert_eq r 1))
+(case adapter_defines_preserve_line_macros
+ (source "line.sv" #"module Top(output int q);
+initial q=`__LINE__;
+endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 2))
+(case callable_timing_keeps_generate_scope
+ (source "scopes.sv" #"module Top(input bit clk,output bit q,r);
+ if(1) begin:untimed task tick;q=1;endtask always @(posedge clk)tick();end
+ if(1) begin:timed task tick;#1 r=1;endtask always @(posedge clk)tick();end
+ endmodule"#)
+ (top Top)(set clk 1)(run_until 1)(assert_eq q 1)(assert_eq r 0)
+ (set clk 0)(eval)(set clk 1)(run_until 2)(assert_eq r 1))

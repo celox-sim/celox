@@ -1451,6 +1451,7 @@ impl<'a> Elaborator<'a, '_> {
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
 fn bind_import(scope: &mut Scope, name: &str, target: &str) {
+    let imported = scope::imported();
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
     // The constant value and type markers of the item, under the name.
@@ -1470,9 +1471,14 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
         .filter_map(|(key, value)| Some((names(key)?, *value)))
         .collect();
     scope.env.extend(constants);
-    match scope.literals.get(target).cloned() {
+    let literal = scope
+        .literals
+        .get(target)
+        .cloned()
+        .or_else(|| imported.parameter_values.get(target).cloned());
+    match &literal {
         Some(value) => {
-            scope.literals.insert(name.to_string(), value);
+            scope.literals.insert(name.to_string(), value.clone());
         }
         None => {
             scope.literals.remove(name);
@@ -1481,6 +1487,24 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
     scope
         .parameters
         .retain(|parameter| parameter.name() != name);
+    // Keep the imported binding's shape and four-state literal as well as its
+    // numeric markers. Later localparam selections must use this block's
+    // import, which can shadow a module import with different declared bounds.
+    if let Some(parameter) = imported
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name() == target)
+    {
+        let mut parameter = parameter.clone();
+        parameter.name = name.to_string();
+        // The exported literal is already evaluated in the package scope.
+        // Keep that snapshot when rebuilding declaration-order environments;
+        // the initializer may name a package dependency absent from this scope.
+        if let Some(value) = literal.and_then(expr_to_const) {
+            parameter.value = Some(value);
+        }
+        scope.parameters.push(parameter);
+    }
 }
 
 // Bootstrap only module-scope functions; collecting the full function map would

@@ -212,7 +212,7 @@ pub enum StmtKind {
     RunTestbench,
     /// `(expect_output TEXT)`: the design printed exactly TEXT with
     /// `$display`/`$write` since the start or the previous `expect_output`.
-    ExpectOutput(String),
+    ExpectOutput(Vec<u8>),
     /// `(run_until TIME)`: advance simulation time to TIME, running the
     /// design's processes, delays and clocks.
     RunUntil(Expr),
@@ -674,7 +674,21 @@ pub fn stmt(form: &Sexpr) -> Result<Stmt, ScriptError> {
         }
         "expect_output" => {
             arity(items, pos, 1, Some(1))?;
-            StmtKind::ExpectOutput(string(&items[1], "output")?)
+            StmtKind::ExpectOutput(if items[1].head() == Some("bytes") {
+                items[1].list().unwrap()[1..]
+                    .iter()
+                    .map(|item| {
+                        item.atom()
+                            .and_then(|atom| atom.parse::<u8>().ok())
+                            .ok_or_else(|| ScriptError {
+                                pos: item.pos(),
+                                message: "expected a byte (0..255)".into(),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                string(&items[1], "output")?.into_bytes()
+            })
         }
         "run_until" => {
             arity(items, pos, 1, Some(1))?;

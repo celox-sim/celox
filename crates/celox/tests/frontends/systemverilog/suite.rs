@@ -41,15 +41,15 @@ fn signal_of<B: SimBackend>(sim: &Simulation<B>, path: &SignalPath) -> celox::Si
     sim.child_signal(&instances, &path.name)
 }
 
-fn collect_output(events: Vec<RuntimeEvent>) -> Result<String> {
-    let mut output = String::new();
+fn collect_output(events: Vec<RuntimeEvent>) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
     for event in events {
         match event {
             RuntimeEvent::Display { message } => {
-                output.push_str(&message);
-                output.push('\n');
+                output.extend_from_slice(&message);
+                output.push(b'\n');
             }
-            RuntimeEvent::Write { message } => output.push_str(&message),
+            RuntimeEvent::Write { message } => output.extend_from_slice(&message),
             RuntimeEvent::Missed { count } => {
                 return Err(format!("{count} runtime events were missed").into());
             }
@@ -88,7 +88,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
         Err("tick is not available in a timed case; the design drives its clocks".into())
     }
 
-    fn take_output(&mut self) -> Result<String> {
+    fn take_output(&mut self) -> Result<Vec<u8>> {
         self.settle_checked()?;
         collect_output(std::mem::take(&mut self.1))
     }
@@ -168,7 +168,7 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
         self.0.tick(self.0.event(event)).map_err(Into::into)
     }
 
-    fn take_output(&mut self) -> Result<String> {
+    fn take_output(&mut self) -> Result<Vec<u8>> {
         collect_output(self.0.drain_runtime_events())
     }
 }

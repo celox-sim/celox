@@ -348,7 +348,7 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "y=1".to_string(),
+            message: b"y=1".to_vec(),
         }]
     );
 
@@ -358,7 +358,7 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
-            message: "y=7".to_string(),
+            message: b"y=7".to_vec(),
         }]
     );
 }
@@ -429,7 +429,7 @@ fn precompiled_runtime_formats_events_with_the_host_time() {
             scope: None,
         }),
         vec![celox::RuntimeEvent::Display {
-            message: "time=37".to_string(),
+            message: b"time=37".to_vec(),
         }]
     );
 }
@@ -491,10 +491,10 @@ fn forced_comb_runtime_events_preserve_procedural_order() {
         runtime.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "before=0".to_string(),
+                message: b"before=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "after=7".to_string(),
+                message: b"after=7".to_vec(),
             },
         ]
     );
@@ -561,10 +561,10 @@ fn precompiled_runtime_distinguishes_write_from_display() {
         runtime.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Write {
-                message: "a".to_string(),
+                message: b"a".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "b".to_string(),
+                message: b"b".to_vec(),
             },
         ]
     );
@@ -596,7 +596,7 @@ fn precompiled_runtime_reports_fatal_assertions() {
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "fatal a=1".to_string(),
+            message: b"fatal a=1".to_vec(),
         }]
     );
 }
@@ -629,7 +629,7 @@ fn precompiled_runtime_reports_sequential_fatal_assertions() {
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
-            message: "ff fatal".to_string(),
+            message: b"ff fatal".to_vec(),
         }]
     );
 }

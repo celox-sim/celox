@@ -1248,5 +1248,22 @@
         "hierarchy::parameter_patterns_override_scalar_defaults"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_packed_parameter_unknown_indices",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects both packed array parameter declarations before the X/Z-index regression can execute. IEEE 1800-2023 11.5.1 requires sized X results for unknown indices of four-state operands and zero for two-state operands. Verilator cannot validate this case's four-state expectations.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_parameter_unknown_indices_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "indexed_select::constant_parameter_initializers_preserve_unknown_indices"
+      ]
+    }
   }
 ]

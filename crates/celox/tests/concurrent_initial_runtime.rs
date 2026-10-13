@@ -87,9 +87,9 @@ fn detailed_assertions_keep_distinct_sites_across_processes_and_instances() {
             .map(|a| (a.passed, a.message.as_deref()))
             .collect::<Vec<_>>(),
         [
-            (false, Some("child")),
-            (false, Some("worker")),
-            (true, Some("last"))
+            (false, Some(b"child".as_slice())),
+            (false, Some(b"worker".as_slice())),
+            (true, Some(b"last".as_slice()))
         ]
     );
 }
@@ -509,7 +509,7 @@ fn concurrent_formatted_time_uses_scheduler_timestamp() {
     let result = Simulator::builder(code, "Top").run_test_detailed().unwrap();
     assert_eq!(
         result.assertions.last().unwrap().message.as_deref(),
-        Some("time=10")
+        Some(b"time=10".as_slice())
     );
 }
 
@@ -533,6 +533,10 @@ fn concurrent_runtime_assertions_use_event_time() {
         .collect();
     assert_eq!(
         messages,
-        vec![Some("ff time=0"), Some("ff time=10"), Some("ff time=20")]
+        vec![
+            Some(b"ff time=0".as_slice()),
+            Some(b"ff time=10".as_slice()),
+            Some(b"ff time=20".as_slice())
+        ]
     );
 }

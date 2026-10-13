@@ -188,12 +188,19 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
             match event {
                 celox::RuntimeEvent::Display { message }
                 | celox::RuntimeEvent::AssertContinue { message } => {
-                    writeln!(stdout, "{message}").unwrap();
+                    stdout.write_all(&message).unwrap();
+                    stdout.write_all(b"\n").unwrap();
                 }
-                celox::RuntimeEvent::Write { message } => write!(stdout, "{message}").unwrap(),
+                celox::RuntimeEvent::Write { message } => stdout.write_all(&message).unwrap(),
                 celox::RuntimeEvent::AssertFatal { message } => {
-                    writeln!(stdout, "{message}").unwrap();
-                    return Err(format!("$fatal: {message}"));
+                    stdout.write_all(&message).unwrap();
+                    stdout.write_all(b"\n").unwrap();
+                    return Err(format!(
+                        "$fatal: {}",
+                        std::str::from_utf8(&message)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|_| message.escape_ascii().to_string())
+                    ));
                 }
                 celox::RuntimeEvent::Finish => {}
                 celox::RuntimeEvent::Missed { count } => {
