@@ -235,3 +235,8 @@ sv_backends! {
  fn timed_file_macros_keep_each_source_path(sim) { @case "timing::timed_file_macros_keep_each_source_path"; }
  fn escaped_identifiers_do_not_collide_with_control_names(sim) { @case "timing::escaped_identifiers_do_not_collide_with_control_names"; }
 }
+
+sv_backends! {
+ fn function_return_bounds_do_not_shadow_local_calls(sim) { @case "timing::function_return_bounds_do_not_shadow_local_calls"; }
+ fn control_shaped_display_is_design_output(sim) { @case "timing::control_shaped_display_is_design_output"; }
+}
