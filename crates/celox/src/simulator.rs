@@ -152,7 +152,7 @@ mod host {
         Finish,
         /// An assertion of a testbench process held.
         AssertPass {
-            message: String,
+            message: Vec<u8>,
         },
         Missed {
             count: u64,
@@ -364,7 +364,7 @@ mod host {
                 }
                 RuntimeEventKind::AssertPass => {
                     if args.is_empty() {
-                        return "assertion passed".to_string();
+                        return b"assertion passed".to_vec();
                     }
                     'x'
                 }

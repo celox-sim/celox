@@ -3147,7 +3147,7 @@ fn clean_component_calls_do_not_replay_comb_assertions() {
         result
             .assertions
             .iter()
-            .filter(|a| a.message.as_deref() == Some("comb"))
+            .filter(|a| a.message.as_deref() == Some(b"comb".as_slice()))
             .count()
     };
     assert_eq!(count("c.get(); c.get();"), count(""));

@@ -48,7 +48,8 @@ pub(crate) fn run_limited<B: SimBackend>(
         .map(|assertion| {
             assertion
                 .message
-                .clone()
+                .as_deref()
+                .map(super::message_diagnostic)
                 .unwrap_or_else(|| "assertion failed".to_string())
         })
         .collect::<Vec<_>>();
@@ -284,7 +285,7 @@ fn drain<B: SimBackend>(
             }),
             RuntimeEvent::AssertFatal { message } => {
                 if drained.fatal.is_none() {
-                    drained.fatal = Some(message.clone());
+                    drained.fatal = Some(super::message_diagnostic(&message));
                 }
                 assertions.push(AssertionResult {
                     passed: false,
@@ -294,7 +295,7 @@ fn drain<B: SimBackend>(
             }
             RuntimeEvent::Missed { count } => assertions.push(AssertionResult {
                 passed: false,
-                message: Some(format!("missed {count} runtime events")),
+                message: Some(format!("missed {count} runtime events").into_bytes()),
                 location: None,
             }),
             RuntimeEvent::Display { message } => forward_display(&message, true),
