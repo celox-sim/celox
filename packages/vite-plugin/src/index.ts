@@ -323,9 +323,16 @@ function generateTestCode(
 		lines.push(
 			`      const __loc = __a.file ? \` (\${__a.file}:\${__a.line}:\${__a.column})\` : "";`,
 		);
+		lines.push(`      let __message = "assertion failed";`);
+		lines.push(`      if (__a.message) {`);
 		lines.push(
-			`      expect.soft(__a.passed, (__a.message ?? "assertion failed") + __loc).toBe(true);`,
+			`        try { __message = new TextDecoder("utf-8", { fatal: true }).decode(__a.message); }`,
 		);
+		lines.push(
+			`        catch { __message = Array.from(__a.message, b => "\\\\x" + b.toString(16).padStart(2, "0")).join(""); }`,
+		);
+		lines.push(`      }`);
+		lines.push(`      expect.soft(__a.passed, __message + __loc).toBe(true);`);
 		lines.push(`    }`);
 		lines.push(`  }`);
 		lines.push(

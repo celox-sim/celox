@@ -84,10 +84,10 @@ fn test_ff_function_unrolled_loop_effects_observe_each_iteration() {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "bit=0 r=0".to_string(),
+                message: b"bit=0 r=0".to_vec(),
             },
             celox::RuntimeEvent::Display {
-                message: "bit=2 r=1".to_string(),
+                message: b"bit=2 r=1".to_vec(),
             },
         ],
     );
@@ -101,7 +101,7 @@ fn displays(sim: &mut celox::Simulator) -> Vec<String> {
     sim.drain_runtime_events()
         .into_iter()
         .map(|event| match event {
-            celox::RuntimeEvent::Display { message } => message,
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
             other => panic!("unexpected runtime event: {other:?}"),
         })
         .collect()

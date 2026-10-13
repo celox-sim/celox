@@ -15,7 +15,7 @@ pub(super) fn expr_static_width(
                     .map(|r#type| r#type.width)
             }),
         Expr::Literal(literal) => {
-            typecheck::parse_integral_literal(literal).map(|literal| literal.width)
+            typecheck::integral_literal_type_metadata(literal).map(|(width, _)| width)
         }
         Expr::Select { msb, lsb, .. } => typecheck::select_range_width(
             &msb.clone().into(),
@@ -79,14 +79,16 @@ pub(super) fn expr_static_width(
             expr_static_width(then_expr, packed_dimensions)?
                 .max(expr_static_width(else_expr, packed_dimensions)?),
         ),
-        Expr::Call { name, args } => typecheck::bit_vector_function_return_type(name, args.len())
-            .map(|(width, _)| width)
-            .or_else(|| {
-                packed_dimensions
-                    .function_return_types
-                    .get(name)
-                    .and_then(|metadata| metadata.width)
-            }),
+        Expr::Call { name, args, .. } => {
+            typecheck::bit_vector_function_return_type(name, args.len())
+                .map(|(width, _)| width)
+                .or_else(|| {
+                    packed_dimensions
+                        .function_return_types
+                        .get(name)
+                        .and_then(|metadata| metadata.width)
+                })
+        }
     }
 }
 

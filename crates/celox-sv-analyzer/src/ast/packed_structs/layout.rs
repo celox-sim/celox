@@ -16,7 +16,9 @@ pub(in crate::ast) fn parse_type(
     const_env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
-    if !matches!(data.nodes.0, sv_parser::StructUnion::Struct(_)) {
+    let union = matches!(data.nodes.0, sv_parser::StructUnion::Union(_));
+    // Tagged unions require a discriminator and are not integral aliases.
+    if !union && !matches!(data.nodes.0, sv_parser::StructUnion::Struct(_)) {
         return None;
     }
     let (_, signing) = data.nodes.1.as_ref()?;
@@ -84,8 +86,18 @@ pub(in crate::ast) fn parse_type(
     let mut width = 0usize;
     // The first declared member occupies the most significant bits.
     for member in members.iter_mut().rev() {
-        member.offset = width;
-        width = width.checked_add(expr_type_from_type(&member.r#type, const_env)?.width)?;
+        let member_width = expr_type_from_type(&member.r#type, const_env)?.width;
+        if union {
+            // IEEE 1800-2023 7.3.1: hard packed members share all bits
+            // and must have the same width.
+            if width != 0 && width != member_width {
+                return None;
+            }
+            width = member_width;
+        } else {
+            member.offset = width;
+            width = width.checked_add(member_width)?;
+        }
     }
     let kind = if members
         .iter()

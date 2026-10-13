@@ -41,6 +41,16 @@ pub(super) fn typed_pattern(
     tree: &SyntaxTree,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
+    let r#type = typed_pattern_type(pattern, tree, dims)?;
+    let shape = procedural::dimensions_from_type(&r#type);
+    expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)
+}
+
+fn typed_pattern_type(
+    pattern: &sv_parser::AssignmentPatternExpression,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<Type> {
     let pattern_type = || unsupported("assignment pattern type");
     let r#type = match pattern.nodes.0.as_ref().ok_or_else(pattern_type)? {
         sv_parser::AssignmentPatternExpressionType::PsTypeIdentifier(identifier) => {
@@ -52,20 +62,96 @@ pub(super) fn typed_pattern(
                 .clone()
         }
         sv_parser::AssignmentPatternExpressionType::IntegerAtomType(atom) => {
-            let atom =
+            let atom_type =
                 integer_atom_expr_type(RefNode::IntegerAtomType(atom)).ok_or_else(pattern_type)?;
-            let mut r#type = Type::new(TypeKind::Bit);
-            r#type.is_signed = atom.signed;
+            let kind = if matches!(
+                atom.as_ref(),
+                sv_parser::IntegerAtomType::Integer(_) | sv_parser::IntegerAtomType::Time(_)
+            ) {
+                TypeKind::Logic
+            } else {
+                TypeKind::Bit
+            };
+            let mut r#type = Type::new(kind);
+            r#type.is_signed = atom_type.signed;
             r#type.packed_ranges = vec![PackedRange::new(
-                ConstExpr::Literal((atom.width - 1).to_string()),
+                ConstExpr::Literal((atom_type.width - 1).to_string()),
                 ConstExpr::Literal("0".to_string()),
             )];
             r#type
         }
         _ => return Err(pattern_type()),
     };
+    Ok(r#type)
+}
+
+/// Serialize a typed constant pattern as positional values already converted
+/// to its caller-side type (IEEE 1800-2023 10.9). Packed values become
+/// literals; only unpacked dimensions need positional patterns.
+pub(super) fn constant_typed_pattern_text(
+    pattern: &sv_parser::AssignmentPatternExpression,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<String> {
+    let r#type = typed_pattern_type(pattern, tree, dims)?;
     let shape = procedural::dimensions_from_type(&r#type);
-    expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)
+    let value = expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)?;
+    let values = dims
+        .parameter_values
+        .iter()
+        .filter(|(name, _)| !dims.const_env.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let value = substitute_expr_constants_with_parameter_literals(value, &dims.const_env, &values);
+    let Expr::Literal(value) = fold_const_integral_expr_preserving_mask(value, &dims.const_env)
+    else {
+        return Err(unsupported("nonconstant typed parameter pattern"));
+    };
+    let value = typecheck::parse_integral_literal(&value)
+        .ok_or_else(|| unsupported("typed parameter pattern value"))?;
+    pattern_value_text(&value, &shape, 0, dims)
+}
+
+fn pattern_value_text(
+    value: &typecheck::IntegralLiteral,
+    shape: &VariableDimensions,
+    offset: usize,
+    dims: &PackedDimensions,
+) -> Converted<String> {
+    let mut parts = Vec::new();
+    if let Some((dimension, rest)) = shape.unpacked.split_first() {
+        let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let element = VariableDimensions {
+            unpacked: rest.to_vec(),
+            ..shape.clone()
+        };
+        let width = shape_width(&element, dims)
+            .ok_or_else(|| unsupported("typed pattern element width"))?;
+        for position in 0..count {
+            parts.push(pattern_value_text(
+                value,
+                &element,
+                offset + position * width,
+                dims,
+            )?);
+        }
+    } else {
+        let width =
+            shape_width(shape, dims).ok_or_else(|| unsupported("typed pattern value width"))?;
+        let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
+        let mut literal = typecheck::IntegralLiteral {
+            value: (&value.value >> offset) & &mask,
+            mask: (&value.mask >> offset) & &mask,
+            width,
+            signed: shape.signed,
+        };
+        if shape.is_2state {
+            literal.value ^= &literal.value & &literal.mask;
+            literal.mask = num_bigint::BigUint::default();
+        }
+        return Ok(typecheck::format_integral_literal_binary(&literal));
+    }
+    Ok(format!("'{{{}}}", parts.join(", ")))
 }
 
 /// The value of one element of a pattern, as a `shape`.
@@ -358,6 +444,11 @@ pub(super) fn expr_from_pattern(
         });
     }
     if !shape.members.is_empty() {
+        // Overlapping members denote a union. A structure pattern would
+        // concatenate the aliases and silently produce a different value.
+        if shape.members.len() > 1 && shape.members.iter().all(|member| member.offset() == 0) {
+            return Err(unsupported("assignment pattern for a packed union"));
+        }
         return struct_pattern(pattern, shape, tree, dims);
     }
     if let Some((dimension, rest)) = shape.packed.split_first()

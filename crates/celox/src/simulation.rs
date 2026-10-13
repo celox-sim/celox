@@ -195,12 +195,11 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .collect();
 
     let mut domain_kinds = vec![None; num_events];
+    let kinds = simulator.program.design.event_kinds();
     for (_, id, _) in topo_signals.iter().copied() {
         if id != usize::MAX {
             let addr = simulator.backend.id_to_addr_slice()[id];
-            if let Some(info) = simulator.program.get_variable_info(&addr) {
-                domain_kinds[id] = Some(info.kind);
-            }
+            domain_kinds[id] = kinds.get(&addr).copied();
         }
     }
 
@@ -784,6 +783,141 @@ mod process_tests {
                 all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
             ))]
             check(build().build_native().unwrap());
+        }
+    }
+    #[cfg(feature = "systemverilog")]
+    const GENERATED_ALIAS_SOURCE: &str = r#"
+module Generator(input logic clk, output logic g);
+    initial g = 0;
+    always_ff @(posedge clk) g <= ~g;
+endmodule
+module Top(input logic cp, cn, output logic [7:0] p, n);
+    logic gp, gn;
+    Generator up(.clk(cp), .g(gp));
+    Generator un(.clk(cn), .g(gn));
+    initial begin p = 0; n = 0; end
+    always_ff @(posedge gp) p <= p + 1;
+    always_ff @(negedge gn) n <= n + 1;
+endmodule
+"#;
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn generated_alias_edges_keep_their_instances_and_stable_phases() {
+        fn check<B: crate::SimBackend>(mut backend: crate::Simulator<B>) {
+            for (expected, address) in backend
+                .program
+                .design
+                .events
+                .ordered_events
+                .iter()
+                .enumerate()
+            {
+                let event = backend.backend.resolve_event(address);
+                assert_eq!(
+                    celox_runtime::backend::EventHandle::id(&event),
+                    expected,
+                    "event handles must match IDs embedded in trigger instructions"
+                );
+            }
+            let cp = backend.signal("cp");
+            let cn = backend.signal("cn");
+            backend
+                .modify(|io| {
+                    io.set(cp, 0u8);
+                    io.set(cn, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("cp", 10, 2);
+            sim.add_clock("cn", 10, 7);
+            sim.run_until(27).unwrap();
+            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
+        }
+        let source = GENERATED_ALIAS_SOURCE;
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("generated_alias.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers()
+            };
+            check(build().build_interpreter().unwrap());
+            check(build().build_cranelift().unwrap());
+            check(build().build_wasm().unwrap());
+            check(build().build_tiered().unwrap());
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            check(build().build_native().unwrap());
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn timed_alias_edges_and_checkpoint_survive_tiered_promotion() {
+        for four_state in [false, true] {
+            let mut backend = crate::Simulator::from_sv_sources(
+                vec![(
+                    GENERATED_ALIAS_SOURCE,
+                    std::path::Path::new("promoted_alias.sv"),
+                )],
+                "Top",
+            )
+            .four_state(four_state)
+            .emit_triggers()
+            .tier_promotion(crate::TierPromotion::AfterSteps(32))
+            .build_tiered()
+            .unwrap();
+            let cp = backend.signal("cp");
+            let cn = backend.signal("cn");
+            backend
+                .modify(|io| {
+                    io.set(cp, 0u8);
+                    io.set(cn, 0u8);
+                })
+                .unwrap();
+            let mut sim = Simulation::new(backend);
+            sim.add_clock("cp", 10, 2);
+            sim.add_clock("cn", 10, 7);
+            let saved = sim.checkpoint().unwrap();
+            assert!(!sim.simulator.is_compiled());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut until = 27u64;
+            loop {
+                sim.run_until(until).unwrap();
+                assert_eq!(
+                    sim.get(sim.signal("p")),
+                    (((until - 2) / 20 + 1) & 255).into()
+                );
+                assert_eq!(
+                    sim.get(sim.signal("n")),
+                    (((until - 17) / 20 + 1) & 255).into()
+                );
+                if sim.simulator.is_compiled() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed tiered backend did not promote"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                until += 10;
+            }
+            sim.restore(&saved).unwrap();
+            assert!(sim.simulator.is_compiled());
+            sim.run_until(27).unwrap();
+            assert_eq!(sim.get(sim.signal("p")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("n")), 1u8.into());
         }
     }
 }

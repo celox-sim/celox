@@ -210,11 +210,16 @@ pub(super) fn simplify_constant_mux_conditions(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name,
             args: args
                 .into_iter()
-                .map(|arg| simplify_constant_mux_conditions(arg, const_env))
+                .map(|arg| arg.map(|arg| simplify_constant_mux_conditions(arg, const_env)))
                 .collect(),
         },
         Expr::Ident(_) | Expr::Literal(_) => expr,
@@ -245,12 +250,20 @@ fn eval_const_integral_expr_preserving_mask(
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<typecheck::IntegralLiteral> {
     match expr {
-        Expr::Select { expr, msb, lsb, .. } => {
-            let operand =
-                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
             let msb = eval_ast_const_expr(msb, const_env)?;
             let lsb = eval_ast_const_expr(lsb, const_env)?;
             let width = usize::try_from(msb.checked_sub(lsb)?.checked_add(1)?).ok()?;
+            if width > MAX_CONSTANT_CONCAT_BITS {
+                return None;
+            }
+            let operand =
+                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
             let mut value = num_bigint::BigUint::default();
             let mut mask = num_bigint::BigUint::default();
             for offset in 0..width {
@@ -269,7 +282,7 @@ fn eval_const_integral_expr_preserving_mask(
             }
             Some(typecheck::IntegralLiteral {
                 width,
-                signed: false,
+                signed: *signed,
                 value,
                 mask,
             })
@@ -369,9 +382,11 @@ fn constant_with_folded_selections_with_lookup(
             then_expr: Box::new(convert(then_expr)?),
             else_expr: Box::new(convert(else_expr)?),
         }),
-        Expr::Call { name, args } => Some(ConstExpr::call(
+        Expr::Call { name, args, .. } => Some(ConstExpr::call(
             name.clone(),
-            args.iter().map(convert).collect::<Option<Vec<_>>>()?,
+            args.iter()
+                .map(|arg| convert(arg.as_ref()?))
+                .collect::<Option<Vec<_>>>()?,
         )),
         _ => expr_to_const(expr.clone()),
     }

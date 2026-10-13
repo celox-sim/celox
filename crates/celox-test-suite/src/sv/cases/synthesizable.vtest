@@ -624,3 +624,148 @@
     (assert_eq ones (popcount value))
     (assert_eq chain (trunc 8 (+ (* (+ value 1) 2) 3)))
     (assert_eq swapped (| (trunc 8 (<< value 4)) (>> value 4)))))
+
+; IEEE 1800-2023 6.21: a nested local is a distinct binding from a top port.
+(case nested_block_locals_shadow_ports
+  (source "nested_scope.sv" #"
+    module Top(input logic c, a, b, output logic t, y);
+        always_comb begin
+            t = 1'b0;
+            if (c) begin
+                logic t;
+                t = a;
+                y = t;
+            end else begin
+                y = b;
+            end
+        end
+    endmodule
+  "#)
+  (top Top)
+  (for (c a b) (list (0 0 1) (1 1 0) (1 0 1) (0 1 0))
+    (modify (set c c) (set a a) (set b b))
+    (assert_eq t 0)
+    (if c (assert_eq y a) (assert_eq y b))))
+
+; Same source names in separate processes must keep separate identities.
+(case block_local_names_shadow_other_signals
+  (source "process_scopes.sv" #"
+    module Top(input logic a, b, output logic t, y, z);
+        assign t = b;
+        always_comb begin logic t; t = a; y = t; end
+        always_comb begin logic t; t = ~a; z = t; end
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0 1) (1 0) (1 1) (0 0))
+    (modify (set a a) (set b b))
+    (assert_eq t b)
+    (assert_eq y a)
+    (assert_eq z (^ a 1))))
+
+(case named_calls_in_constant_contexts
+  (source "named_constants.sv" #"
+    module Top(output logic [31:0] y, output logic ok, output logic [7:0] query);
+      function automatic int f(input int a, b = 2); return a*10 + b; endfunction
+      assign query = {4'($dimensions(f(.a(3)))), 4'($unpacked_dimensions(f(.a(3))))};
+      localparam N = f(.b(2), .a(3));
+      logic [f(.b(2), .a(3))-1:0] word_value;
+      assign word_value = 32'h80000001;
+      assign y = word_value;
+      if (f(.b(3), .a(2)) == 23) begin : selected
+        assign ok = (N == 32);
+      end else begin : rejected
+        assign ok = 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 0x80000001)
+  (assert_eq ok 1)
+  (assert_eq query 0x10))
+
+(case named_calls_respect_generate_signatures
+  (source "named_scoped_calls.sv" #"
+    module Top(input logic [7:0] x, output logic [7:0] outer_y, inner_y);
+      function automatic int f(input int a); return a + 1; endfunction
+      assign outer_y = f(.a(x));
+      if (1) begin : scoped
+        function automatic int f(input int b); return b + 10; endfunction
+        assign inner_y = f(.b(x));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set x 3))
+  (assert_eq outer_y 4)
+  (assert_eq inner_y 13)
+  (modify (set x 8))
+  (assert_eq outer_y 9)
+  (assert_eq inner_y 18))
+
+(case named_calls_preserve_defaults_and_declaration_scope
+  (source "named_defaults.sv" #"
+    module Top(input logic clk, input logic [7:0] a, v,
+               output logic [7:0] y, z, positional, q, constant_value);
+      function automatic int f(input int a = 7, b = a); return a*10 + b; endfunction
+      localparam N = f(.b(3));
+      assign constant_value = N;
+      assign y = f(.b(v));
+      assign positional = f(,v);
+      always_comb begin
+        int a;
+        a = 99;
+        z = f(.a(2));
+      end
+      always_ff @(posedge clk) q <= f(.b(v));
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 5) (set v 3))
+  (assert_eq y 73)
+  (assert_eq z 25)
+  (assert_eq positional 73)
+  (assert_eq constant_value 73)
+  (tick clk)
+  (assert_eq q 73)
+  (modify (set a 9) (set v 4))
+  (assert_eq y 74)
+  (assert_eq z 29)
+  (assert_eq positional 74)
+  (tick clk)
+  (assert_eq q 74))
+
+; IEEE 1800-2023 12.5.1: casex ignores X/Z on either side.
+(case casex_ignores_unknown_selector_bits
+  (four_state)
+  (source "casex_selector.sv" #"
+module Top(input logic clk, input logic [3:0] a,
+           input logic [127:0] wide,
+           output logic [1:0] comb, registered, wide_match);
+    always_comb casex (a)
+        4'b1x0x: comb = 1;
+        4'b01zz: comb = 2;
+        default: comb = 3;
+    endcase
+    always_ff @(posedge clk) casex (a)
+        4'b1x0x: registered <= 1;
+        4'b01zz: registered <= 2;
+        default: registered <= 3;
+    endcase
+    always_comb casex (wide)
+        128'h0: wide_match = 1;
+        default: wide_match = 2;
+    endcase
+endmodule
+"#)
+  (top Top)
+  (for (value mask expected) (list (10 15 1) (0 15 1) (12 5 1) (4 3 2) (4 0 2) (15 0 3))
+    (modify (set a (fourstate value mask)))
+    (assert_eq comb expected)
+    (tick clk)
+    (assert_eq registered expected))
+  (modify (set wide (fourstate 0 (<< 1 100))))
+  (assert_eq wide_match 1)
+  (modify (set wide (fourstate (<< 1 65) (<< 1 100))))
+  (assert_eq wide_match 2))

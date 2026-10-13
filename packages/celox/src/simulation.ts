@@ -1,3 +1,4 @@
+import { withOwnedHandle } from "./handle-ownership.js";
 /**
  * Time-based Simulation.
  *
@@ -135,31 +136,33 @@ export class Simulation<P = Record<string, unknown>> {
 		// test-only plumbing and must not cross the native factory boundary.
 		const { __nativeCreate: _createOverride, ...nativeOptions } = merged;
 		const result = createFn(module.sources, module.name, nativeOptions);
-		const state: DirtyState = { dirty: false };
+		return withOwnedHandle(result.handle, () => {
+			const state: DirtyState = { dirty: false };
 
-		// Always prefer NAPI-derived ports over module.ports (see simulator.ts).
-		const hierarchy = result.hierarchy
-			? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
-			: undefined;
-		const portDefs = hierarchy?.ports ?? module.ports;
-		const dut = createDut<P>(
-			result.buffer,
-			result.layout,
-			portDefs,
-			result.handle,
-			state,
-			hierarchy,
-		);
+			// Always prefer NAPI-derived ports over module.ports (see simulator.ts).
+			const hierarchy = result.hierarchy
+				? filterHierarchyForDse(result.hierarchy, nativeOptions.deadStorePolicy)
+				: undefined;
+			const portDefs = hierarchy?.ports ?? module.ports;
+			const dut = createDut<P>(
+				result.buffer,
+				result.layout,
+				portDefs,
+				result.handle,
+				state,
+				hierarchy,
+			);
 
-		return new Simulation<P>(
-			result.handle,
-			dut,
-			result.events,
-			state,
-			result.buffer,
-			result.layout,
-			result.warnings ?? [],
-		);
+			return new Simulation<P>(
+				result.handle,
+				dut,
+				result.events,
+				state,
+				result.buffer,
+				result.layout,
+				result.warnings ?? [],
+			);
+		});
 	}
 
 	/**
@@ -202,49 +205,50 @@ export class Simulation<P = Record<string, unknown>> {
 			napiOpts,
 		);
 
-		if (isWasmHandle(raw)) {
-			raw.dispose();
-			throw new Error(
-				"Simulation is not supported in WASM mode. " +
-					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
-					"Use Simulator.fromSource() instead.",
+		return withOwnedHandle(raw, () => {
+			if (isWasmHandle(raw)) {
+				throw new Error(
+					"Simulation is not supported in WASM mode. " +
+						"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+						"Use Simulator.fromSource() instead.",
+				);
+			}
+
+			const layout = parseNapiLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+			const hierarchy = filterHierarchyForDse(
+				rawHierarchy,
+				options?.deadStorePolicy,
 			);
-		}
 
-		const layout = parseNapiLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(
-			rawHierarchy,
-			options?.deadStorePolicy,
-		);
+			const ports = buildPortsFromLayout(hierarchy.signals, events);
 
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
+			const buf = raw.sharedMemory().buffer;
 
-		const buf = raw.sharedMemory().buffer;
+			const state: DirtyState = { dirty: false };
+			const handle = wrapDirectSimulationHandle(raw);
+			const dut = createDut<P>(
+				buf,
+				layout.forDut,
+				ports,
+				handle,
+				state,
+				hierarchy,
+			);
 
-		const state: DirtyState = { dirty: false };
-		const handle = wrapDirectSimulationHandle(raw);
-		const dut = createDut<P>(
-			buf,
-			layout.forDut,
-			ports,
-			handle,
-			state,
-			hierarchy,
-		);
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
-
-		return new Simulation<P>(
-			handle,
-			dut,
-			events,
-			state,
-			buf,
-			layout.signals,
-			warnings,
-		);
+			return new Simulation<P>(
+				handle,
+				dut,
+				events,
+				state,
+				buf,
+				layout.signals,
+				warnings,
+			);
+		});
 	}
 
 	/** Create a timed Simulation from an external frontend artifact. */
@@ -269,34 +273,36 @@ export class Simulation<P = Record<string, unknown>> {
 			artifactJson,
 			buildNapiOpts(options),
 		);
-		const layout = parseNapiLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const hierarchy = filterHierarchyForDse(
-			parseHierarchyLayout(raw.hierarchyJson, events),
-			options?.deadStorePolicy,
-		);
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
-		const buffer = raw.sharedMemory().buffer;
-		const handle = wrapDirectSimulationHandle(raw);
-		const state: DirtyState = { dirty: false };
-		const dut = createDut<P>(
-			buffer,
-			layout.forDut,
-			ports,
-			handle,
-			state,
-			hierarchy,
-		);
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
-		return new Simulation<P>(
-			handle,
-			dut,
-			events,
-			state,
-			buffer,
-			layout.signals,
-			warnings,
-		);
+		return withOwnedHandle(raw, () => {
+			const layout = parseNapiLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const hierarchy = filterHierarchyForDse(
+				parseHierarchyLayout(raw.hierarchyJson, events),
+				options?.deadStorePolicy,
+			);
+			const ports = buildPortsFromLayout(hierarchy.signals, events);
+			const buffer = raw.sharedMemory().buffer;
+			const handle = wrapDirectSimulationHandle(raw);
+			const state: DirtyState = { dirty: false };
+			const dut = createDut<P>(
+				buffer,
+				layout.forDut,
+				ports,
+				handle,
+				state,
+				hierarchy,
+			);
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+			return new Simulation<P>(
+				handle,
+				dut,
+				events,
+				state,
+				buffer,
+				layout.signals,
+				warnings,
+			);
+		});
 	}
 
 	/**
@@ -339,51 +345,52 @@ export class Simulation<P = Record<string, unknown>> {
 			napiOpts,
 		);
 
-		if (isWasmHandle(raw)) {
-			raw.dispose();
-			throw new Error(
-				"Simulation is not supported in WASM mode. " +
-					"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
-					"Use Simulator.fromProject() instead.",
+		return withOwnedHandle(raw, () => {
+			if (isWasmHandle(raw)) {
+				throw new Error(
+					"Simulation is not supported in WASM mode. " +
+						"The WASM-compiled addon only supports event-based Simulator, not time-based Simulation. " +
+						"Use Simulator.fromProject() instead.",
+				);
+			}
+
+			const layout = parseNapiLayout(raw.layoutJson);
+			const events: Record<string, number> = JSON.parse(raw.eventsJson);
+			const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
+			const hierarchy = filterHierarchyForDse(
+				rawHierarchy,
+				options?.deadStorePolicy,
 			);
-		}
 
-		const layout = parseNapiLayout(raw.layoutJson);
-		const events: Record<string, number> = JSON.parse(raw.eventsJson);
-		const rawHierarchy = parseHierarchyLayout(raw.hierarchyJson, events);
-		const hierarchy = filterHierarchyForDse(
-			rawHierarchy,
-			options?.deadStorePolicy,
-		);
+			const ports = buildPortsFromLayout(hierarchy.signals, events);
 
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
+			const buf = raw.sharedMemory().buffer;
+			const defaultMaxSteps = raw.defaultMaxSteps ?? undefined;
 
-		const buf = raw.sharedMemory().buffer;
-		const defaultMaxSteps = raw.defaultMaxSteps ?? undefined;
+			const state: DirtyState = { dirty: false };
+			const handle = wrapDirectSimulationHandle(raw);
+			const dut = createDut<P>(
+				buf,
+				layout.forDut,
+				ports,
+				handle,
+				state,
+				hierarchy,
+			);
 
-		const state: DirtyState = { dirty: false };
-		const handle = wrapDirectSimulationHandle(raw);
-		const dut = createDut<P>(
-			buf,
-			layout.forDut,
-			ports,
-			handle,
-			state,
-			hierarchy,
-		);
+			const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 
-		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
-
-		return new Simulation<P>(
-			handle,
-			dut,
-			events,
-			state,
-			buf,
-			layout.signals,
-			warnings,
-			defaultMaxSteps,
-		);
+			return new Simulation<P>(
+				handle,
+				dut,
+				events,
+				state,
+				buf,
+				layout.signals,
+				warnings,
+				defaultMaxSteps,
+			);
+		});
 	}
 
 	/** The DUT accessor object — read/write ports as plain properties. */

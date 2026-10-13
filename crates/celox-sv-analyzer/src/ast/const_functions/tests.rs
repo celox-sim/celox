@@ -41,6 +41,8 @@ fn fixed_ty(width: usize, signed: bool) -> crate::ir::Type {
 
 fn function(name: &str, params: Vec<(&str, crate::ir::Type)>, body: Vec<Stmt>) -> ConstantFunction {
     ConstantFunction {
+        argument_names: params.iter().map(|(name, _)| (*name).to_string()).collect(),
+        argument_defaults: vec![None; params.len()],
         params: params
             .into_iter()
             .map(|(name, ty)| (name.into(), ty))
@@ -70,6 +72,7 @@ fn functions() -> ConstantFunctions {
         vec![("x", fixed_ty(32, true))],
         vec![Stmt::Return(Some(binary(
             Expr::Call {
+                arg_order: Vec::new(),
                 name: "read".into(),
                 args: vec![],
             },
@@ -85,8 +88,9 @@ fn functions() -> ConstantFunctions {
             then_body: vec![Stmt::Return(Some(ident("GLOBAL")))],
             else_body: vec![Stmt::Return(Some(binary(
                 Expr::Call {
+                    arg_order: Vec::new(),
                     name: "recursive".into(),
-                    args: vec![binary(ident("n"), BinaryOp::Sub, literal("1"))],
+                    args: vec![Some(binary(ident("n"), BinaryOp::Sub, literal("1")))],
                 },
                 BinaryOp::Add,
                 literal("1"),

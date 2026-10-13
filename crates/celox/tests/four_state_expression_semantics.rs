@@ -86,7 +86,7 @@ module Top (
             assert_eq!(
                 sim.drain_runtime_events(),
                 vec![celox::RuntimeEvent::AssertContinue {
-                    message: "bad condition".to_string(),
+                    message: b"bad condition".to_vec(),
                 }],
                 "cond={label}",
             );
@@ -131,7 +131,7 @@ module Top (
             assert_eq!(
                 sim.drain_runtime_events(),
                 vec![celox::RuntimeEvent::AssertContinue {
-                    message: "bad condition".to_string(),
+                    message: b"bad condition".to_vec(),
                 }],
                 "only {label} must fail",
             );

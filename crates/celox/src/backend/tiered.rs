@@ -2383,7 +2383,10 @@ module Top (
             let RuntimeEvent::Display { message } = event else {
                 panic!("unexpected event {event:?}");
             };
-            assert_eq!(message.as_str(), format!("tick {index}"));
+            assert_eq!(
+                std::str::from_utf8(message).unwrap(),
+                format!("tick {index}")
+            );
         }
 
         gate.open();
@@ -2411,7 +2414,7 @@ module Top (
                 panic!("unexpected event {event:?}");
             };
             assert_eq!(
-                message.as_str(),
+                std::str::from_utf8(message).unwrap(),
                 format!("tick {}", base.wrapping_add(index as u8))
             );
         }

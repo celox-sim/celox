@@ -151,10 +151,10 @@ module Top (clk: input clock, d: input logic) {
         sim.drain_runtime_events(),
         vec![
             celox::RuntimeEvent::Display {
-                message: "display d=1".to_string(),
+                message: b"display d=1".to_vec(),
             },
             celox::RuntimeEvent::Write {
-                message: "write d=1".to_string(),
+                message: b"write d=1".to_vec(),
             },
         ]
     );

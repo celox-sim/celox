@@ -249,3 +249,28 @@ const sim = Simulator.fromSource(SOURCE, "Adder", {
 - [Dead Store Elimination](./dead-store-elimination.md) -- Speeding up simulation with DSE.
 - [Architecture](/internals/architecture) -- The simulation pipeline in detail.
 - [API Reference](/api/) -- Full TypeScript API documentation.
+
+### HDL output bytes
+
+Rust runtime events (`RuntimeEvent::{Display, Write, AssertContinue, AssertFatal}`)
+and detailed testbench assertion messages return `Vec<u8>`. JavaScript
+`runTest`, `runTestFromProject`, and `runTestWithFrontendArtifact` return
+assertion messages as `Uint8Array`. `%s` and `%c` may contain non-UTF-8 bytes or
+NUL, so byte payloads are never decoded implicitly. Display/write forwarding
+also writes the bytes directly.
+
+Decode explicitly when the design emits UTF-8 text:
+
+```ts
+const text = new TextDecoder("utf-8", { fatal: true }).decode(
+  result.assertions[0]?.message,
+);
+```
+
+In Rust, use `String::from_utf8(message)` to validate UTF-8, or compare the
+bytes directly. Simulator errors and test failure summaries are human-readable
+diagnostics: invalid UTF-8 payloads appear as escaped bytes in those summaries,
+while the original bytes remain in the event or assertion result.
+
+This replaces the earlier string message API; update string comparisons to
+byte comparisons or explicit decoding.

@@ -251,7 +251,7 @@ fn loading_does_not_report_combinational_display_changes() {
     assert_eq!(
         target.drain_runtime_events(),
         [RuntimeEvent::Display {
-            message: "q=9".into()
+            message: b"q=9".to_vec()
         }]
     );
 }

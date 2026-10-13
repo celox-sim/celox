@@ -93,29 +93,10 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
     );
 }
 
-#[test]
-fn rejects_block_local_declarations_inside_always_comb() {
-    let error = cranelift_build_error(
-        r#"
-        module Top(input logic c, a, b, output logic t, y);
-            always_comb begin
-                t = 1'b0;
-                if (c) begin
-                    logic t;
-                    t = a;
-                    y = t;
-                end else begin
-                    y = b;
-                end
-            end
-        endmodule
-        "#,
-    );
-    // The local `t` would be hoisted onto the output port `t`.
-    assert!(
-        error.contains("duplicate port or signal name `t`"),
-        "unexpected error: {error}"
-    );
+sv_backends! {
+    fn nested_block_local_declarations_shadow_ports(sim) {
+        @case "synthesizable::nested_block_locals_shadow_ports";
+    }
 }
 
 #[test]
@@ -5487,7 +5468,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "unpacked struct, union, or unsupported packed struct member",
             r#"
             module Top(output logic [7:0] y);
-                union packed { logic [7:0] a; logic [7:0] b; } value;
+                union packed { logic [7:0] a; logic [3:0] b; } value;
                 assign y = value;
             endmodule
         "#,
@@ -8465,7 +8446,7 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
     let ticks = |n: usize| {
         (0..n)
             .map(|i| celox::RuntimeEvent::Display {
-                message: format!("tick {i}"),
+                message: format!("tick {i}").into_bytes(),
             })
             .collect::<Vec<_>>()
     };

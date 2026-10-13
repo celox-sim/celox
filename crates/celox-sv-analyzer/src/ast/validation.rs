@@ -169,9 +169,20 @@ fn reject_silently_ignored_constructs_with_dimensions(
             _ => None,
         })
         .collect();
-    // Typed indexed lowering validates casts in bases, widths and supported
+    let parameter_indexed_ranges: Vec<_> = validation_nodes(node.clone(), is_module)
+        .filter_map(|child| match child {
+            RefNode::ParamAssignment(parameter) => parameter.nodes.2.as_ref(),
+            _ => None,
+        })
+        .flat_map(|(_, expression)| expression.into_iter())
+        .filter_map(|child| match child {
+            RefNode::ConstantIndexedRange(range) => Some(range),
+            _ => None,
+        })
+        .collect();
+    // Typed selection lowering validates casts in bases, widths and supported
     // parameter initializers. Keep the generic cast checks for other contexts.
-    let typed_indexed_casts: Vec<_> = validation_nodes(node.clone(), is_module)
+    let typed_selection_casts: Vec<_> = validation_nodes(node.clone(), is_module)
         .filter_map(|child| match child {
             RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => Some(child),
             RefNode::ParamAssignment(parameter) => parameter
@@ -179,12 +190,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 .2
                 .as_ref()
                 .filter(|(_, expression)| {
-                    expression.into_iter().any(|child| {
-                        matches!(
-                            child,
-                            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_)
-                        )
-                    })
+                    selects::parameter_initializer_needs_typed_lowering(expression)
                 })
                 .map(|(_, expression)| RefNode::ConstantParamExpression(expression)),
             _ => None,
@@ -258,18 +264,13 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 });
             }
         }
-        // A parameter initializer with an indexed select is lowered through
+        // A parameter initializer with a part-select or multiple indices uses
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
             && let Some((_, expression)) = parameter.nodes.2.as_ref()
-            && expression.into_iter().any(|child| {
-                matches!(
-                    child,
-                    RefNode::ConstantIndexedRange(_) | RefNode::IndexedRange(_)
-                )
-            })
+            && selects::parameter_initializer_needs_typed_lowering(expression)
         {
-            selects::indexed_parameter_initializer(
+            selects::selected_parameter_initializer(
                 expression,
                 syntax_tree,
                 indexed_dimensions,
@@ -311,15 +312,16 @@ fn reject_silently_ignored_constructs_with_dimensions(
             // Subroutine bodies may cast to the width of a local parameter;
             // their lowering rejects the casts it cannot express.
             RefNode::Cast(cast)
-                if !typed_indexed_casts.contains(&RefNode::Cast(cast))
+                if !typed_selection_casts.contains(&RefNode::Cast(cast))
                     && !subroutine_casts.contains(&RefNode::Cast(cast))
                     && !cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
             {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
             RefNode::ConstantCast(cast)
-                if !typed_indexed_casts.contains(&RefNode::ConstantCast(cast))
-                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases) =>
+                if !typed_selection_casts.contains(&RefNode::ConstantCast(cast))
+                    && !constant_cast_is_supported(cast, syntax_tree, const_env, type_aliases)
+                    && casts::constant_cast_with_dimensions(cast, syntax_tree, indexed_dimensions).is_none() =>
             {
                 return Err(AnalyzerError::Unsupported("constant cast expression".to_string()));
             }
@@ -421,6 +423,11 @@ fn reject_silently_ignored_constructs_with_dimensions(
             RefNode::ConstantIndexedRange(range) => {
                 if !lowered_constant_indexed_ranges.contains(&range) {
                     return Err(AnalyzerError::Unsupported("indexed part-select".to_string()));
+                }
+                // The parameter's typed initializer has already validated the
+                // width and folded constant X/Z bases into correctly sized X.
+                if parameter_indexed_ranges.contains(&range) {
+                    continue;
                 }
                 let base = indexed_select_base(
                     RefNode::ConstantExpression(&range.nodes.0),

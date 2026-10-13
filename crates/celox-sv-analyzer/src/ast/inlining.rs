@@ -19,7 +19,7 @@ pub(super) fn expr_signedness_with_return_types(
     match expr {
         Expr::Ident(name) => identifiers.signedness(name),
         Expr::Literal(literal) => {
-            typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
+            typecheck::integral_literal_type_metadata(literal).map(|(_, signed)| signed)
         }
         Expr::Select { signed, .. } => Some(*signed),
         Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
@@ -97,14 +97,16 @@ pub(super) fn expr_signedness_with_return_types(
             )?,
         ),
         Expr::Inside { .. } => Some(false),
-        Expr::Call { name, args } => typecheck::bit_vector_function_return_type(name, args.len())
-            .map(|(_, signed)| signed)
-            .or_else(|| functions.get(name).map(|function| function.return_signed))
-            .or_else(|| {
-                function_return_types
-                    .get(name)
-                    .map(|metadata| metadata.signed)
-            }),
+        Expr::Call { name, args, .. } => {
+            typecheck::bit_vector_function_return_type(name, args.len())
+                .map(|(_, signed)| signed)
+                .or_else(|| functions.get(name).map(|function| function.return_signed))
+                .or_else(|| {
+                    function_return_types
+                        .get(name)
+                        .map(|metadata| metadata.signed)
+                })
+        }
     }
 }
 
@@ -130,8 +132,8 @@ pub(super) fn calls_subroutine(expr: &Expr) -> bool {
         }
     }
     match expr {
-        Expr::Call { name, args } => {
-            !system_functions::is_system_name(name) || args.iter().any(calls_subroutine)
+        Expr::Call { name, args, .. } => {
+            !system_functions::is_system_name(name) || args.iter().flatten().any(calls_subroutine)
         }
         Expr::Ident(_) | Expr::Literal(_) => false,
         Expr::Select { expr, msb, lsb, .. } => {
@@ -312,36 +314,57 @@ pub(super) fn expand_expr_calls(
                 })
                 .collect(),
         },
-        Expr::Call { name, args } => {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => {
             let args = args
                 .into_iter()
                 .map(|arg| {
-                    expand_expr_calls(
-                        arg,
-                        functions,
-                        expression_signedness,
-                        depth,
-                        apply_return_type,
-                    )
+                    arg.map(|arg| {
+                        expand_expr_calls(
+                            arg,
+                            functions,
+                            expression_signedness,
+                            depth,
+                            apply_return_type,
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             let Some(function) = functions.get(&name) else {
-                return Expr::Call { name, args };
+                return Expr::Call {
+                    name,
+                    args,
+                    arg_order,
+                };
             };
             let Some(function_body) = &function.body else {
-                return Expr::Call { name, args };
+                return Expr::Call {
+                    name,
+                    args,
+                    arg_order,
+                };
             };
             // Inlining copies or drops an argument with its parameter, and
             // copies the calls of the body with their sites; a subroutine call
             // in either runs once per evaluation instead.
-            if function.params.len() != args.len() || args.iter().any(calls_subroutine) {
-                return Expr::Call { name, args };
+            if function.params.len() != args.len()
+                || args.iter().any(Option::is_none)
+                || args.iter().flatten().any(calls_subroutine)
+            {
+                return Expr::Call {
+                    name,
+                    args,
+                    arg_order,
+                };
             }
             let call_args = args.clone();
             let env = function
                 .params
                 .iter()
-                .zip(args)
+                .zip(args.into_iter().flatten())
                 .map(|(param, arg)| {
                     let mut arg = if apply_return_type && let Some(width) = param.width {
                         let assigned = Expr::Resize {
@@ -377,6 +400,7 @@ pub(super) fn expand_expr_calls(
             );
             if calls_subroutine(&expanded) {
                 return Expr::Call {
+                    arg_order,
                     name,
                     args: call_args,
                 };
@@ -474,11 +498,16 @@ pub(super) fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) ->
                 .map(|item| item.map(&mut |operand| substitute_expr_idents(operand, env)))
                 .collect(),
         },
-        Expr::Call { name, args } => Expr::Call {
+        Expr::Call {
+            name,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_expr_idents(arg, env))
+                .map(|arg| arg.map(|arg| substitute_expr_idents(arg, env)))
                 .collect(),
         },
     }

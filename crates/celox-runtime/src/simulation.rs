@@ -131,6 +131,7 @@ pub struct SimulationState<B: SimBackend> {
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
     signal_to_id: FxHashMap<SignalRef, usize>,
+    signal_index_by_id: Vec<usize>,
     processes: Vec<ProcessRefs>,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     /// A process requested the end of the simulation.
@@ -149,6 +150,23 @@ impl<B: SimBackend> SimulationState<B> {
             if value != 0 {
                 self.last_clock_values.insert(*id);
             }
+        }
+    }
+
+    fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
+        let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+            return true;
+        };
+        let was_nonzero = self.last_clock_values.contains(id);
+        let is_nonzero = backend.get_as::<u8>(*signal) != 0;
+        match self.domain_kinds[id] {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                !was_nonzero && is_nonzero
+            }
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                was_nonzero && !is_nonzero
+            }
+            _ => was_nonzero != is_nonzero,
         }
     }
 
@@ -186,11 +204,13 @@ impl<B: SimBackend> SimulationState<B> {
     ) -> Self {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
-        for (signal, id, _) in topo_signals.iter().copied() {
+        let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
+        for (index, (signal, id, _)) in topo_signals.iter().copied().enumerate() {
             if id == usize::MAX {
                 continue;
             }
             signal_to_id.insert(signal, id);
+            signal_index_by_id[id] = index;
             let value: u8 = backend.get_as(signal);
             if value != 0 {
                 last_clock_values.insert(id);
@@ -205,6 +225,7 @@ impl<B: SimBackend> SimulationState<B> {
             domain_kinds,
             event_info,
             signal_to_id,
+            signal_index_by_id,
             process_wakeups: (0..processes.len())
                 .map(|process| Reverse((0, process)))
                 .collect(),
@@ -511,12 +532,17 @@ impl<B: SimBackend> SimulationState<B> {
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
-                    discovered_in_this_step.insert(id);
-
                     let info = self.event_info[id];
                     if triggered_domains.contains(info.canonical_id) {
                         continue;
                     }
+                    // Native trigger bits can be coarse hints raised by a
+                    // working-region write before its commit. A derived clock
+                    // must have the requested stable edge before its FFs run.
+                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                        continue;
+                    }
+                    discovered_in_this_step.insert(id);
                     triggered_domains.insert(info.canonical_id);
                     any_new_sequential_trigger = true;
                     newly_triggered.push(info.canonical_id);
