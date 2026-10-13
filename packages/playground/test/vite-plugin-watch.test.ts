@@ -596,3 +596,42 @@ test.each(["create", "delete"])(
 		expect(runGenTs).toHaveBeenCalledTimes(2);
 	},
 );
+
+test("build watch ignores generated-only notifications and preserves real edits", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-build-output-"));
+	roots.push(root);
+	const entry = join(root, "components.ts");
+	const helper = join(root, "helper.ts");
+	writeFileSync(entry, "export {};");
+	const plugin = celox({ projectRoot: root, testbenchComponents: entry });
+	await (plugin.configResolved as Function)({ root, command: "build" });
+	const context = { addWatchFile: vi.fn(), meta: { watchMode: true } };
+	const build = () => (plugin.buildStart as Function).call(context);
+	const changed = (name: string) =>
+		(plugin.watchChange as Function | undefined)?.(join(root, name));
+	await build();
+	const calls = vi.mocked(runGenTs).mock.calls.length;
+	for (const name of [
+		".celox/src/Main.d.veryl.ts",
+		".celox/.generation-locks/claim",
+	]) {
+		context.addWatchFile.mockClear();
+		changed(name);
+		await build();
+		expect(runGenTs).toHaveBeenCalledTimes(calls);
+		for (const dependency of [root, join(root, "Veryl.lock"), entry, helper])
+			expect(context.addWatchFile).toHaveBeenCalledWith(dependency);
+	}
+	// A real edit arriving alongside a delayed output event must still run.
+	for (const name of ["src/Main.veryl", "celox.toml", "helper.ts"]) {
+		const before = vi.mocked(runGenTs).mock.calls.length;
+		changed(".celox/.generation-locks/claim");
+		changed(name);
+		await build();
+		expect(runGenTs).toHaveBeenCalledTimes(before + 1);
+	}
+	// A build without watch notifications (including a retry) still generates.
+	const before = vi.mocked(runGenTs).mock.calls.length;
+	await build();
+	expect(runGenTs).toHaveBeenCalledTimes(before + 1);
+});

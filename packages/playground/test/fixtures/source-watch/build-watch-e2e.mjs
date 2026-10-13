@@ -18,6 +18,7 @@ const viteRoot = join(fixture, "client");
 let watcher;
 let builds = 0;
 let failure;
+const changes = [];
 async function waitForBuild(previous) {
 	const deadline = Date.now() + 15_000;
 	while (builds <= previous && !failure && Date.now() < deadline)
@@ -30,8 +31,16 @@ async function waitForBuild(previous) {
 	const maximum = Number(version.split(".")[0]) >= 8 ? 2 : 1;
 	assert.ok(
 		builds <= previous + maximum,
-		"generated files caused a rebuild loop",
+		`generated files caused a rebuild loop (${previous} -> ${builds}): ${changes.join(", ")}`,
 	);
+	const settled = builds;
+	await new Promise((resolve) => setTimeout(resolve, 1000));
+	assert.equal(
+		builds,
+		settled,
+		`idle build watch did not settle: ${changes.join(", ")}`,
+	);
+	changes.length = 0;
 }
 try {
 	mkdirSync(join(root, "src"), { recursive: true });
@@ -55,7 +64,15 @@ try {
 		configFile: false,
 		publicDir: false,
 		logLevel: "silent",
-		plugins: [celox({ projectRoot: root })],
+		plugins: [
+			celox({ projectRoot: root }),
+			{
+				name: "record-build-watch-changes",
+				watchChange(id) {
+					changes.push(id);
+				},
+			},
+		],
 		build: {
 			watch: {},
 			lib: {

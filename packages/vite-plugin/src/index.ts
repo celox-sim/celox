@@ -46,6 +46,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let viteConfig: ResolvedConfig;
 	let projectId: string;
 	const loadedIds = new Set<string>();
+	const buildChanges = new Set<string>();
 	let pendingRegeneration: Promise<void> | undefined;
 	let lastUpdate:
 		| { file: string; timestamp: number; result: Promise<boolean> }
@@ -201,12 +202,34 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 		},
 
+		watchChange(id) {
+			buildChanges.add(normalizePath(id));
+		},
+
 		async buildStart() {
+			const changes = [...buildChanges];
+			buildChanges.clear();
 			if (viteConfig.command === "build" && this.meta.watchMode) {
 				// configureServer is not called by vite build --watch. Watch the
 				// catalogue too, including sources/configuration that don't exist yet.
 				this.addWatchFile(projectRoot);
 				for (const name of CONFIG_FILES) this.addWatchFile(projectFile(name));
+			}
+			// Rolldown reports output and lock-claim events from the recursive
+			// project watcher despite watch.exclude. Do not acquire another lock
+			// for an output-only rebuild: releasing it would trigger another one.
+			if (
+				generatedData &&
+				changes.length > 0 &&
+				changes.every(
+					(file) =>
+						file.startsWith(`${projectFile(SIDECAR_DIR)}/`) &&
+						!testbenchComponentDependencies.has(file),
+				)
+			) {
+				for (const dependency of testbenchComponentDependencies)
+					this.addWatchFile(dependency);
+				return;
 			}
 			let componentManifests: TestbenchComponentManifests | undefined;
 			if (testbenchComponents) {
