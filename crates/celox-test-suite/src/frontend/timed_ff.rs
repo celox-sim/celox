@@ -256,13 +256,31 @@ pub(super) fn gated(
         unreachable!()
     };
     let armed = fresh("armed");
-    let pending = fresh("pending");
+    let captured = fresh("captured");
     let package = &names.package;
     let event = &source[begin + 1..event_end - 1];
     let replacement_start = attributes_start(source, start);
     let attributes = &source[replacement_start..start];
+    let mut declarations = String::new();
+    let mut samples = Vec::new();
+    let mut active = Vec::new();
+    for (index, leaf) in event_leaves(event).into_iter().enumerate() {
+        let leaf = after_trivia(leaf);
+        let (_, end, edge) = *sv_words(leaf).first().ok_or("empty FF event")?;
+        if !matches!(edge, "posedge" | "negedge") {
+            return Err("FF staging requires edge-qualified events".into());
+        }
+        let sample = format!("1'({})", &leaf[end..]);
+        let baseline = fresh(&format!("baseline_{index}"));
+        declarations.push_str(&format!("logic {baseline};\n"));
+        samples.push(format!("{baseline}={sample};"));
+        let (from, to) = if edge == "posedge" { (0, 1) } else { (1, 0) };
+        active.push(format!("(({baseline}===1'b{from} && {sample}!==1'b{from}) || ({baseline}!==1'b{to} && {sample}===1'b{to}))"));
+    }
+    let samples = samples.join(" ");
+    let active = active.join(" || ");
     let staged = format!(
-        "bit {armed}=0;\nbit {pending}=0;\n{attributes}always @({event} or posedge {package}::started) begin\n  if (!{package}::started) {pending}=1;\n  else if ({armed} || {pending}) begin\n    {pending}=0;\n    {body}\n  end\n  {armed}={package}::started;\nend"
+        "bit {armed}=0;\nbit {captured}=0;\n{declarations}{attributes}always @({event} or posedge {package}::setup_started or posedge {package}::started) begin\n  if (!{package}::started) begin\n    if ({package}::setup_started && !{captured}) begin {samples} {captured}=1; end\n  end\n  else if ({armed} || ({active})) begin\n    {body}\n  end\n  {armed}={package}::started;\nend"
     );
     // A single generate item needs a block for the additional declarations.
     // Reuse that construct's unnamed body rather than inserting another if,
@@ -294,6 +312,13 @@ pub(super) fn edge_control(source: &str, end: usize, tasks: &TaskTiming) -> bool
         return false;
     }
     let event = &source[begin + 1..end - 1];
+    event_leaves(event).into_iter().all(|leaf| {
+        let leaf = after_trivia(leaf);
+        matches!(sv_words(leaf).first(), Some((0, _, "posedge" | "negedge")))
+    })
+}
+
+fn event_leaves(event: &str) -> Vec<&str> {
     let ors = sv_words(event)
         .into_iter()
         .filter_map(|(start, _, word)| (word == "or").then_some(start))
@@ -320,10 +345,7 @@ pub(super) fn edge_control(source: &str, end: usize, tasks: &TaskTiming) -> bool
         at += 1;
     }
     leaves.push(&event[start..]);
-    leaves.into_iter().all(|leaf| {
-        let leaf = after_trivia(leaf);
-        matches!(sv_words(leaf).first(), Some((0, _, "posedge" | "negedge")))
-    })
+    leaves
 }
 
 /// Multiline macro replacements must keep every generated line in the

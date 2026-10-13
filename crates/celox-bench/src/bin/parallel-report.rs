@@ -475,8 +475,19 @@ fn main() -> Result<(), Error> {
     };
     let summary = if let Some(ticks) = args.testbench_ticks {
         match args.backend {
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             Backend::Native => {
                 exercise_testbench(&args, builder().build_native()?, ticks, &window)?
+            }
+            #[cfg(not(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            )))]
+            Backend::Native => {
+                return Err("native execution is unavailable for this target/codegen configuration; use --backend cranelift".into());
             }
             Backend::Cranelift => {
                 exercise_testbench(&args, builder().build_cranelift()?, ticks, &window)?
@@ -484,11 +495,22 @@ fn main() -> Result<(), Error> {
         }
     } else {
         match args.backend {
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
             Backend::Native => {
                 let p = builder().build_native()?;
                 active.store(false, Ordering::Relaxed);
                 let s = Simulator::builder(&source, &args.top).build_native()?;
                 exercise(&args, p, s, active, &outputs)?
+            }
+            #[cfg(not(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            )))]
+            Backend::Native => {
+                return Err("native execution is unavailable for this target/codegen configuration; use --backend cranelift".into());
             }
             Backend::Cranelift => {
                 let p = builder().build_cranelift()?;

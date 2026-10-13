@@ -1146,7 +1146,7 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         );
         out = out.replace(
             "  initial begin\n",
-            "  initial begin\n    settle_queues();\n",
+            "  initial begin\n    settle_queues();\n    celox_suite_begin_setup();\n    settle_queues();\n",
         );
     }
     Ok(out)

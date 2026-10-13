@@ -190,6 +190,58 @@ In testbench mode, `--observe SIGNAL` records the final value as a hexadecimal
 snapshot; it does not compare it against another simulator. Constant `--set`
 assignments are rejected because the testbench owns the input stimulus.
 
+### Compare the plan with execution
+
+Execution shows the recorded combinational partition estimate (left, abstract
+cost units) beside the selected measured dispatch (right, nanoseconds). The
+adopted candidate is selected initially when its recorded decision is available;
+use Recorded static candidate to inspect alternatives. Its axis includes item
+costs, task overhead and cross-lane synchronization, and its reconstructed
+makespan must equal the recorded candidate score. It never uses measured task
+durations or converts static weights to time.
+
+The panels describe different compilation stages. Source partition tasks use
+`pN` labels; optimized runtime tasks use `tN` labels. Equal numbers do not identify
+the same task. Runtime dispatches can also contain FF work absent from the
+combinational estimate. The measured phase is shown above the right panel. Click
+either panel for its own metadata; the table below lists measured runtime tasks.
+Changing the dispatch does not change the static estimate.
+
+Schema-1 captures with Rust Debug candidate task tables are supported as well as
+new structured tables. Missing or inconsistent static evidence produces an
+explicit unavailable/error message, never a prediction derived from measurements.
+Regenerate existing HTML using `scripts/render-parallel-report.mjs`.
+
+The Task lineage table links adopted source tasks through their recorded
+lowered unit indices to compiled tasks. Hover a `p` or `t` to highlight all
+counterparts, including splits and merges; clicking shows the unit-level links.
+Runtime rows distinguish FF-only tasks and tasks containing both comb and FF
+units. These links describe compilation origin, not the fraction of instructions
+that survived optimization or an allocation of measured time to source tasks.
+
+For schema 1, this uses the compiler's preserved combinational unit order:
+`lowered_task.units` indexes the comb vector, `compiled_task.units` indexes that
+same vector for Comb, and Fused appends FF units after its comb prefix. The viewer
+checks the adopted candidate's source items, lowering scope, complete unit
+coverage, lanes and compiled Comb schedule before linking. Missing or ambiguous
+evidence, or an unadopted candidate, displays an unavailable reason instead of
+matching task numbers. This contract must be updated if a future optimizer
+reorders or replaces the unit vector.
+
+Click a timeline task or a task-table row to activate **Timeline focus**.
+The original timelines highlight the selection and its compilation counterparts
+in gold, predecessors in blue, and successors in purple, dimming unrelated tasks.
+Each timeline zooms and scrolls to the selection; the full-timeline map marks the
+visible range with a white box. Click the map to pan, choose a zoom level, or use
+Locate selection to return to the task. Neighbor buttons follow predecessors or
+successors; Back restores the previous selection.
+
+Choose one to three hops, predecessors/successors/both, and whether to include
+same-lane order. The optional dependency diagram shows completion-count waits as
+solid edges and lane sequence as dashed edges, with no time axis. Lane order is
+not necessarily direct data dependency. Full timeline restores the overview;
+changing the dispatch or static candidate clears selection and navigation history.
+
 To attribute long waits to their producers and physical memory conflicts:
 
 ```sh
