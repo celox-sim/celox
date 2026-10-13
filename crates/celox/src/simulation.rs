@@ -472,10 +472,14 @@ impl<B: SimBackend> Simulation<B> {
                 .is_some_and(|next| next <= time)
         {
             self.settle_host_writes()?;
+            let mut drained = false;
             while self.state.next_event_time().is_some_and(|next| next <= time) {
                 self.state.step(&mut self.simulator)?;
+                drained = true;
             }
-            self.state.settle_at(&mut self.simulator, time)?;
+            if !drained {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
         } else {
             self.state.poll_waiting(&mut self.simulator)?;
         }
