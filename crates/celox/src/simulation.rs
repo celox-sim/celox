@@ -706,8 +706,8 @@ impl<B: SimBackend> Simulation<B> {
         self.state.time()
     }
 
-    /// Rising edges of the clocks processes wait on that the simulation has
-    /// run so far.
+    /// Completed process-clock rounds. Coincident rising edges count as
+    /// one tick against the shared testbench budget.
     pub fn ticks(&self) -> u64 {
         self.state.ticks()
     }
@@ -2722,8 +2722,8 @@ mod pending_generated_clock_tests {
         sim.step().unwrap();
         assert_eq!(sim.get(sim.signal("qa")), 1u8.into());
         assert_eq!(sim.get(sim.signal("qb")), 0u8.into());
-        // B rose once at time zero; both A and B rise at time four.
-        assert_eq!(sim.ticks(), 3);
+        // Coincident rising edges count as one completed clock round.
+        assert_eq!(sim.ticks(), 2);
     }
     #[test]
     fn pending_rises_share_pre_edge_state_with_new_clocks() {
