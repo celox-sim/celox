@@ -1,11 +1,5 @@
 import { EventEmitter } from "node:events";
-import {
-	existsSync,
-	mkdtempSync,
-	rmSync,
-	utimesSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizePath } from "vite";
@@ -106,7 +100,9 @@ test.each(["/", "C:/"])(
 			build: { outDir: "dist", watch: {} as Record<string, any> },
 		};
 		(plugin.configResolved as Function)(config);
-		const excluded = [`${root}.celox/**`, `${root}target/**`, `${root}dist/**`];
+		const excluded = [".celox", "target", "node_modules", ".git", "dist"].map(
+			(name) => `${root}${name}/**`,
+		);
 		expect(config.build.watch.exclude).toEqual(excluded);
 		expect(config.build.watch.chokidar.ignored).toEqual(excluded);
 	},
@@ -302,22 +298,68 @@ test.each(
 	},
 );
 
-test("build watch registers the project catalogue and lockfile outside the Vite root", async () => {
-	const root = mkdtempSync(join(tmpdir(), "celox-build-watch-"));
+test.each([undefined, "1.2.13", "1.3.0", "2.0.0"])(
+	"build watch registers the project catalogue and lockfile with Rolldown %s",
+	async (rolldownVersion) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-build-watch-"));
+		roots.push(root);
+		writeFileSync(join(root, "Veryl.lock"), "");
+		const plugin = celox({ projectRoot: root });
+		await (plugin.configResolved as Function)({
+			root: join(root, "tests"),
+			command: "build",
+			build: { watch: {}, outDir: "dist" },
+		});
+		const context = {
+			addWatchFile: vi.fn(),
+			meta: { watchMode: true, rolldownVersion },
+		};
+		await (plugin.buildStart as Function).call(context);
+		expect(context.addWatchFile).toHaveBeenCalledWith(normalizePath(root));
+		expect(context.addWatchFile).toHaveBeenCalledWith(
+			normalizePath(join(root, "Veryl.lock")),
+		);
+	},
+);
+
+test.each(["0.15.0", "1.1.99", "1.2.12", "1.2.13-rc.1"])(
+	"build watch rejects Rolldown %s before registering any directories",
+	async (rolldownVersion) => {
+		const plugin = celox({ projectRoot: "/project" });
+		(plugin.configResolved as Function)({
+			root: "/project",
+			command: "build",
+			build: { watch: {}, outDir: "dist" },
+		});
+		const context = {
+			addWatchFile: vi.fn(),
+			meta: { watchMode: true, rolldownVersion },
+		};
+		await expect((plugin.buildStart as Function).call(context)).rejects.toThrow(
+			"Celox build watch requires Rolldown >= 1.2.13",
+		);
+		expect(context.addWatchFile).not.toHaveBeenCalled();
+	},
+);
+
+test.each([
+	{ command: "serve", watchMode: true },
+	{ command: "build", watchMode: false },
+])("old Rolldown supports $command with watchMode=$watchMode", async (mode) => {
+	const root = mkdtempSync(join(tmpdir(), "celox-no-build-watch-"));
 	roots.push(root);
 	const plugin = celox({ projectRoot: root });
-	await (plugin.configResolved as Function)({
-		root: join(root, "tests"),
-		command: "build",
-		build: { watch: {}, outDir: "dist" },
+	(plugin.configResolved as Function)({
+		root,
+		command: mode.command,
+		build: { watch: false, outDir: "dist" },
 	});
-	const context = { addWatchFile: vi.fn(), meta: { watchMode: true } };
+	const context = {
+		addWatchFile: vi.fn(),
+		meta: { watchMode: mode.watchMode, rolldownVersion: "1.2.12" },
+	};
 	await (plugin.buildStart as Function).call(context);
 	expect(context.addWatchFile).not.toHaveBeenCalledWith(normalizePath(root));
-	const signal = context.addWatchFile.mock.calls[0][0];
-	expect(existsSync(signal)).toBe(true);
-	(plugin.closeWatcher as Function)();
-	expect(existsSync(signal)).toBe(false);
 });
 
 test("HMR-disabled watcher suppresses generation-owned lockfile creation", async () => {

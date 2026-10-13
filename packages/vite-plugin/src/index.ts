@@ -7,7 +7,6 @@ import {
 	type ResolvedConfig,
 	type ViteDevServer,
 } from "vite";
-import { watchBuildCatalogue } from "./build-watch.js";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars, SIDECAR_DIR } from "./sidecar.js";
 import {
@@ -55,7 +54,6 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	const loadedIds = new Set<string>();
 	const resolvedIds = new Set<string>();
 	let devWatcher: ViteDevServer["watcher"] | undefined;
-	let buildCatalogue: ReturnType<typeof watchBuildCatalogue> | undefined;
 	let pendingRegeneration: Promise<void> | undefined;
 	let componentLoadFailed = false;
 	const projectNotifications: (string | undefined)[] = [];
@@ -208,7 +206,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				: `${projectRoot}/`;
 			projectId = `${projectFile("Veryl.toml")}?${PROJECT_QUERY}`;
 			if (config.command === "build" && config.build.watch) {
-				const excluded = [SIDECAR_DIR, "target"].map(
+				const excluded = [SIDECAR_DIR, "target", "node_modules", ".git"].map(
 					(dir) => `${normalizePath(resolve(projectRoot, dir))}/**`,
 				);
 				if (config.build.outDir)
@@ -247,14 +245,24 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 		async buildStart() {
 			if (viteConfig.command === "build" && this.meta.watchMode) {
-				buildCatalogue ??= watchBuildCatalogue(
-					projectRoot,
-					viteConfig.build?.outDir
-						? resolve(viteConfig.root, viteConfig.build.outDir)
-						: undefined,
-					(error) => viteConfig.logger.error(String(error)),
-				);
-				this.addWatchFile(buildCatalogue.signal);
+				// Older Rolldown versions ignore exclusions below watched directories.
+				// Refuse that mode before registering the root to avoid output loops.
+				const version = this.meta.rolldownVersion;
+				if (version) {
+					const [major = 0, minor = 0, patch = 0] = version
+						.split(/[.-]/)
+						.map(Number);
+					if (
+						major < 1 ||
+						(major === 1 && (minor < 2 || (minor === 2 && patch < 13))) ||
+						version.startsWith("1.2.13-")
+					) {
+						throw new Error(
+							`Celox build watch requires Rolldown >= 1.2.13 (found ${version}). Update Vite's Rolldown dependency to fix directory watch exclusions.`,
+						);
+					}
+				}
+				this.addWatchFile(projectRoot);
 			}
 
 			let componentManifests: TestbenchComponentManifests | undefined;
@@ -284,20 +292,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
 			sidecarPaths = nextPaths;
 			generatedData = data;
-			if (buildCatalogue) {
+			if (viteConfig.command === "build" && this.meta.watchMode) {
 				const inputs = [
 					...cache.sourceFiles,
 					...CONFIG_FILES.map(projectFile),
 					...testbenchComponentDependencies,
 				].filter(existsSync);
 				for (const file of inputs) this.addWatchFile(file);
-				buildCatalogue.setWatched(inputs);
 			}
-		},
-
-		closeWatcher() {
-			buildCatalogue?.close();
-			buildCatalogue = undefined;
 		},
 
 		configureServer(server) {
