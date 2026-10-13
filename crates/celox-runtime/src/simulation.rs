@@ -1529,8 +1529,8 @@ impl<B: SimBackend> SimulationState<B> {
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         // Counter-recorded kernel edges survive later blocking stores that
         // restored the signal before the kernel returned.
-        let mut scheduled_trigger_ids =
-            self.process_counter_edges(executor.backend(), &counter_values);
+        let mut recorded_edges = self.process_counter_edges(executor.backend(), &counter_values);
+        let mut scheduled_trigger_ids = recorded_edges.clone();
         // An external drive may already have been combinationally evaluated
         // by a testbench read. Compare against our saved baseline even if that
         // evaluation's transient trigger bits have since been cleared.
@@ -1621,6 +1621,8 @@ impl<B: SimBackend> SimulationState<B> {
 
                 let mut ff_body_edges = BitSet::with_capacity(num_events);
                 for id in marked_bits.iter() {
+                    let recorded_edge = recorded_edges.contains(id);
+                    recorded_edges.remove(id);
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
@@ -1630,8 +1632,11 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                     // Native trigger bits can be coarse hints raised by a
                     // working-region write before its commit. A derived clock
-                    // must have the requested stable edge before its FFs run.
-                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                    // must have a stable edge or a counter-recorded transition.
+                    if info.is_cascaded
+                        && !recorded_edge
+                        && !self.stable_edge_triggered(executor.backend(), id)
+                    {
                         continue;
                     }
                     discovered_in_this_step.insert(id);
@@ -1662,6 +1667,8 @@ impl<B: SimBackend> SimulationState<B> {
                     ff_body_edges
                         .union_with(&self.process_counter_edges(executor.backend(), &before));
                 }
+
+                recorded_edges.union_with(&ff_body_edges);
 
                 // Working-region writes become visible only when this NBA
                 // batch is published; discover their cascade edges then.
@@ -1751,6 +1758,7 @@ impl<B: SimBackend> SimulationState<B> {
                 if progressed {
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &inactive_counter_values);
+                    recorded_edges.union_with(&driven);
                     driven.union_with(&ff_body_edges);
                     executor.eval_comb()?;
                     if executor.finish_requested(current_time) {
@@ -1824,9 +1832,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             if polled {
+                let counter_values = self.process_counter_values(executor.backend());
                 any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
                 if any_process_ran {
-                    let mut driven = executor.backend().get_triggered_bits();
+                    let mut driven =
+                        self.process_counter_edges(executor.backend(), &counter_values);
+                    recorded_edges.union_with(&driven);
                     for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                         if *id == usize::MAX {
                             continue;
