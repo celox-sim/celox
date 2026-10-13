@@ -19,6 +19,16 @@ use celox_sir::LaneUnit;
 
 use super::*;
 
+// One identity per partition invocation, shared across all address types.
+// Span IDs may be reused after planning finishes.
+fn new_source_partition_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("source partition identity exhausted")
+        .to_string()
+}
+
 /// Request for a lane-partitioned lowering.
 #[derive(Debug, Clone)]
 pub struct LanePartitionOptions<Addr> {
@@ -634,7 +644,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     options: &LanePartitionOptions<Addr>,
 ) -> Result<Option<LaneScheduleResult<Addr>>, SchedulerError<Addr>> {
     let _diagnostic =
-        tracing::trace_span!(target: "celox::parallel", "comb_partition", lanes = options.lanes)
+        tracing::trace_span!(target: "celox::parallel", "comb_partition", source_partition = new_source_partition_id(), lanes = options.lanes)
             .entered();
     if options.lanes < 2 || input.is_empty() {
         return Ok(None);

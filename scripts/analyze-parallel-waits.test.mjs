@@ -6,6 +6,7 @@ function fixture(){return [
  {event:'compiled_task',schedule:'s',task:1,lane:1,scopes:[{id:'a'}]},
  {event:'dispatch',schedule:'s',pool:'p',epoch:1},
  {event:'task_run',task:0,pool:'p',epoch:1,start_ns:10,end_ns:30,code:0},
+ {event:'task_run',task:1,pool:'p',epoch:1,start_ns:35,end_ns:40,code:0},
  {event:'task_wait',task:1,pool:'p',epoch:1,lane:1,other:0,completed:1,start_ns:15,end_ns:35},
  {event:'signal',name:'dut.control',address:'a',offset:100,width:8,working_offset:'Some(200)'},
  {event:'hazard',hazard:'RAW',predecessor:0,unit:1,scopes:[{id:'a'}],producer:'Exact(MemoryLocation { object: State, offset: 200, byte_len: 1 })',consumer:'Exact(MemoryLocation { object: State, offset: 200, byte_len: 1 })'},
@@ -52,4 +53,23 @@ test('multiple programs with identical topology and storage do not mix tasks or 
   for(const e of events){if(e.schedule)e.schedule=schedule;if(e.pool)e.pool=pool;if(e.event==='compiled_task'){e.program=program;e.hazard_level='tasks';e.scopes=[];}if(e.event==='hazard')e.scopes=[{id:'reused',schedule,hazard_level:'tasks'}];if(e.event==='signal'){e.program=program;e.name=name;}}
  }
  const r=explainWaits([...a,...b]);assert.equal(r.rows.length,2);assert.deepEqual(r.rows.map(r=>r.conflicts[0].signals.map(s=>s.name)),[['first.signal'],['second.signal']]);
+});
+
+test('aborted or missing consumers do not contribute dependency totals',()=>{
+ for (const missing of [false,true]) {
+  let es=fixture();
+  const consumer=es.find(e=>e.event==='task_run'&&e.task===1);
+  consumer.skipped=true;
+  if(missing) es=es.filter(e=>e!==consumer);
+  const a=explainWaits(es);
+  assert.deepEqual(a.rows,[]);
+  assert.equal(a.issues.length,1);
+  assert.match(a.issues[0].reason,/consumer/);
+ }
+});
+test('consumer records from another epoch or pool cannot validate a wait',()=>{
+ for(const field of ['epoch','pool']) {
+  const es=fixture();es.find(e=>e.event==='task_run'&&e.task===1)[field]='other';
+  const a=explainWaits(es);assert.deepEqual(a.rows,[]);assert.equal(a.issues.length,1);
+ }
 });

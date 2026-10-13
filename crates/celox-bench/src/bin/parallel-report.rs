@@ -631,6 +631,19 @@ mod tests {
             }
         });
         let events = events.lock().unwrap();
+        let partitions = events
+            .iter()
+            .filter(|e| e["event"] == "candidate")
+            .map(|e| {
+                e["scopes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find_map(|s| s["source_partition"].as_str())
+                    .expect("source candidate must have a stable partition identity")
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(partitions.len(), 4);
         let tasks = events
             .iter()
             .filter(|e| e["event"] == "compiled_task")
