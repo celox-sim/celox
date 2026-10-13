@@ -14,7 +14,11 @@ import celox from "../../../../vite-plugin/dist/index.js";
 const { build, version } = await import(process.env.CELOX_TEST_VITE || "vite");
 const fixture = mkdtempSync(join(import.meta.dirname, ".build-project-"));
 const root = join(fixture, "hdl");
-const viteRoot = join(fixture, "client");
+// Exercise nested output on older Vite with CELOX_TEST_BUILD_LAYOUT=default/custom.
+// Rolldown currently reports nested output through recursive directory watches
+// despite watch.exclude, so the default fixture keeps output outside the project.
+const layout = process.env.CELOX_TEST_BUILD_LAYOUT ?? "external";
+const viteRoot = layout === "external" ? join(fixture, "client") : root;
 let watcher;
 let builds = 0;
 let failure;
@@ -36,7 +40,7 @@ async function waitForBuild(previous) {
 try {
 	mkdirSync(join(root, "src"), { recursive: true });
 	mkdirSync(join(root, "tb"));
-	mkdirSync(viteRoot);
+	mkdirSync(viteRoot, { recursive: true });
 	writeFileSync(
 		join(root, "Veryl.toml"),
 		'[project]\nname="build_watch"\nversion="0.1.0"\n[build]\nsources=["src"]\n',
@@ -58,6 +62,7 @@ try {
 		plugins: [celox({ projectRoot: root })],
 		build: {
 			watch: {},
+			outDir: layout === "custom" ? "build-output" : "dist",
 			lib: {
 				entry: join(viteRoot, "entry.ts"),
 				formats: ["es"],
@@ -104,7 +109,7 @@ try {
 		edit();
 		await waitForBuild(previous);
 		verify();
-		console.log(`passed: Vite ${version} build watch ${name}`);
+		console.log(`passed: Vite ${version} ${layout} build watch ${name}`);
 	}
 } finally {
 	await watcher?.close();

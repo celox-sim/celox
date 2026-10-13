@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { normalizePath, type Plugin, type ResolvedConfig } from "vite";
@@ -48,6 +48,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let projectId: string;
 	const loadedIds = new Set<string>();
 	let pendingRegeneration: Promise<void> | undefined;
+	let componentLoadFailed = false;
+	const projectNotifications: (string | undefined)[] = [];
 	// Vite shares one read callback across environments for each event. Unlike
 	// timestamps, its identity distinguishes rapid events and survives interleaving.
 	const updates = new WeakMap<object, Promise<Regeneration>>();
@@ -56,10 +58,19 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		return normalizePath(resolve(projectRoot, name));
 	}
 
+	function projectContents(): string | undefined {
+		try {
+			return readFileSync(projectFile("Veryl.toml"), "utf8");
+		} catch {
+			return undefined;
+		}
+	}
+
 	function regenerate(
 		file: string,
 		read?: () => string | Promise<string>,
 		event?: object,
+		retryComponent = false,
 	): Promise<Regeneration> {
 		file = normalizePath(file);
 		const existing = event && updates.get(event);
@@ -72,6 +83,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Earlier queued loads may discover this dependency or remove it.
 			const componentChanged =
 				wasComponent ||
+				(retryComponent && componentLoadFailed) ||
 				testbenchComponentDependencies.has(
 					normalizeTestbenchComponentPath(file),
 				);
@@ -88,7 +100,11 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 					testbenchComponents,
 					projectRoot,
 					viteConfig,
-				);
+				).catch((error) => {
+					componentLoadFailed = true;
+					throw error;
+				});
+				componentLoadFailed = false;
 				testbenchComponentDependencies = loaded.dependencies;
 				writeTestbenchComponentSidecar(
 					projectRoot,
@@ -178,6 +194,12 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const excluded = [SIDECAR_DIR, "target"].map(
 				(dir) => `${normalizePath(resolve(root, dir))}/**`,
 			);
+			// Vite 5.0 does not exclude outDir from recursive watch itself.
+			const outDir = config.build.outDir ?? "dist";
+			if (outDir)
+				excluded.push(
+					`${normalizePath(resolve(config.root ?? process.cwd(), outDir))}/**`,
+				);
 			// Rollup's directory watcher needs the Chokidar filter; Rolldown
 			// uses watch.exclude. Vite merges these with the user's filters.
 			return {
@@ -254,7 +276,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			server.watcher.add([projectRoot, ...CONFIG_FILES.map(projectFile)]);
 			const hmrDisabled = server.config.server.hmr === false;
 			let notifyingProject = false;
-			const notifyProject = () => {
+			const notifyProject = (completed = true) => {
+				if (completed && !hmrDisabled && !server.environments)
+					projectNotifications.push(projectContents());
 				// Generation already completed before this project notification.
 				notifyingProject = true;
 				try {
@@ -272,17 +296,17 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						normalizeTestbenchComponentPath(file),
 					)
 				)
-					notifyProject();
+					notifyProject(false);
 			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
-			const sourceChanged = (file: string) => {
+			const sourceChanged = (file: string, retryComponent = false) => {
 				if (
 					notifyingProject &&
 					normalizePath(file) === projectFile("Veryl.toml")
 				)
 					return;
 				// Raw events have no shared per-environment timestamp to deduplicate.
-				void regenerate(file)
+				void regenerate(file, undefined, undefined, retryComponent === true)
 					.then((changed) => {
 						if (!changed) return;
 						if (server.environments) {
@@ -327,11 +351,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 					CONFIG_FILES.some((name) => projectFile(name) === file)
 				) {
 					server.watcher.emit("change", projectFile("Veryl.toml"));
+				} else if (testbenchComponents && pendingRegeneration) {
+					// A preceding load may discover this file or fail because it
+					// did not exist yet. Recheck after that load settles.
+					sourceChanged(file, true);
 				}
 			};
 			server.watcher.on("add", catalogueChanged);
 			server.watcher.on("unlink", catalogueChanged);
 			server.httpServer?.once("close", () => {
+				projectNotifications.length = 0;
 				server.watcher.off("change", sourceChanged);
 				server.watcher.off("add", catalogueChanged);
 				server.watcher.off("unlink", catalogueChanged);
@@ -464,7 +493,22 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
 		async handleHotUpdate({ file, server, modules, read }) {
-			if ((await regenerate(file, read)) === false)
+			let stabilizedRead: typeof read | undefined = read;
+			if (
+				normalizePath(file) === projectFile("Veryl.toml") &&
+				projectNotifications.length
+			) {
+				const expected = projectNotifications.shift();
+				// The Vite 5 listener awaits watch hooks after emit() returns.
+				// Consume the marker here; real intervening config edits still regenerate.
+				if (read) {
+					await read();
+					stabilizedRead = undefined;
+				}
+				if (expected !== undefined && expected === projectContents())
+					return affectedModules(server.moduleGraph, modules);
+			}
+			if ((await regenerate(file, stabilizedRead)) === false)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? directLockfileConsumers(modules)
 					: undefined;

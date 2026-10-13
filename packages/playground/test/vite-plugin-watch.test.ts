@@ -98,7 +98,7 @@ test.each(["/", "C:/"])(
 			{ root, build: { watch: {} } },
 			{ command: "build" },
 		);
-		const excluded = [`${root}.celox/**`, `${root}target/**`];
+		const excluded = [`${root}.celox/**`, `${root}target/**`, `${root}dist/**`];
 		expect(config.build.watch.exclude).toEqual(excluded);
 		expect(config.build.watch.chokidar.ignored).toEqual(excluded);
 	},
@@ -738,9 +738,19 @@ test.each(["hotUpdate", "handleHotUpdate"] as const)(
 	},
 );
 
-test.each(["hotUpdate", "handleHotUpdate", "watcher"])(
+test.each([
+	"hotUpdate",
+	"handleHotUpdate",
+	"watcher",
+	"add",
+	"unlink",
+	"add-after-failure",
+	"unlink-after-failure",
+])(
 	"%s rechecks dependencies discovered by a preceding queued load",
 	async (hook) => {
+		const failFirst = hook.endsWith("-after-failure");
+		hook = hook.replace("-after-failure", "");
 		const root = mkdtempSync(join(tmpdir(), "celox-watch-discovered-"));
 		roots.push(root);
 		const entry = join(root, "components.ts");
@@ -762,19 +772,24 @@ test.each(["hotUpdate", "handleHotUpdate", "watcher"])(
 		let finish!: () => void;
 		vi.mocked(loadTestbenchComponentModule).mockImplementationOnce(
 			() =>
-				new Promise((resolve) => {
+				new Promise((resolve, reject) => {
 					finish = () =>
-						resolve({
-							manifests: {},
-							dependencies: new Set(
-								[entry, added].map(normalizeTestbenchComponentPath),
-							),
-						});
+						failFirst
+							? reject(new Error("dependency not yet created"))
+							: resolve({
+									manifests: {},
+									dependencies: new Set(
+										[entry, added].map(normalizeTestbenchComponentPath),
+									),
+								});
 				}),
 		);
 		const invoke = (file: string) =>
-			hook === "watcher"
-				? watcher.emit("change", file)
+			["watcher", "add", "unlink"].includes(hook)
+				? watcher.emit(
+						file === entry || hook === "watcher" ? "change" : hook,
+						file,
+					)
 				: (plugin[hook as "hotUpdate" | "handleHotUpdate"] as Function).call(
 						{ environment: { moduleGraph } },
 						{
@@ -793,10 +808,81 @@ test.each(["hotUpdate", "handleHotUpdate", "watcher"])(
 		await vi.waitFor(() =>
 			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(3),
 		);
-		expect(runGenTs).toHaveBeenCalledTimes(3);
+		expect(runGenTs).toHaveBeenCalledTimes(failFirst ? 2 : 3);
 		// The mock's final load drops added.ts again: notification must use
 		// membership at execution time, not the dependency set after that load.
-		if (hook === "watcher") expect(notifications).toHaveBeenCalledTimes(2);
+		if (["watcher", "add", "unlink"].includes(hook))
+			expect(notifications).toHaveBeenCalledTimes(2);
+		expect(logger.error).toHaveBeenCalledTimes(failFirst ? 1 : 0);
+	},
+);
+
+test.each([undefined, "output", "../artifacts"])(
+	"build watch excludes output %s relative to the Vite root",
+	(outDir) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-output-"));
+		roots.push(root);
+		const viteRoot = join(root, "client");
+		const plugin = celox({ projectRoot: root });
+		const config = (plugin.config as Function)(
+			{ root: viteRoot, build: { watch: {}, outDir } },
+			{ command: "build" },
+		);
+		const expected = `${normalizePath(join(viteRoot, outDir ?? "dist"))}/**`;
+		expect(config.build.watch.exclude).toContain(expected);
+		expect(config.build.watch.chokidar.ignored).toContain(expected);
+	},
+);
+
+test.each(
+	["helper.ts", "Veryl.lock"].flatMap((name) =>
+		[false, true].map((interveningEdit) => ({ name, interveningEdit })),
+	),
+)(
+	"legacy asynchronous HMR consumes $name notification with interveningEdit=$interveningEdit",
+	async ({ name, interveningEdit }) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-notification-"));
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const project = join(root, "Veryl.toml");
+		writeFileSync(entry, "export {};");
+		writeFileSync(project, "original config");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const moduleGraph = graph();
+		const logger = { error: vi.fn() };
+		const server = {
+			watcher,
+			moduleGraph,
+			config: { server: { hmr: true }, logger },
+		};
+		(plugin.configureServer as Function)(server);
+		const events: Promise<unknown>[] = [];
+		watcher.on("change", (file) => {
+			// Vite awaits its watch hooks before calling handleHotUpdate.
+			events.push(
+				Promise.resolve().then(() => {
+					if (interveningEdit) writeFileSync(project, "intervening edit");
+					return (plugin.handleHotUpdate as Function)({
+						file,
+						server,
+						modules: [],
+					});
+				}),
+			);
+		});
+		writeFileSync(join(root, name), "changed");
+		watcher.emit("add", join(root, name));
+		await vi.waitFor(() => expect(events).toHaveLength(1));
+		const result = await events[0];
+		expect(result).toEqual([
+			{ id: `${normalizePath(root)}/Veryl.toml?celox-project` },
+		]);
+		expect(runGenTs).toHaveBeenCalledTimes(interveningEdit ? 3 : 2);
+		writeFileSync(project, "real config edit");
+		watcher.emit("change", project);
+		await events[1];
+		expect(runGenTs).toHaveBeenCalledTimes(interveningEdit ? 4 : 3);
 		expect(logger.error).not.toHaveBeenCalled();
 	},
 );
