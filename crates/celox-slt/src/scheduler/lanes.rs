@@ -19,6 +19,16 @@ use celox_sir::LaneUnit;
 
 use super::*;
 
+// One identity per partition invocation, shared across all address types.
+// Span IDs may be reused after planning finishes.
+fn new_source_partition_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("source partition identity exhausted")
+        .to_string()
+}
+
 /// Request for a lane-partitioned lowering.
 #[derive(Debug, Clone)]
 pub struct LanePartitionOptions<Addr> {
@@ -426,6 +436,7 @@ fn join_expensive_sharing<Addr: Clone + Eq + Hash>(
             if find_root(parents, first) != find_root(parents, index)
                 && cones.cost(node, arena) >= SHARED_CONE_THRESHOLD
             {
+                tracing::trace!(target: "celox::parallel", event = "merge", reason = "shared_expression", first, second = index, node = node.0);
                 union(parents, first, index);
             }
         }
@@ -632,6 +643,9 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     first_runtime_error_code: i64,
     options: &LanePartitionOptions<Addr>,
 ) -> Result<Option<LaneScheduleResult<Addr>>, SchedulerError<Addr>> {
+    let _diagnostic =
+        tracing::trace_span!(target: "celox::parallel", "comb_partition", source_partition = new_source_partition_id(), lanes = options.lanes)
+            .entered();
     if options.lanes < 2 || input.is_empty() {
         return Ok(None);
     }
@@ -645,6 +659,26 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     )?;
     let work = &prepared.scheduled_work;
     let path_count = prepared.input.len();
+    for (path, logic) in prepared.input.iter().enumerate() {
+        tracing::trace!(target: "celox::parallel", event = "path", path,
+            target = %logic.target, sources = ?logic.sources, previous_sources = ?logic.previous_sources,
+            address_sources = ?logic.address_sources, expression = logic.expr.0,
+            users = ?prepared.adj[path]);
+    }
+    if tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
+        let mut seen = HashSet::default();
+        let mut pending = prepared
+            .input
+            .iter()
+            .flat_map(cached_logic_path_roots)
+            .collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if seen.insert(node) {
+                tracing::trace!(target: "celox::parallel", event = "slt_node", node = node.0, expression = ?arena.get(node));
+                push_scheduler_node_children(node, arena, &mut pending);
+            }
+        }
+    }
 
     let mut work_of_path = vec![usize::MAX; path_count];
     for (index, item) in work.iter().enumerate() {
@@ -672,6 +706,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 matches!(observer.target, LogicPathTarget::CombCaptureEvent { .. })
             });
             if is_observer {
+                tracing::trace!(target: "celox::parallel", event = "merge", reason = "observer_materialization", first = work_of_path[path], second = work_of_path[observer.0]);
                 union(&mut atomic, work_of_path[path], work_of_path[observer.0]);
             }
         }
@@ -785,6 +820,12 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         }
         groups.push(group);
     }
+    for item in 0..items.len() {
+        tracing::trace!(target: "celox::parallel", event = "item", item,
+            paths = ?item_paths(item).collect::<Vec<_>>(), work = ?items[item],
+            predecessors = ?predecessors[item], cost = costs[item], group = groups[item],
+            pinned_lane0 = group_lanes[groups[item]] == Some(0));
+    }
 
     let assignment_options = LaneAssignmentOptions {
         lanes: options.lanes,
@@ -808,9 +849,9 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     };
     // Candidate partitions: items placed one by one, and instance subtrees
     // kept whole. Each is charged for the tasks and waits it creates.
-    let mut candidates: Vec<LaneSchedulePlan> = Vec::new();
+    let mut candidates: Vec<(&str, LaneSchedulePlan)> = Vec::new();
     match schedule(&group_lanes) {
-        Ok(plan) => candidates.push(plan),
+        Ok(plan) => candidates.push(("items", plan)),
         Err(error) => tracing::warn!("lane partitioning skipped: {error:?}"),
     }
     if let Some(hierarchy) = &options.hierarchy {
@@ -838,13 +879,20 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 && let Ok(plan) = schedule(&clustered)
             {
                 tried.push(clustered);
-                candidates.push(plan);
+                candidates.push((
+                    match share_percent {
+                        100 => "subtree_100",
+                        150 => "subtree_150",
+                        _ => "subtree_200",
+                    },
+                    plan,
+                ));
             }
         }
     }
     let task_overhead = options.synchronization_cost / TASK_OVERHEAD_DIVISOR;
     let mut best: Option<(u64, LaneSchedulePlan, Vec<LaneTask>)> = None;
-    for plan in candidates {
+    for (candidate, plan) in candidates {
         // Tasks over the plan's order; their items are positions in it.
         let mut position = vec![0usize; items.len()];
         for (index, &item) in plan.order.iter().enumerate() {
@@ -886,6 +934,9 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             options.synchronization_cost,
             task_overhead,
         );
+        tracing::trace!(target: "celox::parallel", event = "candidate", candidate, makespan,
+            sequential_cost, synchronization_cost = options.synchronization_cost,
+            task_overhead, lanes = ?plan.item_lanes, order = ?plan.order, tasks = ?tasks);
         tracing::debug!(
             makespan,
             tasks = tasks.len(),
@@ -904,6 +955,10 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     };
     // Starting and joining the lanes costs about one synchronization.
     let parallel_cost = estimated_makespan.saturating_add(options.synchronization_cost);
+    tracing::trace!(target: "celox::parallel", event = "partition_decision", sequential_cost,
+        estimated_makespan, parallel_cost, minimum_speedup_percent = options.minimum_speedup_percent,
+        accepted = estimated_makespan != 0 && sequential_cost.saturating_mul(100) >= parallel_cost.saturating_mul(options.minimum_speedup_percent),
+        lanes = ?plan.item_lanes, order = ?plan.order);
     if estimated_makespan == 0
         || sequential_cost.saturating_mul(100)
             < parallel_cost.saturating_mul(options.minimum_speedup_percent)
@@ -935,7 +990,8 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut runtime_errors = HashMap::default();
     let mut next_runtime_error_code = first_runtime_error_code;
     let mut units = Vec::new();
-    for task in &tasks {
+    for (task_index, task) in tasks.iter().enumerate() {
+        let first_unit = units.len();
         let mut lowering = WorkLowering::new(&context);
         for &position in &task.items {
             for &work_item in &items[plan.order[position]] {
@@ -959,6 +1015,9 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 .into_iter()
                 .map(|unit| LaneUnit::new(task.lane, unit)),
         );
+        tracing::trace!(target: "celox::parallel", event = "lowered_task", task = task_index,
+            lane = task.lane, items = ?task.items.iter().map(|&position| plan.order[position]).collect::<Vec<_>>(),
+            units = ?(first_unit..units.len()).collect::<Vec<_>>());
     }
     Ok(Some(LaneScheduleResult {
         units,

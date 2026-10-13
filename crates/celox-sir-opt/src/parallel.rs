@@ -501,13 +501,49 @@ impl Footprint {
 
 /// Dependencies of every footprint on earlier footprints of one kernel.
 fn footprint_dependencies(footprints: impl IntoIterator<Item = Footprint>) -> Vec<Vec<usize>> {
+    let diagnostic = tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE);
+    let mut history: Vec<Footprint> = Vec::new();
     let mut tracker = MemoryDependencyTracker::<Storage, usize>::default();
     let mut predecessors = Vec::new();
     let mut dependencies = std::collections::BTreeSet::new();
     for (index, footprint) in footprints.into_iter().enumerate() {
+        tracing::trace!(target: "celox::parallel", event = "footprint", unit = index,
+            reads = ?footprint.reads, writes = ?footprint.writes);
         dependencies.clear();
+        if diagnostic {
+            history.push(footprint.clone());
+        }
         tracker.add_event(index, footprint.reads, footprint.writes, &mut dependencies);
+        if diagnostic {
+            for &predecessor in &dependencies {
+                let before = &history[predecessor];
+                let after = &history[index];
+                for (hazard, left, right) in [
+                    ("RAW", &before.writes, &after.reads),
+                    ("WAR", &before.reads, &after.writes),
+                    ("WAW", &before.writes, &after.writes),
+                ] {
+                    // One exact conflicting pair explains each hazard edge.
+                    // Exhaustively expanding the Cartesian product is quadratic
+                    // for large fused kernels and obscures the scheduler decision.
+                    if let Some((producer, consumer)) = left.iter().find_map(|&producer| {
+                        right
+                            .iter()
+                            .copied()
+                            .find(|&consumer| {
+                                celox_analysis::memory::effects_may_alias(producer, consumer)
+                            })
+                            .map(|consumer| (producer, consumer))
+                    }) {
+                        tracing::trace!(target: "celox::parallel", event = "hazard", predecessor,
+                            unit = index, hazard, representative = true, producer = ?producer, consumer = ?consumer);
+                    }
+                }
+            }
+        }
         predecessors.push(dependencies.iter().copied().collect());
+        tracing::trace!(target: "celox::parallel", event = "physical_dependencies", unit = index,
+            predecessors = ?predecessors[index]);
     }
     predecessors
 }
