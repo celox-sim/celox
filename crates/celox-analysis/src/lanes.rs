@@ -408,12 +408,47 @@ pub fn form_lane_tasks_separated(
     predecessors: &[Vec<usize>],
     classes: &[u8],
 ) -> Result<Vec<LaneTask>, LaneError> {
+    form_lane_tasks_with_options(
+        lane_count,
+        item_lanes,
+        predecessors,
+        classes,
+        TaskFormationOptions::default(),
+    )
+}
+
+/// Optional cuts that let consumers observe completed work sooner.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskFormationOptions<'a> {
+    /// Cost of each indivisible item; required when `max_cost` is nonzero.
+    pub costs: &'a [u64],
+    /// Maximum accumulated task cost. Zero leaves task size unbounded.
+    /// An indivisible item larger than the limit remains a single task.
+    pub max_cost: u64,
+    /// Close a task immediately after these items, before unrelated work joins.
+    pub publish_after: &'a [bool],
+}
+
+/// Form dependency-safe tasks with optional cost and publication boundaries.
+pub fn form_lane_tasks_with_options(
+    lane_count: u32,
+    item_lanes: &[u32],
+    predecessors: &[Vec<usize>],
+    classes: &[u8],
+    options: TaskFormationOptions<'_>,
+) -> Result<Vec<LaneTask>, LaneError> {
     let count = item_lanes.len();
-    if predecessors.len() != count || (!classes.is_empty() && classes.len() != count) {
+    if predecessors.len() != count
+        || (!classes.is_empty() && classes.len() != count)
+        || (!options.costs.is_empty() && options.costs.len() != count)
+        || (options.max_cost != 0 && options.costs.len() != count)
+        || (!options.publish_after.is_empty() && options.publish_after.len() != count)
+    {
         return Err(LaneError::Shape);
     }
     let class_of = |item: usize| classes.get(item).copied().unwrap_or(0) & 3;
     let mut task_classes: Vec<u8> = Vec::new();
+    let mut task_costs: Vec<u64> = Vec::new();
     let lane_count = lane_count.max(1) as usize;
     let mut tasks: Vec<LaneTask> = Vec::new();
     // Vector clock known at the start of each task: for every lane, how many
@@ -427,6 +462,8 @@ pub fn form_lane_tasks_separated(
     let mut touched = Vec::new();
 
     for item in 0..count {
+        let cost = options.costs.get(item).copied().unwrap_or(0);
+        let publish = options.publish_after.get(item).copied().unwrap_or(false);
         let lane = item_lanes[item] as usize;
         if lane >= lane_count {
             return Err(LaneError::InvalidIdentifier);
@@ -452,9 +489,14 @@ pub fn form_lane_tasks_separated(
         if touched.is_empty()
             && let Some(task) = open[lane]
             && (task_classes[task] | class_of(item)) != 3
+            && (options.max_cost == 0 || task_costs[task].saturating_add(cost) <= options.max_cost)
         {
             tasks[task].items.push(item);
             task_classes[task] |= class_of(item);
+            task_costs[task] = task_costs[task].saturating_add(cost);
+            if publish {
+                open[lane] = None;
+            }
             task_of_item[item] = task;
             continue;
         }
@@ -508,10 +550,11 @@ pub fn form_lane_tasks_separated(
             waits: direct,
         });
         task_classes.push(class_of(item));
+        task_costs.push(cost);
         lane_clock[lane] = clock.clone();
         task_clocks.push(clock);
         lane_tasks[lane].push(task);
-        open[lane] = Some(task);
+        open[lane] = (!publish).then_some(task);
         task_of_item[item] = task;
     }
     Ok(tasks)
@@ -657,6 +700,73 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn publication_does_not_hold_a_consumer_behind_unrelated_work() {
+        let lanes = [0, 0, 1];
+        let predecessors = vec![vec![], vec![], vec![0]];
+        let costs = [2, 100, 100];
+        let original = form_lane_tasks(2, &lanes, &predecessors).unwrap();
+        assert_eq!(estimate_task_makespan(2, &original, &costs, 0, 0), 202);
+        for options in [
+            TaskFormationOptions {
+                costs: &costs,
+                max_cost: 50,
+                ..TaskFormationOptions::default()
+            },
+            TaskFormationOptions {
+                publish_after: &[true, false, false],
+                ..TaskFormationOptions::default()
+            },
+        ] {
+            let tasks =
+                form_lane_tasks_with_options(2, &lanes, &predecessors, &[], options).unwrap();
+            assert_eq!(estimate_task_makespan(2, &tasks, &costs, 0, 0), 102);
+            verify_lane_tasks(2, &tasks, &predecessors).unwrap();
+            assert_eq!(
+                tasks[2].waits,
+                [LaneWait {
+                    lane: 0,
+                    completed_tasks: 1
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn publication_and_budget_keep_sparse_classes_separate() {
+        let predecessors = vec![vec![], vec![0], vec![1], vec![2]];
+        let tasks = form_lane_tasks_with_options(
+            1,
+            &[0; 4],
+            &predecessors,
+            &[1, 0, 2, 2],
+            TaskFormationOptions {
+                costs: &[1; 4],
+                max_cost: 100,
+                publish_after: &[false, true, false, false],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            tasks.iter().map(|t| t.items.clone()).collect::<Vec<_>>(),
+            [vec![0, 1], vec![2, 3]]
+        );
+        verify_lane_tasks(1, &tasks, &predecessors).unwrap();
+        assert_eq!(
+            form_lane_tasks_with_options(
+                1,
+                &[0],
+                &[vec![]],
+                &[],
+                TaskFormationOptions {
+                    max_cost: 1,
+                    ..TaskFormationOptions::default()
+                }
+            ),
+            Err(LaneError::Shape)
+        );
     }
 
     #[test]
@@ -944,6 +1054,37 @@ mod tests {
                 .collect::<Vec<_>>();
             let tasks = form_lane_tasks(lane_count, &random_lanes, &predecessors).unwrap();
             verify_lane_tasks(lane_count, &tasks, &predecessors).unwrap();
+            let publish = (0..count).map(|_| next() % 3 == 0).collect::<Vec<_>>();
+            let classes = (0..count).map(|_| (next() % 4) as u8).collect::<Vec<_>>();
+            let tasks = form_lane_tasks_with_options(
+                lane_count,
+                &random_lanes,
+                &predecessors,
+                &classes,
+                TaskFormationOptions {
+                    costs: &costs,
+                    max_cost: next() % 100 + 1,
+                    publish_after: &publish,
+                },
+            )
+            .unwrap();
+            verify_lane_tasks(lane_count, &tasks, &predecessors).unwrap();
+            let mut covered = tasks
+                .iter()
+                .flat_map(|t| t.items.iter().copied())
+                .collect::<Vec<_>>();
+            covered.sort_unstable();
+            assert_eq!(covered, (0..count).collect::<Vec<_>>());
+            for task in &tasks {
+                assert!(
+                    task.items.len() == 1
+                        || task
+                            .items
+                            .iter()
+                            .fold(0, |class, &item| class | classes[item])
+                            != 3
+                );
+            }
 
             // Priority list scheduling: a topological order that keeps
             // ownership groups and fixed lanes.

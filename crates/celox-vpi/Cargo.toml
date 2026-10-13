@@ -20,6 +20,8 @@ name = "celox-vpi-compile"
 path = "src/bin/compile.rs"
 
 [[bin]]
+# The API library also renders to target/doc/celox; do not overwrite it.
+doc = false
 name = "celox"
 path = "src/bin/celox.rs"
 

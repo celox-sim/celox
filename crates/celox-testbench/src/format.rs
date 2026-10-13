@@ -195,6 +195,21 @@ pub fn format_sized_display_arg(
     spec: char,
     field_width: Option<usize>,
 ) -> Vec<u8> {
+    format_sv_display_arg(
+        arg,
+        spec,
+        FieldSpec {
+            width: field_width,
+            ..FieldSpec::default()
+        },
+    )
+}
+
+/// IEEE display sizing with the `-` and leading `0` field flags supported
+/// by Icarus and Verilator. As in Icarus, decimal zero padding follows the sign;
+/// left justification takes precedence over zero padding.
+pub fn format_sv_display_arg(arg: &DisplayFormatArg<'_>, spec: char, field: FieldSpec) -> Vec<u8> {
+    let field_width = field.width;
     // Table 21-1 gives each uppercase specifier the meaning of its lowercase
     // one, so `%H` prints lowercase digits like `%h`.
     let spec = spec.to_ascii_lowercase();
@@ -214,18 +229,17 @@ pub fn format_sized_display_arg(
             .iter()
             .position(|byte| *byte != 0)
             .unwrap_or(bytes.len());
-        return pad_bytes(
+        return pad_veryl_field(
             bytes[start..].to_vec(),
-            b' ',
-            field_width.unwrap_or_else(|| arg.width.div_ceil(8)),
+            spec,
+            FieldSpec {
+                width: Some(field_width.unwrap_or_else(|| arg.width.div_ceil(8))),
+                ..field
+            },
         );
     }
     if spec == 'c' {
-        return pad_bytes(
-            format_display_arg(arg, Some(spec)),
-            b' ',
-            field_width.unwrap_or(0),
-        );
+        return pad_veryl_field(format_display_arg(arg, Some(spec)), spec, field);
     }
     let text = format_numeric_arg(arg, Some(spec));
     let bits_per_digit = match spec {
@@ -241,6 +255,12 @@ pub fn format_sized_display_arg(
             } else {
                 text
             };
+            if field.left_justify {
+                // Icarus retains the argument's radix digits before padding
+                // on the right (Verilator instead uses the minimum digits).
+                let width = arg.width.div_ceil(bits_per_digit).max(1);
+                return pad_veryl_field(pad(text, '0', width).into_bytes(), spec, field);
+            }
             let minimal = text.trim_start_matches('0');
             let minimal = if minimal.is_empty() { "0" } else { minimal };
             let width = field_width.unwrap_or_else(|| arg.width.div_ceil(bits_per_digit).max(1));
@@ -252,9 +272,16 @@ pub fn format_sized_display_arg(
                 None => text,
             };
             let width = field_width.unwrap_or_else(|| decimal_digits(arg));
-            pad(text, ' ', width)
+            return pad_veryl_field(
+                text.into_bytes(),
+                spec,
+                FieldSpec {
+                    width: Some(width),
+                    ..field
+                },
+            );
         }
-        None => pad(text, ' ', field_width.unwrap_or(0)),
+        None => return pad_veryl_field(text.into_bytes(), spec, field),
     }
     .into_bytes()
 }
@@ -312,16 +339,15 @@ pub const MAX_FIELD_WIDTH: usize = 1 << 16;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FieldSpec {
     pub width: Option<usize>,
-    /// `-`, which Veryl reads as C does: pad on the right.
+    /// `-`: pad on the right when flag parsing is enabled.
     pub left_justify: bool,
-    /// A leading `0` digit, which Veryl reads as C's flag: pad numbers with
-    /// zeros.
+    /// A leading `0` digit: pad numbers with zeros.
     pub zero_pad: bool,
 }
 
 impl FieldSpec {
     /// Read the flags and width that follow a `%`. `-` is a flag only with
-    /// `c_flags` (Veryl); otherwise it is left as the conversion character.
+    /// `c_flags`; otherwise it is left as the conversion character.
     pub fn parse(
         chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
         c_flags: bool,
@@ -405,13 +431,6 @@ pub fn pad_veryl_field(mut body: Vec<u8>, spec: char, field: FieldSpec) -> Vec<u
         );
     }
     body
-}
-
-fn pad_bytes(mut bytes: Vec<u8>, fill: u8, width: usize) -> Vec<u8> {
-    if bytes.len() < width {
-        bytes.splice(0..0, std::iter::repeat_n(fill, width - bytes.len()));
-    }
-    bytes
 }
 
 fn pad(text: String, fill: char, width: usize) -> String {
@@ -577,6 +596,46 @@ mod tests {
         assert_eq!(veryl(0x01, 0x03, 8, false, "h"), "0X");
         assert_eq!(veryl(0b1000, 0b1100, 4, false, "b"), "xz00");
         assert_eq!(veryl(0, 0x01, 8, false, "d"), "x");
+    }
+
+    #[test]
+    fn sv_decimal_flags_preserve_sign_and_do_not_truncate() {
+        let value = BigUint::from(0xd6u8); // -42
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 8,
+            signed: true,
+            is_string: false,
+        };
+        // Icarus places zeros behind the sign; Verilator instead prints 00-42.
+        for (format, expected) in [("05d", "-0042"), ("-05d", "-42  "), ("02d", "-42")] {
+            let mut chars = format.chars().peekable();
+            let field = FieldSpec::parse(&mut chars, true);
+            assert_eq!(
+                format_sv_display_arg(&arg, chars.next().unwrap(), field),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn sv_left_justified_radices_keep_icarus_digit_sizing() {
+        let value = BigUint::from(5u8);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 8,
+            signed: false,
+            is_string: false,
+        };
+        let field = FieldSpec {
+            width: Some(5),
+            left_justify: true,
+            zero_pad: false,
+        };
+        assert_eq!(format_sv_display_arg(&arg, 'h', field), b"05   ");
+        assert_eq!(format_sv_display_arg(&arg, 'b', field), b"00000101");
     }
 
     #[test]
