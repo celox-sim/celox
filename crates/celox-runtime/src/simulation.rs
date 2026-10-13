@@ -1162,7 +1162,7 @@ impl<B: SimBackend> SimulationState<B> {
         // Ready processes may activate a clock at this timestamp. Join it
         // to existing source events before any coincident FF domain commits.
         // With no other event, retain the later fused-tick path.
-        if !self.finished && (!events_to_process.is_empty() || !process_driven.is_empty()) {
+        if !self.finished && (!events_to_process.is_empty() || !process_driven.is_empty() || !generated_events.is_empty()) {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
                     && self.clock_has_waiters(*id)
@@ -1745,6 +1745,9 @@ pub struct ScheduleParts<B: SimBackend> {
     pub done_processes: Vec<usize>,
     /// Rising edges of process clocks so far.
     pub ticks: u64,
+    /// Timestamp and one-shot clock drives already consumed at that time.
+    pub scheduled_clock_time: u64,
+    pub scheduled_clock_drives: Vec<B::Event>,
     pub inactive_processes: Vec<usize>,
     /// A process requested the end of the simulation.
     pub finished: bool,
@@ -1808,6 +1811,8 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             done_processes: self.done.iter().copied().collect(),
             ticks: self.ticks,
+            scheduled_clock_time: self.scheduled_clock_time,
+            scheduled_clock_drives: self.scheduled_clock_drives.iter().map(|id| events[id]).collect(),
             inactive_processes: self.inactive.iter().copied().collect(),
             finished: self.finished,
         }
@@ -1872,6 +1877,8 @@ impl<B: SimBackend> SimulationState<B> {
             .collect();
         self.done = parts.done_processes.into_iter().collect();
         self.ticks = parts.ticks;
+        self.scheduled_clock_time = parts.scheduled_clock_time;
+        self.scheduled_clock_drives = parts.scheduled_clock_drives.into_iter().map(|event| event.id()).collect();
         self.inactive = parts.inactive_processes.into_iter().collect();
         self.finished = parts.finished;
     }
