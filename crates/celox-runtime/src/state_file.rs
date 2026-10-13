@@ -78,8 +78,9 @@ pub struct ScheduleRecord {
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
     pub high_events: Vec<String>,
-    /// Events whose baseline contains X/Z bits.
-    pub unknown_events: Vec<String>,
+    /// Events whose baseline contains X/Z bits. Legacy version-1 files do
+    /// not carry this information; their baselines are reconstructed on load.
+    pub unknown_events: Option<Vec<String>>,
 }
 
 /// Contents of a state file.
@@ -122,7 +123,16 @@ impl StateFile {
     pub fn write_to(&self, mut writer: impl Write) -> io::Result<()> {
         let w = &mut writer;
         w.write_all(MAGIC)?;
-        put_u16(w, VERSION)?;
+        let version = if self
+            .schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.unknown_events.is_none())
+        {
+            1
+        } else {
+            VERSION
+        };
+        put_u16(w, version)?;
         let mut flags = 0;
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
@@ -171,9 +181,11 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
-            put_len(w, schedule.unknown_events.len())?;
-            for event in &schedule.unknown_events {
-                put_str(w, event)?;
+            if let Some(unknown_events) = &schedule.unknown_events {
+                put_len(w, unknown_events.len())?;
+                for event in unknown_events {
+                    put_str(w, event)?;
+                }
             }
         }
         Ok(())
@@ -241,11 +253,13 @@ impl StateFile {
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
             let unknown_events = if version >= 2 {
-                (0..get_u32(r)?)
-                    .map(|_| get_str(r))
-                    .collect::<Result<_, _>>()?
+                Some(
+                    (0..get_u32(r)?)
+                        .map(|_| get_str(r))
+                        .collect::<Result<_, _>>()?,
+                )
             } else {
-                Vec::new()
+                None
             };
             Some(ScheduleRecord {
                 unknown_events,
@@ -455,9 +469,23 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
-                unknown_events: vec!["clk".into()],
+                unknown_events: Some(vec!["clk".into()]),
             }),
         }
+    }
+
+    #[test]
+    fn legacy_schedule_round_trips_preserve_missing_mask_metadata() {
+        let mut file = sample();
+        file.schedule.as_mut().unwrap().unknown_events = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[8..10], &1u16.to_le_bytes());
+        let loaded = StateFile::read_from(bytes.as_slice()).unwrap();
+        assert_eq!(loaded, file);
+        let mut again = Vec::new();
+        loaded.write_to(&mut again).unwrap();
+        assert_eq!(again, bytes);
     }
 
     #[test]
