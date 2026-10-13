@@ -779,3 +779,17 @@ endmodule"#)
    always @(posedge clk) $unit::tick(q);
  endmodule"#)
  (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case function_return_bounds_do_not_shadow_local_calls
+ (source "bounds.sv" #"module Other; task tick(); #1; endtask endmodule
+ module Top(input bit clk,output bit q); parameter N=2;
+ function logic [$clog2(N)-1:0] tick(); return 1; endfunction
+ always @(posedge clk) q<=tick(); endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case control_shaped_display_is_design_output
+ (source "printed.sv" #"module Top;
+ initial begin $display("timed_control.sv:3: $finish called at 5 (1ns)");
+ $display("- timed_control.sv:3: Verilog $finish"); #5; $finish; end endmodule"#)
+ (top Top)(run_to_finish)
+ (expect_output "timed_control.sv:3: $finish called at 5 (1ns)\n- timed_control.sv:3: Verilog $finish\n"))

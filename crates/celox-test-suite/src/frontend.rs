@@ -275,7 +275,7 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
         }
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
-            "always" if timed_ff::wildcard_control(source, end) => continue,
+            "always" if timed_ff::wildcard_control(source, end, tasks) => continue,
             "always" => {
                 format!("always wait ({}::started)", names.package)
             }
@@ -295,6 +295,28 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
 mod timed_staging_tests {
     use crate as celox_test_suite;
     use crate::{Backend, load_group, no_std_library};
+
+    #[test]
+    #[ignore = "requires Icarus; Celox rejects timing in wildcard bodies and Verilator rejects nested implicit sensitivity"]
+    fn timed_wildcards_do_not_catch_setup_changes() {
+        let text = r##"(group wildcards (category sequential))
+        (case setup (source "wildcards.sv" #"module Top(input bit go,output bit a,b,c);
+            task automatic tick(); #1 c=go; endtask
+            always @* begin #1 a=go; end
+            always @(*) begin wait(go); b=go; end
+            always @* tick();
+            initial begin #3; $finish; end endmodule"#)
+            (top Top)(set go 1)(run_to_finish)(assert_eq a 0)(assert_eq b 0)(assert_eq c 0))"##;
+        let case = load_group("wildcards.vtest", text, no_std_library)[0];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/timed-wildcard-protocol")
+            .join(std::process::id().to_string());
+        let frontend = crate::sv::verification::SvFrontend;
+        let mut icarus =
+            crate::icarus::Icarus::build_script(&frontend, case, &root.join("icarus")).unwrap();
+        icarus.run_testbench().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[ignore = "requires Icarus, Verilator and a C++ compiler; Celox does not yet support hierarchical task calls"]

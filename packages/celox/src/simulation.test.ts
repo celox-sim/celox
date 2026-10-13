@@ -918,3 +918,18 @@ for (const method of ["runUntil", "waitUntil"] as const) {
 		sim.dispose();
 	});
 }
+
+for (const maxSteps of [0, 1]) {
+	test(`waitUntil rechecks settled combinational outputs with budget ${maxSteps}`, () => {
+		const { create, handle, buffer } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		// Read shared output storage directly so the predicate does not settle it.
+		expect(
+			sim.waitUntil(() => new DataView(buffer).getUint8(4) === 1, { maxSteps }),
+		).toBe(0);
+		expect(handle.step).not.toHaveBeenCalled();
+		expect(sim.nextEventTime()).toBe(5);
+		sim.dispose();
+	});
+}

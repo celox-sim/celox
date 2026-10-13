@@ -352,16 +352,25 @@ pub(super) fn in_macro(source: &str, start: usize, replacement: String) -> Strin
     output
 }
 
-pub(super) fn wildcard_control(source: &str, end: usize) -> bool {
+pub(super) fn wildcard_control(source: &str, end: usize, tasks: &TaskTiming) -> bool {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
         return false;
     }
     let begin = trivia(source, at + 1);
-    if source.as_bytes().get(begin) == Some(&b'*') {
-        return true;
-    }
-    parens(source, begin).is_some_and(|end| after_trivia(&source[begin + 1..end - 1]).trim() == "*")
+    let event_end = if source.as_bytes().get(begin) == Some(&b'*') {
+        begin + 1
+    } else if let Some(end) = parens(source, begin)
+        && after_trivia(&source[begin + 1..end - 1]).trim() == "*"
+    {
+        end
+    } else {
+        return false;
+    };
+    let Some(body_end) = statement_end(source, event_end) else {
+        return false;
+    };
+    !has_timing(&source[event_end..body_end]) && !tasks.has_timed_call(source, event_end, body_end)
 }
 
 fn has_timing(source: &str) -> bool {
@@ -571,7 +580,29 @@ impl TaskTiming {
                         .map(|offset| end + offset)
                         .unwrap_or(source.len());
                     let header = &source[*end..header_end];
-                    let name_end = header.find('(').unwrap_or(header.len());
+                    let mut name_end = header.len();
+                    let mut at = 0;
+                    let mut brackets = 0usize;
+                    while at < header.len() {
+                        if skip_token(header, &mut at) {
+                            continue;
+                        }
+                        match header.as_bytes()[at] {
+                            b'[' => brackets += 1,
+                            b']' => brackets = brackets.saturating_sub(1),
+                            b'(' => {
+                                if brackets == 0 {
+                                    name_end = at;
+                                }
+                                if let Some(end) = parens(header, at) {
+                                    at = end;
+                                    continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                        at += 1;
+                    }
                     if let Some((_, _, name)) = sv_words(&header[..name_end]).last() {
                         result
                             .tasks

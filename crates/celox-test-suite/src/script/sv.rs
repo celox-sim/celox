@@ -133,7 +133,7 @@ fn icarus_finish_notice(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Whether `line` is a simulator's notice of a `$finish` in one of the
-/// simulation's source files `sources` (file names): a design may print a
+/// simulation's source files `sources` (canonical paths): a design may print a
 /// line of the same shape, which is its output.
 fn is_source_finish_notice(line: &str, sources: &[String]) -> bool {
     is_finish_notice(line)
@@ -142,7 +142,7 @@ fn is_source_finish_notice(line: &str, sources: &[String]) -> bool {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            name == "timed_control.sv" && sources.contains(&name)
+            name == "timed_control.sv" && sources.iter().any(|source| source == file)
         })
 }
 
@@ -1158,14 +1158,14 @@ mod tests {
 
     #[test]
     fn finish_notices_are_not_design_output() {
-        let sources = vec!["timed_control.sv".to_string()];
+        let sources = vec!["/stage/timed_control.sv".to_string()];
         for log in [
-            b"done\ntimed_control.sv:3: $finish called at 5 (1ns)\n".as_slice(),
-            b"done\n- timed_control.sv:3: Verilog $finish\n",
+            b"done\n/stage/timed_control.sv:3: $finish called at 5 (1ns)\n".as_slice(),
+            b"done\n- /stage/timed_control.sv:3: Verilog $finish\n",
         ] {
             assert_eq!(design_output(log, &sources), b"done\n");
         }
-        let printed = b"\x80\xffsource_0.sv:3: $finish called at 5 (1ns)\n";
+        let printed = b"\x80\xfftimed_control.sv:3: $finish called at 5 (1ns)\n";
         assert_eq!(design_output(printed, &sources), printed);
     }
 
