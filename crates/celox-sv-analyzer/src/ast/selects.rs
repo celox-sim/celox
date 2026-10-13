@@ -1686,6 +1686,40 @@ pub(super) fn parameter_initializer_needs_typed_lowering(
     })
 }
 
+/// Validate selections independently of a short-circuited initializer's value.
+/// Lower only the selected primary so unrelated oversized values remain skipped.
+pub(super) fn validate_parameter_initializer_selections(
+    initializer: &sv_parser::ConstantParamExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let mut dimensions = dimensions.clone();
+    dimensions.constant_indexed_base = true;
+    for node in initializer.into_iter() {
+        match node {
+            RefNode::ConstantPrimary(sv_parser::ConstantPrimary::PsParameter(parameter))
+                if !parameter.nodes.1.nodes.1.nodes.0.is_empty()
+                    || parameter.nodes.1.nodes.2.is_some() =>
+            {
+                indexed_constant_expression(node, syntax_tree, &dimensions)?;
+            }
+            RefNode::Primary(primary @ sv_parser::Primary::Hierarchical(parameter))
+                if !parameter.nodes.2.nodes.1.nodes.0.is_empty()
+                    || parameter.nodes.2.nodes.2.is_some() =>
+            {
+                expressions::expr_from_primary_with_types(primary, syntax_tree, &dimensions)?;
+            }
+            // Concatenation selections have no named primary to lower. Check
+            // the width independently without inspecting the concatenated bits.
+            RefNode::ConstantIndexedRange(range) => {
+                indexed_select_width(&range.nodes.2, syntax_tree, &dimensions)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // Parameter arithmetic receives the assignment width after self-determined
 // selection operands have been folded, rather than the index expression context.
 pub(super) fn selected_parameter_initializer(

@@ -465,6 +465,13 @@ pub(super) fn parameters_from_ref_node_with_environment(
                 continue;
             }
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
+            // The declaration already binds its name while its initializer is
+            // analyzed. Neither an imported value nor an earlier projection
+            // of this binding may resolve a self-reference.
+            for key in binding_keys(&name, &environment.constants, parameter_ranges.len()) {
+                environment.constants.remove(&key);
+            }
+            environment.literals.remove(&name);
             let const_env = &environment.constants;
             let mut value = if let Some((_, expr)) = &param.nodes.2 {
                 let imported = scope::imported();
@@ -473,12 +480,15 @@ pub(super) fn parameters_from_ref_node_with_environment(
                     syntax_tree,
                     const_env,
                     type_aliases,
-                    &|name| {
-                        environment.literals.get(name).cloned().or_else(|| {
+                    &|reference| {
+                        environment.literals.get(reference).cloned().or_else(|| {
                             // An unresolved local binding still shadows imports.
-                            (!parameters.iter().any(|parameter| parameter.name() == name))
-                                .then(|| imported.parameter_values.get(name).cloned())
-                                .flatten()
+                            (reference != name
+                                && !parameters
+                                    .iter()
+                                    .any(|parameter| parameter.name() == reference))
+                            .then(|| imported.parameter_values.get(reference).cloned())
+                            .flatten()
                         })
                     },
                 )? {

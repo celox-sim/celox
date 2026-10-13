@@ -268,22 +268,50 @@ fn reject_silently_ignored_constructs_with_dimensions(
         // the typed path; report why it cannot be.
         if let RefNode::ParamAssignment(parameter) = &child
             && let Some((_, expression)) = parameter.nodes.2.as_ref()
-            && selects::parameter_initializer_needs_typed_lowering(expression)
-            && parameters::validate_parameter_initializer_literal_widths(
+        {
+            let folded = parameters::validate_parameter_initializer_literal_widths(
                 expression,
                 syntax_tree,
                 const_env,
                 type_aliases,
                 &|name| indexed_dimensions.parameter_values.get(name).cloned(),
-            )?
-            .is_none()
-        {
-            selects::selected_parameter_initializer(
-                expression,
-                syntax_tree,
-                indexed_dimensions,
-                None,
             )?;
+            if folded.is_some() {
+                selects::validate_parameter_initializer_selections(
+                    expression,
+                    syntax_tree,
+                    indexed_dimensions,
+                )?;
+                let signatures = const_functions::argument_names();
+                for node in expression.into_iter() {
+                    if let RefNode::TfCall(call) = node
+                        && call.nodes.2.is_some()
+                    {
+                        let name = reference_name(
+                            RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                            syntax_tree,
+                        )
+                        .ok_or_else(|| unsupported("subroutine name"))?;
+                        let (bindings, _) = expressions::bind_call_arguments(
+                            &name,
+                            call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
+                            syntax_tree,
+                            &signatures,
+                        )?;
+                        const_functions::validate_argument_bindings(
+                            &name,
+                            &bindings.iter().map(Option::is_some).collect::<Vec<_>>(),
+                        )?;
+                    }
+                }
+            } else if selects::parameter_initializer_needs_typed_lowering(expression) {
+                selects::selected_parameter_initializer(
+                    expression,
+                    syntax_tree,
+                    indexed_dimensions,
+                    None,
+                )?;
+            }
         }
         match child {
             RefNode::SystemTfCall(call) if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| name == "$printtimescale") => {

@@ -811,6 +811,68 @@ fn permits_short_circuited_constant_parameter_operands() {
 }
 
 #[test]
+fn validates_shapes_in_short_circuited_parameter_operands() {
+    for selection in [
+        "W[0 +: 0]",
+        "W[0 -: -1]",
+        "W[0][0 +: 1]",
+        "{W}[0 +: 0]",
+        "$bits(W[0][0 +: 1])",
+    ] {
+        let source = format!(
+            "module Top; localparam logic [7:0] W = 0; localparam N = 0 && ({selection} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_shape.sv")).is_err(),
+            "{selection}"
+        );
+    }
+    let ir = analyze_source(
+        "module Top; localparam logic [7:0] W = 0; localparam N = 0 && (W[0 +: 1] || 1000000000'd0); endmodule",
+        Path::new("skipped_valid_parameter_shape.sv"),
+    ).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+}
+
+#[test]
+fn validates_user_calls_in_short_circuited_parameter_operands() {
+    for call in ["f(.missing(1))", "f(.x(1), .x(2))", "f(1, 2)", "f()"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_user_call.sv")).is_err(),
+            "{call}"
+        );
+    }
+    for call in ["f(.x(1000000000'd0))", "f()"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x = 1); return x; endfunction localparam N = 0 && ({call} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_user_call.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn current_parameter_shadows_imports_in_its_initializer() {
+    for flag in ["1'b0", "1'bx"] {
+        let source = format!(
+            "package p; localparam FLAG = {flag}; endpackage module Top; import p::*; localparam FLAG = FLAG && 1000000000'd0; endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("self_referencing_parameter.sv")).is_err(),
+            "{flag}"
+        );
+    }
+    let ir = analyze_source(
+        "package p; localparam FLAG = 0; endpackage module Top; import p::*; localparam FLAG = p::FLAG && 1000000000'd0; endmodule",
+        Path::new("qualified_parameter_import.sv"),
+    ).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
 fn validates_calls_in_short_circuited_constant_parameter_operands() {
     for call in ["$random()", "$unknown()", "$clog2()", "$bits()"] {
         let source =
