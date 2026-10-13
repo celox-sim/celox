@@ -752,3 +752,30 @@ endmodule"#)
  (source "escaped-control.sv" #"package \celox_suite_timed_control ;parameter bit Q=1;endpackage
  module Top(output bit q);initial q=\celox_suite_timed_control ::Q;endmodule"#)
  (top Top)(run_until 0)(assert_eq q 1))
+
+(case single_item_generate_imports_do_not_leak
+ (source "imports.sv" #"package A; task automatic tick(output bit value); value=1; endtask endpackage
+ package B; task automatic tick(output bit value); #1 value=1; endtask endpackage
+ module Top(input bit clk,output bit q);
+   import A::tick;
+   if(1) import B::tick;
+   always @(posedge clk) tick(q);
+ endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case exported_untimed_tasks_keep_setup_edges
+ (source "exports.sv" #"package A; task automatic tick(output bit value); value=1; endtask endpackage
+ package B; import A::tick; export A::*; endpackage
+ package C; import B::tick; export *::*; endpackage
+ module Top(input bit clk,output bit q);
+   import C::*;
+   always @(posedge clk) tick(q);
+ endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case qualified_unit_tasks_keep_setup_edges
+ (source "unit.sv" #"task automatic tick(output bit value); value=1; endtask
+ module Top(input bit clk,output bit q);
+   always @(posedge clk) $unit::tick(q);
+ endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))

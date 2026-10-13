@@ -226,6 +226,9 @@ sv_backends! {
  fn attributes_preserve_single_generate_arms(sim) { @case "timing::attributes_preserve_single_generate_arms"; }
  fn adapter_defines_preserve_line_macros(sim) { @case "timing::adapter_defines_preserve_line_macros"; }
  fn callable_timing_keeps_generate_scope(sim) { @case "timing::callable_timing_keeps_generate_scope"; }
+ fn single_item_generate_imports_do_not_leak(sim) { @case "timing::single_item_generate_imports_do_not_leak"; }
+ fn exported_untimed_tasks_keep_setup_edges(sim) { @case "timing::exported_untimed_tasks_keep_setup_edges"; }
+ fn qualified_unit_tasks_keep_setup_edges(sim) { @case "timing::qualified_unit_tasks_keep_setup_edges"; }
 }
 
 sv_backends! {

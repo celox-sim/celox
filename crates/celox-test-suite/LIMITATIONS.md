@@ -362,6 +362,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
+| `sv_icarus_qualified_unit_task` | compile | icarus | 1 | Icarus 13.0 rejects a `$unit::` qualified task call permitted by IEEE 1800-2023 3.12.1. Celox and Verilator pass the unchanged timed case. The [pre-exclusion diagnostic](verification/repros/sv_timed_unit_icarus.json) records the malformed-statement error. |
 | `sv_icarus_genvar_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for `$dimensions` of a generated loop index's implicit integer localparam; IEEE 1800-2023 27.4 and 20.7 require one packed dimension. Celox and Verilator pass the unchanged assertions. The [standalone reproducer and pre-exclusion result](verification/repros/sv_genvar_dimensions.json) retain the observed disagreement. |
 | `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
 | `sv_icarus_runtime_array_queries` | execute | icarus | 1 | Icarus 13.0 aborts on a runtime dimension argument. A standalone reproducer also rejects an integer variable as the dimension. IEEE 1800-2023 20.7 permits querying fixed-size dimensions with runtime expressions. |

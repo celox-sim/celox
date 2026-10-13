@@ -411,7 +411,7 @@ pub(super) fn node_range(node: RefNode<'_>) -> (usize, usize) {
 
 /// The source ranges of the generate blocks under a module `node`: each is a
 /// scope of its own (IEEE 1800-2023 27.5).
-fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
+pub(super) fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
     if !matches!(
         node,
         RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)

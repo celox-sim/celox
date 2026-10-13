@@ -1265,5 +1265,22 @@
         "indexed_select::constant_parameter_initializers_preserve_unknown_indices"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_qualified_unit_task",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0 / Verilator 5.052",
+    "reason": "Icarus 13.0 rejects $unit::tick(q) as a malformed statement. IEEE 1800-2023 3.12.1 permits scope-qualified compilation-unit identifiers. Celox and Verilator pass the unchanged timed task case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_timed_unit_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::qualified_unit_tasks_keep_setup_edges"
+      ]
+    }
   }
 ]
