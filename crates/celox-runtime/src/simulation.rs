@@ -421,14 +421,10 @@ impl<B: SimBackend> SimulationState<B> {
     pub fn has_unsettled_edges(&self, backend: &B) -> bool {
         self.topo_signals.iter().any(|(signal, id, _)| {
             *id != usize::MAX
-                && self.edge_triggers(
-                    *id,
-                    (
-                        self.last_clock_values.contains(*id),
-                        self.unknown_clock_values.contains(*id),
-                    ),
-                    sample_event_signal(backend, *signal),
-                )
+                && (
+                    self.last_clock_values.contains(*id),
+                    self.unknown_clock_values.contains(*id),
+                ) != sample_event_signal(backend, *signal)
         })
     }
 
