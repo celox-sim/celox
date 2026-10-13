@@ -50,7 +50,7 @@ mod host {
         },
     };
     use celox_testbench::{
-        DisplayFormatArg, FieldSpec, format_sized_display_arg, format_veryl_display_arg,
+        DisplayFormatArg, FieldSpec, format_sv_display_arg, format_veryl_display_arg,
         pad_veryl_field,
     };
     use num_bigint::BigUint;
@@ -369,7 +369,7 @@ mod host {
         };
         match sizing {
             DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
-            DisplaySizing::Ieee => format_sized_display_arg(&arg, spec, field.width),
+            DisplaySizing::Ieee => format_sv_display_arg(&arg, spec, field),
         }
     }
 
@@ -423,7 +423,7 @@ mod host {
                 out.push(b'%');
                 continue;
             }
-            let field = FieldSpec::parse(&mut chars, site.sizing == DisplaySizing::Veryl);
+            let field = FieldSpec::parse(&mut chars, true);
             let spec = chars.next().unwrap_or('d');
             match spec {
                 'x' | 'h' | 'X' | 'H' | 'b' | 'B' | 'o' | 'O' | 'c' | 'C' | 's' | 'S' => {

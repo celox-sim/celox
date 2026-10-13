@@ -25,6 +25,8 @@ pub(crate) enum LaneKernelKind {
 /// One partitioned kernel with its concurrency plan.
 pub(crate) struct PlannedLaneKernel<'a> {
     pub(crate) kind: LaneKernelKind,
+    pub(crate) diagnostic_id: String,
+    pub(crate) diagnostic_program: String,
     units: Vec<&'a LaneUnit<RegionedAbsoluteAddr>>,
     pub(crate) tasks: Vec<LaneTask>,
     /// Index of an earlier planned kernel with the same units, whose
@@ -35,6 +37,21 @@ pub(crate) struct PlannedLaneKernel<'a> {
 }
 
 impl<'a> PlannedLaneKernel<'a> {
+    /// Link the final runtime schedule to the units from which it was made.
+    pub(crate) fn trace_schedule(&self, hazard_level: &str) {
+        if !tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
+            return;
+        }
+        let schedule = &self.diagnostic_id;
+        let program = &self.diagnostic_program;
+        for (task, spec) in self.tasks.iter().enumerate() {
+            tracing::trace!(target: "celox::parallel", event = "compiled_task", schedule, program, hazard_level,
+                kind = ?self.kind, task, lane = spec.lane, units = ?spec.items,
+                waits = ?spec.waits.iter().map(|wait| [wait.lane, wait.completed_tasks]).collect::<Vec<_>>(),
+                sir = ?self.task_units(task));
+        }
+    }
+
     /// Units of one task, in execution order.
     pub(crate) fn task_units(&self, task: usize) -> Vec<&'a ExecutionUnit<RegionedAbsoluteAddr>> {
         self.tasks[task]
@@ -72,6 +89,24 @@ pub(crate) fn plan_lane_kernels(
         return Ok((1, Vec::new()));
     };
     let lanes = parallel.lanes;
+    let program = celox_runtime::parallel::new_diagnostic_id();
+    if tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE) {
+        let layout = laid_out.layout();
+        for (address, offset) in &layout.offsets {
+            let source = laid_out
+                .runtime()
+                .design
+                .variable(address)
+                .map(|v| v.source_id);
+            tracing::trace!(target: "celox::parallel", event = "signal", program, address = %address,
+                source_address = source.map(|id| format!("AbsoluteAddr({}, {})", address.instance_id, id)).unwrap_or_default(),
+                source_object = source.map(|id| id.0),
+                name = laid_out.runtime().design.get_path(address), instance = address.instance_id.0,
+                object = address.var_id.0, offset, width = layout.widths.get(address).copied().unwrap_or(0),
+                working_offset = ?layout.working_offsets.get(address).map(|offset| layout.working_base_offset + offset),
+                sparse_offset = ?layout.sparse_offsets.get(address).map(|offset| layout.sparse_base_offset + offset));
+        }
+    }
     if lanes < 2 {
         return Ok((1, Vec::new()));
     }
@@ -101,10 +136,18 @@ pub(crate) fn plan_lane_kernels(
     }
     let mut planned: Vec<PlannedLaneKernel<'_>> = Vec::new();
     for (kind, units) in candidates {
+        let diagnostic_id = planned
+            .iter()
+            .find(|kernel| kernel.units == units)
+            .map(|kernel| kernel.diagnostic_id.clone())
+            .unwrap_or_else(celox_runtime::parallel::new_diagnostic_id);
+        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "kernel_plan", program = program.as_str(), schedule = diagnostic_id.as_str(), hazard_level = "units", kind = ?kind, codegen = ?codegen).entered();
         if let Some(index) = planned.iter().position(|kernel| kernel.units == units) {
             let tasks = planned[index].tasks.clone();
             planned.push(PlannedLaneKernel {
                 kind,
+                diagnostic_id,
+                diagnostic_program: program.clone(),
                 units,
                 tasks,
                 same_as: Some(index),
@@ -135,6 +178,8 @@ pub(crate) fn plan_lane_kernels(
         if used_lanes.len() > 1 {
             planned.push(PlannedLaneKernel {
                 kind,
+                diagnostic_id,
+                diagnostic_program: program.clone(),
                 units,
                 tasks,
                 same_as: None,
@@ -235,19 +280,76 @@ pub(crate) fn run_selected<B, R>(
     sequential: impl FnOnce(&mut B) -> R,
 ) -> R {
     use celox_runtime::parallel::KernelChoice;
+    // A capture subscriber can open a bounded window before work starts,
+    // without tracing worker tasks during selector calibration.
+    let _capture_scope =
+        tracing::trace_span!(target: "celox::parallel::call", "kernel_selection").entered();
+    tracing::trace!(target: "celox::parallel::call", event = "kernel_call", slot = ?slot);
     let (choice, timed) = selectors(backend).selector(slot, selection).next();
-    let start = timed.then(std::time::Instant::now);
+    let diagnostic = tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE);
+    let start = (timed || diagnostic).then(std::time::Instant::now);
     let result = match choice {
         KernelChoice::Parallel => parallel(backend),
         KernelChoice::Sequential => sequential(backend),
     };
     let selector = selectors(backend).selector(slot, selection);
+    if diagnostic {
+        tracing::trace!(target: "celox::parallel", event = "kernel_choice", slot = ?slot,
+            choice = ?choice, calibrating = timed,
+            elapsed_ns = start.map_or(0, |start| start.elapsed().as_nanos() as u64));
+    }
     match start {
-        Some(start) => {
+        Some(start) if timed => {
             let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             selector.record(choice, nanos);
+            if let Some(decision) = selector.decided() {
+                tracing::debug!(target: "celox::parallel::selection", event = "selector_slot",
+                    selector = selector.diagnostic_id(), slot = ?slot, decision = ?decision);
+            }
         }
-        None => selector.advance(1),
+        _ => selector.advance(1),
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_runtime::parallel::KernelSelection;
+
+    #[test]
+    fn selector_identity_survives_table_growth_and_is_unique_per_simulator() {
+        let mut seen = fxhash::FxHashSet::default();
+        for _ in 0..2 {
+            let mut selectors = LaneSelectors::default();
+            for slot in [LaneKernelSlot::Event(0), LaneKernelSlot::Fused(0)] {
+                let id = selectors
+                    .selector(slot, KernelSelection::Measured)
+                    .diagnostic_id()
+                    .to_owned();
+                assert!(seen.insert(id.clone()));
+                // Grow both tables after recording the first slot's identity.
+                for index in 1..64 {
+                    selectors.selector(LaneKernelSlot::Event(index), KernelSelection::Measured);
+                    selectors.selector(LaneKernelSlot::Fused(index), KernelSelection::Measured);
+                }
+                while selectors.decided(slot).is_none() {
+                    run_selected(
+                        &mut selectors,
+                        |selectors| selectors,
+                        slot,
+                        KernelSelection::Measured,
+                        |_| (),
+                        |_| (),
+                    );
+                }
+                assert_eq!(
+                    selectors
+                        .selector(slot, KernelSelection::Measured)
+                        .diagnostic_id(),
+                    id
+                );
+            }
+        }
+    }
 }

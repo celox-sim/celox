@@ -19,7 +19,10 @@
 //! sets them to one with plain byte stores.
 
 use celox_analysis::dependence::MemoryDependencyTracker;
-use celox_analysis::lanes::{LaneError, form_lane_tasks_separated, verify_lane_tasks};
+use celox_analysis::lanes::{
+    LaneError, TaskFormationOptions, form_lane_tasks_separated, form_lane_tasks_with_options,
+    verify_lane_tasks,
+};
 use celox_analysis::memory::{MemoryEffect, MemoryLocation};
 use celox_state_layout::MemoryLayout;
 
@@ -501,13 +504,49 @@ impl Footprint {
 
 /// Dependencies of every footprint on earlier footprints of one kernel.
 fn footprint_dependencies(footprints: impl IntoIterator<Item = Footprint>) -> Vec<Vec<usize>> {
+    let diagnostic = tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE);
+    let mut history: Vec<Footprint> = Vec::new();
     let mut tracker = MemoryDependencyTracker::<Storage, usize>::default();
     let mut predecessors = Vec::new();
     let mut dependencies = std::collections::BTreeSet::new();
     for (index, footprint) in footprints.into_iter().enumerate() {
+        tracing::trace!(target: "celox::parallel", event = "footprint", unit = index,
+            reads = ?footprint.reads, writes = ?footprint.writes);
         dependencies.clear();
+        if diagnostic {
+            history.push(footprint.clone());
+        }
         tracker.add_event(index, footprint.reads, footprint.writes, &mut dependencies);
+        if diagnostic {
+            for &predecessor in &dependencies {
+                let before = &history[predecessor];
+                let after = &history[index];
+                for (hazard, left, right) in [
+                    ("RAW", &before.writes, &after.reads),
+                    ("WAR", &before.reads, &after.writes),
+                    ("WAW", &before.writes, &after.writes),
+                ] {
+                    // One exact conflicting pair explains each hazard edge.
+                    // Exhaustively expanding the Cartesian product is quadratic
+                    // for large fused kernels and obscures the scheduler decision.
+                    if let Some((producer, consumer)) = left.iter().find_map(|&producer| {
+                        right
+                            .iter()
+                            .copied()
+                            .find(|&consumer| {
+                                celox_analysis::memory::effects_may_alias(producer, consumer)
+                            })
+                            .map(|consumer| (producer, consumer))
+                    }) {
+                        tracing::trace!(target: "celox::parallel", event = "hazard", predecessor,
+                            unit = index, hazard, representative = true, producer = ?producer, consumer = ?consumer);
+                    }
+                }
+            }
+        }
         predecessors.push(dependencies.iter().copied().collect());
+        tracing::trace!(target: "celox::parallel", event = "physical_dependencies", unit = index,
+            predecessors = ?predecessors[index]);
     }
     predecessors
 }
@@ -564,11 +603,44 @@ pub fn plan_parallel_kernel(
         .iter()
         .map(|unit| sparse_class(&unit.unit))
         .collect::<Vec<_>>();
-    let tasks = form_lane_tasks_separated(lanes, &unit_lanes, &predecessors, &classes)
-        .map_err(ParallelPlanError::Lanes)?;
+    let publish_after = publication_boundaries(&unit_lanes, &predecessors);
+    let tasks = form_lane_tasks_with_options(
+        lanes,
+        &unit_lanes,
+        &predecessors,
+        &classes,
+        TaskFormationOptions {
+            publish_after: &publish_after,
+            ..TaskFormationOptions::default()
+        },
+    )
+    .map_err(ParallelPlanError::Lanes)?;
     verify_lane_tasks(lanes, &tasks, &predecessors)
         .map_err(|(predecessor, unit)| ParallelPlanError::Unordered { predecessor, unit })?;
     Ok(tasks)
+}
+
+// A consumer cannot start before the latest producer on each other lane.
+// Earlier publications only help when another consumer needs them sooner.
+fn publication_boundaries(unit_lanes: &[u32], predecessors: &[Vec<usize>]) -> Vec<bool> {
+    let mut publish = vec![false; unit_lanes.len()];
+    let mut latest = std::collections::BTreeMap::<u32, usize>::new();
+    for (consumer, dependencies) in predecessors.iter().enumerate() {
+        latest.clear();
+        for &producer in dependencies {
+            let lane = unit_lanes[producer];
+            if lane != unit_lanes[consumer] {
+                latest
+                    .entry(lane)
+                    .and_modify(|old| *old = (*old).max(producer))
+                    .or_insert(producer);
+            }
+        }
+        for &producer in latest.values() {
+            publish[producer] = true;
+        }
+    }
+    publish
 }
 
 /// Waits of tasks whose code is final.
@@ -707,6 +779,40 @@ mod tests {
 
     fn layout_with_width(aliases: Vec<(u32, u32)>, width: usize) -> MemoryLayout<AbsoluteAddr> {
         MemoryLayout::build(&Source { aliases, width }, false, MemoryLayoutMode::Packed)
+    }
+
+    #[test]
+    fn many_producers_publish_only_the_latest_needed_by_each_consumer() {
+        let mut lanes = vec![0; 100];
+        lanes.push(1);
+        let mut predecessors = vec![vec![]; 101];
+        predecessors[100] = (0..100).collect();
+        for earlier_consumer in [false, true] {
+            if earlier_consumer {
+                lanes.push(2);
+                predecessors.push(vec![0]);
+            }
+            let publish = publication_boundaries(&lanes, &predecessors);
+            assert_eq!(
+                publish.iter().filter(|&&p| p).count(),
+                if earlier_consumer { 2 } else { 1 }
+            );
+            assert!(publish[99]);
+            assert_eq!(publish[0], earlier_consumer);
+            let tasks = form_lane_tasks_with_options(
+                3,
+                &lanes,
+                &predecessors,
+                &[],
+                TaskFormationOptions {
+                    publish_after: &publish,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            verify_lane_tasks(3, &tasks, &predecessors).unwrap();
+            assert_eq!(tasks.len(), if earlier_consumer { 4 } else { 2 });
+        }
     }
 
     #[test]
