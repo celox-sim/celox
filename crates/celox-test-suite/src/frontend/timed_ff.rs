@@ -296,6 +296,13 @@ pub(super) fn gated(
 /// The frontend classifies an ordinary always as FF only when every leaf
 /// of its event list is explicitly edge-qualified.
 pub(super) fn edge_control(source: &str, end: usize, tasks: &TaskTiming) -> bool {
+    if tasks
+        .ff_offsets
+        .get(source)
+        .is_some_and(|offsets| !offsets.contains(&end.saturating_sub("always".len())))
+    {
+        return false;
+    }
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
         return false;
@@ -426,6 +433,7 @@ fn has_timing(source: &str) -> bool {
 pub(super) struct TaskTiming {
     tasks: BTreeMap<(String, Vec<usize>, String), bool>,
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
+    ff_offsets: BTreeMap<String, Vec<usize>>,
     imports: BTreeMap<String, Vec<(String, Option<String>)>>,
     exports: BTreeMap<String, Vec<(Option<String>, Option<String>)>>,
 }
@@ -538,6 +546,10 @@ impl TaskTiming {
         for source in sources {
             if let Ok(tree) = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))
             {
+                result.ff_offsets.insert(
+                    source.clone(),
+                    celox_sv_analyzer::ast::ff_always_offsets(&tree),
+                );
                 result.generate_scopes.insert(
                     source.clone(),
                     celox_sv_analyzer::ast::generate_scope_ranges(&tree),
