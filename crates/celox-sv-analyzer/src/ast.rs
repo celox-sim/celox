@@ -2442,3 +2442,28 @@ pub fn generate_scope_ranges(tree: &SyntaxTree) -> Vec<(usize, usize)> {
         .flat_map(imports::generate_blocks)
         .collect()
 }
+
+/// Source offsets of always constructs whose controls have the supported FF
+/// shape. Adapter callable analysis separately excludes timed task calls.
+pub fn ff_always_offsets(syntax_tree: &SyntaxTree) -> Vec<usize> {
+    syntax_tree
+        .into_iter()
+        .filter_map(|node| {
+            let RefNode::AlwaysConstruct(always) = node else {
+                return None;
+            };
+            if validation::always_kind(always, syntax_tree) != validation::AlwaysKind::Ff {
+                return None;
+            }
+            RefNode::AlwaysConstruct(always)
+                .into_iter()
+                .find_map(|node| {
+                    if let RefNode::Keyword(keyword) = node {
+                        Some(keyword.nodes.0.offset)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect()
+}

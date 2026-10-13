@@ -514,6 +514,9 @@ impl<B: SimBackend> Simulation<B> {
     /// Settle the combinational logic a host write left dirty, so a process
     /// waiting for a derived value sees it.
     fn settle_host_writes(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.state.is_finished() {
+            return Ok(());
+        }
         if self.simulator.dirty {
             self.simulator.eval_comb()?;
         }
@@ -1931,5 +1934,45 @@ mod staged_edge_review_tests {
             Simulation::new(build().build_native().unwrap()),
             Simulation::new(build().build_native().unwrap()),
         );
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod finished_host_write_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, operation: &str) {
+        sim.run_until(0).unwrap();
+        assert!(sim.is_finished());
+        let a = sim.signal("a");
+        let q = sim.signal("q");
+        sim.simulator.set_wide(a, 1u8.into());
+        match operation {
+            "step" => assert_eq!(sim.step().unwrap(), None),
+            "step_until" => assert_eq!(sim.step_until(1).unwrap(), None),
+            _ => sim.run_until(1).unwrap(),
+        };
+        assert_eq!(sim.simulator.backend.get(q), 0u8.into());
+        sim.eval_comb().unwrap();
+        assert_eq!(sim.simulator.backend.get(q), 1u8.into());
+    }
+    #[test]
+    fn finished_processes_do_not_settle_later_host_writes() {
+        let source = "module Top(input bit a,output bit q);assign q=a;initial $finish;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("finished.sv"))], "Top")
+        };
+        for operation in ["step", "step_until", "run_until"] {
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                operation,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                operation,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), operation);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), operation);
+        }
     }
 }
