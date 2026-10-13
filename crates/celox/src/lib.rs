@@ -100,14 +100,22 @@ mod host_api {
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
         pub(crate) backend: &'a mut B,
+        pub(crate) host_writes: &'a mut Vec<crate::SignalRef>,
+        pub(crate) host_clock_signals: &'a [crate::SignalRef],
     }
 
     impl<'a, B: SimBackend> IOContext<'a, B> {
         pub fn set<T: Copy>(&mut self, signal: crate::SignalRef, val: T) {
+            if self.host_clock_signals.contains(&signal) && !self.host_writes.contains(&signal) {
+                self.host_writes.push(signal);
+            }
             self.backend.set(signal, val);
         }
 
         pub fn set_wide(&mut self, signal: crate::SignalRef, val: crate::BigUint) {
+            if self.host_clock_signals.contains(&signal) && !self.host_writes.contains(&signal) {
+                self.host_writes.push(signal);
+            }
             self.backend.set_wide(signal, val);
         }
 
@@ -117,6 +125,9 @@ mod host_api {
             val: crate::BigUint,
             mask: crate::BigUint,
         ) {
+            if self.host_clock_signals.contains(&signal) && !self.host_writes.contains(&signal) {
+                self.host_writes.push(signal);
+            }
             self.backend.set_four_state(signal, val, mask);
         }
     }

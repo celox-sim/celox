@@ -278,6 +278,7 @@ impl<B: SimBackend> Simulator<B> {
             return Err(StateError::Runtime(error));
         }
         self.reset_runtime_finish(false);
+        self.pending_host_writes.clear();
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
         self.comb_observer_initial_eval = false;
         if let Some(writer) = &mut self.vcd_writer {

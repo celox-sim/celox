@@ -110,7 +110,8 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             if let Err(error) = self.eval_comb_checked() {
                 return (0, Err(error));
             }
-            return (1, self.tick_deferred_comb(event));
+            let result = self.tick_deferred_comb(event);
+            return (u64::from(result.is_ok()), result);
         }
         // Every tick settles the combinational logic first, so a clean
         // state needs no special case and the whole run stays in the
@@ -510,7 +511,8 @@ impl<B: SimBackend> Simulation<B> {
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
         let time = self.state.time();
-        if self.simulator.dirty
+        if !self.simulator.pending_host_writes.is_empty()
+            || self.simulator.dirty
             || !self.simulator.backend.get_triggered_bits().is_empty()
             || self.state.has_unsettled_edges(&self.simulator.backend)
             || self
@@ -525,7 +527,7 @@ impl<B: SimBackend> Simulation<B> {
                 .next_event_time()
                 .is_some_and(|next| next <= time)
             {
-                self.state.step(&mut self.simulator)?;
+                self.state.step_until(&mut self.simulator, time)?;
                 drained = true;
             }
             if !drained {
@@ -540,6 +542,13 @@ impl<B: SimBackend> Simulation<B> {
     /// Settle the combinational logic a host write left dirty, so a process
     /// waiting for a derived value sees it.
     fn settle_host_writes(&mut self) -> Result<(), RuntimeErrorCode> {
+        let writes = self.simulator.take_host_writes();
+        for &signal in &writes {
+            if let Err(error) = self.state.validate_host_write(signal) {
+                self.simulator.pending_host_writes = writes;
+                return Err(error);
+            }
+        }
         if self.simulator.dirty {
             self.simulator.eval_comb()?;
         }
@@ -2767,6 +2776,135 @@ mod scheduled_pulse_tests {
                         .unwrap(),
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_clock_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", word).unwrap();
+        module
+            .set_initial(q, Constant::two_state(0u8, 8).unwrap())
+            .unwrap();
+        let value = module.read(q).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = module.binary(BinaryOp::Add, value, one, word).unwrap();
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        let ten = module.constant(Constant::two_state(10u8, 64).unwrap());
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            }])
+            .unwrap();
+        module.finish()
+    }
+    fn settle<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), Some(1));
+    }
+    fn host<B: SimBackend>(mut sim: Simulation<B>, mode: u8) {
+        let clk = sim.signal("clk");
+        let before = sim.checkpoint().unwrap();
+        match mode {
+            0 => sim.set_wide(clk, 1u8.into()),
+            1 => sim.set_four_state(clk, 1u8.into(), 0u8.into()),
+            2 => sim
+                .modify(|io| {
+                    io.set(clk, 1u8);
+                    io.set(clk, 0u8);
+                })
+                .unwrap(),
+            _ => {
+                sim.set_wide(clk, 1u8.into());
+                sim.get(sim.signal("q"));
+            }
+        }
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("direct host write"), "{error}");
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.ticks(), 0);
+        assert!(
+            sim.run_until(0)
+                .unwrap_err()
+                .to_string()
+                .contains("direct host write")
+        );
+        sim.restore(&before).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn settling_a_process_clock_keeps_current_time() {
+        let build = || Simulator::from_frontend(design());
+        settle(Simulation::new(build().build_interpreter().unwrap()));
+        settle(Simulation::new(build().build_cranelift().unwrap()));
+        settle(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        settle(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn direct_host_clock_writes_are_rejected_before_activation() {
+        let build = || Simulator::from_frontend(design());
+        for mode in 0..4 {
+            host(Simulation::new(build().build_interpreter().unwrap()), mode);
+            host(Simulation::new(build().build_cranelift().unwrap()), mode);
+            host(Simulation::new(build().build_wasm().unwrap()), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            host(Simulation::new(build().build_native().unwrap()), mode);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod failed_ff_progress_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let event = sim.event("clk");
+        let (completed, result) = SimulationExecutor::tick_many(&mut sim, event, 10);
+        assert_eq!(completed, 0, "{}", std::any::type_name::<B>());
+        assert!(result.is_err());
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            0u8.into(),
+            "{}",
+            std::any::type_name::<B>()
+        );
+    }
+    #[test]
+    fn failed_ff_evaluation_does_not_complete_a_tick() {
+        let source = "module Top(input bit clk,ok,output bit q);always_ff @(posedge clk)begin assert(ok)else $fatal(1,\"failed FF\");q<=1;end endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("failed-ff.sv"))], "Top")
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        check(build().build_tiered().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            check(build().build_native().unwrap());
+            check(
+                build()
+                    .threads(4)
+                    .parallel_partition(crate::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap(),
+            );
         }
     }
 }
