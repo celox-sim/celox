@@ -19,7 +19,10 @@
 //! sets them to one with plain byte stores.
 
 use celox_analysis::dependence::MemoryDependencyTracker;
-use celox_analysis::lanes::{LaneError, form_lane_tasks_separated, verify_lane_tasks};
+use celox_analysis::lanes::{
+    LaneError, TaskFormationOptions, form_lane_tasks_separated, form_lane_tasks_with_options,
+    verify_lane_tasks,
+};
 use celox_analysis::memory::{MemoryEffect, MemoryLocation};
 use celox_state_layout::MemoryLayout;
 
@@ -600,8 +603,25 @@ pub fn plan_parallel_kernel(
         .iter()
         .map(|unit| sparse_class(&unit.unit))
         .collect::<Vec<_>>();
-    let tasks = form_lane_tasks_separated(lanes, &unit_lanes, &predecessors, &classes)
-        .map_err(ParallelPlanError::Lanes)?;
+    let mut publish_after = vec![false; units.len()];
+    for (consumer, dependencies) in predecessors.iter().enumerate() {
+        for &producer in dependencies {
+            if unit_lanes[consumer] != unit_lanes[producer] {
+                publish_after[producer] = true;
+            }
+        }
+    }
+    let tasks = form_lane_tasks_with_options(
+        lanes,
+        &unit_lanes,
+        &predecessors,
+        &classes,
+        TaskFormationOptions {
+            publish_after: &publish_after,
+            ..TaskFormationOptions::default()
+        },
+    )
+    .map_err(ParallelPlanError::Lanes)?;
     verify_lane_tasks(lanes, &tasks, &predecessors)
         .map_err(|(predecessor, unit)| ParallelPlanError::Unordered { predecessor, unit })?;
     Ok(tasks)

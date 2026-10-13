@@ -12,8 +12,8 @@
 //! valid sequential order; their lanes only express placement.
 
 use celox_analysis::lanes::{
-    LaneAssignmentInput, LaneAssignmentOptions, LaneSchedulePlan, LaneTask, estimate_task_makespan,
-    form_lane_tasks, list_schedule_lanes,
+    LaneAssignmentInput, LaneAssignmentOptions, LaneSchedulePlan, LaneTask, TaskFormationOptions,
+    estimate_task_makespan, form_lane_tasks_with_options, list_schedule_lanes,
 };
 use celox_sir::LaneUnit;
 
@@ -881,7 +881,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         }
     }
     let task_overhead = options.synchronization_cost / TASK_OVERHEAD_DIVISOR;
-    let mut best: Option<(u64, LaneSchedulePlan, Vec<LaneTask>)> = None;
+    let mut best: Option<(u64, LaneSchedulePlan, Vec<LaneTask>, u64)> = None;
     for (candidate, plan) in candidates {
         // Tasks over the plan's order; their items are positions in it.
         let mut position = vec![0usize; items.len()];
@@ -910,42 +910,60 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             .iter()
             .map(|&item| costs[item])
             .collect::<Vec<_>>();
-        let tasks = match form_lane_tasks(options.lanes, &ordered_lanes, &ordered_predecessors) {
-            Ok(tasks) => tasks,
-            Err(error) => {
-                tracing::warn!("lane task formation skipped: {error:?}");
-                continue;
-            }
-        };
-        let makespan = estimate_task_makespan(
-            options.lanes,
-            &tasks,
-            &ordered_costs,
-            options.synchronization_cost,
-            task_overhead,
-        );
-        tracing::trace!(target: "celox::parallel", event = "candidate", candidate, makespan,
+        // Compare the unbounded plan with publication intervals proportional
+        // to synchronization cost. Charge each extra boundary before choosing.
+        for task_budget in [
+            0,
+            options.synchronization_cost.saturating_mul(32),
+            options.synchronization_cost.saturating_mul(16),
+        ] {
+            let tasks = match form_lane_tasks_with_options(
+                options.lanes,
+                &ordered_lanes,
+                &ordered_predecessors,
+                &[],
+                TaskFormationOptions {
+                    costs: &ordered_costs,
+                    max_cost: task_budget,
+                    ..TaskFormationOptions::default()
+                },
+            ) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::warn!("lane task formation skipped: {error:?}");
+                    continue;
+                }
+            };
+            let makespan = estimate_task_makespan(
+                options.lanes,
+                &tasks,
+                &ordered_costs,
+                options.synchronization_cost,
+                task_overhead,
+            );
+            tracing::trace!(target: "celox::parallel", event = "candidate", candidate, task_budget, makespan,
             sequential_cost, synchronization_cost = options.synchronization_cost,
             task_overhead, lanes = ?plan.item_lanes, order = ?plan.order, tasks = ?tasks);
-        tracing::debug!(
-            makespan,
-            tasks = tasks.len(),
-            waits = tasks.iter().map(|task| task.waits.len()).sum::<usize>(),
-            "[parallel] comb partition candidate"
-        );
-        if best
-            .as_ref()
-            .is_none_or(|(best_makespan, ..)| makespan < *best_makespan)
-        {
-            best = Some((makespan, plan, tasks));
+            tracing::debug!(
+                makespan,
+                tasks = tasks.len(),
+                waits = tasks.iter().map(|task| task.waits.len()).sum::<usize>(),
+                "[parallel] comb partition candidate"
+            );
+            if best
+                .as_ref()
+                .is_none_or(|(best_makespan, ..)| makespan < *best_makespan)
+            {
+                best = Some((makespan, plan.clone(), tasks, task_budget));
+            }
         }
     }
-    let Some((estimated_makespan, plan, tasks)) = best else {
+    let Some((estimated_makespan, plan, tasks, task_budget)) = best else {
         return Ok(None);
     };
     // Starting and joining the lanes costs about one synchronization.
     let parallel_cost = estimated_makespan.saturating_add(options.synchronization_cost);
-    tracing::trace!(target: "celox::parallel", event = "partition_decision", sequential_cost,
+    tracing::trace!(target: "celox::parallel", event = "partition_decision", sequential_cost, task_budget,
         estimated_makespan, parallel_cost, minimum_speedup_percent = options.minimum_speedup_percent,
         accepted = estimated_makespan != 0 && sequential_cost.saturating_mul(100) >= parallel_cost.saturating_mul(options.minimum_speedup_percent),
         lanes = ?plan.item_lanes, order = ?plan.order);

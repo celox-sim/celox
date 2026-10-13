@@ -204,3 +204,13 @@ attributed. Signal names include aliases and are approximate for strided array
 storage; a physical ordering edge does not alone establish a semantic circuit
 dependency. Summed waits across lanes are not wall-clock time or a promised
 speedup from eliminating that edge.
+
+Comb task formation compares unbounded merging with task budgets of 32 and 16
+times the synchronization cost, charging the additional task and wait overhead
+in each estimate. An indivisible item larger than the budget remains one task.
+The candidate table's `Task budget` column and
+`partition_decision.task_budget` expose this choice. After physical dependence
+analysis, a unit used by another lane closes its task so unrelated following
+work cannot delay its completion notification. More tasks and waits can still
+reduce execution time by releasing consumers sooner; verify the effect with
+repeated untraced measurements.
