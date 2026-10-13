@@ -1147,7 +1147,9 @@ fn finish_in_an_initial_block_ends_the_simulation() {
     assert_eq!(
         sim.drain_runtime_events(),
         vec![
-            celox::RuntimeEvent::Display { message: b"before".to_vec() },
+            celox::RuntimeEvent::Display {
+                message: b"before".to_vec()
+            },
             celox::RuntimeEvent::Finish,
         ],
     );

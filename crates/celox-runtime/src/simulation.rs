@@ -380,10 +380,18 @@ impl<B: SimBackend> SimulationState<B> {
         let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
             return true;
         };
-        let was = (self.last_clock_values.contains(id), self.unknown_clock_values.contains(id));
+        let was = (
+            self.last_clock_values.contains(id),
+            self.unknown_clock_values.contains(id),
+        );
         let is = sample_event_signal(backend, *signal);
         match self.domain_kinds[id] {
-            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh | DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => self.edge_triggers(id, was, is),
+            Some(
+                DomainKind::ClockPosedge
+                | DomainKind::ResetAsyncHigh
+                | DomainKind::ClockNegedge
+                | DomainKind::ResetAsyncLow,
+            ) => self.edge_triggers(id, was, is),
             _ => was != is,
         }
     }
@@ -1473,7 +1481,10 @@ impl<B: SimBackend> SimulationState<B> {
         });
         if !self.finished
             && !self.tick_budget_spent()
-            && (reset_edge_due || !events_to_process.is_empty() || !process_driven.is_empty() || !generated_events.is_empty())
+            && (reset_edge_due
+                || !events_to_process.is_empty()
+                || !process_driven.is_empty()
+                || !generated_events.is_empty())
         {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
@@ -2158,7 +2169,11 @@ impl<B: SimBackend> SimulationState<B> {
             done_processes: self.done.iter().copied().collect(),
             ticks: self.ticks,
             scheduled_clock_time: self.scheduled_clock_time,
-            scheduled_clock_drives: self.scheduled_clock_drives.iter().map(|id| events[id]).collect(),
+            scheduled_clock_drives: self
+                .scheduled_clock_drives
+                .iter()
+                .map(|id| events[id])
+                .collect(),
             inactive_processes: self.inactive.iter().copied().collect(),
             finished: self.finished,
         }
@@ -2230,7 +2245,11 @@ impl<B: SimBackend> SimulationState<B> {
         self.done = parts.done_processes.into_iter().collect();
         self.ticks = parts.ticks;
         self.scheduled_clock_time = parts.scheduled_clock_time;
-        self.scheduled_clock_drives = parts.scheduled_clock_drives.into_iter().map(|event| event.id()).collect();
+        self.scheduled_clock_drives = parts
+            .scheduled_clock_drives
+            .into_iter()
+            .map(|event| event.id())
+            .collect();
         self.inactive = parts.inactive_processes.into_iter().collect();
         self.finished = parts.finished;
     }

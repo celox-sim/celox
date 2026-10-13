@@ -2700,7 +2700,11 @@ fn test_ff_runtime_events_drain_with_per_tick_time() {
             .collect::<Vec<_>>(),
         // `%t` is the scheduler time: the default clock has period 2, and
         // its first edge is at time 0.
-        vec![Some(b"ff time=0".as_slice()), Some(b"ff time=2".as_slice()), Some(b"ff time=4".as_slice())],
+        vec![
+            Some(b"ff time=0".as_slice()),
+            Some(b"ff time=2".as_slice()),
+            Some(b"ff time=4".as_slice())
+        ],
     );
 }
 
@@ -2722,7 +2726,10 @@ fn test_assert_format_args_render_current_time_for_percent_t() {
     assert_eq!(detailed.assertions.len(), 1);
     // Three edges of the default clock (period 2) end at time 4; the
     // process resumes one period later.
-    assert_eq!(detailed.assertions[0].message.as_deref(), Some(b"time=6".as_slice()));
+    assert_eq!(
+        detailed.assertions[0].message.as_deref(),
+        Some(b"time=6".as_slice())
+    );
 }
 
 #[test]
