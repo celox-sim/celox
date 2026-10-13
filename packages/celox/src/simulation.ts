@@ -566,6 +566,7 @@ export class Simulation<P = Record<string, unknown>> {
 		let steps = 0;
 		while (!condition()) {
 			this.settleSharedWrites();
+			if (condition()) break;
 			if (this.isFinished()) {
 				this._state.pendingHostWrites = false;
 				break;
