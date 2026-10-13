@@ -250,6 +250,8 @@ pub(super) fn compile_lane_kernels(
                 &mut |prepared| {
                     footprint = Some(Footprint::of_unit(prepared, layout, codegen));
                     tracing::trace!(target: "celox::parallel", event = "native_task_sir",
+                        schedule = planned[kernel].diagnostic_id.as_str(),
+                        program = planned[kernel].diagnostic_program.as_str(),
                         kind = ?planned[kernel].kind, task, sir = ?prepared);
                 },
             )?;
@@ -274,7 +276,7 @@ pub(super) fn compile_lane_kernels(
     let mut compiled_index: Vec<usize> = Vec::with_capacity(planned.len());
     let mut slots = Vec::with_capacity(planned.len());
     for (mut planned, functions) in planned.into_iter().zip(functions) {
-        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "final_native_plan", schedule = planned.diagnostic_id.as_str(), hazard_level = "tasks", kind = ?planned.kind).entered();
+        let _diagnostic = tracing::trace_span!(target: "celox::parallel", "final_native_plan", program = planned.diagnostic_program.as_str(), schedule = planned.diagnostic_id.as_str(), hazard_level = "tasks", kind = ?planned.kind).entered();
         if let Some(original) = planned.same_as {
             let index = compiled_index[original];
             for (task, final_task) in planned.tasks.iter_mut().zip(&kernels[index].tasks) {
@@ -339,10 +341,12 @@ fn compile_jobs<J: Sync, T: Send>(
         return jobs.iter().map(&compile).collect();
     }
     let next = AtomicUsize::new(0);
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     let results = std::thread::scope(|scope| {
         let handles = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
+                    let _dispatch = tracing::dispatcher::set_default(&dispatcher);
                     let mut compiled = Vec::new();
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);

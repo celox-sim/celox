@@ -109,3 +109,19 @@ test("lane costs retain mixed-source items and count incoming cross-lane edges",
         {lane:1, items:2, cost:8, pinned:0, crossLaneEdges:2},
     ]);
 });
+
+test('physical signals include all state regions and preserve storage and program identity',async()=>{
+ const {signalsForFootprints}=await import('./parallel-report.mjs');
+ const signals=[{event:'signal',program:'p',name:'actual',offset:10,working_offset:'Some(100)',sparse_offset:'Some(200)',width:8},{event:'signal',program:'other',name:'wrong',offset:100,width:8}];
+ const matches=signalsForFootprints([{reads:'Exact(MemoryLocation { object: State, offset: 100, byte_len: 1 })',writes:'Exact(MemoryLocation { object: WriteEnvelope, offset: 200, byte_len: 1 })'}],signals,'p');
+ assert.deepEqual(matches.map(s=>s.matched_region),['working_offset','sparse_offset']);
+ assert.deepEqual(matches.map(s=>s.ranges[0].storage),['State','WriteEnvelope']);
+ assert.ok(matches.every(s=>s.name==='actual'));
+ assert.equal(signalsForFootprints([{reads:'Exact(MemoryLocation { object: Scratch, offset: 10, byte_len: 1 })'}],signals,'p').length,0);
+});
+test('final native SIR is selected by schedule even when phase and task are identical',async()=>{
+ const {nativeSirForTask}=await import('./parallel-report.mjs');
+ const records=['first','second'].map(schedule=>({event:'native_task_sir',schedule,kind:'Comb',task:0,sir:schedule}));
+ assert.equal(nativeSirForTask(records,'second',0).sir,'second');
+ assert.equal(nativeSirForTask(records,undefined,0),undefined);
+});

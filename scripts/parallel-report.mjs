@@ -64,6 +64,30 @@ export function analyzeDispatch(dispatch, runs, waits, compiled) {
 	};
 }
 
+// A missing identity in an old capture is safer than showing another program's SIR.
+export function nativeSirForTask(events, schedule, task) {
+    return events.find(e => e.event === "native_task_sir" &&
+        e.schedule === schedule && e.task === task && schedule !== undefined);
+}
+
+export function signalsForFootprints(footprints, signals, program) {
+    const ranges = [...JSON.stringify(footprints).matchAll(
+        /object: (State|WriteEnvelope), offset: (-?\d+), byte_len: (\d+)/g
+    )].map(m => ({storage:m[1],offset:Number(m[2]),length:Number(m[3])}));
+    const matches = [];
+    for (const signal of signals.filter(s => s.event === "signal" && s.program === program)) {
+        for (const region of ["offset", "working_offset", "sparse_offset"]) {
+            const raw = signal[region];
+            const offset = typeof raw === "number" ? raw : Number(raw?.match(/Some\((\d+)\)/)?.[1]);
+            if (!Number.isFinite(offset)) continue;
+            const overlapping = ranges.filter(r => r.offset < offset + Math.ceil(signal.width / 8)
+                && offset < r.offset + r.length);
+            if (overlapping.length) matches.push({...signal, matched_region:region, matched_offset:offset, ranges:overlapping});
+        }
+    }
+    return matches;
+}
+
 export function scopeKey(event) {
 	return (event.scopes ?? []).map((s) => s.id).join("/");
 }
@@ -404,12 +428,7 @@ function startViewer(data) {
 					execution: r,
 					waits: waits.filter((w) => w.task === r.task),
 					compiled: compiled.find((t) => t.task === r.task),
-					final_native_sir: events.find(
-						(e) =>
-							e.event === "native_task_sir" &&
-							e.task === r.task &&
-							e.kind === compiled.find((t) => t.task === r.task)?.kind,
-					),
+					final_native_sir: nativeSirForTask(events, d.schedule, r.task),
 				});
 			label(svg, left + r.start_ns * scale, 77 + r.lane * row, `t${r.task}`);
 		}
@@ -673,24 +692,15 @@ function startViewer(data) {
 					hazards = scoped.filter(
 						(e) => e.event === "hazard" && e.unit === n.id,
 					);
-				const ranges = [
-					...JSON.stringify(footprints).matchAll(
-						/offset: (\d+), byte_len: (\d+)/g,
-					),
-				].map((m) => [Number(m[1]), Number(m[2])]);
+                const program = (footprints[0]?.scopes ?? []).find(s => s.program)?.program;
+
 				details({
 					unit: n.id,
 					dependencies: rows.find((e) => e.unit === n.id),
 					footprints,
 					hazards,
-					nearby_signals: signals.filter((s) =>
-						ranges.some(
-							([offset, len]) =>
-								offset < s.offset + Math.ceil(s.width / 8) &&
-								s.offset < offset + len,
-						),
-					),
-					note: "Signal matches show stable-state storage; working/sparse offsets are included in the signal records. Aliases can share storage. Some tracker edges summarize earlier ordering rather than a direct range conflict.",
+                    nearby_signals: signalsForFootprints(footprints, signals, program),
+                    note: "Signal matches include stable, working and sparse storage candidates with their physical object and range. Aliases and strided arrays can make names approximate. Some edges summarize transitive ordering.",
 				});
 			},
 		);
