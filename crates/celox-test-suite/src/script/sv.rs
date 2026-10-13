@@ -160,9 +160,12 @@ fn design_output(text: &[u8], sources: &[String]) -> Vec<u8> {
     let mut output = Vec::new();
     for chunk in text.split_inclusive(|byte| *byte == b'\n') {
         let line = chunk.strip_suffix(b"\n").unwrap_or(chunk);
-        let notice = std::str::from_utf8(line).ok()
+        let notice = std::str::from_utf8(line)
+            .ok()
             .is_some_and(|line| is_source_finish_notice(line, sources));
-        if !notice { output.extend_from_slice(chunk); }
+        if !notice {
+            output.extend_from_slice(chunk);
+        }
     }
     output
 }
@@ -1156,7 +1159,10 @@ mod tests {
     #[test]
     fn finish_notices_are_not_design_output() {
         let sources = vec!["timed_control.sv".to_string()];
-        for log in [b"done\ntimed_control.sv:3: $finish called at 5 (1ns)\n".as_slice(), b"done\n- timed_control.sv:3: Verilog $finish\n"] {
+        for log in [
+            b"done\ntimed_control.sv:3: $finish called at 5 (1ns)\n".as_slice(),
+            b"done\n- timed_control.sv:3: Verilog $finish\n",
+        ] {
             assert_eq!(design_output(log, &sources), b"done\n");
         }
         let printed = b"\x80\xffsource_0.sv:3: $finish called at 5 (1ns)\n";
@@ -1259,11 +1265,18 @@ mod tests {
     #[test]
     fn checks_non_utf8_output_without_replacement() {
         assert_eq!(
-            check_output(b"\x80\xff\0\n@suite output 80ff00 here\n\n@suite end\n", &[]),
+            check_output(
+                b"\x80\xff\0\n@suite output 80ff00 here\n\n@suite end\n",
+                &[]
+            ),
             Ok(())
         );
         assert!(
-            check_output(b"\xef\xbf\xbd\xff\0\n@suite output 80ff00 here\n\n@suite end\n", &[]).is_err()
+            check_output(
+                b"\xef\xbf\xbd\xff\0\n@suite output 80ff00 here\n\n@suite end\n",
+                &[]
+            )
+            .is_err()
         );
         let text = testbench(
             &case("(tick clk) (expect_output (bytes 128 255 0))"),
