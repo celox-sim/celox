@@ -409,7 +409,7 @@ fn validate_query_selection(
     Some(())
 }
 
-fn unpacked_expression_dimensions(
+pub(super) fn unpacked_expression_dimensions(
     argument: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
@@ -436,6 +436,27 @@ fn unpacked_expression_dimensions(
                     .is_some() =>
             {
                 return Some(0);
+            }
+            sv_parser::Primary::FunctionSubroutineCall(call) => {
+                // The parser also represents a bare array name as a TfCall.
+                if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0
+                    && call.nodes.2.is_none()
+                {
+                    let name = reference_name(
+                        RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
+                        syntax_tree,
+                    )?;
+                    let context = query_operand_dimensions(
+                        argument,
+                        syntax_tree,
+                        const_env,
+                        type_aliases,
+                        dimensions,
+                    );
+                    if let Some(ty) = context.get(&name) {
+                        return Some(ty.unpacked.len());
+                    }
+                }
             }
             sv_parser::Primary::Hierarchical(hierarchical) => {
                 let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)?;

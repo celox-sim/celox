@@ -1049,6 +1049,55 @@ fn folded_parameter_streaming_slice_sizes_are_validated() {
 }
 
 #[test]
+fn folded_parameter_streaming_with_ranges_are_validated() {
+    for range in [
+        "0 +: 0",
+        "0 -: -1",
+        "0 +: 1'bx",
+        "0 -: 1'bz",
+        "missing",
+        "0 : missing",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam logic [7:0] W [0:1] = '{{0, 0}}; localparam N = 0 && (f({{<< 1 {{W with [{range}]}}}}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_stream_range.sv")).is_err(),
+            "{range}"
+        );
+    }
+    for range in ["0", "0:1", "0 +: 2", "1 -: 2"] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction localparam logic [7:0] W [0:1] = '{{0, 0}}; localparam N = 0 && (f({{<< 1 {{W with [{range}]}}}}) || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_stream_range_valid.sv"))
+            .unwrap_or_else(|error| panic!("{range}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+
+    for declaration in [
+        "localparam W = 8'b0;",
+        "localparam logic [7:0] W [0:1][0:1] = '{'{0, 0}, '{0, 0}};",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction {declaration} localparam N = 0 && (f({{<< 1 {{W with [0 +: 1]}}}}) || 1000000000'd0); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("folded_stream_array_shape.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("one-dimensional unpacked array"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn folded_array_queries_allow_out_of_range_dimensions() {
     // IEEE 1800-2023 20.7 returns X for an out-of-range dimension;
     // the call remains legal and may be skipped by a logical operator.

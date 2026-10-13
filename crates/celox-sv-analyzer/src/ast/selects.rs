@@ -1731,6 +1731,9 @@ pub(super) fn validate_parameter_initializer_selections(
             RefNode::AssignmentPatternRepeat(pattern) => {
                 repeat_count(RefNode::ConstantExpression(&pattern.nodes.0.nodes.1.0))?;
             }
+            RefNode::StreamExpression(stream) if stream.nodes.1.is_some() => {
+                validate_streaming_with_range(stream, syntax_tree, &dimensions)?;
+            }
             RefNode::SliceSize(size) => {
                 // Validate only the shape; a skipped stream can contain an
                 // arbitrarily large payload that must never be materialized.
@@ -1841,6 +1844,70 @@ pub(super) fn validate_parameter_initializer_selections(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Check a skipped stream's selector without lowering the streamed value.
+fn validate_streaming_with_range(
+    stream: &sv_parser::StreamExpression,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let Some((_, range)) = &stream.nodes.1 else {
+        return Ok(());
+    };
+    let bound = |expression: &sv_parser::Expression| {
+        let expression =
+            indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)?;
+        eval_ast_const_expr(&expression, &dimensions.const_env).ok_or_else(|| {
+            unsupported("streaming with range bound must be a known integral constant")
+        })
+    };
+    match &range.nodes.1 {
+        sv_parser::ArrayRangeExpression::Expression(index) => {
+            bound(index)?;
+        }
+        sv_parser::ArrayRangeExpression::Colon(range) => {
+            bound(&range.nodes.0)?;
+            bound(&range.nodes.2)?;
+        }
+        range => {
+            let (start, width, plus) = match range {
+                sv_parser::ArrayRangeExpression::PlusColon(range) => {
+                    (&range.nodes.0, &range.nodes.2, true)
+                }
+                sv_parser::ArrayRangeExpression::MinusColon(range) => {
+                    (&range.nodes.0, &range.nodes.2, false)
+                }
+                _ => unreachable!(),
+            };
+            let start = bound(start)?;
+            let width = bound(width)?;
+            if width <= 0 {
+                return Err(unsupported("streaming with range width must be positive"));
+            }
+            let end = if plus {
+                start.checked_add(width - 1)
+            } else {
+                start.checked_sub(width - 1)
+            };
+            end.ok_or_else(|| unsupported("streaming with range bounds overflow"))?;
+        }
+    }
+    // IEEE 1800-2023 11.4.14.4 restricts `with` to one-dimensional
+    // unpacked arrays. Query the shape, not the array's element values.
+    if dimensions::unpacked_expression_dimensions(
+        &stream.nodes.0,
+        syntax_tree,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+        Some(dimensions),
+    ) != Some(1)
+    {
+        return Err(unsupported(
+            "streaming with requires a one-dimensional unpacked array",
+        ));
     }
     Ok(())
 }
@@ -2500,5 +2567,46 @@ fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) ->
             else_expr: go(else_expr),
         },
         expr => expr,
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_streaming_with_validates_ranges_without_lowering_arrays() {
+        for (range, valid) in [
+            ("0", true),
+            ("0:1", true),
+            ("0 +: 2", true),
+            ("1 -: 2", true),
+            ("-1 +: 4", true),
+            ("0 +: (2 - 2)", false),
+            ("0 -: -1", false),
+            ("0 +: 1'bx", false),
+            ("0 -: 1'bz", false),
+            ("missing", false),
+            ("0:missing", false),
+            ("missing:0", false),
+            ("1.5", false),
+            ("170141183460469231731687303715884105727 +: 2", false),
+        ] {
+            let code = format!(
+                "module Top(input logic [7:0] data [0:1]); initial $display({{<< 1 {{data with [{range}]}}}}); endmodule"
+            );
+            let tree = crate::syntax::parse_source(&code, std::path::Path::new("stream_range.sv"))
+                .unwrap();
+            let stream = tree
+                .into_iter()
+                .find_map(|node| match node {
+                    RefNode::StreamExpression(stream) => Some(stream),
+                    _ => None,
+                })
+                .unwrap();
+            let dimensions = PackedDimensions::default();
+            let result = validate_streaming_with_range(stream, &tree, &dimensions);
+            assert_eq!(result.is_ok(), valid, "{range}: {result:?}");
+        }
     }
 }
