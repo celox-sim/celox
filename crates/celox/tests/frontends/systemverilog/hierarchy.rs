@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn widens_small_parameters_preserving_four_state_bits(sim) {
+        @case "hierarchy::widens_small_parameters_preserving_four_state_bits";
+    }
+    fn widens_small_parameters_into_child_int_outputs(sim) {
+        @case "hierarchy::widens_small_parameters_into_child_int_outputs";
+    }
     fn parameter_patterns_preserve_packed_member_states(sim) { @case "hierarchy::parameter_patterns_preserve_packed_member_states"; }
     fn parameter_patterns_transfer_packed_values(sim) { @case "hierarchy::parameter_patterns_transfer_packed_values"; }
     fn parameter_patterns_override_scalar_defaults(sim) { @case "hierarchy::parameter_patterns_override_scalar_defaults"; }

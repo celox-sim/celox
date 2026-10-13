@@ -430,3 +430,42 @@
   (assert_eq xvalue (fourstate 0xffffffff 0xffffffff))
   (assert_eq zvalue (fourstate 0 0xffffffff))
   (assert_eq two_state 0))
+
+(case widens_small_parameters_into_child_int_outputs
+  (source "small_parameter.sv" #"
+    module Child #(parameter N = 4'd11)(output int value);
+      assign value = N;
+    endmodule
+    module SignedChild #(parameter N = 4'sb1011)(output int value);
+      assign value = N;
+    endmodule
+    module Literal(output int value);
+      assign value = 4'd11;
+    endmodule
+    module Top(output int value, output int negative, output int literal);
+      Child child(.value(value));
+      SignedChild signed_child(.value(negative));
+      Literal literal_child(.value(literal));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq value 11)
+  (assert_eq negative 0xfffffffb)
+  (assert_eq literal 11))
+
+(case widens_small_parameters_preserving_four_state_bits
+  (four_state)
+  (source "small_parameter_states.sv" #"
+    module Child #(parameter N = 4'b1xz1)(output int value, output logic [31:0] raw);
+      assign value = N;
+      assign raw = N;
+    endmodule
+    module Top(output int value, output logic [31:0] raw);
+      Child child(.value(value), .raw(raw));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq value 9)
+  (assert_eq raw (fourstate 13 6)))
