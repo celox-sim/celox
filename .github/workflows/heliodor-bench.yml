@@ -403,6 +403,9 @@ jobs:
   linux-suite:
     name: Linux suite (${{ matrix.arch }}, ${{ matrix.test }}, ${{ matrix.group }})
     needs: linux-suite-matrix
+    # Scheduled runs skip validate-dispatch, an ancestor of this job. Override
+    # the implicit success() check while still requiring a valid matrix.
+    if: ${{ !cancelled() && needs['linux-suite-matrix'].result == 'success' }}
     permissions:
       contents: write
     strategy:
