@@ -912,11 +912,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             .collect::<Vec<_>>();
         // Compare the unbounded plan with publication intervals proportional
         // to synchronization cost. Charge each extra boundary before choosing.
-        for task_budget in [
-            0,
-            options.synchronization_cost.saturating_mul(32),
-            options.synchronization_cost.saturating_mul(16),
-        ] {
+        for task_budget in task_budgets(options.synchronization_cost) {
             let tasks = match form_lane_tasks_with_options(
                 options.lanes,
                 &ordered_lanes,
@@ -1035,6 +1031,12 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     }))
 }
 
+// Zero synchronization cost forces admission; it must not disable task cuts.
+fn task_budgets(synchronization_cost: u64) -> [u64; 3] {
+    let interval = synchronization_cost.max(1);
+    [0, interval.saturating_mul(32), interval.saturating_mul(16)]
+}
+
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
@@ -1126,6 +1128,35 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn forced_partition_keeps_finite_candidates_that_release_consumers() {
+        let budgets = task_budgets(0);
+        assert_eq!(budgets, [0, 32, 16]);
+        let mut lanes = vec![0; 9];
+        lanes.push(1);
+        let mut predecessors = vec![vec![]; 10];
+        predecessors[9] = vec![0];
+        let mut costs = vec![20; 9];
+        costs.push(180);
+        let spans = budgets.map(|max_cost| {
+            let tasks = form_lane_tasks_with_options(
+                2,
+                &lanes,
+                &predecessors,
+                &[],
+                TaskFormationOptions {
+                    costs: &costs,
+                    max_cost,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            celox_analysis::lanes::verify_lane_tasks(2, &tasks, &predecessors).unwrap();
+            estimate_task_makespan(2, &tasks, &costs, 0, 0)
+        });
+        assert_eq!(spans, [360, 200, 200]);
     }
 
     #[test]
