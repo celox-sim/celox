@@ -1954,3 +1954,34 @@ fn repeat_count_calls_publish_one_combinational_write() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
 }
+
+#[test]
+fn nested_omitted_defaults_do_not_hide_combinational_pulses() {
+    let source = "module Top(output bit seen); bit q;
+        function automatic bit pulse(); q=1; q=0; return 0; endfunction
+        function automatic bit middle(input bit x=pulse()); return x; endfunction
+        function automatic bit outer(input bit x=middle()); return x; endfunction
+        always_comb begin bit unused; unused=outer(); end
+        initial begin @(posedge q); seen=1; end
+    endmodule";
+    assert!(build_error(source).contains("multiple blocking writes"));
+}
+
+#[test]
+fn output_arguments_preserve_cascaded_domain_events() {
+    for direction in ["output", "inout"] {
+        let source = format!(
+            "module Top(input bit clk, output bit seen); bit c2,a,b;
+            task automatic drive({direction} bit o); o=1; endtask
+            always @(posedge clk) begin drive(c2); a<=1; end
+            always @(posedge c2) b<=1;
+            initial begin @(a^b); seen=1; end
+        endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{direction}");
+    }
+}

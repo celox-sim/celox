@@ -3115,11 +3115,39 @@ fn ff_cascades(
             });
         }
         found
-            || calls.into_iter().any(|(name, _)| {
-                seen.insert(name.clone())
-                    && pm
-                        .subroutine(&name)
-                        .is_some_and(|sub| writes(&sub.body, signal, pm, seen))
+            || calls.into_iter().any(|(name, args)| {
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                let result = pm.subroutine(&name).is_some_and(|sub| {
+                    let copy_back = sub.params.iter().zip(&args).any(|(param, arg)| {
+                        param.direction.is_written()
+                            && arg
+                                .as_ref()
+                                .and_then(lvalue_from_expr)
+                                .into_iter()
+                                .flatten()
+                                .any(|target| target.name() == signal)
+                    });
+                    let mut defaults = Vec::new();
+                    default_calls(sub, &args, &mut defaults);
+                    copy_back
+                        || writes(&sub.body, signal, pm, seen)
+                        || defaults.into_iter().any(|(name, args)| {
+                            writes(
+                                &[sv::ir::Stmt::Call {
+                                    name,
+                                    args,
+                                    arg_order: Vec::new(),
+                                }],
+                                signal,
+                                pm,
+                                seen,
+                            )
+                        })
+                });
+                seen.remove(&name);
+                result
             })
     }
     target
@@ -3257,19 +3285,18 @@ fn watched_write_count(
                     }
                     let mut defaults = Vec::new();
                     default_calls(subroutine, &args, &mut defaults);
-                    for (name, _) in defaults {
-                        if visiting.insert(name.clone()) {
-                            if let Some(subroutine) = pm.subroutine(&name) {
-                                count += watched_write_count(
-                                    &subroutine.body,
-                                    pm,
-                                    expr,
-                                    visiting,
-                                    nonblocking,
-                                );
-                            }
-                            visiting.remove(&name);
-                        }
+                    for (name, args) in defaults {
+                        count += watched_write_count(
+                            &[sv::ir::Stmt::Call {
+                                name,
+                                args,
+                                arg_order: Vec::new(),
+                            }],
+                            pm,
+                            expr,
+                            visiting,
+                            nonblocking,
+                        );
                     }
                 }
                 visiting.remove(&name);
