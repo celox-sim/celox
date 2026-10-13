@@ -115,36 +115,41 @@ pub(crate) fn declare_storage(
         .collect::<Vec<_>>();
     event_variables.sort_unstable();
     let mut next = variables.len() as u32;
-    let mut declare = |path: Vec<String>, template: Option<&SymbolicVariable>, width: usize| {
-        let id = SourceVarId(next);
-        next += 1;
-        let variable = match template {
-            Some(template) => SymbolicVariable {
-                path,
-                source: None,
-                module_affiliated: false,
-                ..template.clone()
-            },
-            None => SymbolicVariable {
-                path,
-                kind: VariableKind::Variable,
-                signed: false,
-                metadata: VariableMetadata {
-                    width,
-                    is_4state: false,
-                    kind: celox_design::DomainKind::Other,
-                    type_kind: PortTypeKind::Bit,
-                    array_dims: Vec::new(),
+    let mut declare =
+        |path: Vec<String>, template: Option<&SymbolicVariable>, width: usize, is_4state: bool| {
+            let id = SourceVarId(next);
+            next += 1;
+            let variable = match template {
+                Some(template) => SymbolicVariable {
+                    path,
+                    source: None,
+                    module_affiliated: false,
+                    ..template.clone()
                 },
-                packed_dims: vec![width],
-                source: None,
-                // Hidden state is not a signal of the design.
-                module_affiliated: false,
-            },
+                None => SymbolicVariable {
+                    path,
+                    kind: VariableKind::Variable,
+                    signed: false,
+                    metadata: VariableMetadata {
+                        width,
+                        is_4state,
+                        kind: celox_design::DomainKind::Other,
+                        type_kind: if is_4state {
+                            PortTypeKind::Logic
+                        } else {
+                            PortTypeKind::Bit
+                        },
+                        array_dims: Vec::new(),
+                    },
+                    packed_dims: vec![width],
+                    source: None,
+                    // Hidden state is not a signal of the design.
+                    module_affiliated: false,
+                },
+            };
+            variables.insert(id, variable);
+            id
         };
-        variables.insert(id, variable);
-        id
-    };
     let mut blocks = Vec::new();
     for (index, statements) in initial_blocks(ir).enumerate() {
         let name = |slot: &str| vec![format!("$initial[{index}]"), slot.to_string()];
@@ -153,7 +158,12 @@ pub(crate) fn declare_storage(
             .into_iter()
             .enumerate()
             .map(|(slot, need)| {
-                let id = declare(name(&format!("{}@{slot}", need.purpose)), None, need.width);
+                let id = declare(
+                    name(&format!("{}@{slot}", need.purpose)),
+                    None,
+                    need.width,
+                    need.purpose == "file_arg",
+                );
                 (need, id)
             })
             .collect();
@@ -184,7 +194,7 @@ pub(crate) fn declare_storage(
             .into_iter()
             .enumerate()
             .map(|(slot, (token, width))| {
-                let id = declare(name(&format!("expression@{slot}")), None, width);
+                let id = declare(name(&format!("expression@{slot}")), None, width, true);
                 (token, (width, id))
             })
             .collect();
@@ -192,15 +202,15 @@ pub(crate) fn declare_storage(
             .iter()
             .map(|(local, template)| {
                 let path = name(&format!("{}@private", template.path.join(".")));
-                (*local, declare(path, Some(template), 0))
+                (*local, declare(path, Some(template), 0, false))
             })
             .collect();
         blocks.push(BlockStorage {
-            resume: declare(name("resume"), None, PROCESS_RESUME_WIDTH),
-            status: declare(name("status"), None, PROCESS_STATUS_WIDTH),
-            delay: declare(name("delay"), None, PROCESS_DELAY_WIDTH),
-            clock: declare(name("clock"), None, PROCESS_CLOCK_WIDTH),
-            release: declare(name("release"), None, PROCESS_RELEASE_WIDTH),
+            resume: declare(name("resume"), None, PROCESS_RESUME_WIDTH, false),
+            status: declare(name("status"), None, PROCESS_STATUS_WIDTH, false),
+            delay: declare(name("delay"), None, PROCESS_DELAY_WIDTH, false),
+            clock: declare(name("clock"), None, PROCESS_CLOCK_WIDTH, false),
+            release: declare(name("release"), None, PROCESS_RELEASE_WIDTH, false),
             event_counters: event_variables
                 .iter()
                 .map(|&var| {
@@ -210,11 +220,13 @@ pub(crate) fn declare_storage(
                             name(&format!("event_rises@{}", ids[&var].0)),
                             None,
                             celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                            false,
                         ),
                         declare(
                             name(&format!("event_falls@{}", ids[&var].0)),
                             None,
                             celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                            false,
                         ),
                     )
                 })
@@ -2746,7 +2758,8 @@ impl<'a> BlockLowering<'a> {
             let value = if two_state {
                 SIRValue::new(0u8)
             } else {
-                SIRValue::new_four_state(0u8, (BigUint::from(1u8) << width) - BigUint::from(1u8))
+                let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                SIRValue::new_four_state(mask.clone(), mask)
             };
             builder.emit(SIRInstruction::Imm(reg, value));
             self.store(&self.destination(id, call.comptime.token), reg)?;

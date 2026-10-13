@@ -1390,8 +1390,8 @@ fn automatic_function_storage_is_reset_on_every_call() {
         );
         for name in ["value", "out"] {
             assert_eq!(
-                sim.get_four_state(sim.signal(name)).1,
-                255u8.into(),
+                sim.get_four_state(sim.signal(name)),
+                (255u8.into(), 255u8.into()),
                 "{name}"
             );
         }
@@ -1528,4 +1528,54 @@ fn file_io_failures_stop_later_kernel_effects() {
         "{result:?}"
     );
     assert_eq!(sim.get(sim.signal("after")), 0u8.into());
+}
+
+#[test]
+fn file_arguments_preserve_unknown_automatic_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mask.txt");
+    let code = format!(
+        r#"#[test(Top)] module Top {{var f:$tb::file;
+        function emit() {{var value:logic<8>;f.write("%h",value);}}
+        initial{{f.open("{}");emit();f.flush();f.close();$finish();}}
+    }}"#,
+        path.display()
+    );
+    fn check<B: SimBackend>(mut sim: Simulator<B>, path: &std::path::Path) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"xx");
+    }
+    check(
+        Simulator::builder(&code, "Top")
+            .four_state(true)
+            .build_interpreter()
+            .unwrap(),
+        &path,
+    );
+    check(
+        Simulator::builder(&code, "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap(),
+        &path,
+    );
+    check(
+        Simulator::builder(&code, "Top")
+            .four_state(true)
+            .build_wasm()
+            .unwrap(),
+        &path,
+    );
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(
+        Simulator::builder(&code, "Top")
+            .four_state(true)
+            .build_native()
+            .unwrap(),
+        &path,
+    );
 }
