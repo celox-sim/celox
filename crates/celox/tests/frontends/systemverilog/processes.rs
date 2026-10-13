@@ -39,8 +39,8 @@ fn displays(sim: &mut Simulation) -> Vec<(u64, String)> {
     while let Some(time) = sim.step().unwrap() {
         for event in sim.drain_runtime_events() {
             match event {
-                RuntimeEvent::Display { message } => lines.push((time, message)),
-                RuntimeEvent::Write { message } => lines.push((time, message)),
+                RuntimeEvent::Display { message } => lines.push((time, String::from_utf8(message).expect("UTF-8 test output"))),
+                RuntimeEvent::Write { message } => lines.push((time, String::from_utf8(message).expect("UTF-8 test output"))),
                 RuntimeEvent::Finish => {}
                 other => panic!("unexpected runtime event {other:?}"),
             }
@@ -794,7 +794,7 @@ fn events_between_cascaded_register_updates_wake_waiters() {
         .drain_runtime_events()
         .into_iter()
         .filter_map(|event| match event {
-            RuntimeEvent::Display { message } => Some(message),
+            RuntimeEvent::Display { message } => Some(String::from_utf8(message).expect("UTF-8 test output")),
             _ => None,
         })
         .collect();
