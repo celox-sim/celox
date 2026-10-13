@@ -870,6 +870,61 @@ fn validates_user_calls_in_short_circuited_parameter_operands() {
 }
 
 #[test]
+fn validates_names_in_short_circuited_parameter_operands() {
+    for operand in [
+        "missing",
+        "missing[0]",
+        "f(missing)",
+        "f(.x(missing))",
+        "$clog2(missing)",
+        "{missing, 1'b0}",
+        "(1 ? 0 : missing)",
+        "data",
+        "f(data)",
+        "$bits(missing)",
+        "$bits(f(missing))",
+        "$size(data, missing)",
+    ] {
+        let source = format!(
+            "module Top(input logic [7:0] data); function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("skipped_parameter_name.sv")).is_err(),
+            "accepted invalid operand: {operand}"
+        );
+    }
+    for operand in [
+        "W",
+        "W[0]",
+        "f(W)",
+        "f(.x(W))",
+        "p::W",
+        "E",
+        "X",
+        "$bits(data)",
+        "$bits(word_t)",
+        "$bits(f(data))",
+        "$size(data)",
+        "$bits(1000000000'd0)",
+        "f(1000000000'd0)",
+    ] {
+        let source = format!(
+            "package p; localparam W = 1; endpackage module Top(input logic [7:0] data); localparam W = 1; localparam X = 1'bx; typedef logic [7:0] word_t; typedef enum logic {{ E = 0 }} enum_t; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("skipped_valid_parameter_name.sv"))
+            .unwrap_or_else(|error| panic!("{operand}: {error}"));
+        assert_eq!(
+            ir.modules()[0]
+                .parameters()
+                .last()
+                .unwrap()
+                .resolved_value(),
+            Some(0)
+        );
+    }
+}
+
+#[test]
 fn local_values_shadow_imported_bare_function_calls() {
     for declaration in ["localparam f = 0;", "typedef enum logic { f = 0 } E;"] {
         let source = format!(

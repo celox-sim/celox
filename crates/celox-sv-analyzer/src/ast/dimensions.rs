@@ -1038,7 +1038,7 @@ fn selected_expression_first_dimension_width(
     }
 }
 
-fn containing_packed_dimensions(
+pub(super) fn containing_packed_dimensions(
     target: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,

@@ -135,6 +135,132 @@ fn validation_nodes(node: RefNode<'_>, is_module: bool) -> impl Iterator<Item = 
     })
 }
 
+/// Short circuiting suppresses evaluation, not name resolution (11.2.1).
+/// Walk the original syntax so skipped values and call actuals are checked
+/// without lowering or materializing potentially enormous literal operands.
+fn validate_folded_parameter_names(
+    initializer: &sv_parser::ConstantParamExpression,
+    tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    let signatures = const_functions::argument_names();
+    let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
+    let mut value_operands = HashSet::<*const sv_parser::Expression>::default();
+    let mut query_stack = vec![false];
+    let mut query_dimensions = None;
+    for event in initializer.into_iter().event() {
+        let node = match event {
+            sv_parser::NodeEvent::Enter(node) => node,
+            sv_parser::NodeEvent::Leave(_) => {
+                query_stack.pop();
+                continue;
+            }
+        };
+        if let RefNode::SystemTfCall(call) = node
+            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "$bits"
+                        | "$size"
+                        | "$left"
+                        | "$right"
+                        | "$low"
+                        | "$high"
+                        | "$increment"
+                        | "$dimensions"
+                        | "$unpacked_dimensions"
+                )
+            })
+            && let sv_parser::SystemTfCall::ArgExpression(call) = call
+        {
+            let arguments = call.nodes.1.nodes.1.0.contents();
+            if let Some(Some(argument)) = arguments.first() {
+                query_operands.insert(argument as *const sv_parser::Expression);
+            }
+            for argument in arguments.into_iter().skip(1).flatten() {
+                value_operands.insert(argument as *const sv_parser::Expression);
+            }
+        }
+        let in_query = match node {
+            RefNode::Expression(expression)
+                if query_operands.contains(&(expression as *const sv_parser::Expression)) =>
+            {
+                true
+            }
+            RefNode::Expression(expression)
+                if value_operands.contains(&(expression as *const sv_parser::Expression)) =>
+            {
+                false
+            }
+            _ => *query_stack.last().unwrap(),
+        };
+        query_stack.push(in_query);
+        let reference = match node {
+            RefNode::ConstantPrimary(sv_parser::ConstantPrimary::PsParameter(parameter)) => {
+                Some(RefNode::PsParameterIdentifier(&parameter.nodes.0))
+            }
+            RefNode::Primary(sv_parser::Primary::Hierarchical(primary)) => {
+                Some(RefNode::PrimaryHierarchical(primary))
+            }
+            RefNode::TfCall(call) => Some(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0)),
+            _ => None,
+        };
+        let Some(reference) = reference else {
+            continue;
+        };
+        let name = reference_name(reference, tree)
+            .ok_or_else(|| unsupported("name in short-circuited parameter operand"))?;
+        let constant = dimensions.const_env.contains_key(&name)
+            || dimensions.parameter_values.contains_key(&name)
+            || dimensions
+                .const_env
+                .contains_key(&parameters::unbounded_parameter_marker(&name));
+        // Initial module validation precedes port/signal collection. Reuse
+        // query type discovery lazily; completed generate scopes use only
+        // their supplied lexical metadata.
+        let visible_value = constant
+            || dimensions.get(&name).is_some()
+            || dimensions
+                .const_env
+                .contains_key(&variable_bits_marker(&name))
+            || (in_query
+                && !dimensions.scope_types_complete
+                && query_dimensions
+                    .get_or_insert_with(|| {
+                        dimensions::containing_packed_dimensions(
+                            RefNode::ConstantParamExpression(initializer),
+                            tree,
+                            &dimensions.const_env,
+                            &dimensions.type_aliases,
+                        )
+                    })
+                    .as_ref()
+                    .is_some_and(|scope| scope.get(&name).is_some()));
+        if let RefNode::TfCall(call) = node
+            && (call.nodes.2.is_some()
+                || (!visible_value && const_functions::is_constant_function(&name)))
+        {
+            let (bindings, _) = expressions::bind_call_arguments(
+                &name,
+                call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
+                tree,
+                &signatures,
+            )?;
+            const_functions::validate_argument_bindings(
+                &name,
+                &bindings.iter().map(Option::is_some).collect::<Vec<_>>(),
+            )?;
+        } else if !constant
+            && !(in_query && (visible_value || dimensions.type_aliases.contains_key(&name)))
+        {
+            return Err(unsupported(format!(
+                "unresolved or nonconstant name `{name}` in short-circuited parameter operand"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn reject_silently_ignored_constructs_with_dimensions(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -282,38 +408,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                     syntax_tree,
                     indexed_dimensions,
                 )?;
-                let signatures = const_functions::argument_names();
-                for node in expression.into_iter() {
-                    if let RefNode::TfCall(call) = node {
-                        let name = reference_name(
-                            RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
-                            syntax_tree,
-                        )
-                        .ok_or_else(|| unsupported("subroutine name"))?;
-                        // Bare parameter identifiers also parse as TfCall.
-                        // A registered function with omitted parentheses still
-                        // binds an empty argument list and must check defaults.
-                        // Visible values take precedence over imported functions.
-                        if call.nodes.2.is_none()
-                            && (const_env.contains_key(&name)
-                                || indexed_dimensions.parameter_values.contains_key(&name)
-                                || indexed_dimensions.get(&name).is_some()
-                                || !const_functions::is_constant_function(&name))
-                        {
-                            continue;
-                        }
-                        let (bindings, _) = expressions::bind_call_arguments(
-                            &name,
-                            call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
-                            syntax_tree,
-                            &signatures,
-                        )?;
-                        const_functions::validate_argument_bindings(
-                            &name,
-                            &bindings.iter().map(Option::is_some).collect::<Vec<_>>(),
-                        )?;
-                    }
-                }
+                validate_folded_parameter_names(expression, syntax_tree, indexed_dimensions)?;
             } else if selects::parameter_initializer_needs_typed_lowering(expression) {
                 selects::selected_parameter_initializer(
                     expression,
