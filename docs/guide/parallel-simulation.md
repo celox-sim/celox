@@ -159,7 +159,7 @@ node scripts/render-parallel-report.mjs work/parallel-auto/report.json work/para
 ```
 
 For a Veryl project with an initial testbench, preserve project metadata and
-source paths with `--project` and execute the original stimulus with
+source paths with `--project` (root, descendant directory, or `Veryl.toml`) and execute the original stimulus with
 `--testbench-ticks LIMIT`:
 
 ```sh
@@ -169,7 +169,9 @@ cargo run --locked --release -p celox-bench --bin parallel-report -- \
   --omit-sir --output work/heliodor-4core
 ```
 
-In this mode, `--warmup` and `--capture` count selected-kernel calls, not ticks.
+In this mode, `--warmup` and `--capture` count outermost selected-kernel calls,
+not ticks. Nested selections inside a captured composite call stay in the same
+window until that outer call finishes.
 A separate trace marker opens the window before the selected call starts, so
 worker timestamps are disabled outside the capture window. Selector decisions
 are retained throughout execution; decisions made during the capture window

@@ -275,6 +275,8 @@ pub(crate) fn run_selected<B, R>(
     use celox_runtime::parallel::KernelChoice;
     // A capture subscriber can open a bounded window before work starts,
     // without tracing worker tasks during selector calibration.
+    let _capture_scope =
+        tracing::trace_span!(target: "celox::parallel::call", "kernel_selection").entered();
     tracing::trace!(target: "celox::parallel::call", event = "kernel_call", slot = ?slot);
     let (choice, timed) = selectors(backend).selector(slot, selection).next();
     let diagnostic = tracing::enabled!(target: "celox::parallel", tracing::Level::TRACE);

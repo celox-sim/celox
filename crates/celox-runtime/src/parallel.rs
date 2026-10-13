@@ -73,7 +73,7 @@ pub enum LaneScheduleError {
 }
 
 /// Validated execution order of a lane-partitioned kernel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LaneSchedule {
     lanes: u32,
     tasks: Vec<LaneTaskSpec>,
@@ -81,6 +81,15 @@ pub struct LaneSchedule {
     lane_tasks: Vec<Vec<usize>>,
     diagnostic_id: String,
 }
+
+impl PartialEq for LaneSchedule {
+    fn eq(&self, other: &Self) -> bool {
+        self.lanes == other.lanes
+            && self.tasks == other.tasks
+            && self.lane_tasks == other.lane_tasks
+    }
+}
+impl Eq for LaneSchedule {}
 
 impl LaneSchedule {
     /// Validate `tasks`, listed in a valid sequential order.
@@ -724,6 +733,17 @@ mod tests {
         let (first, _) = chain_schedule();
         let (second, _) = chain_schedule();
         assert_ne!(first.diagnostic_id, second.diagnostic_id);
+        assert_eq!(first, second);
+        assert_eq!(first, second.clone().with_diagnostic_id("different".into()));
+        let different = LaneSchedule::new(
+            1,
+            vec![LaneTaskSpec {
+                lane: 0,
+                waits: vec![],
+            }],
+        )
+        .unwrap();
+        assert_ne!(first, different);
         assert_eq!(first.clone().diagnostic_id, first.diagnostic_id);
         let first_pool = LanePool::new(1).unwrap();
         let id = first_pool.diagnostic_id.clone();
