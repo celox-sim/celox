@@ -2133,28 +2133,37 @@ mod clock_provenance_checkpoint_tests {
         assert_eq!(sim.ticks(), 0);
     }
     fn check_transfer<B: SimBackend>(mut from: Simulation<B>, mut to: Simulation<B>) {
-        from.schedule("clk",0,1).unwrap();
+        from.schedule("clk", 0, 1).unwrap();
         from.step().unwrap();
         let design = from.simulator.checkpoint().unwrap();
         let mut parts = from.state.export_schedule(&from.simulator.backend);
-        parts.process_wakeups = vec![(0,0)];
+        parts.process_wakeups = vec![(0, 0)];
         to.simulator.restore(&design).unwrap();
         to.state.import_schedule(parts);
         let error = to.step().unwrap_err().to_string();
-        assert!(error.contains("already driven by schedule"),"{error}");
-        assert_eq!(to.ticks(),0);
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(to.ticks(), 0);
     }
     #[test]
     fn exported_schedule_retains_consumed_clock_drives() {
-        let build=|| Simulation::from_frontend(design()).build_interpreter().unwrap();
-        check_transfer(build(),build());
-        let build=|| Simulation::from_frontend(design()).build_cranelift().unwrap();
-        check_transfer(build(),build());
-        let build=|| Simulation::from_frontend(design()).build_wasm().unwrap();
-        check_transfer(build(),build());
-        #[cfg(any(target_arch="x86_64",target_arch="aarch64"))] {
-            let build=|| Simulation::from_frontend(design()).build_native().unwrap();
-            check_transfer(build(),build());
+        let build = || {
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap()
+        };
+        check_transfer(build(), build());
+        let build = || {
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap()
+        };
+        check_transfer(build(), build());
+        let build = || Simulation::from_frontend(design()).build_wasm().unwrap();
+        check_transfer(build(), build());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let build = || Simulation::from_frontend(design()).build_native().unwrap();
+            check_transfer(build(), build());
         }
     }
     #[test]
@@ -2557,45 +2566,71 @@ mod direct_finish_tests {
 #[cfg(test)]
 mod pending_generated_clock_tests {
     use super::*;
-    use crate::frontend_sdk::{Constant,Edge,ModuleBuilder,Statement,UnaryOp,ValueType};
-    fn design()->crate::frontend_sdk::FrontendArtifact {
-        let mut m=ModuleBuilder::new("Top").unwrap();
-        let bit=ValueType::bits(1).unwrap();
-        let a=m.internal("a",bit).unwrap();let b=m.internal("b",bit).unwrap();
-        let qa=m.output("qa",bit).unwrap();let qb=m.output("qb",bit).unwrap();
-        let old=m.read(qb).unwrap();let next=m.unary(UnaryOp::BitNot,old,bit).unwrap();
-        let qa_target=m.whole(qa).unwrap();let qb_target=m.whole(qb).unwrap();
-        m.register(qa_target,old,a,Edge::Posedge,None,None).unwrap();
-        m.register(qb_target,next,b,Edge::Posedge,None,None).unwrap();
-        m.clock_period(a,4).unwrap();m.clock_period(b,4).unwrap();
-        let two=m.constant(Constant::two_state(2u8,64).unwrap());
-        let one=m.constant(Constant::two_state(1u8,64).unwrap());
-        let four=m.constant(Constant::two_state(4u8,64).unwrap());
-        m.process(vec![Statement::ClockCycles{clock:b,count:two}]).unwrap();
-        m.process(vec![Statement::Delay{amount:four},Statement::ClockCycles{clock:a,count:one}]).unwrap();
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let a = m.internal("a", bit).unwrap();
+        let b = m.internal("b", bit).unwrap();
+        let qa = m.output("qa", bit).unwrap();
+        let qb = m.output("qb", bit).unwrap();
+        let old = m.read(qb).unwrap();
+        let next = m.unary(UnaryOp::BitNot, old, bit).unwrap();
+        let qa_target = m.whole(qa).unwrap();
+        let qb_target = m.whole(qb).unwrap();
+        m.register(qa_target, old, a, Edge::Posedge, None, None)
+            .unwrap();
+        m.register(qb_target, next, b, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(a, 4).unwrap();
+        m.clock_period(b, 4).unwrap();
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let four = m.constant(Constant::two_state(4u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: b,
+            count: two,
+        }])
+        .unwrap();
+        m.process(vec![
+            Statement::Delay { amount: four },
+            Statement::ClockCycles {
+                clock: a,
+                count: one,
+            },
+        ])
+        .unwrap();
         m.finish()
     }
-    fn check<B:SimBackend>(mut sim:Simulation<B>) {
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
         sim.run_until(3).unwrap();
-        assert_eq!(sim.get(sim.signal("qb")),1u8.into());
+        assert_eq!(sim.get(sim.signal("qb")), 1u8.into());
         // A failed round can leave this generated drive high without publishing its FF batch.
-        sim.simulator.backend.set(sim.signal("b"),1u8);
+        sim.simulator.backend.set(sim.signal("b"), 1u8);
         sim.step().unwrap();
-        assert_eq!(sim.get(sim.signal("qa")),1u8.into());
-        assert_eq!(sim.get(sim.signal("qb")),0u8.into());
-        assert_eq!(sim.ticks(),2);
+        assert_eq!(sim.get(sim.signal("qa")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("qb")), 0u8.into());
+        assert_eq!(sim.ticks(), 2);
     }
     #[test]
     fn pending_rises_share_pre_edge_state_with_new_clocks() {
-        check(Simulation::from_frontend(design()).build_interpreter().unwrap());
-        check(Simulation::from_frontend(design()).build_cranelift().unwrap());
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
         check(Simulation::from_frontend(design()).build_wasm().unwrap());
-        #[cfg(any(target_arch="x86_64",target_arch="aarch64"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::from_frontend(design()).build_native().unwrap());
     }
 }
 
-#[cfg(all(test, feature="systemverilog"))]
+#[cfg(all(test, feature = "systemverilog"))]
 mod current_time_settle_tests {
     use super::*;
     #[test]
