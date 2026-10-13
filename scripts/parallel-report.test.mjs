@@ -125,3 +125,16 @@ test('final native SIR is selected by schedule even when phase and task are iden
  assert.equal(nativeSirForTask(records,'second',0).sir,'second');
  assert.equal(nativeSirForTask(records,undefined,0),undefined);
 });
+
+test('physical plan grouping ignores recycled span IDs and distinguishes programs and stages',async()=>{
+ const {physicalPlanKey}=await import('./parallel-report.mjs');
+ const event=(program,schedule,hazard_level,id)=>({event:'physical_dependencies',unit:0,scopes:[{id,program,schedule,hazard_level}]});
+ const first=event('p','s','units','recycled');
+ const second=event('p','t','units','recycled');
+ const final=event('p','s','tasks','recycled');
+ const other=event('other','s','units','recycled');
+ assert.equal(new Set([first,second,final,other].map(physicalPlanKey)).size,4);
+ const footprint={...event('p','s','units','different'),event:'footprint'};
+ const hazard={event:'hazard',program:'p',schedule:'s',hazard_level:'units'};
+ assert.deepEqual([second,footprint,final,hazard,other].filter(e=>physicalPlanKey(e)===physicalPlanKey(first)),[footprint,hazard]);
+});
