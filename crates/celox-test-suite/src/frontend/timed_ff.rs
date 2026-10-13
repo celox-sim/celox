@@ -244,7 +244,7 @@ pub(super) fn gated(
     let body = timed_content(&source[body_start..body_end], names, tasks)?;
     let identifiers = sv_words(source)
         .into_iter()
-        .map(|word| word.2)
+        .map(|word| word.2.strip_prefix('\\').unwrap_or(word.2))
         .collect::<std::collections::BTreeSet<_>>();
     let fresh = |kind: &str| {
         for suffix in 0.. {

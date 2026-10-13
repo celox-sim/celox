@@ -237,6 +237,8 @@ pub enum ProcessStatus {
     /// resumes one period after the last counted edge, before the edge that
     /// follows.
     WaitClock,
+    /// An event occurred while sampling queued drives; resume its body after the batch.
+    Ready,
 }
 
 impl ProcessStatus {
@@ -251,6 +253,7 @@ impl ProcessStatus {
             Self::Wait => 4,
             Self::Pending => 5,
             Self::WaitClock => 6,
+            Self::Ready => 11,
         }
     }
 
@@ -263,6 +266,7 @@ impl ProcessStatus {
             4 => Some(Self::Wait),
             5 => Some(Self::Pending),
             6 => Some(Self::WaitClock),
+            11 => Some(Self::Ready),
             _ => None,
         }
     }

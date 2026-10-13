@@ -20,8 +20,8 @@ use celox_design::{
     RegionedVarAddrBase, STABLE_REGION,
 };
 use celox_sir::{
-    BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRSwitchCase,
-    SIRTerminator, SIRValue,
+    BinaryOp, BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset,
+    SIRSwitchCase, SIRTerminator, SIRValue,
 };
 use thiserror::Error;
 
@@ -162,6 +162,24 @@ impl ProcessKernelBuilder {
     /// there whenever the state may have changed. Sampling that an edge
     /// condition compares against is done by the caller before this call.
     pub fn begin_wait(&mut self) -> Result<(), ProcessKernelError> {
+        self.begin_event_wait()?;
+        // Sampling a queued drive must not evaluate or release a level wait.
+        let sample = self.sampling_request();
+        let pending = self.builder.new_block();
+        let normal = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: sample,
+            true_block: (pending, Vec::new()),
+            false_block: (normal, Vec::new()),
+        });
+        self.builder.switch_to_block(pending);
+        self.end(ProcessStatus::Pending);
+        self.builder.switch_to_block(normal);
+        Ok(())
+    }
+
+    /// Arm an event wait whose samples may be polled between queued drives.
+    pub fn begin_event_wait(&mut self) -> Result<(), ProcessKernelError> {
         let point = self.resume_blocks.len();
         if point > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
@@ -190,6 +208,68 @@ impl ProcessKernelBuilder {
         self.builder.switch_to_block(pending);
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
+    }
+
+    fn sampling_request(&mut self) -> RegisterId {
+        // Delay is unused while waiting. The runtime supplies a transient
+        // sampling flag and clears it before ordinary process execution.
+        let request = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder.emit(SIRInstruction::Load(
+            request,
+            stable(self.slots.delay),
+            SIROffset::Static(0),
+            PROCESS_DELAY_WIDTH,
+        ));
+        let zero = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let flag = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(flag, request, BinaryOp::Ne, zero));
+        flag
+    }
+
+    /// Retain an event occurrence without executing the continuation while
+    /// the runtime is still applying a batch of scheduled signal values.
+    pub fn wake_event_if(&mut self, condition: RegisterId) {
+        let status = self.builder.alloc_bit(PROCESS_STATUS_WIDTH, false);
+        self.builder.emit(SIRInstruction::Load(
+            status,
+            stable(self.slots.status),
+            SIROffset::Static(0),
+            PROCESS_STATUS_WIDTH,
+        ));
+        let ready_code = self.builder.alloc_bit(PROCESS_STATUS_WIDTH, false);
+        self.builder.emit(SIRInstruction::Imm(
+            ready_code,
+            SIRValue::new(ProcessStatus::Ready.code()),
+        ));
+        let ready = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            ready,
+            status,
+            BinaryOp::Eq,
+            ready_code,
+        ));
+        let occurred = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            occurred,
+            condition,
+            BinaryOp::Or,
+            ready,
+        ));
+        self.wake_if(occurred);
+        let sample = self.sampling_request();
+        let sampled = self.builder.new_block();
+        let normal = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: sample,
+            true_block: (sampled, Vec::new()),
+            false_block: (normal, Vec::new()),
+        });
+        self.builder.switch_to_block(sampled);
+        self.end(ProcessStatus::Ready);
+        self.builder.switch_to_block(normal);
     }
 
     /// End the simulation. No block is open afterwards.
