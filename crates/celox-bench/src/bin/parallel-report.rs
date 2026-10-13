@@ -557,6 +557,78 @@ mod tests {
     }
 
     #[test]
+    fn multiple_programs_keep_compiler_and_runtime_diagnostics_connected() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture {
+            events: events.clone(),
+            window: Arc::new(Window::default()),
+            omit_sir: true,
+        });
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                let source = demo(4);
+                let builder = || {
+                    Simulator::builder(&source, "Top")
+                        .threads(4)
+                        .parallel_partition(celox::ParallelPartition::Always)
+                };
+                let mut native = builder().build_native().unwrap();
+                let clock = native.try_event("clk").unwrap();
+                native.tick(clock).unwrap();
+                let mut cranelift = builder().build_cranelift().unwrap();
+                let clock = cranelift.try_event("clk").unwrap();
+                cranelift.tick(clock).unwrap();
+            }
+        });
+        let events = events.lock().unwrap();
+        let tasks = events
+            .iter()
+            .filter(|e| e["event"] == "compiled_task")
+            .collect::<Vec<_>>();
+        let programs = tasks
+            .iter()
+            .map(|e| e["program"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(programs.len(), 4);
+        let dispatches = events
+            .iter()
+            .filter(|e| e["event"] == "dispatch")
+            .collect::<Vec<_>>();
+        assert!(!dispatches.is_empty());
+        let pools = dispatches
+            .iter()
+            .map(|e| e["pool"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(pools.len(), 4);
+        for dispatch in dispatches {
+            let metadata = tasks
+                .iter()
+                .filter(|t| t["schedule"] == dispatch["schedule"])
+                .collect::<Vec<_>>();
+            assert!(!metadata.is_empty());
+            assert!(
+                metadata
+                    .iter()
+                    .all(|t| t["program"] == metadata[0]["program"])
+            );
+        }
+        for level in ["units", "tasks"] {
+            assert!(events.iter().any(|e| {
+                e["event"] == "hazard"
+                    && e["scopes"].as_array().is_some_and(|scopes| {
+                        scopes.iter().any(|scope| {
+                            scope["hazard_level"] == level
+                                && tasks.iter().any(|task| {
+                                    task["schedule"] == scope["schedule"]
+                                        && task["hazard_level"] == level
+                                })
+                        })
+                    })
+            }));
+        }
+    }
+
+    #[test]
     fn project_mode_requires_a_bounded_testbench() {
         assert!(Args::try_parse_from(["parallel-report", "--project", "."]).is_err());
         assert!(Args::try_parse_from(["parallel-report", "--testbench-ticks", "4"]).is_err());

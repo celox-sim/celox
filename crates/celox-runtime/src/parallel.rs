@@ -20,18 +20,14 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// Diagnostic fingerprint of a task table, shared by compiler and runtime.
-/// Only meaningful within the same executable; not a persistent format ID.
-pub fn schedule_diagnostic_id(name: &str, lanes: u32, tasks: &[LaneTaskSpec]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hash);
-    lanes.hash(&mut hash);
-    for task in tasks {
-        task.lane.hash(&mut hash);
-        task.waits.hash(&mut hash);
-    }
-    format!("{:016x}", hash.finish())
+/// Process-local identity for diagnostic objects. Never derived from addresses
+/// or topology, and never persisted in native images.
+pub fn new_diagnostic_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("diagnostic identity exhausted");
+    id.to_string()
 }
 
 #[derive(Default)]
@@ -83,7 +79,7 @@ pub struct LaneSchedule {
     tasks: Vec<LaneTaskSpec>,
     /// Global task indices of every lane, in execution order.
     lane_tasks: Vec<Vec<usize>>,
-    diagnostic_name: String,
+    diagnostic_id: String,
 }
 
 impl LaneSchedule {
@@ -120,13 +116,13 @@ impl LaneSchedule {
             lanes,
             tasks,
             lane_tasks,
-            diagnostic_name: String::new(),
+            diagnostic_id: new_diagnostic_id(),
         })
     }
 
-    /// Give reports a phase identity so equal task topologies do not alias.
-    pub fn with_diagnostic_name(mut self, name: String) -> Self {
-        self.diagnostic_name = name;
+    /// Bind this runtime schedule to its compiler diagnostic identity.
+    pub fn with_diagnostic_id(mut self, name: String) -> Self {
+        self.diagnostic_id = name;
         self
     }
 
@@ -299,6 +295,7 @@ pub struct LanePool {
     shared: Arc<Shared>,
     workers: Vec<JoinHandle<()>>,
     epoch: u64,
+    diagnostic_id: String,
 }
 
 impl std::fmt::Debug for LanePool {
@@ -346,6 +343,7 @@ impl LanePool {
                         shared,
                         workers,
                         epoch: 0,
+                        diagnostic_id: new_diagnostic_id(),
                     };
                     drop(pool);
                     return Err(error);
@@ -356,6 +354,7 @@ impl LanePool {
             shared,
             workers,
             epoch: 0,
+            diagnostic_id: new_diagnostic_id(),
         })
     }
 
@@ -438,9 +437,8 @@ impl LanePool {
         }
         if let Some(trace) = &trace {
             let elapsed_ns = trace.nanos();
-            let schedule_id =
-                schedule_diagnostic_id(&schedule.diagnostic_name, schedule.lanes, &schedule.tasks);
-            let pool = format!("{:p}", Arc::as_ptr(&self.shared));
+            let schedule_id = &schedule.diagnostic_id;
+            let pool = &self.diagnostic_id;
             tracing::trace!(target: "celox::parallel", event = "dispatch", pool, epoch,
                 schedule = schedule_id, lanes = schedule.lanes, elapsed_ns);
             // Emit after joining: no subscriber locks or I/O on worker threads.
@@ -722,12 +720,16 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_ids_distinguish_equal_topologies_in_different_phases() {
-        let (schedule, _) = chain_schedule();
-        assert_ne!(
-            schedule_diagnostic_id("comb", 3, schedule.tasks()),
-            schedule_diagnostic_id("ff", 3, schedule.tasks())
-        );
+    fn diagnostic_ids_distinguish_equal_topologies_and_recreated_pools() {
+        let (first, _) = chain_schedule();
+        let (second, _) = chain_schedule();
+        assert_ne!(first.diagnostic_id, second.diagnostic_id);
+        assert_eq!(first.clone().diagnostic_id, first.diagnostic_id);
+        let first_pool = LanePool::new(1).unwrap();
+        let id = first_pool.diagnostic_id.clone();
+        drop(first_pool);
+        let second_pool = LanePool::new(1).unwrap();
+        assert_ne!(id, second_pool.diagnostic_id);
     }
 
     #[test]

@@ -9,6 +9,9 @@ export function explainWaits(events) {
   const schedules = new Map(), runs = new Map(), dispatches = new Map(), hazards = new Map();
   const signals = events.filter(e => e.event === "signal");
   const scope = e => (e.scopes ?? []).map(s => s.id).join("/");
+  const plan = e => e.schedule ?? [...(e.scopes ?? [])].reverse().find(s => s.schedule)?.schedule;
+  const level = e => e.hazard_level ?? [...(e.scopes ?? [])].reverse().find(s => s.hazard_level)?.hazard_level;
+  const hazardKey = e => plan(e) !== undefined && level(e) !== undefined ? `plan:${plan(e)}/${level(e)}` : `scope:${scope(e)}`;
   const execution = e => `${e.pool}/${e.epoch}`;
   for (const e of events) {
     if (e.event === "compiled_task") {
@@ -18,7 +21,7 @@ export function explainWaits(events) {
       runs.set(`${execution(e)}/${e.task}`, e);
     } else if (e.event === "dispatch") dispatches.set(execution(e), e);
     else if (e.event === "hazard") {
-      const key = `${scope(e)}/${e.predecessor}/${e.unit}`;
+      const key = `${hazardKey(e)}/${e.predecessor}/${e.unit}`;
       if (!hazards.has(key)) hazards.set(key, []);
       hazards.get(key).push(e);
     }
@@ -44,11 +47,15 @@ export function explainWaits(events) {
       continue;
     }
     const key = `${d.schedule}/${producer.task}/${consumer.task}`;
-    if (!rows.has(key)) rows.set(key, {schedule:d.schedule, producer:producer.task,
+    const producerIds = level(consumer) === "units" ? (producer.units ?? []) : [producer.task];
+    const consumerIds = level(consumer) === "units" ? (consumer.units ?? []) : [consumer.task];
+    const conflicts = producerIds.flatMap(p => consumerIds.flatMap(c =>
+      hazards.get(`${hazardKey(consumer)}/${p}/${c}`) ?? []));
+    if (!rows.has(key)) rows.set(key, {schedule:d.schedule, program:consumer.program, producer:producer.task,
       consumer:consumer.task, producer_lane:producer.lane, consumer_lane:consumer.lane,
       producer_units:producer.units ?? [], consumer_units:consumer.units ?? [],
       count:0, wait_ns:0, blocked_ns:0, ready_tail_ns:0, producer_work_ns:0,
-      conflicts:hazards.get(`${scope(consumer)}/${producer.task}/${consumer.task}`) ?? []});
+      conflicts});
     const row = rows.get(key);
     row.count++;
     row.wait_ns += w.end_ns - w.start_ns;
@@ -57,26 +64,27 @@ export function explainWaits(events) {
     row.producer_work_ns += p.end_ns - p.start_ns;
   }
   const cache = new Map();
-  function names(effect) {
-    if (cache.has(effect)) return cache.get(effect);
+  function names(effect, program) {
+    const key = JSON.stringify([program, effect]);
+    if (cache.has(key)) return cache.get(key);
     const m = effect?.match(/object: (State|WriteEnvelope), offset: (\d+), byte_len: (\d+)/);
     const matches = [];
     if (m) {
       const low = Number(m[2]), high = low + Number(m[3]);
-      for (const s of signals) for (const region of ["offset", "working_offset", "sparse_offset"]) {
+      for (const s of signals.filter(s => s.program === program)) for (const region of ["offset", "working_offset", "sparse_offset"]) {
         const raw = s[region];
         const start = typeof raw === "number" ? raw : Number(raw?.match(/Some\((\d+)\)/)?.[1]);
         if (Number.isFinite(start) && start < high && low < start + Math.ceil(s.width / 8))
           matches.push({name:s.name, region, address:s.address, offset:start, width:s.width});
       }
     }
-    cache.set(effect, matches);
+    cache.set(key, matches);
     return matches;
   }
   const result = [...rows.values()].sort((a,b) => b.blocked_ns - a.blocked_ns);
   for (const row of result) row.conflicts = row.conflicts.map(c => ({type:c.hazard,
     producer_effect:c.producer, consumer_effect:c.consumer,
-    representative:c.representative ?? false, signals:names(c.consumer)}));
+    representative:c.representative ?? false, signals:names(c.consumer, row.program)}));
   return {rows:result, issues,
     note:"Wait sums span lanes and must not be added to wall time. Blocked time ends when the required producer finishes; ready-tail includes notification/check/scheduling overhead. Signal names are overlapping storage candidates, including aliases, not proof of a semantic dependence. Exact byte ranges and the tracker edge are authoritative; a missing direct conflict may be a transitive ordering edge. Array storage can be strided, so names alone are not an exact address map."};
 }

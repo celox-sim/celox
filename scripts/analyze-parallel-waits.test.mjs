@@ -33,3 +33,23 @@ test('identical task numbers in another pool do not change attribution',()=>{
  const es=fixture();es.push({event:'task_run',task:0,pool:'different',epoch:1,start_ns:0,end_ns:999});
  assert.equal(explainWaits(es).rows[0].blocked_ns,15);
 });
+test('stable plan identity connects out-of-span Cranelift metadata through unit IDs',()=>{
+ const es=fixture(),tasks=es.filter(e=>e.event==='compiled_task');
+ for(const [i,t] of tasks.entries()){t.hazard_level='units';t.units=[10+i];t.scopes=[];}
+ const h=es.find(e=>e.event==='hazard');h.scopes=[{id:'planning-only',schedule:'s',hazard_level:'units'}];h.predecessor=10;h.unit=11;
+ const unrelated=structuredClone(h);unrelated.scopes=[{id:'planning-only',schedule:'other',hazard_level:'units'}];unrelated.hazard='WAW';es.push(unrelated);
+ const a=explainWaits(es);assert.deepEqual(a.issues,[]);assert.equal(a.rows[0].conflicts.length,1);assert.equal(a.rows[0].conflicts[0].type,'RAW');
+});
+test('native final task hazards are isolated from the preliminary unit plan',()=>{
+ const es=fixture();for(const t of es.filter(e=>e.event==='compiled_task')){t.hazard_level='tasks';t.units=[t.task+10];t.scopes=[];}
+ const h=es.find(e=>e.event==='hazard');h.scopes=[{id:'final',schedule:'s',hazard_level:'tasks'}];
+ const pre=structuredClone(h);pre.scopes=[{id:'early',schedule:'s',hazard_level:'units'}];pre.hazard='WAW';es.push(pre);
+ assert.deepEqual(explainWaits(es).rows[0].conflicts.map(c=>c.type),['RAW']);
+});
+test('multiple programs with identical topology and storage do not mix tasks or signal names',()=>{
+ const a=fixture(),b=fixture();
+ for(const [events,schedule,program,pool,name] of [[a,'first','program1','pool1','first.signal'],[b,'second','program2','pool2','second.signal']]){
+  for(const e of events){if(e.schedule)e.schedule=schedule;if(e.pool)e.pool=pool;if(e.event==='compiled_task'){e.program=program;e.hazard_level='tasks';e.scopes=[];}if(e.event==='hazard')e.scopes=[{id:'reused',schedule,hazard_level:'tasks'}];if(e.event==='signal'){e.program=program;e.name=name;}}
+ }
+ const r=explainWaits([...a,...b]);assert.equal(r.rows.length,2);assert.deepEqual(r.rows.map(r=>r.conflicts[0].signals.map(s=>s.name)),[['first.signal'],['second.signal']]);
+});
