@@ -50,6 +50,19 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
 
     match arena.get(node) {
         SLTNode::Constant(val, msk, _, _) => (val.clone(), msk.clone(), width),
+        SLTNode::Concat(parts) => {
+            let mut payload = BigUint::zero();
+            let mut mask = BigUint::zero();
+            // Parts are ordered most significant first. Preserve both planes:
+            // a surrounding ToTwoState must clear only actual X/Z bits.
+            for (part, part_width) in parts {
+                let (value, unknown, _) = eval_const_expr(*part, arena);
+                let part_mask = (BigUint::from(1u8) << part_width) - 1u8;
+                payload = (payload << part_width) | (value & &part_mask);
+                mask = (mask << part_width) | (unknown & part_mask);
+            }
+            (payload, mask, width)
+        }
         SLTNode::Slice { expr, access } => {
             let (val, msk, _) = eval_const_expr(*expr, arena);
             let slice_w = access.msb - access.lsb + 1;
@@ -504,6 +517,45 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::eval_const_expr;
+
+    #[test]
+    fn evaluates_constant_concat_payload_and_mask_at_declared_widths() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let high = arena
+            .alloc(SLTNode::Constant(0xabu32.into(), 0x48u32.into(), 8, false))
+            .unwrap();
+        let low = arena
+            .alloc(SLTNode::Constant(0xdu32.into(), 0x6u32.into(), 4, false))
+            .unwrap();
+        let concat = arena
+            .alloc(SLTNode::Concat(vec![(high, 8), (low, 4)]))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(concat, &arena),
+            (0xabdu32.into(), 0x486u32.into(), 12),
+        );
+        let converted = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, concat))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(converted, &arena),
+            (0xa39u32.into(), 0u32.into(), 12),
+        );
+        let wide_low = arena
+            .alloc(SLTNode::Constant(0xdu32.into(), 0x6u32.into(), 128, false))
+            .unwrap();
+        let wide = arena
+            .alloc(SLTNode::Concat(vec![(concat, 12), (wide_low, 128)]))
+            .unwrap();
+        assert_eq!(
+            eval_const_expr(wide, &arena),
+            (
+                (BigUint::from(0xabdu32) << 128) | BigUint::from(0xdu32),
+                (BigUint::from(0x486u32) << 128) | BigUint::from(0x6u32),
+                140,
+            ),
+        );
+    }
 
     #[test]
     fn preserves_constant_dependencies_inside_legacy_fold() {
