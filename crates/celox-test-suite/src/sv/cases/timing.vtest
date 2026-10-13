@@ -283,9 +283,11 @@
 
 (case four_state_edges_count_transitions_through_unknown
   (source "four_state_edges.sv" #"
-                module Top(output logic [7:0] pos, output logic [7:0] neg, output logic [7:0] any);
+                module Top(input logic host_clk, output logic [7:0] host_count, output logic [7:0] pos, output logic [7:0] neg, output logic [7:0] any);
+                    always_ff @(posedge host_clk) host_count <= host_count + 1;
                     logic s = 1'b0;
                     initial begin
+                        host_count = 8'd0;
                         pos = 8'd0;
                         neg = 8'd0;
                         any = 8'd0;
@@ -314,6 +316,13 @@
             "#)
   (top Top)
   (four_state)
+  (set host_clk 0)
+  (run_until 0)
+  (set host_clk 1'bz)(eval)(assert_eq host_count 1)
+  (set host_clk 1'bx)(eval)(assert_eq host_count 1)
+  (set host_clk 1)(eval)(assert_eq host_count 2)
+  (set host_clk 0)(eval)
+  (set host_clk 1'bz)(eval)(assert_eq host_count 3)
   (run_to_finish)
   (assert_eq pos 3)
   (assert_eq neg 3)
