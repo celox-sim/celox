@@ -31,8 +31,8 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 #[cfg(feature = "host-runtime")]
 mod host {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use crate::backend::RuntimeEventBuffer;
     #[cfg(any(
@@ -104,6 +104,7 @@ mod host {
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
+        runtime_finish_state: Arc<Mutex<RuntimeFinishState>>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
         pub(super) comb_observer_initial_eval: bool,
@@ -161,7 +162,21 @@ mod host {
         sites: Vec<RuntimeEventSite>,
         read_seq: u64,
         shared_read_seq: Arc<AtomicU64>,
+        finish_state: Arc<Mutex<RuntimeFinishState>>,
         active: Arc<AtomicBool>,
+    }
+
+    #[derive(Default)]
+    struct RuntimeFinishState {
+        requested: bool,
+        read_seq: u64,
+    }
+
+    fn raw_events_request_finish(events: &[RawRuntimeEvent], sites: &[RuntimeEventSite]) -> bool {
+        events.iter().any(|event| {
+            matches!(event, RawRuntimeEvent::Event { site_id, .. }
+                if sites.get(*site_id).is_some_and(|site| matches!(site.kind, RuntimeEventKind::Finish)))
+        })
     }
 
     impl RuntimeEventDrain {
@@ -170,6 +185,22 @@ mod host {
         }
 
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
+            if self
+                .sites
+                .iter()
+                .any(|site| matches!(site.kind, RuntimeEventKind::Finish))
+            {
+                let mut finish = self.finish_state.lock().unwrap();
+                if !finish.requested {
+                    let events = drain_raw_runtime_events_from_buffer(
+                        &self.buffer,
+                        &self.layout,
+                        &self.sites,
+                        &mut finish.read_seq,
+                    );
+                    finish.requested = raw_events_request_finish(&events, &self.sites);
+                }
+            }
             let events = drain_raw_runtime_events_from_buffer(
                 &self.buffer,
                 &self.layout,
@@ -667,6 +698,7 @@ mod host {
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
+                runtime_finish_state: Arc::new(Mutex::new(RuntimeFinishState::default())),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_initial_eval: true,
@@ -897,6 +929,7 @@ mod host {
         }
 
         fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
+            self.has_pending_runtime_finish();
             let layout = self.backend.layout();
             let mut read_seq = self.runtime_event_read_seq.load(Ordering::Acquire);
             if let Some(buffer) = self.backend.runtime_event_buffer() {
@@ -949,19 +982,35 @@ mod host {
             {
                 return false;
             }
-            self.peek_backend_runtime_events_from(self.runtime_event_read_seq.load(Ordering::Acquire)).iter().any(|event| {
-                matches!(event,RawRuntimeEvent::Event{site_id,..} if self.program.runtime_schema.runtime_event_sites.get(*site_id).is_some_and(|site|matches!(site.kind,RuntimeEventKind::Finish)))
-            })
+            let mut finish = self.runtime_finish_state.lock().unwrap();
+            if !finish.requested {
+                let events = self.read_backend_runtime_events(&mut finish.read_seq);
+                finish.requested = raw_events_request_finish(
+                    &events,
+                    &self.program.runtime_schema.runtime_event_sites,
+                );
+            }
+            finish.requested
+        }
+
+        pub(super) fn reset_runtime_finish(&self, finished: bool) {
+            let mut finish = self.runtime_finish_state.lock().unwrap();
+            finish.read_seq = self.runtime_event_write_seq();
+            finish.requested = finished;
         }
 
         fn peek_backend_runtime_events_from(&self, read_seq: u64) -> Vec<RawRuntimeEvent> {
             let mut read_seq = read_seq;
+            self.read_backend_runtime_events(&mut read_seq)
+        }
+
+        fn read_backend_runtime_events(&self, read_seq: &mut u64) -> Vec<RawRuntimeEvent> {
             let layout = self.backend.layout();
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 collect_runtime_events(
                     layout,
                     &self.program.runtime_schema.runtime_event_sites,
-                    &mut read_seq,
+                    read_seq,
                     buffer.byte_size(),
                     |offset| buffer.read_u64(offset),
                     |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
@@ -974,7 +1023,7 @@ mod host {
                 collect_runtime_events(
                     layout,
                     &self.program.runtime_schema.runtime_event_sites,
-                    &mut read_seq,
+                    read_seq,
                     size,
                     read_u64,
                     read_u64,
@@ -993,6 +1042,7 @@ mod host {
                 sites: self.program.runtime_schema.runtime_event_sites.clone(),
                 read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
                 shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
+                finish_state: Arc::clone(&self.runtime_finish_state),
                 active: Arc::clone(&self.runtime_event_drain_active),
             })
         }
