@@ -1710,8 +1710,27 @@ pub(super) fn validate_parameter_initializer_selections(
         }
         Ok(())
     };
+    let repeat_count = |count: RefNode<'_>| {
+        let count = indexed_select_base(count, syntax_tree, &dimensions)?;
+        if !eval_ast_const_expr(&count, &dimensions.const_env).is_some_and(|count| count >= 0) {
+            return Err(unsupported(
+                "parameter repetition count must be a nonnegative known constant",
+            ));
+        }
+        Ok(())
+    };
+    let mut discovered_dimensions = None;
     for node in initializer.into_iter() {
         match node {
+            RefNode::MultipleConcatenation(concat) => {
+                repeat_count(RefNode::Expression(&concat.nodes.0.nodes.1.0))?;
+            }
+            RefNode::ConstantMultipleConcatenation(concat) => {
+                repeat_count(RefNode::ConstantExpression(&concat.nodes.0.nodes.1.0))?;
+            }
+            RefNode::AssignmentPatternRepeat(pattern) => {
+                repeat_count(RefNode::ConstantExpression(&pattern.nodes.0.nodes.1.0))?;
+            }
             RefNode::ConstantBitSelect(select) => {
                 for index in &select.nodes.0 {
                     bound(&index.nodes.1, true)?;
@@ -1728,15 +1747,45 @@ pub(super) fn validate_parameter_initializer_selections(
             }
             RefNode::ConstantPrimary(sv_parser::ConstantPrimary::PsParameter(parameter))
                 if !parameter.nodes.1.nodes.1.nodes.0.is_empty()
-                    || parameter.nodes.1.nodes.2.is_some() =>
+                    || parameter.nodes.1.nodes.2.is_some()
+                    || packed_structs::has_member_access(
+                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                        RefNode::ConstantSelect(&parameter.nodes.1),
+                    ) =>
             {
                 indexed_constant_expression(node, syntax_tree, &dimensions)?;
             }
             RefNode::Primary(primary @ sv_parser::Primary::Hierarchical(parameter))
                 if !parameter.nodes.2.nodes.1.nodes.0.is_empty()
-                    || parameter.nodes.2.nodes.2.is_some() =>
+                    || parameter.nodes.2.nodes.2.is_some()
+                    || packed_structs::has_member_access(
+                        RefNode::HierarchicalIdentifier(&parameter.nodes.1),
+                        RefNode::Select(&parameter.nodes.2),
+                    ) =>
             {
-                expressions::expr_from_primary_with_types(primary, syntax_tree, &dimensions)?;
+                // A skipped query may refer to a port/signal member before
+                // final module declaration metadata has been installed.
+                let context = if dimensions.scope_types_complete {
+                    &dimensions
+                } else {
+                    discovered_dimensions.get_or_insert_with(|| {
+                        let mut context = dimensions.clone();
+                        if let Some(discovered) = dimensions::containing_packed_dimensions(
+                            node,
+                            syntax_tree,
+                            &dimensions.const_env,
+                            &dimensions.type_aliases,
+                        ) {
+                            for (name, metadata) in discovered.iter() {
+                                if context.get(name).is_none() {
+                                    context.insert(name.clone(), metadata.clone());
+                                }
+                            }
+                        }
+                        context
+                    })
+                };
+                expressions::expr_from_primary_with_types(primary, syntax_tree, context)?;
             }
             // Concatenation selections have no named primary to lower. Check
             // their start and width without inspecting the concatenated bits,

@@ -1341,3 +1341,23 @@ fn unbounded_projection_keeps_requested_aliases_and_omits_unused_dollars() {
         }
     }
 }
+
+#[test]
+fn logical_type_inference_requires_operand_types_outside_bounded_proofs() {
+    let expression = ConstExpr::Binary {
+        left: Box::new(ConstExpr::Ident("missing".into())),
+        op: BinaryOp::LogicAnd,
+        right: Box::new(ConstExpr::Literal("0".into())),
+    };
+    assert_eq!(
+        infer_const_expr_type(&expression, &HashMap::default()),
+        None
+    );
+    assert_eq!(
+        infer_const_expr_type_inner(&expression, &HashMap::default(), true),
+        Some(ExprType {
+            width: 1,
+            signed: false
+        }),
+    );
+}

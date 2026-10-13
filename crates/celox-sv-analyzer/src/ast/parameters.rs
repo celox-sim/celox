@@ -729,8 +729,11 @@ pub(super) fn validate_parameter_initializer_literal_widths(
             && let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer
             && let Some(proof) =
                 expr_to_const(bounded_parameter_proof(expression, tree, parameter_literal))
-            && let Some(ty) =
-                infer_const_expr_type(&proof, &parameter_types_from_const_env(const_env))
+            && let Some(ty) = infer_const_expr_type_inner(
+                &proof,
+                &parameter_types_from_const_env(const_env),
+                true,
+            )
             && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
             && let Some(value) = eval_ast_const_expr(&proof, const_env)
         {
@@ -1940,6 +1943,16 @@ pub(super) fn infer_const_expr_type(
     expr: &ConstExpr,
     parameter_types: &HashMap<String, ExprType>,
 ) -> Option<ExprType> {
+    infer_const_expr_type_inner(expr, parameter_types, false)
+}
+
+// Only the bounded proof may infer a logical result without resolving its
+// opaque skipped operands. Ordinary type queries must resolve both operands.
+fn infer_const_expr_type_inner(
+    expr: &ConstExpr,
+    parameter_types: &HashMap<String, ExprType>,
+    bounded_proof: bool,
+) -> Option<ExprType> {
     match expr {
         ConstExpr::Literal(literal) => {
             let literal = typecheck::parse_integral_literal(literal)?;
@@ -1970,7 +1983,7 @@ pub(super) fn infer_const_expr_type(
         ConstExpr::Function { name, args, .. } => match name.as_str() {
             "$signed" | "$unsigned" => {
                 let [arg] = args.as_slice() else { return None };
-                let mut ty = infer_const_expr_type(arg, parameter_types)?;
+                let mut ty = infer_const_expr_type_inner(arg, parameter_types, bounded_proof)?;
                 ty.signed = name == "$signed";
                 Some(ty)
             }
@@ -1985,7 +1998,7 @@ pub(super) fn infer_const_expr_type(
             _ => None,
         },
         ConstExpr::Unary { op, expr } => {
-            let operand = infer_const_expr_type(expr, parameter_types)?;
+            let operand = infer_const_expr_type_inner(expr, parameter_types, bounded_proof)?;
             if matches!(
                 op,
                 UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
@@ -1999,14 +2012,14 @@ pub(super) fn infer_const_expr_type(
             }
         }
         ConstExpr::Binary { left, op, right } => {
-            if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+            if bounded_proof && matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
                 return Some(ExprType {
                     width: 1,
                     signed: false,
                 });
             }
-            let left = infer_const_expr_type(left, parameter_types)?;
-            let right = infer_const_expr_type(right, parameter_types)?;
+            let left = infer_const_expr_type_inner(left, parameter_types, bounded_proof)?;
+            let right = infer_const_expr_type_inner(right, parameter_types, bounded_proof)?;
             match op {
                 BinaryOp::LogicAnd
                 | BinaryOp::LogicOr
@@ -2035,8 +2048,8 @@ pub(super) fn infer_const_expr_type(
             else_expr,
             ..
         } => {
-            let then_type = infer_const_expr_type(then_expr, parameter_types)?;
-            let else_type = infer_const_expr_type(else_expr, parameter_types)?;
+            let then_type = infer_const_expr_type_inner(then_expr, parameter_types, bounded_proof)?;
+            let else_type = infer_const_expr_type_inner(else_expr, parameter_types, bounded_proof)?;
             Some(ExprType {
                 width: then_type.width.max(else_type.width),
                 signed: then_type.signed && else_type.signed,

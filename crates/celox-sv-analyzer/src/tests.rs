@@ -925,6 +925,115 @@ fn validates_names_in_short_circuited_parameter_operands() {
 }
 
 #[test]
+fn folded_parameter_names_require_a_declaration_prefix() {
+    for body in [
+        "localparam A = 0 && A && 1000000000'd0;",
+        "localparam A = 0 && B && 1000000000'd0; localparam B = 1;",
+        "localparam A = 0 && f(A) && 1000000000'd0;",
+        "localparam A = 0 && $bits(A) && 1000000000'd0;",
+    ] {
+        let source = format!(
+            "module Top; function automatic int f(input int x); return x; endfunction {body} endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_prefix.sv")).is_err(),
+            "{body}"
+        );
+    }
+    let source = "module Top; localparam A = 1; localparam B = 0 && A && 1000000000'd0; endmodule";
+    let ir = analyze_source(source, Path::new("folded_prefix_valid.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[1].resolved_value(), Some(0));
+}
+
+#[test]
+fn logical_query_types_resolve_both_operands() {
+    for expression in [
+        "missing && 0",
+        "0 && missing",
+        "missing || 1",
+        "1 || missing",
+    ] {
+        let source = format!("module Top; localparam N = $bits({expression}); endmodule");
+        assert!(
+            analyze_source(&source, Path::new("logical_query_name.sv")).is_err(),
+            "{expression}"
+        );
+    }
+    for expression in ["data && 0", "0 && data", "data || 1", "1 || data"] {
+        let source = format!(
+            "module Top(input logic [7:0] data); localparam N = $bits({expression}); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("logical_query_valid.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(1));
+    }
+}
+
+#[test]
+fn folded_parameter_queries_validate_member_paths() {
+    for member in ["missing", "a.missing"] {
+        let source = format!(
+            "module Top; struct packed {{ logic a; }} value; localparam N = 0 && ($bits(value.{member}) || 1000000000'd0); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("folded_member.sv")).is_err(),
+            "{member}"
+        );
+    }
+    let source = "module Top; struct packed { logic a; } value; localparam N = 0 && ($bits(value.a) || 1000000000'd0); endmodule";
+    let ir = analyze_source(source, Path::new("folded_member_valid.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+}
+
+#[test]
+fn folded_parameter_replication_counts_are_validated() {
+    for count in ["-1", "1'bx", "1'bz", "missing"] {
+        for operand in [
+            format!("{{{count}{{1'b0}}}}"),
+            format!("f({{{count}{{1'b0}}}})"),
+            format!("word_t'('{{{count}{{1'b0}}}})"),
+        ] {
+            let source = format!(
+                "module Top; typedef logic [1:0] word_t; function automatic int f(input int x); return x; endfunction localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("folded_repeat.sv")).is_err(),
+                "{operand}"
+            );
+        }
+    }
+    for operand in [
+        "{2{1'b0}}",
+        "{1000000000{1'b0}}",
+        "{2{1000000000'd0}}",
+        "{1'b0, {0{1'b0}}}",
+        "word_t'('{2{1'b0}})",
+    ] {
+        let source = format!(
+            "module Top; typedef logic [1:0] word_t; localparam N = 0 && ({operand} || 1000000000'd0); endmodule"
+        );
+        let ir = analyze_source(&source, Path::new("folded_repeat_valid.sv"))
+            .unwrap_or_else(|error| panic!("{operand}: {error}"));
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+    }
+}
+
+#[test]
+fn folded_array_queries_allow_out_of_range_dimensions() {
+    // IEEE 1800-2023 20.7 returns X for an out-of-range dimension;
+    // the call remains legal and may be skipped by a logical operator.
+    for name in ["$size", "$left", "$right", "$low", "$high", "$increment"] {
+        for dimension in ["0", "-1", "2", "1'bx", "1'bz"] {
+            let source = format!(
+                "module Top(input logic [7:0] data); localparam N = 0 && ({name}(data, {dimension}) || 1000000000'd0); endmodule"
+            );
+            let ir = analyze_source(&source, Path::new("folded_query_dimension.sv"))
+                .unwrap_or_else(|error| panic!("{name}/{dimension}: {error}"));
+            assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(0));
+        }
+    }
+}
+
+#[test]
 fn local_values_shadow_imported_bare_function_calls() {
     for declaration in ["localparam f = 0;", "typedef enum logic { f = 0 } E;"] {
         let source = format!(

@@ -142,6 +142,7 @@ fn validate_folded_parameter_names(
     initializer: &sv_parser::ConstantParamExpression,
     tree: &SyntaxTree,
     dimensions: &PackedDimensions,
+    unavailable_parameters: &HashSet<String>,
 ) -> Converted<()> {
     let signatures = const_functions::argument_names();
     let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
@@ -210,6 +211,11 @@ fn validate_folded_parameter_names(
         };
         let name = reference_name(reference, tree)
             .ok_or_else(|| unsupported("name in short-circuited parameter operand"))?;
+        if unavailable_parameters.contains(&name) {
+            return Err(unsupported(format!(
+                "parameter `{name}` is not in the declaration prefix"
+            )));
+        }
         let constant = dimensions.const_env.contains_key(&name)
             || dimensions.parameter_values.contains_key(&name)
             || dimensions
@@ -272,6 +278,31 @@ fn reject_silently_ignored_constructs_with_dimensions(
         node,
         RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
     );
+    // Final metadata contains every published parameter. Retain source order
+    // separately so a folded initializer cannot resolve itself or a later
+    // declaration through that completed table.
+    let mut parameter_assignments = Vec::new();
+    if let Some(header) = module_parameter_port_list(node.clone()) {
+        parameter_assignments.extend(header.into_iter().filter_map(|node| match node {
+            RefNode::ParamAssignment(parameter) => Some(parameter),
+            _ => None,
+        }));
+    }
+    for declaration in scope_declarations(node.clone()) {
+        let declaration = match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
+                RefNode::ParameterDeclaration(&declaration.0)
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
+                RefNode::LocalParameterDeclaration(&declaration.0)
+            }
+            _ => continue,
+        };
+        parameter_assignments.extend(declaration.into_iter().filter_map(|node| match node {
+            RefNode::ParamAssignment(parameter) => Some(parameter),
+            _ => None,
+        }));
+    }
     // These are the constant contexts that use selection-aware lowering.
     // Other contexts (such as declaration ranges) still use the lightweight
     // constant parser and must reject indexed selections rather than drop them.
@@ -366,6 +397,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
             Some(&**call)
         })
         .collect();
+    let mut deferred_bits_queries = Vec::new();
     for child in validation_nodes(node.clone(), is_module) {
         if let RefNode::SystemTfCall(call) = child.clone()
             && !procedural_queries.contains(&call)
@@ -408,7 +440,27 @@ fn reject_silently_ignored_constructs_with_dimensions(
                     syntax_tree,
                     indexed_dimensions,
                 )?;
-                validate_folded_parameter_names(expression, syntax_tree, indexed_dimensions)?;
+                let position = parameter_assignments
+                    .iter()
+                    .position(|candidate| std::ptr::eq(*candidate, *parameter))
+                    .unwrap_or(parameter_assignments.len());
+                let unavailable_parameters = parameter_assignments[position..]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(*parameter))
+                    .map(|parameter| {
+                        parameter_name(
+                            RefNode::ParameterIdentifier(&parameter.nodes.0),
+                            syntax_tree,
+                        )
+                    })
+                    .collect::<Result<HashSet<_>, _>>()?;
+                validate_folded_parameter_names(
+                    expression,
+                    syntax_tree,
+                    indexed_dimensions,
+                    &unavailable_parameters,
+                )?;
             } else if selects::parameter_initializer_needs_typed_lowering(expression) {
                 selects::selected_parameter_initializer(
                     expression,
@@ -427,6 +479,15 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision")) =>
             {
                 timescales::query(call, syntax_tree)?;
+            }
+            RefNode::SystemTfCall(call)
+                if system_tf_call_parts(call, syntax_tree)
+                    .is_some_and(|(name, _)| name == "$bits")
+                    && !procedural_queries.contains(&call) =>
+            {
+                // First preserve diagnostics from the operand's own calls;
+                // then require the completed query to have a resolved type.
+                deferred_bits_queries.push(call);
             }
             RefNode::SystemTfCall(call)
                 if system_tf_call_parts(call, syntax_tree)
@@ -722,6 +783,23 @@ fn reject_silently_ignored_constructs_with_dimensions(
             }
             _ => {}
         }
+    }
+    for call in deferred_bits_queries {
+        // Parameter collection may defer queries, but the frontend must not
+        // recover a fixed logical width from unresolved operands.
+        dimensions::size_system_function_call_type(
+            call,
+            syntax_tree,
+            const_env,
+            type_aliases,
+            Some(indexed_dimensions),
+        )
+        .ok_or_else(|| {
+            unsupported(format!(
+                "operand of `$bits`: {}",
+                syntax_tree.get_str(call).unwrap_or_default()
+            ))
+        })?;
     }
     if is_module {
         let active = generate::items(node, syntax_tree, const_env, type_aliases)?;

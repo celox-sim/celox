@@ -299,3 +299,21 @@ fn rejects_unresolved_indexed_parameter_initializers_after_collection() {
     .build_cranelift()
     .expect_err("an unused unresolved indexed initializer must be rejected");
 }
+
+#[test]
+fn rejects_unresolved_logical_parameter_type_queries() {
+    for expression in [
+        "missing && 0",
+        "0 && missing",
+        "missing || 1",
+        "1 || missing",
+    ] {
+        let source = format!("module Top; localparam N = $bits({expression}); endmodule");
+        Simulator::from_sv_sources(
+            vec![(&source, Path::new("unresolved_logical_query.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .expect_err("unresolved operands must not acquire a logical result type");
+    }
+}
