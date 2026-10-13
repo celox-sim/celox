@@ -46,9 +46,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let projectId: string;
 	const loadedIds = new Set<string>();
 	let pendingRegeneration: Promise<void> | undefined;
-	let lastUpdate:
-		| { file: string; timestamp: number; result: Promise<boolean> }
-		| undefined;
+	// Vite shares one read callback across environments for each event. Unlike
+	// timestamps, its identity distinguishes rapid events and survives interleaving.
+	const updates = new WeakMap<object, Promise<boolean>>();
 
 	function projectFile(name: string): string {
 		return normalizePath(resolve(projectRoot, name));
@@ -56,16 +56,12 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 	function regenerate(
 		file: string,
-		timestamp?: number,
 		read?: () => string | Promise<string>,
+		event?: object,
 	): Promise<boolean> {
 		file = normalizePath(file);
-		if (
-			timestamp !== undefined &&
-			lastUpdate?.file === file &&
-			lastUpdate.timestamp === timestamp
-		)
-			return lastUpdate.result;
+		const existing = event && updates.get(event);
+		if (existing) return existing;
 		// Capture membership before an earlier load replaces its dependency set.
 		const componentChanged = testbenchComponentDependencies.has(
 			normalizeTestbenchComponentPath(file),
@@ -125,7 +121,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		};
 		const pending = result.then(settled, settled);
 		pendingRegeneration = pending;
-		if (timestamp !== undefined) lastUpdate = { file, timestamp, result };
+		if (event) updates.set(event, result);
 		return result;
 	}
 
@@ -248,7 +244,13 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			const reportError = (file: string, error: unknown) => {
 				server.config.logger.error(String(error));
 				// Vitest must also rerun and report failed dependency resolution.
-				if (normalizePath(file) === projectFile("Veryl.lock")) notifyProject();
+				if (
+					normalizePath(file) === projectFile("Veryl.lock") ||
+					testbenchComponentDependencies.has(
+						normalizeTestbenchComponentPath(file),
+					)
+				)
+					notifyProject();
 			};
 			// Vitest disables HMR, so its watcher also needs cache/sidecar updates.
 			const sourceChanged = (file: string) => {
@@ -285,6 +287,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// the shared project dependency on Vite 5 or with HMR disabled.
 			const catalogueChanged = (file: string) => {
 				file = normalizePath(file);
+				if (
+					testbenchComponentDependencies.has(
+						normalizeTestbenchComponentPath(file),
+					)
+				) {
+					sourceChanged(file);
+					return;
+				}
 				if (file === projectFile("Veryl.lock")) {
 					void regenerate(file)
 						.then((changed) => {
@@ -422,13 +432,10 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async hotUpdate({ file, timestamp, modules, type, read }) {
+		async hotUpdate({ file, modules, type, read }) {
 			if (
-				(await regenerate(
-					file,
-					timestamp,
-					type === "update" ? read : undefined,
-				)) === false
+				(await regenerate(file, type === "update" ? read : undefined, read)) ===
+				false
 			)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
@@ -438,7 +445,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 		// Vite 5 uses the server graph; newer Vite calls hotUpdate above.
 		async handleHotUpdate({ file, server, modules, read }) {
-			if ((await regenerate(file, undefined, read)) === false)
+			if ((await regenerate(file, read)) === false)
 				return normalizePath(file) === projectFile("Veryl.lock")
 					? []
 					: undefined;

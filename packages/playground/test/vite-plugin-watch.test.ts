@@ -172,12 +172,13 @@ test.each(["Main.veryl", "Veryl.toml", "celox.toml", "Veryl.lock"])(
 		writeFileSync(file, "before");
 		utimesSync(file, 1_700_000_000, 1_700_000_000);
 		const { plugin } = await initialize(root);
+		const read = vi.fn(() => "edited");
 		writeFileSync(file, "edited");
 		utimesSync(file, 1_700_000_000, 1_700_000_000);
 		for (const moduleGraph of [graph(), graph()]) {
 			await (plugin.hotUpdate as Function).call(
 				{ environment: { moduleGraph } },
-				{ file, timestamp: 1 },
+				{ file, timestamp: 1, type: "update", read },
 			);
 			expect(moduleGraph.invalidateModule).toHaveBeenCalled();
 		}
@@ -561,7 +562,8 @@ test.each([false, true])(
 		finish();
 		await vi.waitFor(() => {
 			expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(3);
-			expect(notifications).toHaveBeenCalledTimes(failFirst ? 1 : 2);
+			// Failed component loads also notify so the test runner reports them.
+			expect(notifications).toHaveBeenCalledTimes(2);
 		});
 		expect(logger.error).toHaveBeenCalledTimes(failFirst ? 1 : 0);
 		// The final dependency set, rather than the older load's set, is active.
@@ -620,5 +622,83 @@ test.each(["create", "delete"])(
 		);
 		expect(read).not.toHaveBeenCalled();
 		expect(runGenTs).toHaveBeenCalledTimes(2);
+	},
+);
+
+// Distinct Vite events can share Date.now(), but share read only across environments.
+test.each(["update", "create", "delete"])(
+	"same-timestamp %s events regenerate separately across interleaved environments",
+	async (type) => {
+		const root = mkdtempSync(join(tmpdir(), "celox-watch-timestamp-"));
+		roots.push(root);
+		const { plugin } = await initialize(root);
+		const file = join(root, "Main.veryl");
+		const events = [vi.fn(() => "first"), vi.fn(() => "second")];
+		const invoke = (read: () => string) =>
+			(plugin.hotUpdate as Function).call(
+				{ environment: { moduleGraph: graph() } },
+				{ file, type, timestamp: 42, read },
+			);
+		await invoke(events[0]);
+		expect(runGenTs).toHaveBeenCalledTimes(2);
+		await invoke(events[1]);
+		expect(runGenTs).toHaveBeenCalledTimes(3);
+		// A later environment still shares the original event's result.
+		await invoke(events[0]);
+		await invoke(events[1]);
+		expect(runGenTs).toHaveBeenCalledTimes(3);
+		for (const read of events)
+			expect(read).toHaveBeenCalledTimes(type === "update" ? 1 : 0);
+	},
+);
+
+test.each([
+	{ hasEnvironments: false, hmr: true },
+	{ hasEnvironments: false, hmr: false },
+	{ hasEnvironments: true, hmr: false },
+])(
+	"component removal and recreation recover with environments=$hasEnvironments, hmr=$hmr",
+	async ({ hasEnvironments, hmr }) => {
+		const root = mkdtempSync(
+			join(tmpdir(), "celox-watch-component-catalogue-"),
+		);
+		roots.push(root);
+		const entry = join(root, "components.ts");
+		const helper = join(root, "helper.ts");
+		writeFileSync(entry, "export {};");
+		const { plugin } = await initialize(root, entry);
+		const watcher = Object.assign(new EventEmitter(), { add: vi.fn() });
+		const moduleGraph = graph();
+		const logger = { error: vi.fn() };
+		const httpServer = new EventEmitter();
+		(plugin.configureServer as Function)({
+			watcher,
+			httpServer,
+			moduleGraph,
+			config: { server: { hmr }, logger },
+			environments: hasEnvironments ? { ssr: { moduleGraph } } : undefined,
+		});
+		const notifications = vi.fn();
+		watcher.on("change", (file) => {
+			if (file === normalizePath(join(root, "Veryl.toml"))) notifications();
+		});
+		for (const file of [helper, entry]) {
+			vi.mocked(loadTestbenchComponentModule).mockRejectedValueOnce(
+				new Error("removed dependency"),
+			);
+			watcher.emit("unlink", file);
+			await vi.waitFor(() => expect(logger.error).toHaveBeenCalledTimes(1));
+			expect(notifications).toHaveBeenCalledTimes(1);
+			watcher.emit("add", file);
+			await vi.waitFor(() => expect(notifications).toHaveBeenCalledTimes(2));
+			expect(moduleGraph.invalidateModule).toHaveBeenCalled();
+			logger.error.mockClear();
+			notifications.mockClear();
+		}
+		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(5);
+		expect(runGenTs).toHaveBeenCalledTimes(3);
+		httpServer.emit("close");
+		watcher.emit("add", helper);
+		expect(loadTestbenchComponentModule).toHaveBeenCalledTimes(5);
 	},
 );
