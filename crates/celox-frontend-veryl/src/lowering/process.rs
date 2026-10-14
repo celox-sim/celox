@@ -1403,27 +1403,34 @@ impl<'a> BlockLowering<'a> {
         declare: bool,
     ) -> bool {
         for statement in statements {
-            let mut calls = Vec::new();
-            let mut unconditional = Vec::new();
-            for expr in expressions::statement_inputs(statement) {
-                expressions::expression_calls(expr, &mut calls);
-                expressions::unconditional_expression_calls(expr, &mut unconditional);
-            }
-            for call in calls {
-                if active.insert(function_key(call)) {
-                    if let Some(body) = function_body(&self.ir.functions, call) {
-                        let continues = self.scan_clocks(&body.statements, active, declare);
-                        active.remove(&function_key(call));
-                        if !continues
-                            && unconditional
-                                .iter()
-                                .any(|required| std::ptr::eq(*required, call))
-                        {
-                            return false;
-                        }
-                    } else {
-                        active.remove(&function_key(call));
+            // Calls and case patterns have their own conditional evaluation
+            // order; a flat input list cannot describe their continuation.
+            match statement {
+                Statement::FunctionCall(call) => {
+                    if !self.scan_call_clocks(call, active, declare) {
+                        return false;
                     }
+                    continue;
+                }
+                Statement::Case(stmt) => {
+                    if !self.scan_expression_clocks(&stmt.case_target, active, declare) {
+                        return false;
+                    }
+                    let continues = if let Some(body) = selected_case_body(stmt) {
+                        self.scan_clocks(body, active, declare)
+                    } else {
+                        self.scan_case_clock_arms(stmt, 0, active, declare)
+                    };
+                    if !continues {
+                        return false;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            for expr in expressions::statement_inputs(statement) {
+                if !self.scan_expression_clocks(expr, active, declare) {
+                    return false;
                 }
             }
             match statement {
@@ -1466,21 +1473,6 @@ impl<'a> BlockLowering<'a> {
                     self.scan_clocks(&stmt.true_side, active, declare);
                     self.scan_clocks(&stmt.false_side, active, declare);
                 }
-                Statement::Case(stmt) => {
-                    if let Some(body) = selected_case_body(stmt) {
-                        if !self.scan_clocks(body, active, declare) {
-                            return false;
-                        }
-                        continue;
-                    }
-                    let mut continues = self.scan_clocks(&stmt.default, active, declare);
-                    for arm in &stmt.arms {
-                        continues |= self.scan_clocks(&arm.body, active, declare);
-                    }
-                    if !continues {
-                        return false;
-                    }
-                }
                 Statement::For(stmt) if !constant_empty_range(&stmt.range) => {
                     let continues = self.scan_clocks(&stmt.body, active, declare);
                     if !continues
@@ -1488,17 +1480,6 @@ impl<'a> BlockLowering<'a> {
                         && !contains_loop_break(&stmt.body)
                     {
                         return false;
-                    }
-                }
-                Statement::FunctionCall(call) => {
-                    if active.insert(function_key(call))
-                        && let Some(body) = function_body(&self.ir.functions, call)
-                    {
-                        let continues = self.scan_clocks(&body.statements, active, declare);
-                        active.remove(&function_key(call));
-                        if !continues {
-                            return false;
-                        }
                     }
                 }
                 Statement::SystemFunctionCall(call)
@@ -1511,6 +1492,129 @@ impl<'a> BlockLowering<'a> {
             }
         }
         true
+    }
+
+    fn scan_expression_clocks(
+        &mut self,
+        expr: &Expression,
+        active: &mut HashSet<FunctionKey>,
+        declare: bool,
+    ) -> bool {
+        if let Expression::Term(factor) = expr
+            && let veryl_analyzer::ir::Factor::FunctionCall(call) = factor.as_ref()
+        {
+            return self.scan_call_clocks(call, active, declare);
+        }
+        match expr {
+            Expression::Binary(lhs, op, rhs, _) if matches!(op, Op::LogicAnd | Op::LogicOr) => {
+                if !self.scan_expression_clocks(lhs, active, declare) {
+                    return false;
+                }
+                match constant_truth(lhs) {
+                    Some(truth)
+                        if (*op == Op::LogicAnd && !truth) || (*op == Op::LogicOr && truth) =>
+                    {
+                        true
+                    }
+                    Some(_) => self.scan_expression_clocks(rhs, active, declare),
+                    None => {
+                        // RHS runs only on the non-short-circuit path.
+                        self.scan_expression_clocks(rhs, active, declare);
+                        true
+                    }
+                }
+            }
+            Expression::Ternary(cond, yes, no, _) => {
+                if !self.scan_expression_clocks(cond, active, declare) {
+                    return false;
+                }
+                match constant_truth(cond) {
+                    Some(true) => self.scan_expression_clocks(yes, active, declare),
+                    Some(false) => self.scan_expression_clocks(no, active, declare),
+                    None => {
+                        let yes = self.scan_expression_clocks(yes, active, declare);
+                        let no = self.scan_expression_clocks(no, active, declare);
+                        yes || no
+                    }
+                }
+            }
+            _ => expressions::children(expr)
+                .into_iter()
+                .all(|child| self.scan_expression_clocks(child, active, declare)),
+        }
+    }
+
+    fn scan_call_clocks(
+        &mut self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        active: &mut HashSet<FunctionKey>,
+        declare: bool,
+    ) -> bool {
+        // Match lower_function_call's formal argument and copy-back order.
+        let paths = self.ir.functions[&call.id]
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            if let Some(expr) = call
+                .inputs
+                .iter()
+                .find_map(|(input, expr)| (input == path).then_some(expr))
+                && !self.scan_expression_clocks(expr, active, declare)
+            {
+                return false;
+            }
+        }
+        if active.insert(function_key(call)) {
+            let continues = function_body(&self.ir.functions, call)
+                .is_none_or(|body| self.scan_clocks(&body.statements, active, declare));
+            active.remove(&function_key(call));
+            if !continues {
+                return false;
+            }
+        }
+        for path in &paths {
+            if let Some(destinations) = call
+                .outputs
+                .iter()
+                .find_map(|(output, destinations)| (output == path).then_some(destinations))
+            {
+                for destination in destinations {
+                    for expr in expressions::selection(&destination.index, &destination.select) {
+                        if !self.scan_expression_clocks(expr, active, declare) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn scan_case_clock_arms(
+        &mut self,
+        stmt: &veryl_analyzer::ir::CaseStatement,
+        arm: usize,
+        active: &mut HashSet<FunctionKey>,
+        declare: bool,
+    ) -> bool {
+        let Some(case_arm) = stmt.arms.get(arm) else {
+            return self.scan_clocks(&stmt.default, active, declare);
+        };
+        let condition = case_arm_condition_expr(&stmt.case_target, &case_arm.patterns);
+        if !self.scan_expression_clocks(&condition, active, declare) {
+            return false;
+        }
+        match constant_truth(&condition) {
+            Some(true) => self.scan_clocks(&case_arm.body, active, declare),
+            Some(false) => self.scan_case_clock_arms(stmt, arm + 1, active, declare),
+            None => {
+                let matched = self.scan_clocks(&case_arm.body, active, declare);
+                let unmatched = self.scan_case_clock_arms(stmt, arm + 1, active, declare);
+                matched || unmatched
+            }
+        }
     }
 
     fn declare_clock(&mut self, inst: StrId, period: u64) {
@@ -1649,13 +1753,28 @@ impl<'a> BlockLowering<'a> {
         &mut self,
         destination: &AssignDestination,
         load: impl FnOnce(&mut Self) -> Result<RegisterId, ParserError>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<Flow, ParserError> {
         let inputs = expressions::selection(&destination.index, &destination.select);
-        let bindings = self.expression_bindings(&inputs)?;
+        let mut bindings = HashMap::default();
+        if inputs.iter().any(|expr| expressions::has_call(expr)) {
+            for expr in &inputs {
+                let value = self.expression(expr)?;
+                if !self.scan_expression_clocks(expr, &mut HashSet::default(), false) {
+                    self.kernel.finish();
+                    return Ok(Flow::Ended);
+                }
+                self.save_expression(expr, value)?;
+            }
+            bindings = inputs
+                .into_iter()
+                .map(|expr| (expr.token_range(), self.saved_expression(expr)))
+                .collect();
+        }
         self.parser.push_process_expression_values(bindings);
         let result = load(self).and_then(|value| self.store(destination, value));
         self.parser.pop_process_expression_values();
-        result
+        result?;
+        Ok(Flow::Continue)
     }
 
     fn store(
@@ -2035,6 +2154,10 @@ impl<'a> BlockLowering<'a> {
         stmt: &veryl_analyzer::ir::CaseStatement,
     ) -> Result<Flow, ParserError> {
         let value = self.expression(&stmt.case_target)?;
+        if !self.scan_expression_clocks(&stmt.case_target, &mut HashSet::default(), false) {
+            self.kernel.finish();
+            return Ok(Flow::Ended);
+        }
         self.save_expression(&stmt.case_target, value)?;
         if let Some(body) = selected_case_body(stmt) {
             return self.lower_statements(body);
@@ -2061,6 +2184,10 @@ impl<'a> BlockLowering<'a> {
         let condition = self.condition(&condition_expr);
         self.parser.pop_process_expression_values();
         let condition = condition?;
+        if !self.scan_expression_clocks(&condition_expr, &mut HashSet::default(), false) {
+            self.kernel.finish();
+            return Ok(Flow::Ended);
+        }
         let builder = self.kernel.builder();
         let then_block = builder.new_block();
         let else_block = builder.new_block();
@@ -2886,6 +3013,10 @@ impl<'a> BlockLowering<'a> {
                     .coerce_function_input_expression((*expr).clone(), *formal)
             });
             let value = self.expression(actual.as_ref().unwrap_or(expr))?;
+            if !self.scan_expression_clocks(expr, &mut HashSet::default(), false) {
+                self.kernel.finish();
+                return Ok(Flow::Ended);
+            }
             if freeze {
                 self.save_expression(expr, value)?;
             }
@@ -2961,7 +3092,11 @@ impl<'a> BlockLowering<'a> {
             };
             if let Some(&formal) = body.arg_map.get(path) {
                 for destination in destinations {
-                    self.copy_back(destination, |this| this.load_var(formal))?;
+                    if let Flow::Ended =
+                        self.copy_back(destination, |this| this.load_var(formal))?
+                    {
+                        return Ok(Flow::Ended);
+                    }
                 }
             }
         }
@@ -3128,9 +3263,9 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    self.copy_back(ret, |this| {
+                    return self.copy_back(ret, |this| {
                         Ok(this.load_scratch(slot, result_width, *signed))
-                    })?;
+                    });
                 }
                 Ok(Flow::Continue)
             }
@@ -3167,9 +3302,9 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    self.copy_back(ret, |this| {
+                    return self.copy_back(ret, |this| {
                         Ok(this.load_scratch(slot, result_width, *signed))
-                    })?;
+                    });
                 }
                 Ok(Flow::Continue)
             }
@@ -3180,7 +3315,7 @@ impl<'a> BlockLowering<'a> {
                     result,
                 })?;
                 if let Some(ret) = tb.ret.as_deref() {
-                    self.copy_back(ret, |this| Ok(this.load_scratch(slot, 64, false)))?;
+                    return self.copy_back(ret, |this| Ok(this.load_scratch(slot, 64, false)));
                 }
                 Ok(Flow::Continue)
             }
@@ -3233,9 +3368,9 @@ impl<'a> BlockLowering<'a> {
                     strict: tb.ret_strict,
                 })?;
                 if let (Some(ret), Some((value, slot))) = (tb.ret.as_deref(), result) {
-                    self.copy_back(ret, |this| {
+                    return self.copy_back(ret, |this| {
                         Ok(this.load_scratch(slot, value.width, tb.ret_signed))
-                    })?;
+                    });
                 }
                 Ok(Flow::Continue)
             }

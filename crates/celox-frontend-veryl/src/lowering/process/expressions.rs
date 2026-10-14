@@ -167,43 +167,7 @@ pub(super) fn statement_bodies(statement: &Statement) -> Vec<&[Statement]> {
         _ => Vec::new(),
     }
 }
-/// Calls that every evaluation of this expression must reach.
-pub(super) fn unconditional_expression_calls<'s>(
-    expr: &'s Expression,
-    calls: &mut Vec<&'s veryl_analyzer::ir::FunctionCall>,
-) {
-    let inputs = match expr {
-        Expression::Binary(lhs, Op::LogicAnd, rhs, _) => {
-            if constant_truth(lhs) == Some(true) {
-                vec![lhs.as_ref(), rhs.as_ref()]
-            } else {
-                vec![lhs.as_ref()]
-            }
-        }
-        Expression::Binary(lhs, Op::LogicOr, rhs, _) => {
-            if constant_truth(lhs) == Some(false) {
-                vec![lhs.as_ref(), rhs.as_ref()]
-            } else {
-                vec![lhs.as_ref()]
-            }
-        }
-        Expression::Ternary(cond, yes, no, _) => match constant_truth(cond) {
-            Some(true) => vec![cond.as_ref(), yes.as_ref()],
-            Some(false) => vec![cond.as_ref(), no.as_ref()],
-            None => vec![cond.as_ref()],
-        },
-        _ => children(expr),
-    };
-    for child in inputs {
-        unconditional_expression_calls(child, calls);
-    }
-    if let Expression::Term(factor) = expr
-        && let Factor::FunctionCall(call) = factor.as_ref()
-    {
-        calls.push(call);
-    }
-}
-
+/// Calls in potentially evaluated branches of this expression.
 pub(super) fn expression_calls<'s>(
     expr: &'s Expression,
     calls: &mut Vec<&'s veryl_analyzer::ir::FunctionCall>,

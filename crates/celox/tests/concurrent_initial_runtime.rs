@@ -1851,3 +1851,81 @@ fn repeated_clockless_runs_settle_residual_writes_before_entry_reads() {
         );
     }
 }
+
+#[test]
+fn output_selectors_are_scanned_after_the_timed_callee() {
+    for (selector, tail) in [
+        (
+            "$finish(); return 0;",
+            "unused.next();$assert(0,\"continued after selector finish\");",
+        ),
+        ("return 0;", "$assert(words[0]==7); $finish();"),
+    ] {
+        let code = format!(
+            r#"#[test(Top)]module Top {{
+            inst clk:$tb::clock_gen;inst unused:$tb::clock_gen;var q:u32;var words:u32[2];
+            always_ff(clk){{q+=1;}}
+            function index()->u32 {{{selector}}}
+            function give(o:output u32){{clk.next(1);o=7;}}
+            initial {{give(words[index()]);{tail}}}
+        }}"#
+        );
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            sim.set(sim.signal("unused"), 1u8);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            assert_eq!(sim.get(sim.signal("q")), 1u32.into());
+            assert_eq!(sim.get(sim.signal("unused")), 1u8.into());
+        }
+        check(
+            Simulator::builder(&code, "Top")
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(Simulator::builder(&code, "Top").build_cranelift().unwrap());
+        check(Simulator::builder(&code, "Top").build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulator::builder(&code, "Top").build_native().unwrap());
+    }
+}
+
+#[test]
+fn runtime_case_scans_only_the_unmatched_path_to_later_patterns() {
+    let code = r#"#[test(Top)]module Top(choose:input u32){
+        inst clk:$tb::clock_gen;inst unused:$tb::clock_gen;var selector:u32;var q:u32;
+        always_ff(clk){q+=1;}
+        function stop()->u32{$finish();return 1;}
+        initial{selector=choose;case selector{0:{}stop():{}default:{unused.next();}}
+            clk.next(1);$assert(q==1);$finish();}
+    }"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>, input: u32) {
+        sim.set(sim.signal("unused"), 1u8);
+        sim.set(sim.signal("choose"), input);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(sim.signal("q")), u32::from(input == 0).into());
+        assert_eq!(sim.get(sim.signal("unused")), 1u8.into());
+    }
+    for input in [0, 1] {
+        check(
+            Simulator::builder(code, "Top").build_interpreter().unwrap(),
+            input,
+        );
+        check(
+            Simulator::builder(code, "Top").build_cranelift().unwrap(),
+            input,
+        );
+        check(Simulator::builder(code, "Top").build_wasm().unwrap(), input);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulator::builder(code, "Top").build_native().unwrap(),
+            input,
+        );
+    }
+}
