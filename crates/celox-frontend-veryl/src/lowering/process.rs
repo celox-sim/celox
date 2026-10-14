@@ -65,6 +65,7 @@ pub struct BlockStorage {
     pub clock: SourceVarId,
     pub release: SourceVarId,
     pub event_counters: Vec<(VarId, SourceVarId, SourceVarId)>,
+    pub hierarchical_event_counters: Vec<(SourceVarId, SourceVarId)>,
     pub scratch: Vec<(ScratchNeed, SourceVarId)>,
     /// The block's own copy of each function-local variable, so a call
     /// that waits keeps its arguments and locals while another block calls
@@ -231,6 +232,26 @@ pub(crate) fn declare_storage(
                     )
                 })
                 .collect(),
+            hierarchical_event_counters: hierarchical_references(ir, statements)
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    (
+                        declare(
+                            name(&format!("hier_event_rises@{index}")),
+                            None,
+                            celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                            false,
+                        ),
+                        declare(
+                            name(&format!("hier_event_falls@{index}")),
+                            None,
+                            celox_design::PROCESS_EVENT_COUNTER_WIDTH,
+                            false,
+                        ),
+                    )
+                })
+                .collect(),
             scratch,
             private,
             expression_values,
@@ -374,9 +395,10 @@ fn constant_nonempty_range(range: &ForRange) -> bool {
 fn contains_loop_break(statements: &[Statement]) -> bool {
     statements.iter().any(|stmt| {
         matches!(stmt, Statement::Break)
-            || expressions::statement_bodies(stmt)
-                .iter()
-                .any(|body| contains_loop_break(body))
+            || (!matches!(stmt, Statement::For(_))
+                && expressions::statement_bodies(stmt)
+                    .iter()
+                    .any(|body| contains_loop_break(body)))
     })
 }
 
@@ -597,19 +619,19 @@ fn scratch_needs(ir: &Module, statements: &[Statement]) -> Result<Vec<ScratchNee
     let mut active = HashSet::default();
     collect_scratch_needs(ir, statements, &mut active, &mut needs)?;
     // Taken first, before any statement (see `lower_block`).
+    needs.insert(
+        0,
+        ScratchNeed {
+            purpose: "event_yield_clean",
+            width: 1,
+        },
+    );
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
-        needs.insert(
-            0,
-            ScratchNeed {
-                purpose: "event_yield",
-                width: EVENT_YIELD_WIDTH,
-            },
-        );
         needs.insert(
             1,
             ScratchNeed {
-                purpose: "event_yield_clean",
-                width: 1,
+                purpose: "event_yield",
+                width: EVENT_YIELD_WIDTH,
             },
         );
     }
@@ -874,14 +896,30 @@ fn lower_block(
     let mut hierarchical_vars = HashMap::default();
     let mut hierarchical = HashMap::default();
     let mut next_synthetic = 0x4000_0000u32;
-    let mut references = Vec::new();
-    collect_hierarchical_references(
-        statements,
-        &ir.functions,
-        &mut HashSet::default(),
-        &mut references,
-    );
-    for reference in references {
+    let references = hierarchical_references(ir, statements);
+    let mut event_counters: HashMap<_, _> = storage
+        .event_counters
+        .iter()
+        .map(|(var, rises, falls)| (*var, (*rises, *falls)))
+        .collect();
+    let mut counter_targets: Vec<_> = storage
+        .event_counters
+        .iter()
+        .map(|(var, rises, falls)| {
+            (
+                SourceAddr {
+                    instance_id: instance,
+                    var_id: ids[var],
+                },
+                *rises,
+                *falls,
+            )
+        })
+        .collect();
+    for (reference, &(rises, falls)) in references
+        .into_iter()
+        .zip(&storage.hierarchical_event_counters)
+    {
         let key = (reference.inst_path.clone(), reference.var_path.clone());
         if hierarchical_vars.contains_key(&key) {
             continue;
@@ -893,6 +931,13 @@ fn lower_block(
         variable.id = id;
         module.variables.insert(id, variable);
         hierarchical_vars.insert(key, id);
+        if let Some(signal) = lookup.state_address(&resolved.target) {
+            let signal = scheduled.design.events.canonical(signal);
+            if scheduled.design.events.ordered_events.contains(&signal) {
+                event_counters.insert(id, (rises, falls));
+                counter_targets.push((resolved.target, rises, falls));
+            }
+        }
         hierarchical.insert(id, resolved.target);
     }
     let site_base = scheduled.runtime_schema.runtime_event_sites.len() as u32;
@@ -943,15 +988,13 @@ fn lower_block(
         dirty: false,
         event_yield: None,
         event_yield_clean: None,
-        event_counters: storage
-            .event_counters
-            .iter()
-            .map(|(var, rises, falls)| (*var, (*rises, *falls)))
-            .collect(),
+        event_counters,
     };
+    lowering.event_yield_clean = Some(lowering.take_scratch("event_yield_clean", 1)?.1);
+    let clean = lowering.constant(1, 1);
+    lowering.store_scratch(lowering.event_yield_clean.unwrap(), 1, clean);
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
         lowering.event_yield = Some(lowering.take_scratch("event_yield", EVENT_YIELD_WIDTH)?.1);
-        lowering.event_yield_clean = Some(lowering.take_scratch("event_yield_clean", 1)?.1);
     }
     lowering.declare_clocks(statements);
     // A block that ends right after a store settles, so a process that runs
@@ -1061,11 +1104,8 @@ fn lower_block(
         .runtime_schema
         .testbench_kernels
         .get_or_insert(scheduled.runtime_schema.processes.len());
-    for (var, rises, falls) in &storage.event_counters {
-        let signal = to_state(&SourceAddr {
-            instance_id: instance,
-            var_id: ids[var],
-        })?;
+    for (target, rises, falls) in &counter_targets {
+        let signal = to_state(target)?;
         let signal = scheduled.design.events.canonical(signal);
         if scheduled.design.events.ordered_events.contains(&signal) {
             let counters = celox_design::ProcessEventCounters {
@@ -1142,6 +1182,21 @@ fn resolve_hierarchical(
         variable,
         target: *source,
     })
+}
+
+/// Stable unique reference order shared by storage declaration and lowering.
+fn hierarchical_references(ir: &Module, statements: &[Statement]) -> Vec<HierVarRef> {
+    let mut references = Vec::new();
+    collect_hierarchical_references(
+        statements,
+        &ir.functions,
+        &mut HashSet::default(),
+        &mut references,
+    );
+    let mut seen = HashSet::default();
+    references
+        .retain(|reference| seen.insert((reference.inst_path.clone(), reference.var_path.clone())));
+    references
 }
 
 /// Every hierarchical reference the statements make, reads and writes.
@@ -1745,8 +1800,8 @@ impl<'a> BlockLowering<'a> {
                 .builder()
                 .seal_block(SIRTerminator::Jump(after, Vec::new()));
             self.kernel.builder().switch_to_block(after);
-            let zero = self.constant(0, 1);
-            self.store_scratch(self.event_yield_clean.unwrap(), 1, zero);
+            let clean = self.constant(1, 1);
+            self.store_scratch(self.event_yield_clean.unwrap(), 1, clean);
         }
         self.suspended();
         Ok(())
@@ -1771,6 +1826,10 @@ impl<'a> BlockLowering<'a> {
     fn suspended(&mut self) {
         self.parser.clear_register_cache();
         self.dirty = false;
+        if let Some(slot) = self.event_yield_clean {
+            let clean = self.constant(1, 1);
+            self.store_scratch(slot, 1, clean);
+        }
     }
 
     fn host_scratch(
@@ -1831,11 +1890,14 @@ impl<'a> BlockLowering<'a> {
         match statement {
             Statement::Assign(assign) => {
                 self.lower_assign(assign)?;
-                self.dirty |= assign.hier_dst.is_some()
+                if assign.hier_dst.is_some()
                     || assign
                         .dst
                         .iter()
-                        .any(|destination| !self.private.contains_key(&destination.id));
+                        .any(|destination| !self.private.contains_key(&destination.id))
+                {
+                    self.mark_dirty();
+                }
                 Ok(Flow::Continue)
             }
             Statement::If(stmt) => {
@@ -2071,17 +2133,33 @@ impl<'a> BlockLowering<'a> {
         let statement = Statement::Assign(assign.clone());
         let bindings = self.expression_bindings(&expressions::statement_inputs(&statement))?;
         self.parser.push_process_expression_values(bindings);
-        let (parser, kernel, targets, sources, convert) = parts!(self);
-        let result = parser.parse_assign_statement(
-            assign,
-            targets,
-            &Domain::Process,
-            &convert,
-            sources,
-            kernel.builder(),
-        );
+        let mut counter_values = Vec::new();
+        for destination in &assign.dst {
+            if let Some(&(rises, falls)) = self.event_counters.get(&destination.id) {
+                self.parser.clear_register_cache();
+                let before = self.load_var(destination.id)?;
+                counter_values.push((destination.id, rises, falls, before));
+            }
+        }
+        let result = {
+            let (parser, kernel, targets, sources, convert) = parts!(self);
+            parser.parse_assign_statement(
+                assign,
+                targets,
+                &Domain::Process,
+                &convert,
+                sources,
+                kernel.builder(),
+            )
+        };
         self.parser.pop_process_expression_values();
-        result
+        result?;
+        for (var, rises, falls, before) in counter_values {
+            self.parser.clear_register_cache();
+            let after = self.load_var(var)?;
+            self.record_event_edges(before, after, rises, falls);
+        }
+        Ok(())
     }
 
     /// A `for` loop whose counter and bounds live in state, so its body

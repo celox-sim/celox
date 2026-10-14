@@ -590,6 +590,40 @@ mod event_yield_settle_tests {
         panic!("process did not finish");
     }
     #[test]
+    fn clean_conditional_paths_do_not_request_a_settle() {
+        for statement in [
+            "if limit != 0 {source=1;}",
+            "case limit {0:{} default:{source=1;}}",
+        ] {
+            let code = format!(
+                "#[test(Top)]module Top(limit:input u32){{var source:u32;var derived:u32;always_comb{{derived=source;}}initial{{{statement}$assert(derived==source);$finish();}}}}"
+            );
+            macro_rules! check {
+                ($method:ident) => {{
+                    for (input, expected) in [(0, 0), (1, 1)] {
+                        assert_eq!(
+                            count(
+                                Simulator::builder(&code, "Top")
+                                    .testbench_kernels(true)
+                                    .$method()
+                                    .unwrap(),
+                                input
+                            ),
+                            expected,
+                            "{statement}, input={input}"
+                        );
+                    }
+                }};
+            }
+            check!(build_interpreter);
+            check!(build_cranelift);
+            check!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(build_native);
+        }
+    }
+
+    #[test]
     fn event_yield_does_not_settle_a_write_twice() {
         let code = r#"#[test(Top)]module Top(limit:input u32){var source:u32;var derived:u32;
             always_comb{derived=source;}

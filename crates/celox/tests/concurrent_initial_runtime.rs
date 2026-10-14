@@ -1640,3 +1640,58 @@ fn event_yields_preserve_comb_assertions() {
         );
     }
 }
+
+#[test]
+fn nested_loop_breaks_do_not_register_clocks_after_outer_finish() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{for i in 0..1{for j in 0..1{break;}$finish();}clk.next();}}"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let clk = sim.signal("clk");
+        sim.set(clk, 1u8);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(clk), 1u8.into());
+    }
+    let build = || Simulator::builder(code, "Top").testbench_kernels(true);
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}
+
+#[test]
+fn hierarchical_clock_pulses_survive_a_settling_read() {
+    let code = r#"module Child(clk:input clock,q:output logic){always_ff(clk){q=1;}}
+    #[test(Top)]module Top{var q:logic;inst dut:Child(q);initial{dut.q=0;dut.clk=1;$assert(dut.q==0);dut.clk=0;}}
+    "#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        sim.set(sim.signal("q"), 0u8);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    for four_state in [false, true] {
+        let build = || {
+            Simulator::builder(code, "Top")
+                .testbench_kernels(true)
+                .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            check(build().build_native().unwrap());
+            let image = build().compile_native().unwrap().into_program_image();
+            let image = celox::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            check(
+                Simulator::from_sources(Vec::new(), "Top")
+                    .build_native_from_image(image)
+                    .unwrap(),
+            );
+        }
+    }
+}
