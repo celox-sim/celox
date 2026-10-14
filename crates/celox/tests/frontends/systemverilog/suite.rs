@@ -125,7 +125,8 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_to_finish(&mut self) -> Result<()> {
-        self.capture_events()?;
+        // Draining dirty state would evaluate staged writes before this
+        // operation begins. Check prior finish, then settle within the run.
         if self.finished() {
             return Err(
                 "run_to_finish: the design already finished before the operation began".into(),
