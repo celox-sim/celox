@@ -516,6 +516,14 @@ impl<B: SimBackend> Simulation<B> {
     /// follow, as [`Self::step`] does before advancing. Time does not
     /// advance.
     pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        // A lazy output read can settle the host write and leave only its
+        // finish event pending. Synchronize termination before the clean path.
+        if self.simulator.has_pending_runtime_finish() {
+            self.state.finish();
+        }
+        if self.state.is_finished() {
+            return Ok(());
+        }
         let time = self.state.time();
         if self.simulator.dirty
             || !self.simulator.backend.get_triggered_bits().is_empty()
@@ -2680,5 +2688,35 @@ mod active_feedback_review_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), timed);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod lazy_finish_settle_review {
+    use super::*;
+    #[test]
+    fn settle_recognizes_finish_after_lazy_reads() {
+        let source = "module Top(input bit go,output bit y);always_comb begin y=go;if(go)$finish;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let y = sim.signal("y");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            assert_eq!(sim.get(y), 1u8.into());
+            sim.settle().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.step().unwrap(), None);
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("lazy-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
