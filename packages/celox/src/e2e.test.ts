@@ -4066,6 +4066,8 @@ test("retained NAPI memory cannot inject a generated clock edge", () => {
 			raw.runUntil(1);
 			expect(memory[layout.y.offset]).toBe(1);
 			memory[layout.clk.offset] = 1;
+			if (!raw.checkpoint) throw new Error("checkpoint unavailable");
+			expect(() => raw.checkpoint?.()).toThrow(/direct host write/);
 			expect(() => (explicit ? raw.evalComb() : raw.runUntil(2))).toThrow(
 				/direct host write/,
 			);
