@@ -676,6 +676,18 @@ impl<B: SimBackend> SimulationState<B> {
                 self.scheduled_clock_drives.insert(*id);
             }
         }
+        let mut falling = Vec::new();
+        for (id, clock) in &self.tick_clocks {
+            if clock.falling_edge == Some(current_time) {
+                falling.push(*id);
+                events_to_process.push(SimEvent {
+                    time: current_time,
+                    event_ref: clock.event,
+                    signal: clock.signal,
+                    next_val: 0,
+                });
+            }
+        }
         let ready = self.take_ready_processes(executor, current_time, &mut events_to_process);
         let rising: Vec<usize> = self
             .tick_clocks
@@ -712,7 +724,7 @@ impl<B: SimBackend> SimulationState<B> {
             ready,
             true,
         );
-        self.finish_clock_round(current_time, rising, &[], result)?;
+        self.finish_clock_round(current_time, rising, &falling, result)?;
         self.run_remaining_rounds(executor, current_time, limit)?;
         executor.finish_timed_step(self.scheduler.time);
         // Fused ticks may have moved the time on.
