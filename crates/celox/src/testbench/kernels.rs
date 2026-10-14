@@ -684,6 +684,136 @@ mod event_yield_settle_tests {
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check!(build_native);
     }
+    #[cfg(feature = "host-runtime")]
+    #[test]
+    fn writing_component_host_request_preserves_completed_settle() {
+        use std::ffi::c_void;
+        use veryl_component_sys as sys;
+        struct Host {
+            api: *const sys::VrlHostApi,
+            output: u32,
+        }
+        unsafe extern "C" fn create(
+            ctx: *mut sys::VrlCtx,
+            api: *const sys::VrlHostApi,
+        ) -> *mut c_void {
+            let clock = unsafe {
+                ((*api).port_index)(ctx, sys::VrlStr::from_str("clk"), sys::VRL_DIR_CLOCK)
+            };
+            let output = unsafe {
+                ((*api).port_index)(ctx, sys::VrlStr::from_str("q"), sys::VRL_DIR_OUTPUT)
+            };
+            if clock < 0 || output < 0 {
+                return std::ptr::null_mut();
+            }
+            Box::into_raw(Box::new(Host {
+                api,
+                output: output as u32,
+            }))
+            .cast()
+        }
+        unsafe extern "C" fn destroy(state: *mut c_void) {
+            drop(unsafe { Box::from_raw(state.cast::<Host>()) });
+        }
+        unsafe extern "C" fn hook(_: *mut c_void, _: *mut sys::VrlCtx) -> i32 {
+            0
+        }
+        unsafe extern "C" fn call(
+            state: *mut c_void,
+            ctx: *mut sys::VrlCtx,
+            name: sys::VrlStr,
+            args: *const sys::VrlValue,
+            nargs: usize,
+            _: *mut sys::VrlValue,
+        ) -> i32 {
+            if unsafe { name.as_str() } != "drive" || nargs != 1 {
+                return 1;
+            }
+            let state = unsafe { &*state.cast::<Host>() };
+            let value = unsafe { (*args).words.as_ref() }.copied().unwrap();
+            unsafe { ((*state.api).write_output)(ctx, state.output, &value, std::ptr::null()) };
+            0
+        }
+        static COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+            abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+            kind: sys::VRL_KIND_CLOCKED,
+            create,
+            destroy,
+            on_init: hook,
+            on_reset: hook,
+            on_clock: hook,
+            call_method: call,
+            on_finish: hook,
+        };
+        crate::register_static_component("settled_writer", &COMPONENT);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("component")).unwrap();
+        std::fs::write(dir.path().join("Veryl.toml"), "[project]\nname=\"settled_writer_test\"\nversion=\"0.1.0\"\n[[components]]\npath=\"component\"\n").unwrap();
+        std::fs::write(dir.path().join("component/veryl.manifest.json"), r#"{"types":{"settled_writer":{"kind":"clocked","ports":[{"name":"clk","dir":"input","role":"clock"},{"name":"q","dir":"output"}],"methods":[{"name":"drive","args":[{"name":"value","type":"value"}]}]}}}"#).unwrap();
+        let code = r#"#[test(Top)]module Top{
+          inst clk:$tb::clock_gen;var q:u8;var source:u8;var derived:u8;
+          inst c:$comp::settled_writer(clk,q);
+          always_comb{derived=q+source;}
+          initial{source=1;c.drive(7);$finish();}}
+        "#;
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let tb = super::super::compile_initial_testbench(&sim).unwrap();
+            let initial = sim
+                .components
+                .initialize(
+                    tb.components(),
+                    tb.component_bindings(),
+                    tb.component_libraries(),
+                    tb.component_file_base(),
+                    7,
+                    "Top",
+                    false,
+                    &mut sim.backend,
+                )
+                .unwrap();
+            apply_component_writes(&mut sim, initial);
+            let mut state = crate::simulation::simulation_state(&sim);
+            let mut executor = CountingExecutor {
+                sim,
+                settles: 0,
+                combs: 0,
+                fused: 0,
+                combs_before_edge: None,
+            };
+            state.step(&mut executor).unwrap();
+            assert!(state.is_finished());
+            assert_eq!(
+                executor.sim.backend.get_as::<u8>(executor.sim.signal("q")),
+                7
+            );
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("derived")),
+                8
+            );
+            assert_eq!(executor.combs, 1, "{}", std::any::type_name::<B>());
+        }
+        macro_rules! check_backend {
+            ($build:ident) => {
+                let metadata =
+                    veryl_metadata::Metadata::load(dir.path().join("Veryl.toml")).unwrap();
+                check(
+                    Simulator::builder(code, "Top")
+                        .with_metadata(metadata)
+                        .$build()
+                        .unwrap(),
+                );
+            };
+        }
+        check_backend!(build_interpreter);
+        check_backend!(build_cranelift);
+        check_backend!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_backend!(build_native);
+    }
+
     #[test]
     fn private_loop_counters_do_not_request_settles() {
         let code = r#"#[test(Top)]module Top(limit:input u32){initial{for i in 0..limit{$assert(1);}$finish();}}"#;

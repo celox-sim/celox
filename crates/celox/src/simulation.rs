@@ -190,7 +190,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             .processes
             .get(process)
             .and_then(|process| process.host_requests.get(request))
-            .is_none_or(|request| matches!(request, celox_design::HostRequest::Component { .. }))
+            .is_none_or(|request| {
+                matches!(request, celox_design::HostRequest::Component { .. }) && self.dirty
+            })
     }
 
     fn host_request(
