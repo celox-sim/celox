@@ -675,6 +675,22 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
+    /// Clock signals changed outside a scheduler round through retained memory.
+    pub fn escaped_host_clock_writes(&self, backend: &B) -> Vec<SignalRef> {
+        self.processes
+            .iter()
+            .flat_map(|process| &process.clocks)
+            .filter_map(|clock| {
+                let id = clock.event.id();
+                let baseline = (
+                    self.last_clock_values.contains(id),
+                    self.unknown_clock_values.contains(id),
+                );
+                (baseline != sample_event_signal(backend, clock.signal)).then_some(clock.signal)
+            })
+            .collect()
+    }
+
     /// A generated process clock owns its signal, including before its first wait.
     pub fn validate_host_write(&self, signal: SignalRef) -> Result<(), SimulatorErrorCode> {
         if let Some(clock) = self

@@ -1065,3 +1065,7 @@ endmodule"#)
 (case untimed_task_copyback_preserves_distinct_activation_times
  (source "untimed_task_copyback_preserves_distinct_activation_times.sv" #"module Child(output bit[1:0]q);task automatic drive(output bit x);x=1;endtask initial begin #1;drive(q[0]);end initial begin #2;drive(q[1]);end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
+
+(case staged_always_comb_side_effects_wait_for_setup
+ (source "staged-comb-effects.sv" #"module Top(input bit go,output bit seen);always_comb begin seen=go;if(!go)begin $display("early");$fatal(1,"early");end end initial begin #1;$finish;end endmodule"#)
+ (top Top)(set go 1)(run_to_finish)(assert_eq seen 1)(expect_output ""))
