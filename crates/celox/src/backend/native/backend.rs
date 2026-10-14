@@ -687,7 +687,11 @@ impl NativeProgramImage {
                     .runtime_schema
                     .rtl_writes
                     .iter()
-                    .any(|write| write.id == clock.signal)
+                    .any(|write| {
+                        let clock_bit=self.layout.offsets.get(&clock.signal).and_then(|offset|offset.checked_mul(8));
+                        let written=self.layout.offsets.get(&write.id).and_then(|offset|offset.checked_mul(8)).and_then(|base|Some((base.checked_add(write.access.lsb)?,base.checked_add(write.access.msb)?)));
+                        matches!((clock_bit,written),(Some(clock),Some((first,last))) if first<=clock && clock<=last)
+                    })
                 {
                     return Err("a process clock is driven by design logic".into());
                 }
@@ -3621,6 +3625,33 @@ mod process_metadata_tests {
                 "accepted corruption {corruption}"
             );
         }
+    }
+
+    #[test]
+    fn aliased_rtl_storage_cannot_drive_a_process_clock() {
+        let mut broken = image();
+        broken.to_container_bytes().unwrap();
+        let clock = broken.runtime_schema.processes[0].clocks[0].signal;
+        let driver = broken
+            .runtime_schema
+            .rtl_writes
+            .iter()
+            .find(|write| write.id != clock)
+            .unwrap()
+            .id;
+        assert_ne!(driver, clock);
+        assert_ne!(
+            broken.layout.offsets[&driver],
+            broken.layout.offsets[&clock]
+        );
+        broken
+            .layout
+            .offsets
+            .insert(clock, broken.layout.offsets[&driver]);
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
     }
 
     #[test]
