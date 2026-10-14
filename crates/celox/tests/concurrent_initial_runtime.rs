@@ -2002,3 +2002,40 @@ fn no_op_value_operands_do_not_initialize_an_unused_clock() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(Simulator::builder(code, "Top").build_native().unwrap());
 }
+
+#[test]
+fn terminating_host_argument_skips_later_clock_argument() {
+    for call in [
+        "value=random.get_range(stop(),later());",
+        "f.write(\"%d %d\",stop(),later());",
+    ] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            inst clk:$tb::clock_gen; var random:$tb::random::<u32>; var f:$tb::file; var value:u32;
+            function stop()->u32 {{$finish();return 0;}}
+            function later()->u32 {{clk.next();return 10;}}
+            initial {{{call}}}
+        }}"#
+        );
+        check_passes_on_every_backend(&code);
+    }
+}
+
+#[test]
+fn terminating_event_argument_skips_later_clock_argument() {
+    for call in [
+        "$display(\"%d %d\",stop(),later());",
+        "$write(\"%d %d\",stop(),later());",
+        "$assert(1,\"%d %d\",stop(),later());",
+    ] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            inst clk:$tb::clock_gen;
+            function stop()->u32 {{$finish();return 0;}}
+            function later()->u32 {{clk.next();return 10;}}
+            initial {{{call}}}
+        }}"#
+        );
+        check_passes_on_every_backend(&code);
+    }
+}

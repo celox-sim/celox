@@ -292,9 +292,9 @@ impl BlockLowering<'_> {
     pub(super) fn expression_bindings(
         &mut self,
         inputs: &[&Expression],
-    ) -> Result<HashMap<TokenRange, RegisterId>, ParserError> {
+    ) -> Result<Option<HashMap<TokenRange, RegisterId>>, ParserError> {
         if !inputs.iter().any(|expr| has_call(expr)) {
-            return Ok(HashMap::default());
+            return Ok(Some(HashMap::default()));
         }
         let inputs = inputs
             .iter()
@@ -303,12 +303,17 @@ impl BlockLowering<'_> {
             .collect::<Vec<_>>();
         for expr in &inputs {
             let value = self.expression(expr)?;
+            if self.argument_ended(expr) {
+                return Ok(None);
+            }
             self.save_expression(expr, value)?;
         }
-        Ok(inputs
-            .into_iter()
-            .map(|expr| (expr.token_range(), self.saved_expression(expr)))
-            .collect())
+        Ok(Some(
+            inputs
+                .into_iter()
+                .map(|expr| (expr.token_range(), self.saved_expression(expr)))
+                .collect(),
+        ))
     }
 
     pub(super) fn expression(&mut self, expr: &Expression) -> Result<RegisterId, ParserError> {

@@ -2053,7 +2053,9 @@ impl<'a> BlockLowering<'a> {
         }
         match statement {
             Statement::Assign(assign) => {
-                self.lower_assign(assign)?;
+                if let Flow::Ended = self.lower_assign(assign)? {
+                    return Ok(Flow::Ended);
+                }
                 if assign.hier_dst.is_some()
                     || assign
                         .dst
@@ -2237,7 +2239,7 @@ impl<'a> BlockLowering<'a> {
         self.join(join, joined)
     }
 
-    fn lower_assign(&mut self, assign: &AssignStatement) -> Result<(), ParserError> {
+    fn lower_assign(&mut self, assign: &AssignStatement) -> Result<Flow, ParserError> {
         // A constant index or part select outside the destination is an
         // error of the testbench, as it was for the interpreter.
         for destination in &assign.dst {
@@ -2308,7 +2310,11 @@ impl<'a> BlockLowering<'a> {
             assign
         };
         let statement = Statement::Assign(assign.clone());
-        let bindings = self.expression_bindings(&expressions::statement_inputs(&statement))?;
+        let Some(bindings) =
+            self.expression_bindings(&expressions::statement_inputs(&statement))?
+        else {
+            return Ok(Flow::Ended);
+        };
         self.parser.push_process_expression_values(bindings);
         let mut counter_values = Vec::new();
         for destination in &assign.dst {
@@ -2336,7 +2342,7 @@ impl<'a> BlockLowering<'a> {
             let after = self.load_var(var)?;
             self.record_event_edges(before, after, rises, falls);
         }
-        Ok(())
+        Ok(Flow::Continue)
     }
 
     /// A `for` loop whose counter and bounds live in state, so its body
@@ -2821,6 +2827,9 @@ impl<'a> BlockLowering<'a> {
             }
             SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) => {
                 let flow = self.system_task(call)?;
+                if matches!(flow, Flow::Ended) {
+                    return Ok(flow);
+                }
                 self.yield_for_runtime_event()?;
                 Ok(flow)
             }
@@ -2834,7 +2843,10 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn system_task(&mut self, call: &SystemFunctionCall) -> Result<Flow, ParserError> {
-        let bindings = self.expression_bindings(&expressions::system_inputs(&call.kind))?;
+        let Some(bindings) = self.expression_bindings(&expressions::system_inputs(&call.kind))?
+        else {
+            return Ok(Flow::Ended);
+        };
         self.parser.push_process_expression_values(bindings);
         let first_site = self.parser.runtime_event_sites().len();
         let (parser, kernel, targets, sources, convert) = parts!(self);
@@ -2865,6 +2877,9 @@ impl<'a> BlockLowering<'a> {
         args: &[SystemFunctionInput],
     ) -> Result<Flow, ParserError> {
         let mut condition = self.condition(&cond.0)?;
+        if self.argument_ended(&cond.0) {
+            return Ok(Flow::Ended);
+        }
         let argument_calls = args.iter().any(|arg| expressions::has_call(&arg.0));
         let freeze_condition = argument_calls || expressions::has_call(&cond.0);
         if freeze_condition {
@@ -2872,7 +2887,9 @@ impl<'a> BlockLowering<'a> {
         }
         self.settle_if_dirty()?;
         let inputs = args.iter().map(|arg| &arg.0).collect::<Vec<_>>();
-        let bindings = self.expression_bindings(&inputs)?;
+        let Some(bindings) = self.expression_bindings(&inputs)? else {
+            return Ok(Flow::Ended);
+        };
         if freeze_condition {
             let value = self.saved_expression(&cond.0);
             condition = self
@@ -3123,10 +3140,19 @@ impl<'a> BlockLowering<'a> {
         Ok(Flow::Continue)
     }
 
+    fn argument_ended(&mut self, expression: &Expression) -> bool {
+        if self.scan_expression_clocks(expression, &mut HashSet::default(), false) {
+            false
+        } else {
+            self.kernel.finish();
+            true
+        }
+    }
+
     fn file_argument(
         &mut self,
         arg: &SystemFunctionInput,
-    ) -> Result<HostValue<SourceAddr>, ParserError> {
+    ) -> Result<Option<HostValue<SourceAddr>>, ParserError> {
         let width = argument_width(arg);
         let signed = expression_signed(&arg.0);
         let (mut value, slot) = self.host_scratch(
@@ -3148,11 +3174,14 @@ impl<'a> BlockLowering<'a> {
             reg
         } else {
             let reg = self.expression(&arg.0)?;
+            if self.argument_ended(&arg.0) {
+                return Ok(None);
+            }
             self.parser
                 .cast_reg_width_ext(self.kernel.builder(), reg, width, signed)
         };
         self.store_scratch(slot, width, reg);
-        Ok(value)
+        Ok(Some(value))
     }
 
     fn lower_tb_method(&mut self, tb: &TbMethodCall) -> Result<Flow, ParserError> {
@@ -3265,6 +3294,9 @@ impl<'a> BlockLowering<'a> {
             }
             TbMethod::RandomSeed { value } => {
                 let seed = self.expression(value)?;
+                if self.argument_ended(value) {
+                    return Ok(Flow::Ended);
+                }
                 let seed = self.unsigned_bits(seed, 64);
                 let (host_value, slot) = self.host_scratch("random_seed", 64, false, false)?;
                 self.store_scratch(slot, 64, seed);
@@ -3297,10 +3329,16 @@ impl<'a> BlockLowering<'a> {
             } => {
                 let freeze = expressions::has_call(min) || expressions::has_call(max);
                 let min_reg = self.expression(min)?;
+                if self.argument_ended(min) {
+                    return Ok(Flow::Ended);
+                }
                 if freeze {
                     self.save_expression(min, min_reg)?;
                 }
                 let max_reg = self.expression(max)?;
+                if self.argument_ended(max) {
+                    return Ok(Flow::Ended);
+                }
                 let min_reg = if freeze {
                     self.saved_expression(min)
                 } else {
@@ -3362,6 +3400,9 @@ impl<'a> BlockLowering<'a> {
                         reg
                     } else {
                         let reg = self.expression(&arg.0)?;
+                        if self.argument_ended(&arg.0) {
+                            return Ok(Flow::Ended);
+                        }
                         self.unsigned_bits(reg, width)
                     };
                     self.store_scratch(slot, width, reg);
@@ -3395,7 +3436,9 @@ impl<'a> BlockLowering<'a> {
                 Ok(Flow::Continue)
             }
             TbMethod::FileOpen { name, append } => {
-                let path = self.file_argument(name)?;
+                let Some(path) = self.file_argument(name)? else {
+                    return Ok(Flow::Ended);
+                };
                 self.host_request(HostRequest::FileOpen {
                     handle: self.resource_name(tb.inst),
                     path,
@@ -3410,7 +3453,10 @@ impl<'a> BlockLowering<'a> {
                 let skip = usize::from(template.is_some());
                 let mut values = Vec::new();
                 for arg in &args[skip..] {
-                    values.push(self.file_argument(arg)?);
+                    let Some(value) = self.file_argument(arg)? else {
+                        return Ok(Flow::Ended);
+                    };
+                    values.push(value);
                 }
                 self.host_request(HostRequest::FileWrite {
                     handle: self.resource_name(tb.inst),
