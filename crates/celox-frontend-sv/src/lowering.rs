@@ -95,6 +95,8 @@ impl SvVariable {
 #[derive(Clone)]
 pub(crate) struct LoweredSvModule {
     source: sv::ir::Module,
+    /// Source initial blocks actually emitted as runtime kernels.
+    runtime_initial_processes: Vec<usize>,
     implicit_nets_allowed: bool,
     pub sim_module: SimModule,
     variables: HashMap<SourceVarId, SvVariable>,
@@ -1266,6 +1268,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             .collect();
         LoweredSvModule {
             source: dummy_ir.modules()[0].clone(),
+            runtime_initial_processes: Vec::new(),
             implicit_nets_allowed: false,
             sim_module: signature.sim_module.clone(),
             signal_names: variables
@@ -2123,18 +2126,19 @@ fn lower_module_with_overrides(
         })
         .collect();
     mark_ff_event_domains(module, &mut variables, &name_to_id);
-    let (initial_values, processes, process_event_counters) = lower_initial_processes(
-        module,
-        &mut variables,
-        &mut name_to_id,
-        &constants,
-        &parameter_types,
-        four_state,
-        &mut runtime_event_sites,
-        &mut runtime_errors,
-        &mut extern_functions,
-        event_watch_plan,
-    )?;
+    let (initial_values, processes, process_event_counters, runtime_initial_processes) =
+        lower_initial_processes(
+            module,
+            &mut variables,
+            &mut name_to_id,
+            &constants,
+            &parameter_types,
+            four_state,
+            &mut runtime_event_sites,
+            &mut runtime_errors,
+            &mut extern_functions,
+            event_watch_plan,
+        )?;
     initial_memory_values.extend(initial_values);
 
     let shared_variables = variables
@@ -2209,6 +2213,7 @@ fn lower_module_with_overrides(
         .collect();
     Ok(LoweredSvModule {
         source: module.clone(),
+        runtime_initial_processes,
         implicit_nets_allowed,
         sim_module: SimModule {
             name,
@@ -3084,8 +3089,9 @@ fn validate_cross_instance_event_pulses(
                         .source
                         .initial_processes()
                         .iter()
-                        .filter(|p| !p.is_initializer() && active(p.condition()))
-                        .map(|p| (p.body(), true))
+                        .enumerate()
+                        .filter(|(index, _)| source.runtime_initial_processes.contains(index))
+                        .map(|(_, p)| (p.body(), true))
                         .chain(
                             source
                                 .source
@@ -3489,11 +3495,13 @@ fn lower_initial_processes(
         Vec<InitialStateValue<SourceVarId>>,
         Vec<SymbolicProcess>,
         Vec<celox_design::ProcessEventCounters<SourceVarId>>,
+        Vec<usize>,
     ),
     sv::AnalyzerError,
 > {
     let mut values = Vec::new();
     let mut runtime = Vec::new();
+    let mut runtime_indices = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
         variables,
@@ -3504,7 +3512,7 @@ fn lower_initial_processes(
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
-    for process in module.initial_processes() {
+    for (index, process) in module.initial_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -3523,7 +3531,10 @@ fn lower_initial_processes(
                     seed = store;
                 }
             }
-            Err(_) => runtime.push(process),
+            Err(_) => {
+                runtime.push(process);
+                runtime_indices.push(index);
+            }
         }
     }
     let created = std::mem::take(&mut pm.created);
@@ -3640,7 +3651,7 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?, process_event_counters))
+    Ok((values, processes?, process_event_counters, runtime_indices))
 }
 
 fn lower_comb_processes(
