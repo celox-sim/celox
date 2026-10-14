@@ -1057,3 +1057,11 @@ endmodule"#)
 (case constant_for_writes_preserve_distinct_activation_times
  (source "constant-for-times.sv" #"module Child(output bit[1:0]q);initial begin #1;for(int i=0;i<1;i++)q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
+
+(case untimed_tasks_preserve_distinct_activation_times
+ (source "untimed_tasks_preserve_distinct_activation_times.sv" #"module Child(output bit[1:0]q);task automatic noop();endtask initial begin #1;noop();q[0]=1;end initial begin #2;noop();q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"#)
+ (top Top)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
+
+(case untimed_task_copyback_preserves_distinct_activation_times
+ (source "untimed_task_copyback_preserves_distinct_activation_times.sv" #"module Child(output bit[1:0]q);task automatic drive(output bit x);x=1;endtask initial begin #1;drive(q[0]);end initial begin #2;drive(q[1]);end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"#)
+ (top Top)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
