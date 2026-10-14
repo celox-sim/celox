@@ -4985,12 +4985,7 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_interpreter().unwrap()));
         check(Simulation::new(build().build_cranelift().unwrap()));
         check(Simulation::new(build().build_wasm().unwrap()));
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        check(Simulation::new(build().build_native().unwrap()));
-    }
-}
-
-#[cfg(test)]
+        #[cfg(test)]
 mod host_clock_activation_review {
     use super::*;
     use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
@@ -5041,5 +5036,88 @@ mod host_clock_activation_review {
         check(Simulation::from_frontend(design()).build_wasm().unwrap());
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod mixed_other_domain_host_review {
+    use super::*;
+    #[test]
+    fn any_change_host_falls_join_current_time_batches() {
+        let source = "module Top(input bit clk,queued,output bit[7:0]count,queued_count);always @(posedge clk)count<=count+1;always @(posedge queued)queued_count<=queued_count+1;endmodule";
+        fn check<B: SimBackend>(simulator: Simulator<B>, mode: u8) {
+            // The compiled event entry is the FF operation. Its edge policy
+            // comes from runtime metadata; exercise an any-change domain here.
+            let signal = simulator.signal("clk");
+            let address = simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let event = simulator.backend.resolve_event(&address);
+            let mut kinds = vec![None; simulator.backend.num_events()];
+            kinds[event.id()] = Some(celox_design::DomainKind::Other);
+            let queued_address = simulator.program.get_addr(&[], &["queued"]).unwrap();
+            let queued_event = simulator.backend.resolve_event(&queued_address);
+            let queued_signal = simulator.signal("queued");
+            kinds[queued_event.id()] = Some(celox_design::DomainKind::ClockPosedge);
+            let mut info = vec![
+                EventInfo {
+                    canonical_id: usize::MAX,
+                    is_cascaded: false,
+                    eval_ff_event: None,
+                    eval_only_event: None,
+                    apply_event: None
+                };
+                simulator.backend.num_events()
+            ];
+            info[event.id()] = EventInfo {
+                canonical_id: event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&address),
+                apply_event: simulator.backend.resolve_apply_event(&address),
+            };
+            info[queued_event.id()] = EventInfo {
+                canonical_id: queued_event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(queued_event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&queued_address),
+                apply_event: simulator.backend.resolve_apply_event(&queued_address),
+            };
+            let state = SimulationState::new(
+                &simulator.backend,
+                vec![
+                    (signal, event.id(), event.id()),
+                    (queued_signal, queued_event.id(), queued_event.id()),
+                ],
+                kinds,
+                info,
+                Vec::new(),
+            );
+            let mut sim = Simulation { simulator, state };
+            sim.set_wide(signal, 1u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+            sim.set_wide(signal, 0u8.into());
+            sim.schedule("queued", 0, 1).unwrap();
+            let time = match mode {
+                0 => sim.step().unwrap(),
+                1 => sim.step_until(0).unwrap(),
+                _ => sim.state.step(&mut sim.simulator).unwrap(),
+            };
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(time, Some(0));
+            assert_eq!(sim.get(sim.signal("queued_count")), 1u8.into());
+        }
+        for mode in [0, 1, 2] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("any-change-operation.sv"))],
+                    "Top",
+                )
+            };
+            check(build().build_interpreter().unwrap(), mode);
+            check(build().build_cranelift().unwrap(), mode);
+            check(build().build_wasm().unwrap(), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), mode);
+        }
     }
 }

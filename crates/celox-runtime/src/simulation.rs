@@ -1352,17 +1352,8 @@ impl<B: SimBackend> SimulationState<B> {
         // Pending host writes share this round with current-time scheduled
         // edges. Record their net transitions before scheduled values replace
         // them and before clearing the backend's transient trigger hints.
-        for (signal, id, _) in &self.topo_signals {
-            if *id != usize::MAX
-                && self.edge_triggers(
-                    *id,
-                    (
-                        self.last_clock_values.contains(*id),
-                        self.unknown_clock_values.contains(*id),
-                    ),
-                    sample_event_signal(executor.backend(), *signal),
-                )
-            {
+        for (_, id, _) in &self.topo_signals {
+            if *id != usize::MAX && self.stable_edge_triggered(executor.backend(), *id) {
                 scheduled_edges.insert(*id);
             }
         }
