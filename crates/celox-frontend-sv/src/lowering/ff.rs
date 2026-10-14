@@ -3457,14 +3457,18 @@ pub(super) fn fixed_runtime_write_times(
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
     fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
+        let negated = sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::LogicNot,
+            expr: Box::new(condition.clone()),
+        };
         known_loop_value(
-            condition,
+            &negated,
             pm.variables,
             pm.name_to_id,
             pm.constants,
             pm.parameter_types,
         )
-        .is_some_and(|value| value != 0)
+        .is_some_and(|value| value == 0)
     }
     fn preserves_own_time(stmts: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> bool {
         let mut safe = true;
