@@ -540,12 +540,18 @@ impl<B: SimBackend> Simulation<B> {
         }
         if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
-            if self.state.next_event_time() == Some(time) {
+            let active = self
+                .state
+                .has_unsettled_active_edges(&self.simulator.backend);
+            let queued = self.state.next_event_time() == Some(time);
+            if queued {
                 self.state.step(&mut self.simulator)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
-            return Ok(Some(time));
+            if active || queued {
+                return Ok(Some(time));
+            }
         }
         self.state.step(&mut self.simulator)
     }
@@ -626,12 +632,18 @@ impl<B: SimBackend> Simulation<B> {
         }
         if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
-            if self.state.next_event_time() == Some(time) {
+            let active = self
+                .state
+                .has_unsettled_active_edges(&self.simulator.backend);
+            let queued = self.state.next_event_time() == Some(time);
+            if queued {
                 self.state.step(&mut self.simulator)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
-            return Ok(Some(time));
+            if active || queued {
+                return Ok(Some(time));
+            }
         }
         if self
             .state
@@ -3582,5 +3594,98 @@ mod finish_during_round_review_tests {
         nba_finish(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         nba_finish(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod inactive_host_transition_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, method: &str, future: bool) {
+        let clk = sim.signal("clk");
+        sim.set_wide(clk, 1u8.into());
+        sim.run_until(0).unwrap();
+        sim.set_wide(clk, 0u8.into());
+        if future {
+            sim.schedule("clk", 5, 1).unwrap();
+        }
+        if method == "step" {
+            assert_eq!(sim.step().unwrap(), future.then_some(5));
+        } else {
+            assert_eq!(sim.step_until(4).unwrap(), None);
+            if future {
+                assert_eq!(sim.step_until(5).unwrap(), Some(5));
+            }
+        }
+    }
+    #[test]
+    fn inactive_host_edges_do_not_fabricate_steps() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        for method in ["step", "step_until"] {
+            for future in [false, true] {
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(source, std::path::Path::new("inactive-host.sv"))],
+                        "Top",
+                    )
+                };
+                check(
+                    Simulation::new(build().build_interpreter().unwrap()),
+                    method,
+                    future,
+                );
+                check(
+                    Simulation::new(build().build_cranelift().unwrap()),
+                    method,
+                    future,
+                );
+                check(
+                    Simulation::new(build().build_wasm().unwrap()),
+                    method,
+                    future,
+                );
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(
+                    Simulation::new(build().build_native().unwrap()),
+                    method,
+                    future,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod queued_derived_ff_review_tests {
+    use super::*;
+    #[test]
+    fn queued_pulse_reaches_derived_ff_without_process_waiters() {
+        let source = "module Top(input bit src,enable,output bit q);bit unused;wire gated=src&enable;always @(posedge src)unused<=1;always @(negedge gated)q<=1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let src = sim.signal("src");
+            let enable = sim.signal("enable");
+            sim.modify(|io| {
+                io.set(src, 1u8);
+                io.set(enable, 1u8);
+            })
+            .unwrap();
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            sim.schedule("src", 1, 0).unwrap();
+            sim.schedule("src", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("gated")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("queued-derived-ff.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }

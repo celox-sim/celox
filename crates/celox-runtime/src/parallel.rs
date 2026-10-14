@@ -292,6 +292,10 @@ impl Shared {
                     timing.waits.push((other, completed, start, trace.nanos()));
                 }
             }
+            // Failed lanes publish progress too, so a waiter can leave its
+            // loop through the progress load without observing abort there.
+            // Acquire abort again after the dependency's release publication.
+            aborted |= self.abort.0.load(Ordering::Acquire);
             if !aborted {
                 if let (Some(trace), Some(timing)) = (trace, &mut timing) {
                     timing.start = trace.nanos();
@@ -664,14 +668,18 @@ mod tests {
     fn failures_skip_pending_work_and_report_the_first_task() {
         let (schedule, predecessors) = chain_schedule();
         let mut pool = LanePool::new(3).unwrap();
-        let runner = recorder(predecessors.clone(), Some(0));
-        assert_eq!(
-            pool.run(&schedule, &runner),
-            Err(LaneTaskFailure { task: 0, code: 7 })
-        );
-        // Dependents of the failed task never ran.
-        assert!(!runner.done[1].load(Ordering::Acquire));
-        assert!(!runner.done[3].load(Ordering::Acquire));
+        // Exercise both wait-loop aborts and dependency progress arriving
+        // before the waiter checks abort. Recovery also resets every epoch.
+        for _ in 0..2000 {
+            let runner = recorder(predecessors.clone(), Some(0));
+            assert_eq!(
+                pool.run(&schedule, &runner),
+                Err(LaneTaskFailure { task: 0, code: 7 })
+            );
+            // Dependents of the failed task never ran.
+            assert!(!runner.done[1].load(Ordering::Acquire));
+            assert!(!runner.done[3].load(Ordering::Acquire));
+        }
         // The pool remains usable after a failure.
         let runner = recorder(predecessors, None);
         pool.run(&schedule, &runner).unwrap();

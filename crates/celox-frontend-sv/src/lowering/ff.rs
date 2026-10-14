@@ -3339,6 +3339,9 @@ pub(super) fn runtime_watched_write_count(
                                 .fold(effects, |writes, lhs| writes.then(target(pm, expr, lhs)))
                         }
                     }
+                    Stmt::SystemTask { name, args } if !nonblocking => effects.then(
+                        WritePhases::writes(watched_readmem_count(pm, expr, name, args)),
+                    ),
                     Stmt::If {
                         condition,
                         then_body,
@@ -3421,6 +3424,84 @@ pub(super) fn runtime_watched_write_count(
     body(stmts, pm, expr, &mut HashSet::default(), nonblocking).maximum
 }
 
+/// Exact times for a straight-line initial activation with constant delays.
+/// Other control flow retains the conservative activation summary above.
+pub(super) fn fixed_runtime_write_times(
+    stmts: &[sv::ir::Stmt],
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    nonblocking: bool,
+) -> Option<std::collections::BTreeMap<u64, usize>> {
+    use sv::ir::Stmt;
+    let mut time = 0u64;
+    let mut times = std::collections::BTreeMap::<u64, usize>::new();
+    for stmt in stmts {
+        let mut calls = Vec::new();
+        stmt_calls(stmt, &mut calls);
+        if !calls.is_empty() {
+            return None;
+        }
+        let count = match stmt {
+            Stmt::Assign {
+                lhs,
+                nonblocking: nba,
+                ..
+            } if *nba == nonblocking => usize::from(watched_lvalue_affects(pm, expr, lhs)),
+            Stmt::AssignConcat {
+                parts,
+                nonblocking: nba,
+                ..
+            } if *nba == nonblocking => {
+                if nonblocking {
+                    usize::from(
+                        parts
+                            .iter()
+                            .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
+                    )
+                } else {
+                    parts
+                        .iter()
+                        .filter(|lhs| watched_lvalue_affects(pm, expr, lhs))
+                        .count()
+                        .min(2)
+                }
+            }
+            Stmt::SystemTask { name, args }
+                if !nonblocking && readmem_destination(name, args).is_some() =>
+            {
+                watched_readmem_count(pm, expr, name, args)
+            }
+            Stmt::Delay(delay) => {
+                let delay = u64::try_from(known_loop_value(
+                    delay,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                )?)
+                .ok()?;
+                if delay == 0 {
+                    return None;
+                } // inactive-region ordering needs a delta index
+                time = time.checked_add(delay)?;
+                0
+            }
+            Stmt::If { .. }
+            | Stmt::Case { .. }
+            | Stmt::Loop { .. }
+            | Stmt::Wait(_)
+            | Stmt::WaitEvent(_)
+            | Stmt::Call { .. } => return None,
+            Stmt::Return(_) | Stmt::Break | Stmt::Continue => break,
+            Stmt::SystemTask { name, .. } if matches!(name.as_str(), "$finish" | "$fatal") => break,
+            _ => 0,
+        };
+        let value = times.entry(time).or_default();
+        *value = (*value + count).min(2);
+    }
+    Some(times)
+}
+
 fn watched_nba_count(
     stmts: &[sv::ir::Stmt],
     pm: &ProcModule<'_>,
@@ -3428,6 +3509,60 @@ fn watched_nba_count(
     visiting: &mut HashSet<String>,
 ) -> usize {
     watched_write_count(stmts, pm, expr, visiting, true)
+}
+
+/// Count the exact destination stores emitted by the read-memory lowering.
+/// MemoryWord accesses and event reads both use flattened physical bit ranges.
+fn watched_readmem_count(
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    name: &str,
+    args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> usize {
+    let Some(destination) = readmem_destination(name, args) else {
+        return 0;
+    };
+    let mut addresses = [None, None];
+    for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
+        if let sv::ir::SystemTaskArg::Expr(value) = arg {
+            let Some(value) = known_loop_value(
+                value,
+                pm.variables,
+                pm.name_to_id,
+                pm.constants,
+                pm.parameter_types,
+            ) else {
+                return 2;
+            };
+            *slot = Some(value);
+        }
+    }
+    let Ok((id, words)) = pm.readmem(name, args, addresses[0], addresses[1]) else {
+        return 2;
+    };
+    let mut names = HashSet::default();
+    expr_idents(expr, &mut names);
+    subroutine_reads(pm, expr, &mut names);
+    if !names.contains(destination) {
+        return 0;
+    }
+    let reads = super::event_read_accesses(
+        expr,
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+    );
+    let reads: Vec<_> = reads
+        .iter()
+        .filter(|(read, _)| *read == id)
+        .map(|(_, access)| access)
+        .collect();
+    words
+        .iter()
+        .filter(|word| reads.is_empty() || reads.iter().any(|read| read.overlaps(&word.access)))
+        .count()
+        .min(2)
 }
 
 fn watched_lvalue_affects(
@@ -3501,6 +3636,9 @@ pub(super) fn watched_write_count(
                 } else {
                     parts.iter().filter(|part| affects(part)).count().min(2)
                 }
+            }
+            sv::ir::Stmt::SystemTask { name, args } if !nonblocking => {
+                watched_readmem_count(pm, expr, name, args)
             }
             sv::ir::Stmt::If {
                 then_body,

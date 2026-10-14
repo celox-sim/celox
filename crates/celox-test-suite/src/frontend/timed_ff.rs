@@ -447,6 +447,7 @@ pub(super) struct TaskTiming {
     tasks: BTreeMap<(String, Vec<usize>, String), bool>,
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
     ff_offsets: BTreeMap<String, Vec<usize>>,
+    calls: BTreeMap<String, Vec<(usize, String)>>,
     imports: BTreeMap<String, Vec<(String, Option<String>)>>,
     exports: BTreeMap<String, Vec<(Option<String>, Option<String>)>>,
 }
@@ -559,6 +560,10 @@ impl TaskTiming {
         for source in sources {
             if let Ok(tree) = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))
             {
+                result.calls.insert(
+                    source.clone(),
+                    celox_sv_analyzer::ast::procedural_call_sites(&tree),
+                );
                 result.ff_offsets.insert(
                     source.clone(),
                     celox_sv_analyzer::ast::ff_always_offsets(&tree),
@@ -776,6 +781,14 @@ impl TaskTiming {
     }
 
     fn has_timed_call(&self, source: &str, start: usize, end: usize) -> bool {
+        if let Some(calls) = self.calls.get(source) {
+            return calls.iter().any(|(at, name)| {
+                *at >= start
+                    && *at < end
+                    && self.tasks.keys().any(|key| key.2 == *name)
+                    && self.resolve(source, *at, name).unwrap_or(true)
+            });
+        }
         sv_words(&source[start..end])
             .iter()
             .any(|(at, word_end, name)| {
@@ -800,7 +813,10 @@ impl TaskTiming {
                     || prefix.is_empty()
                     || prefix.ends_with([';', ')', ':', '.'])
                     || words.last().is_some_and(|word| {
-                        matches!(word.2, "begin" | "end" | "else" | "forever" | "do")
+                        matches!(
+                            word.2,
+                            "begin" | "end" | "else" | "forever" | "do" | "endcase"
+                        )
                     });
                 (tail.starts_with('(') || (tail.starts_with(';') && statement_start))
                     && self.resolve(source, start + at, name).unwrap_or(true)

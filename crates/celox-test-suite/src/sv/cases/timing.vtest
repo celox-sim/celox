@@ -849,3 +849,17 @@ endmodule"#)
  always @(posedge clk)begin : work tick;end
  initial begin #3;$finish;end endmodule"#)
  (top Top)(set clk 1)(run_to_finish)(assert_eq q 0))
+
+(case timed_calls_after_endcase_do_not_replay_setup_edges
+ (source "endcase-task.sv" #"module Top(input bit clk,sel,output bit q);
+ task automatic tick();#1 q=1;endtask
+ always @(posedge clk)begin case(sel)0:;default:;endcase tick;end
+ initial begin #3;$finish;end endmodule"#)
+ (top Top)(set clk 1)(run_to_finish)(assert_eq q 0))
+
+(case inactive_time_directives_do_not_change_scheduler_units
+ (source "inactive-scale.sv" #"`ifdef NEVER_DEFINED
+ `timescale 10ns/1ps
+ `endif
+ module Top(output bit q);initial begin #1;q=1;end endmodule"#)
+ (top Top)(run_until 1)(assert_eq q 1))
