@@ -1579,3 +1579,64 @@ fn file_arguments_preserve_unknown_automatic_values() {
         &path,
     );
 }
+
+#[test]
+fn passing_dynamic_assertions_keep_their_messages() {
+    let code = r#"#[test(Top)]module Top{var value:logic<8>;initial{value=42;$assert(1,value);$finish();}}"#;
+    for kernels in [false, true] {
+        let result = Simulator::builder(code, "Top")
+            .testbench_kernels(kernels)
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed);
+        assert_eq!(
+            result.assertions[0].message.as_deref(),
+            Some(b"2a".as_slice())
+        );
+    }
+}
+
+#[test]
+fn event_yields_preserve_comb_assertions() {
+    fn check<B: SimBackend>(mut sim: Simulator<B>, count: usize) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_to_finish(&mut sim, &tb);
+        let TestResult::Fail(message) = result else {
+            panic!("expected nonfatal comb assertions");
+        };
+        assert_eq!(
+            message.lines().filter(|message| *message == "comb").count(),
+            count - 1,
+            "{count}: {}",
+            std::any::type_name::<B>()
+        );
+    }
+    for count in [256, 257] {
+        let code = format!(
+            r#"#[test(Top)]module Top {{var source:u32;var derived:u32;
+            always_comb {{derived=source;if(source){{$assert_continue(0,"comb");}}}}
+            function mark(x:input u32,o:output u32)->u32{{o=x;return 1;}}
+            initial{{for i in 0..{count}{{$assert(1,"tb %d",mark(i,source));}}$assert(derived=={count}-1,"end");$finish();}}
+        }}"#
+        );
+        check(
+            Simulator::builder(&code, "Top")
+                .build_interpreter()
+                .unwrap(),
+            count,
+        );
+        check(
+            Simulator::builder(&code, "Top").build_cranelift().unwrap(),
+            count,
+        );
+        check(
+            Simulator::builder(&code, "Top").build_wasm().unwrap(),
+            count,
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulator::builder(&code, "Top").build_native().unwrap(),
+            count,
+        );
+    }
+}

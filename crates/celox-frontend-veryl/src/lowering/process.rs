@@ -605,6 +605,13 @@ fn scratch_needs(ir: &Module, statements: &[Statement]) -> Result<Vec<ScratchNee
                 width: EVENT_YIELD_WIDTH,
             },
         );
+        needs.insert(
+            1,
+            ScratchNeed {
+                purpose: "event_yield_clean",
+                width: 1,
+            },
+        );
     }
     Ok(needs)
 }
@@ -835,6 +842,8 @@ struct BlockLowering<'a> {
     /// gave the host a chance to drain them (see
     /// [`BlockLowering::yield_for_runtime_event`]).
     event_yield: Option<SourceVarId>,
+    /// Runtime branch state: the most recent event yield already settled a write.
+    event_yield_clean: Option<SourceVarId>,
     event_counters: HashMap<VarId, (SourceVarId, SourceVarId)>,
 }
 
@@ -933,6 +942,7 @@ fn lower_block(
         sources: Vec::new(),
         dirty: false,
         event_yield: None,
+        event_yield_clean: None,
         event_counters: storage
             .event_counters
             .iter()
@@ -941,6 +951,7 @@ fn lower_block(
     };
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
         lowering.event_yield = Some(lowering.take_scratch("event_yield", EVENT_YIELD_WIDTH)?.1);
+        lowering.event_yield_clean = Some(lowering.take_scratch("event_yield_clean", 1)?.1);
     }
     lowering.declare_clocks(statements);
     // A block that ends right after a store settles, so a process that runs
@@ -1594,7 +1605,7 @@ impl<'a> BlockLowering<'a> {
             })?;
         }
         if !self.private.contains_key(&destination.id) {
-            self.dirty = true;
+            self.mark_dirty();
         }
         let counters = self.event_counters.get(&destination.id).copied();
         let before = if counters.is_some() {
@@ -1697,15 +1708,46 @@ impl<'a> BlockLowering<'a> {
         }
     }
 
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        if let Some(slot) = self.event_yield_clean {
+            let zero = self.constant(0, 1);
+            self.store_scratch(slot, 1, zero);
+        }
+    }
+
     /// Settle the combinational logic before a read of design state that
     /// follows a store, as the statements of a testbench are sequential.
     fn settle_if_dirty(&mut self) -> Result<(), ParserError> {
         if !self.dirty {
             return Ok(());
         }
+        let after = if let Some(slot) = self.event_yield_clean {
+            let clean = self.load_scratch(slot, 1, false);
+            let builder = self.kernel.builder();
+            let settle = builder.new_block();
+            let after = builder.new_block();
+            builder.seal_block(SIRTerminator::Branch {
+                cond: clean,
+                true_block: (after, Vec::new()),
+                false_block: (settle, Vec::new()),
+            });
+            builder.switch_to_block(settle);
+            Some(after)
+        } else {
+            None
+        };
         self.kernel
             .settle()
             .map_err(|error| self.error("testbench process lowering", error.to_string(), None))?;
+        if let Some(after) = after {
+            self.kernel
+                .builder()
+                .seal_block(SIRTerminator::Jump(after, Vec::new()));
+            self.kernel.builder().switch_to_block(after);
+            let zero = self.constant(0, 1);
+            self.store_scratch(self.event_yield_clean.unwrap(), 1, zero);
+        }
         self.suspended();
         Ok(())
     }
@@ -2492,7 +2534,7 @@ impl<'a> BlockLowering<'a> {
                 self.lower_assert(call, *kind, cond, args)
             }
             SystemFunctionKind::Readmemh(_, SystemFunctionOutput::Local(_)) => {
-                self.dirty = true;
+                self.mark_dirty();
                 self.system_task(call)
             }
             SystemFunctionKind::Readmemh(filename, SystemFunctionOutput::Hier(reference)) => {
@@ -2518,7 +2560,7 @@ impl<'a> BlockLowering<'a> {
                     ),
                     comptime: call.comptime.clone(),
                 };
-                self.dirty = true;
+                self.mark_dirty();
                 self.system_task(&local)
             }
             SystemFunctionKind::Display(_) | SystemFunctionKind::Write(_) => {
@@ -2679,12 +2721,16 @@ impl<'a> BlockLowering<'a> {
         };
         yielded
             .map_err(|error| self.error("testbench process lowering", error.to_string(), None))?;
+        if dirty && let Some(slot) = self.event_yield_clean {
+            let one = self.constant(1, 1);
+            self.store_scratch(slot, 1, one);
+        }
         self.kernel
             .builder()
             .seal_block(SIRTerminator::Jump(after, Vec::new()));
         self.kernel.builder().switch_to_block(after);
-        // Registers do not survive the yield path; the dirty state is the
-        // one before it, as the other path kept it.
+        // Registers do not survive the yield path. The static dirty state
+        // includes the keep path; scratch distinguishes its runtime state.
         self.parser.clear_register_cache();
         self.dirty = dirty;
         Ok(())

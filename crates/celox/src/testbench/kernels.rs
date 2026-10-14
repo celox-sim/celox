@@ -305,7 +305,7 @@ fn drain<B: SimBackend>(
                 passed: true,
                 message: site
                     .and_then(|id| sim.program.runtime_schema.runtime_event_sites.get(id))
-                    .and_then(|site| site.template.as_ref())
+                    .filter(|site| site.template.is_some() || !site.arg_widths.is_empty())
                     .map(|_| message),
                 location,
             }),
@@ -527,4 +527,105 @@ fn write<B: SimBackend>(
     let signal = sim.backend.resolve_signal(&target.signal);
     let mask = (BigUint::from(1u8) << target.width) - BigUint::from(1u8);
     sim.backend.set_wide(signal, value & mask);
+}
+
+#[cfg(test)]
+mod event_yield_settle_tests {
+    use super::*;
+    use crate::RuntimeErrorCode;
+    use celox_runtime::SimulationExecutor;
+
+    struct CountingExecutor<B: SimBackend> {
+        sim: Simulator<B>,
+        settles: usize,
+    }
+    impl<B: SimBackend> SimulationExecutor for CountingExecutor<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::run_process(&mut self.sim, index, time)?;
+            let slot = self.sim.program.runtime_schema.processes[index].status;
+            let signal = self.sim.backend.resolve_signal(&slot);
+            if celox_design::ProcessStatus::from_code(self.sim.backend.get_as(signal))
+                == Some(celox_design::ProcessStatus::Settle)
+            {
+                self.settles += 1;
+            }
+            Ok(())
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_only_ff_at(&mut self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::apply_ff_at(&mut self.sim, event)
+        }
+        fn finish_requested(&mut self, time: u64) -> bool {
+            SimulationExecutor::finish_requested(&mut self.sim, time)
+        }
+    }
+    fn count<B: SimBackend>(mut sim: Simulator<B>, iterations: usize) -> usize {
+        let limit = sim.signal("limit");
+        sim.modify(|io| {
+            io.set(limit, iterations as u32);
+        })
+        .unwrap();
+        let mut state = crate::simulation::simulation_state(&sim);
+        let mut executor = CountingExecutor { sim, settles: 0 };
+        for _ in 0..10000 {
+            if state.step(&mut executor).unwrap().is_none() || state.is_finished() {
+                return executor.settles;
+            }
+        }
+        panic!("process did not finish");
+    }
+    #[test]
+    fn event_yield_does_not_settle_a_write_twice() {
+        let code = r#"#[test(Top)]module Top(limit:input u32){var source:u32;var derived:u32;
+            always_comb{derived=source;}
+            function mark(x:input u32,o:output u32)->u32{o=x;return 1;}
+            initial{for i in 0..limit{$assert(1,"tb %d",mark(i,source));$assert(derived==i,"read");$assert(1);}$assert(derived==limit-1,"end");$finish();}}"#;
+        macro_rules! check {
+            ($method:ident) => {{
+                let run = |n| {
+                    count(
+                        Simulator::builder(code, "Top")
+                            .testbench_kernels(true)
+                            .$method()
+                            .unwrap(),
+                        n,
+                    )
+                };
+                let small_delta = run(2) - run(1);
+                let before_yield = run(85);
+                let at_yield = run(86);
+                let after_yield = run(87);
+                assert_eq!(
+                    at_yield - before_yield,
+                    small_delta,
+                    "256th event settled twice"
+                );
+                assert_eq!(
+                    after_yield - at_yield,
+                    small_delta,
+                    "post-yield write must settle"
+                );
+            }};
+        }
+        check!(build_interpreter);
+        check!(build_cranelift);
+        check!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check!(build_native);
+    }
 }
