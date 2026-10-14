@@ -534,6 +534,13 @@ impl NativeProgramImage {
         if self.code.is_empty() {
             return Err("code image is empty".into());
         }
+        if self
+            .runtime_schema
+            .testbench_kernels
+            .is_some_and(|start| start > self.runtime_schema.processes.len())
+        {
+            return Err("testbench kernel boundary exceeds process count".into());
+        }
         let mut entry_offsets = HashSet::default();
         let mut previous_end = 0usize;
         for entry in &self.code_entries {
@@ -629,12 +636,12 @@ impl NativeProgramImage {
                 }
             }
             let valid_host_value = |value: &celox_design::HostValue<_>| {
-                value.width > 0
+                (value.width > 0 || value.is_string)
                     && self
                         .design
                         .state_objects
                         .get(&value.signal)
-                        .is_some_and(|m| m.width == value.width && m.array_dims.is_empty())
+                        .is_some_and(|m| m.width == value.width.max(1) && m.array_dims.is_empty())
             };
             for request in &process.host_requests {
                 use celox_design::HostRequest;
@@ -3508,6 +3515,20 @@ mod process_metadata_tests {
             .compile_native()
             .unwrap()
             .into_program_image()
+    }
+
+    #[test]
+    fn testbench_boundary_must_fit_process_table() {
+        let mut image = image();
+        for start in [0, image.runtime_schema.processes.len()] {
+            image.runtime_schema.testbench_kernels = Some(start);
+            image.to_container_bytes().unwrap();
+        }
+        image.runtime_schema.testbench_kernels = Some(image.runtime_schema.processes.len() + 1);
+        assert!(matches!(
+            image.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
     }
 
     #[test]
