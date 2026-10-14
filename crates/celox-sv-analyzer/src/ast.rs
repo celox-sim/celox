@@ -2560,6 +2560,27 @@ pub fn package_import_export_clauses(
 pub fn instance_type_sites(tree: &SyntaxTree) -> Vec<(usize, String, String)> {
     let mut sites = Vec::new();
     for node in tree {
+        if let RefNode::AnsiPortDeclarationNet(port) = node.clone()
+            && let Some(sv_parser::NetPortHeaderOrInterfacePortHeader::InterfacePortHeader(header)) =
+                &port.nodes.0
+            && let sv_parser::InterfacePortHeader::Identifier(header) = &**header
+            && let Some(module) =
+                identifier_text(RefNode::InterfaceIdentifier(&header.nodes.0), tree)
+            && let Some(identifier) = identifier_text(RefNode::PortIdentifier(&port.nodes.1), tree)
+            && let Some(offset) =
+                RefNode::PortIdentifier(&port.nodes.1)
+                    .into_iter()
+                    .find_map(|node| {
+                        if let RefNode::Locate(loc) = node {
+                            Some(loc.offset)
+                        } else {
+                            None
+                        }
+                    })
+        {
+            sites.push((offset, identifier, module));
+        }
+
         let RefNode::ModuleInstantiation(instance) = node else {
             continue;
         };

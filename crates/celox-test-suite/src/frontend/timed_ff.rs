@@ -954,6 +954,15 @@ impl TaskTiming {
 mod callable_analysis_tests {
     use super::*;
     #[test]
+    fn modport_formals_resolve_their_interface_methods() {
+        let source="interface Scale;function automatic bit scaled(input bit v);return v;endfunction modport user(import scaled);endinterface module User(Scale.user s,input bit clk, v,output bit q);always @(posedge clk)q<=s.scaled(v);endmodule".to_owned();
+        let tasks = TaskTiming::new(std::slice::from_ref(&source));
+        assert_eq!(
+            tasks.resolve(&source, source.rfind("scaled(v)").unwrap(), "scaled"),
+            Some(false)
+        );
+    }
+    #[test]
     fn parameterized_instances_resolve_their_declared_method_type() {
         let source="interface Scale #(parameter int K=1);function automatic bit scaled(input bit v);return v;endfunction endinterface module Top;Scale #(.K(5)) s();always @(posedge clk)q<=s.scaled(v);endmodule".to_owned();
         let tasks = TaskTiming::new(std::slice::from_ref(&source));
