@@ -1106,7 +1106,7 @@ mod host {
             finish.requested
         }
 
-        pub(super) fn reset_runtime_finish(&self, finished: bool) {
+        pub(crate) fn reset_runtime_finish(&self, finished: bool) {
             let mut finish = self.runtime_finish_state.lock().unwrap();
             finish.read_seq = self.runtime_event_write_seq();
             finish.requested = finished;

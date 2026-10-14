@@ -2093,3 +2093,21 @@ fn distinct_kernels_add_clock_edge_counts() {
         check(build().build_native().unwrap());
     }
 }
+
+#[test]
+fn repeated_runs_reset_the_rtl_finish_tracker() {
+    let source = "#[test(Top)]module Top{inst clk:$tb::clock_gen;var count:u32;var starts:u32;always_ff(clk){count+=1;$finish();}initial{starts+=1;clk.next(2);}}";
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        for run in 1u8..=2 {
+            assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+            assert_eq!(sim.get(sim.signal("starts")), run.into());
+        }
+    }
+    let build = || Simulator::builder(source, "Top").testbench_kernels(true);
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}

@@ -166,6 +166,7 @@ fn run<B: SimBackend>(
         }
     }
     sim.testbench_events.clear();
+    sim.reset_runtime_finish(false);
 
     // The scheduler samples the clocks it detects edges on from settled
     // state.
