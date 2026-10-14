@@ -2521,3 +2521,13 @@ fn coincident_pulse_writers_in_different_instances_are_rejected() {
     sim.run_until(2).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
 }
+
+#[test]
+fn statically_satisfied_waits_preserve_distinct_activation_times() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;wait(1);q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+}
