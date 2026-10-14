@@ -46,6 +46,11 @@ pub trait SimulationExecutor {
         self.backend_mut().run_process(index)
     }
 
+    /// Whether this process has made no design store since its last settle.
+    fn process_is_clean(&self, _index: usize) -> bool {
+        false
+    }
+
     /// Whether an internal settle or process execution emitted a finish event.
     fn finish_requested(&mut self, _time: u64) -> bool {
         false
@@ -1250,6 +1255,7 @@ impl<B: SimBackend> SimulationState<B> {
         executor: &mut E,
         current_time: u64,
         ready: Vec<usize>,
+        comb_current: &mut bool,
     ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -1285,6 +1291,9 @@ impl<B: SimBackend> SimulationState<B> {
                         .backend_mut()
                         .set(self.processes[process].delay, 0u64);
                     executor.run_process(process, current_time)?;
+                    if !executor.process_is_clean(process) {
+                        *comb_current = false;
+                    }
                     if executor.finish_requested(current_time) {
                         self.finish_round = true;
                         self.finished = true;
@@ -1314,6 +1323,7 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                         Some(ProcessStatus::Settle) => {
                             executor.eval_comb()?;
+                            *comb_current = true;
                             if executor.finish_requested(current_time) {
                                 self.finished = true;
                                 return Ok(true);
@@ -1422,6 +1432,9 @@ impl<B: SimBackend> SimulationState<B> {
                                 self.finished = true;
                                 return Ok(true);
                             }
+                            // A component or host service may write design
+                            // state outside this kernel's store instrumentation.
+                            *comb_current = false;
                             any_ran = true;
                             continue;
                         }
@@ -1508,6 +1521,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        let mut comb_current = false;
         self.scheduler.time = current_time;
         self.round_published_domains.make_empty();
         self.round_triggered_domains.make_empty();
@@ -1625,7 +1639,8 @@ impl<B: SimBackend> SimulationState<B> {
                 .iter()
                 .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                 .collect();
-            let progressed = self.run_processes(executor, current_time, ready_processes)?;
+            let progressed =
+                self.run_processes(executor, current_time, ready_processes, &mut comb_current)?;
             if self.finished && self.finish_round {
                 return Ok(true);
             }
@@ -1699,6 +1714,9 @@ impl<B: SimBackend> SimulationState<B> {
                 .checked_add(self.tick_clocks[&id].period)
                 .ok_or_else(|| clock_overflow(id))?;
         }
+        if !generated_events.is_empty() {
+            comb_current = false;
+        }
         for event in &generated_events {
             executor.backend_mut().set(event.signal, event.next_val);
         }
@@ -1735,7 +1753,9 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        executor.eval_comb()?;
+        if !comb_current {
+            executor.eval_comb()?;
+        }
         self.round_evaluated = true;
         if executor.finish_requested(current_time) {
             self.finished = true;
@@ -1872,7 +1892,8 @@ impl<B: SimBackend> SimulationState<B> {
                 // batch, including evaluations a combinational settle woke.
                 let inactive_counter_values = self.process_counter_values(executor.backend());
                 let mut inactive_samples = None;
-                let mut active_ran = self.run_processes(executor, current_time, Vec::new())?;
+                let mut active_ran =
+                    self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
                 if !active_ran {
                     // Drain active combinational effects of blocking FF stores
                     // before either inactive continuations or NBA publication.
@@ -1898,7 +1919,8 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                         executor.backend_mut().clear_triggered_bits();
                     }
-                    active_ran = self.run_processes(executor, current_time, Vec::new())?;
+                    active_ran =
+                        self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
                 }
                 if self.finished && self.finish_round {
                     return Ok(true);
@@ -1943,7 +1965,7 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                     }
                     inactive_samples = Some(before);
-                    self.run_processes(executor, current_time, ready)?
+                    self.run_processes(executor, current_time, ready, &mut comb_current)?
                 };
                 if progressed {
                     let mut driven =
@@ -2023,7 +2045,8 @@ impl<B: SimBackend> SimulationState<B> {
 
             if polled {
                 let counter_values = self.process_counter_values(executor.backend());
-                any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
+                any_process_ran |=
+                    self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
                 if self.finished && self.finish_round {
                     return Ok(true);
                 }

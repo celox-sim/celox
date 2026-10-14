@@ -121,6 +121,16 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         result
     }
 
+    fn process_is_clean(&self, index: usize) -> bool {
+        self.program.runtime_schema.processes[index]
+            .comb_clean
+            .is_some_and(|flag| {
+                self.backend
+                    .get_as::<u8>(self.backend.resolve_signal(&flag))
+                    != 0
+            })
+    }
+
     fn finish_requested(&mut self, time: u64) -> bool {
         if self.testbench_random.is_some() {
             let ctx = crate::simulator::RuntimeFormatContext {

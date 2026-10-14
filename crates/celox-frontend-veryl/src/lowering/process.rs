@@ -1010,6 +1010,7 @@ fn lower_block(
         clocks,
         releases,
         host_requests,
+        event_yield_clean,
         ..
     } = lowering;
     let mut unit = kernel.build();
@@ -1078,6 +1079,7 @@ fn lower_block(
         })
     })?;
     let slots = ProcessSlots {
+        comb_clean: event_yield_clean.map(|id| stable(id).into_absolute()),
         resume: stable(storage.resume).into_absolute(),
         status: stable(storage.status).into_absolute(),
         delay: stable(storage.delay).into_absolute(),
@@ -1124,6 +1126,9 @@ fn lower_block(
                 .process_event_counters
                 .push(counters);
         }
+    }
+    if let Some(flag) = slots.comb_clean {
+        scheduled.runtime_schema.testbench_read_roots.insert(flag);
     }
     scheduled.sir.processes.push(unit);
     scheduled.runtime_schema.processes.push(slots);
@@ -1385,10 +1390,15 @@ impl<'a> BlockLowering<'a> {
     /// periods.
     fn declare_clocks(&mut self, statements: &[Statement]) {
         let mut active = HashSet::default();
-        self.scan_clocks(statements, &mut active);
+        self.scan_clocks(statements, &mut active, true);
     }
 
-    fn scan_clocks(&mut self, statements: &[Statement], active: &mut HashSet<FunctionKey>) -> bool {
+    fn scan_clocks(
+        &mut self,
+        statements: &[Statement],
+        active: &mut HashSet<FunctionKey>,
+        declare: bool,
+    ) -> bool {
         for statement in statements {
             let mut calls = Vec::new();
             let mut unconditional = Vec::new();
@@ -1399,7 +1409,7 @@ impl<'a> BlockLowering<'a> {
             for call in calls {
                 if active.insert(function_key(call)) {
                     if let Some(body) = function_body(&self.ir.functions, call) {
-                        let continues = self.scan_clocks(&body.statements, active);
+                        let continues = self.scan_clocks(&body.statements, active, declare);
                         active.remove(&function_key(call));
                         if !continues
                             && unconditional
@@ -1423,21 +1433,25 @@ impl<'a> BlockLowering<'a> {
                             .or_else(|| period.as_deref().and_then(try_eval_const))
                             .unwrap_or(2)
                             .max(2);
-                        self.declare_clock(tb.inst, period);
+                        if declare {
+                            self.declare_clock(tb.inst, period);
+                        }
                     }
                     TbMethod::ResetAssert { clock, .. } => {
                         let period = self.clock_periods.get(clock).copied().unwrap_or(2).max(2);
-                        self.declare_clock(*clock, period);
+                        if declare {
+                            self.declare_clock(*clock, period);
+                        }
                     }
                     _ => {}
                 },
                 Statement::If(stmt) => {
                     let continues = match constant_truth(&stmt.cond) {
-                        Some(true) => self.scan_clocks(&stmt.true_side, active),
-                        Some(false) => self.scan_clocks(&stmt.false_side, active),
+                        Some(true) => self.scan_clocks(&stmt.true_side, active, declare),
+                        Some(false) => self.scan_clocks(&stmt.false_side, active, declare),
                         None => {
-                            let a = self.scan_clocks(&stmt.true_side, active);
-                            let b = self.scan_clocks(&stmt.false_side, active);
+                            let a = self.scan_clocks(&stmt.true_side, active, declare);
+                            let b = self.scan_clocks(&stmt.false_side, active, declare);
                             a || b
                         }
                     };
@@ -1446,26 +1460,26 @@ impl<'a> BlockLowering<'a> {
                     }
                 }
                 Statement::IfReset(stmt) => {
-                    self.scan_clocks(&stmt.true_side, active);
-                    self.scan_clocks(&stmt.false_side, active);
+                    self.scan_clocks(&stmt.true_side, active, declare);
+                    self.scan_clocks(&stmt.false_side, active, declare);
                 }
                 Statement::Case(stmt) => {
                     if let Some(body) = selected_case_body(stmt) {
-                        if !self.scan_clocks(body, active) {
+                        if !self.scan_clocks(body, active, declare) {
                             return false;
                         }
                         continue;
                     }
-                    let mut continues = self.scan_clocks(&stmt.default, active);
+                    let mut continues = self.scan_clocks(&stmt.default, active, declare);
                     for arm in &stmt.arms {
-                        continues |= self.scan_clocks(&arm.body, active);
+                        continues |= self.scan_clocks(&arm.body, active, declare);
                     }
                     if !continues {
                         return false;
                     }
                 }
                 Statement::For(stmt) if !constant_empty_range(&stmt.range) => {
-                    let continues = self.scan_clocks(&stmt.body, active);
+                    let continues = self.scan_clocks(&stmt.body, active, declare);
                     if !continues
                         && constant_nonempty_range(&stmt.range)
                         && !contains_loop_break(&stmt.body)
@@ -1477,7 +1491,7 @@ impl<'a> BlockLowering<'a> {
                     if active.insert(function_key(call))
                         && let Some(body) = function_body(&self.ir.functions, call)
                     {
-                        let continues = self.scan_clocks(&body.statements, active);
+                        let continues = self.scan_clocks(&body.statements, active, declare);
                         active.remove(&function_key(call));
                         if !continues {
                             return false;
@@ -2672,6 +2686,7 @@ impl<'a> BlockLowering<'a> {
     fn system_task(&mut self, call: &SystemFunctionCall) -> Result<Flow, ParserError> {
         let bindings = self.expression_bindings(&expressions::system_inputs(&call.kind))?;
         self.parser.push_process_expression_values(bindings);
+        let first_site = self.parser.runtime_event_sites().len();
         let (parser, kernel, targets, sources, convert) = parts!(self);
         let result = parser.parse_system_task_statement(
             call,
@@ -2683,6 +2698,12 @@ impl<'a> BlockLowering<'a> {
         );
         self.parser.pop_process_expression_values();
         result?;
+        // Kernel events execute at suspension boundaries, unlike RTL events
+        // emitted on every fused edge. Preserve their source ownership marker.
+        let location = event_location(&call.comptime.token);
+        for site in &mut self.parser.runtime_event_sites_mut()[first_site..] {
+            site.location = location.clone();
+        }
         Ok(Flow::Continue)
     }
 
@@ -2977,6 +2998,25 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn lower_tb_method(&mut self, tb: &TbMethodCall) -> Result<Flow, ParserError> {
+        if matches!(
+            tb.method,
+            TbMethod::ClockNext { .. } | TbMethod::ResetAssert { .. }
+        ) {
+            let statement = Statement::TbMethodCall(tb.clone());
+            if !self.scan_clocks(
+                std::slice::from_ref(&statement),
+                &mut HashSet::default(),
+                false,
+            ) {
+                // Evaluate the terminating argument, then seal only its dead
+                // continuation. The outer wait has no reachable clock metadata.
+                for expr in expressions::statement_inputs(&statement) {
+                    self.expression(expr)?;
+                }
+                self.kernel.finish();
+                return Ok(Flow::Ended);
+            }
+        }
         match &tb.method {
             TbMethod::ClockNext { count, .. } => {
                 let clock = self.clock_index(tb.inst)?;

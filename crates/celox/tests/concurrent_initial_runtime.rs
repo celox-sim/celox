@@ -1695,3 +1695,80 @@ fn hierarchical_clock_pulses_survive_a_settling_read() {
         }
     }
 }
+
+#[test]
+fn terminating_clock_arguments_leave_unreachable_clock_and_reset_untouched() {
+    for wait in ["clk.next(stop());", "rst.assert(stop());"] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            function stop()->u32 {{$finish();return 1;}}
+            initial {{{wait} $assert(0,"continued after finish");}}
+        }}"#
+        );
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let clk = sim.signal("clk");
+            let rst = sim.signal("rst");
+            sim.set(clk, 1u8);
+            sim.set(rst, 1u8);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            assert_eq!(sim.get(clk), 1u8.into());
+            assert_eq!(sim.get(rst), 1u8.into());
+        }
+        check(
+            Simulator::builder(&code, "Top")
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(Simulator::builder(&code, "Top").build_cranelift().unwrap());
+        check(Simulator::builder(&code, "Top").build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulator::builder(&code, "Top").build_native().unwrap());
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn bounded_testbench_with_background_delay_returns_after_clock_and_reset_boundary() {
+    let veryl = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        inst rst: $tb::reset_gen(clk);
+        var background: u32;
+        inst worker: $sv::Worker(background);
+        initial { rst.assert(1); $assert(0,"resumed after budget"); }
+        initial { clk.next(100); $assert(0,"resumed after budget"); }
+    }"#;
+    let sv =
+        "module Worker(output bit[31:0] background);always #1 background=background+1;endmodule";
+    fn check<B: SimBackend>(mut sim: Simulator<B>, limit: u64) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, limit);
+        assert_eq!(result.result, TestResult::Pass);
+        assert_eq!(result.ticks, limit);
+        assert!(result.tick_limit_reached);
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("rst")), u8::from(limit > 0).into());
+        // At time zero the first tick consumes the budget. Background delay
+        // resumptions are blocked too; only clock falls/releases still drain.
+        assert_eq!(sim.get(sim.signal("background")), 0u32.into());
+    }
+    for limit in [0, 1] {
+        let build = || {
+            Simulator::from_mixed_sources(
+                vec![(veryl, std::path::Path::new("bounded.veryl"))],
+                vec![(sv, std::path::Path::new("background.sv"))],
+                "Top",
+            )
+        };
+        check(build().build_interpreter().unwrap(), limit);
+        check(build().build_cranelift().unwrap(), limit);
+        check(build().build_wasm().unwrap(), limit);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap(), limit);
+    }
+}

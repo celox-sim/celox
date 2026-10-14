@@ -577,6 +577,19 @@ impl NativeProgramImage {
         }
         let mut process_clock_periods = fxhash::FxHashMap::default();
         for process in &self.runtime_schema.processes {
+            if let Some(flag) = process.comb_clean
+                && !self
+                    .design
+                    .state_objects
+                    .get(&flag)
+                    .is_some_and(|metadata| {
+                        metadata.width == 1 && !metadata.is_4state && metadata.array_dims.is_empty()
+                    })
+            {
+                return Err(
+                    "a process combinational-clean flag has an invalid state object".into(),
+                );
+            }
             if !self
                 .design
                 .state_objects
@@ -3458,13 +3471,14 @@ mod process_metadata_tests {
     fn process_clock_metadata_is_checked_before_image_attachment() {
         let original = image();
         original.to_container_bytes().unwrap();
-        for corruption in 0..5 {
+        for corruption in 0..6 {
             let mut broken = original.clone();
             let slots = &mut broken.runtime_schema.processes[0];
             match corruption {
                 0 => slots.clocks[0].signal = slots.delay,
                 1 => slots.clocks[0].period = 1,
                 2 => slots.clock = slots.status,
+                5 => slots.comb_clean = Some(slots.delay),
                 4 => {
                     let signal = slots.clocks[0].signal;
                     broken

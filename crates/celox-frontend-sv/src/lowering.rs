@@ -3564,6 +3564,7 @@ fn lower_initial_processes(
                 id
             };
             ProcessSlots {
+                comb_clean: None,
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),

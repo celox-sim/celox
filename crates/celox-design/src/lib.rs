@@ -503,6 +503,10 @@ impl<A> HostRequest<A> {
 /// state objects, so checkpoints capture a suspended process.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
+    /// Optional two-state flag: no design store since this kernel's last
+    /// combinational settle. Missing flags conservatively require a settle.
+    #[serde(default = "Option::default")]
+    pub comb_clean: Option<A>,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -524,6 +528,7 @@ impl<A> ProcessSlots<A> {
     /// Slots for a process without clocks, releases or host requests.
     pub fn new(resume: A, status: A, delay: A, clock: A, release: A) -> Self {
         Self {
+            comb_clean: None,
             resume,
             status,
             delay,
@@ -537,6 +542,7 @@ impl<A> ProcessSlots<A> {
 
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
+            comb_clean: self.comb_clean.map(&mut map),
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
@@ -570,6 +576,7 @@ impl<A> ProcessSlots<A> {
             &self.release,
         ]
         .into_iter()
+        .chain(self.comb_clean.iter())
     }
 }
 

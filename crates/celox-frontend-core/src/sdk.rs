@@ -1195,6 +1195,7 @@ fn lower_processes(
             let mut clocks = Vec::new();
             celox_frontend_sdk::collect_process_clocks(process.body(), &mut clocks);
             let slots = ProcessSlots {
+                comb_clean: None,
                 resume: declare(name("resume"), PROCESS_RESUME_WIDTH),
                 status: declare(name("status"), PROCESS_STATUS_WIDTH),
                 delay: declare(name("delay"), PROCESS_DELAY_WIDTH),

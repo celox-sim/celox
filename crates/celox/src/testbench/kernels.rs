@@ -538,6 +538,9 @@ mod event_yield_settle_tests {
     struct CountingExecutor<B: SimBackend> {
         sim: Simulator<B>,
         settles: usize,
+        combs: usize,
+        fused: u64,
+        combs_before_edge: Option<usize>,
     }
     impl<B: SimBackend> SimulationExecutor for CountingExecutor<B> {
         type Backend = B;
@@ -548,7 +551,24 @@ mod event_yield_settle_tests {
             &mut self.sim.backend
         }
         fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.combs += 1;
             SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn process_is_clean(&self, index: usize) -> bool {
+            SimulationExecutor::process_is_clean(&self.sim, index)
+        }
+        fn fused_ticks_allowed(&self) -> bool {
+            SimulationExecutor::fused_ticks_allowed(&self.sim)
+        }
+        fn tick_many(
+            &mut self,
+            event: B::Event,
+            count: u64,
+        ) -> (u64, Result<(), RuntimeErrorCode>) {
+            self.combs_before_edge.get_or_insert(self.combs);
+            let result = SimulationExecutor::tick_many(&mut self.sim, event, count);
+            self.fused = self.fused.max(count);
+            result
         }
         fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
             SimulationExecutor::run_process(&mut self.sim, index, time)?;
@@ -562,6 +582,7 @@ mod event_yield_settle_tests {
             Ok(())
         }
         fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.combs_before_edge.get_or_insert(self.combs);
             SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
         }
         fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
@@ -581,7 +602,13 @@ mod event_yield_settle_tests {
         })
         .unwrap();
         let mut state = crate::simulation::simulation_state(&sim);
-        let mut executor = CountingExecutor { sim, settles: 0 };
+        let mut executor = CountingExecutor {
+            sim,
+            settles: 0,
+            combs: 0,
+            fused: 0,
+            combs_before_edge: None,
+        };
         for _ in 0..10000 {
             if state.step(&mut executor).unwrap().is_none() || state.is_finished() {
                 return executor.settles;
@@ -684,5 +711,112 @@ mod event_yield_settle_tests {
         check!(build_wasm);
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check!(build_native);
+    }
+    fn execution_counts<B: SimBackend>(sim: Simulator<B>, steps: usize) -> (usize, u64, u64) {
+        let mut state = crate::simulation::simulation_state(&sim);
+        let mut executor = CountingExecutor {
+            sim,
+            settles: 0,
+            combs: 0,
+            fused: 0,
+            combs_before_edge: None,
+        };
+        for _ in 0..steps {
+            if state.step(&mut executor).unwrap().is_none() {
+                break;
+            }
+            if state.is_finished() {
+                break;
+            }
+        }
+        if let Ok(q) = executor.sim.try_signal("q") {
+            assert_eq!(executor.sim.backend.get_as::<u32>(q), state.ticks() as u32);
+        }
+        if let (Ok(source), Ok(derived)) = (
+            executor.sim.try_signal("source"),
+            executor.sim.try_signal("derived"),
+        ) {
+            assert_eq!(
+                executor.sim.backend.get_as::<u32>(derived),
+                executor.sim.backend.get_as::<u32>(source)
+            );
+        }
+        (
+            executor.combs_before_edge.unwrap_or(executor.combs),
+            executor.fused,
+            state.ticks(),
+        )
+    }
+    #[test]
+    fn kernel_output_after_wait_preserves_fusion_but_design_output_does_not() {
+        for task in ["$display(\"done\");", "$write(\"done\");"] {
+            let code = format!(
+                "#[test(Top)]module Top{{inst clk:$tb::clock_gen;var q:u32;always_ff(clk){{q+=1;}}initial{{clk.next(1000);{task}$assert(q==1000);$finish();}}}}"
+            );
+            macro_rules! check {
+                ($method:ident) => {{
+                    let (_, fused, ticks) =
+                        execution_counts(Simulator::builder(&code, "Top").$method().unwrap(), 3000);
+                    assert_eq!(fused, 1000);
+                    assert_eq!(ticks, 1000);
+                }};
+            }
+            check!(build_interpreter);
+            check!(build_cranelift);
+            check!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(build_native);
+        }
+        let code = "#[test(Top)]module Top{inst clk:$tb::clock_gen;always_ff(clk){$display(\"edge\");}initial{clk.next(1000);$finish();}}";
+        let (_, fused, _) = execution_counts(
+            Simulator::builder(code, "Top").build_interpreter().unwrap(),
+            2,
+        );
+        assert_eq!(fused, 0);
+    }
+    #[test]
+    fn clean_clock_wait_continuations_do_not_repeat_comb_settles() {
+        for (body, expected) in [
+            ("source=1;", 1),
+            ("source=1;clk.next(1);", 2),
+            ("source=1;$assert(derived==1);source=2;", 2),
+            ("source=1;$assert(derived==1);clk.next(write());", 3),
+        ] {
+            let code = format!(
+                "#[test(Top)]module Top{{inst clk:$tb::clock_gen;var source:u32;var derived:u32;always_comb{{derived=source;$assert(1,\"comb\");}}function write()->u32{{source=2;return 1;}}initial{{{body}}}}}"
+            );
+            macro_rules! check {
+                ($method:ident) => {{
+                    let (combs, _, _) =
+                        execution_counts(Simulator::builder(&code, "Top").$method().unwrap(), 1);
+                    assert_eq!(combs, expected, "{body}");
+                }};
+            }
+            check!(build_interpreter);
+            check!(build_cranelift);
+            check!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check!(build_native);
+        }
+    }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn native_image_preserves_clean_continuation_after_optimization() {
+        let code = "#[test(Top)]module Top{var source:u32;var derived:u32;always_comb{derived=source;}initial{source=1;}}";
+        let original = Simulator::builder(code, "Top")
+            .opt_level(crate::OptLevel::O2)
+            .build_native()
+            .unwrap();
+        let bytes = original
+            .shared_code()
+            .program_image()
+            .to_container_bytes()
+            .unwrap();
+        let image = crate::NativeProgramImage::from_container_bytes(&bytes).unwrap();
+        assert!(image.runtime_schema().processes[0].comb_clean.is_some());
+        let restored = Simulator::builder("unused", "unused")
+            .build_native_from_image(image)
+            .unwrap();
+        assert_eq!(execution_counts(restored, 1).0, 1);
     }
 }
