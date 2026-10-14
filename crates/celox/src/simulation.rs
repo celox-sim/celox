@@ -563,15 +563,19 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
-        let was_dirty = self.simulator.dirty;
-        self.simulator.dump(timestamp);
-        self.synchronize_runtime_finish(was_dirty);
+        if let Err(error) = self.try_dump(timestamp) {
+            panic!("VCD dump at {timestamp} failed: {error}");
+        }
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
         let was_dirty = self.simulator.dirty;
-        let result = self.simulator.try_dump(timestamp);
+        let result = if self.state.is_finished() {
+            self.simulator.try_dump_without_evaluation(timestamp)
+        } else {
+            self.simulator.try_dump(timestamp)
+        };
         self.synchronize_runtime_finish(was_dirty);
         result
     }
@@ -5272,7 +5276,202 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_interpreter().unwrap()));
         check(Simulation::new(build().build_cranelift().unwrap()));
         check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(test)]
+mod host_clock_activation_review {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let host = m.input("host", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let source = m.output("source", bit).unwrap();
+        let sampled = m.output("sampled", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(source).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let old = m.read(source).unwrap();
+        let target = m.whole(sampled).unwrap();
+        m.register(target, old, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let host = sim.signal("host");
+        sim.modify(|io| io.set(host, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("source")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn captured_host_edges_share_pre_edge_state_with_first_clock_wait() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod mixed_other_domain_host_review {
+    use super::*;
+    #[test]
+    fn any_change_host_falls_join_current_time_batches() {
+        let source = "module Top(input bit clk,queued,output bit[7:0]count,queued_count);always @(posedge clk)count<=count+1;always @(posedge queued)queued_count<=queued_count+1;endmodule";
+        fn check<B: SimBackend>(simulator: Simulator<B>, mode: u8) {
+            // The compiled event entry is the FF operation. Its edge policy
+            // comes from runtime metadata; exercise an any-change domain here.
+            let signal = simulator.signal("clk");
+            let address = simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let event = simulator.backend.resolve_event(&address);
+            let mut kinds = vec![None; simulator.backend.num_events()];
+            kinds[event.id()] = Some(celox_design::DomainKind::Other);
+            let queued_address = simulator.program.get_addr(&[], &["queued"]).unwrap();
+            let queued_event = simulator.backend.resolve_event(&queued_address);
+            let queued_signal = simulator.signal("queued");
+            kinds[queued_event.id()] = Some(celox_design::DomainKind::ClockPosedge);
+            let mut info = vec![
+                EventInfo {
+                    canonical_id: usize::MAX,
+                    is_cascaded: false,
+                    eval_ff_event: None,
+                    eval_only_event: None,
+                    apply_event: None
+                };
+                simulator.backend.num_events()
+            ];
+            info[event.id()] = EventInfo {
+                canonical_id: event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&address),
+                apply_event: simulator.backend.resolve_apply_event(&address),
+            };
+            info[queued_event.id()] = EventInfo {
+                canonical_id: queued_event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(queued_event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&queued_address),
+                apply_event: simulator.backend.resolve_apply_event(&queued_address),
+            };
+            let state = SimulationState::new(
+                &simulator.backend,
+                vec![
+                    (signal, event.id(), event.id()),
+                    (queued_signal, queued_event.id(), queued_event.id()),
+                ],
+                kinds,
+                info,
+                Vec::new(),
+            );
+            let mut sim = Simulation { simulator, state };
+            sim.set_wide(signal, 1u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+            sim.set_wide(signal, 0u8.into());
+            sim.schedule("queued", 0, 1).unwrap();
+            let time = match mode {
+                0 => sim.step().unwrap(),
+                1 => sim.step_until(0).unwrap(),
+                _ => sim.state.step(&mut sim.simulator).unwrap(),
+            };
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(time, Some(0));
+            assert_eq!(sim.get(sim.signal("queued_count")), 1u8.into());
+        }
+        for mode in [0, 1, 2] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("any-change-operation.sv"))],
+                    "Top",
+                )
+            };
+            check(build().build_interpreter().unwrap(), mode);
+            check(build().build_cranelift().unwrap(), mode);
+            check(build().build_wasm().unwrap(), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), mode);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_settle_review {
+    use super::*;
+    #[test]
+    fn all_propagated_blocking_waiters_sample_before_continuations() {
+        let source = "module Child(output bit go);initial begin #1;go=1;end endmodule module Top(output bit a,b);bit enable=1;wire go;Child child(.go(go));initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("active-waiters.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn finished_dump_preserves_dirty_outputs_and_events() {
+        let source = "module Top(input bit go,output bit q);always_comb begin q=go;$display(\"q=%d\",q);if(go)$finish;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>, path: &std::path::Path) {
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert!(sim.is_finished());
+            sim.drain_runtime_events();
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.try_dump(0).unwrap();
+            sim.dump(1);
+            sim.flush_vcd().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert!(sim.drain_runtime_events().is_empty());
+            assert!(
+                std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains("$enddefinitions")
+            );
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("finished.vcd");
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("finished-dump.sv"))],
+                "Top",
+            )
+            .vcd(&path)
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()), &path);
+        check(Simulation::new(build().build_cranelift().unwrap()), &path);
+        check(Simulation::new(build().build_wasm().unwrap()), &path);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()), &path);
     }
 }

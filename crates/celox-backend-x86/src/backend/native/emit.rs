@@ -37,7 +37,7 @@ use diagnostics::{
 use folded_operands::{count_vreg_uses, try_emit_load_fold, try_emit_not_and_fold};
 use instruction::emit_inst;
 use memory::{
-    emit_direct_memcopy, emit_sparse_chunk_copy, emit_sparse_commit_worklist,
+    SparseDirtyWords, emit_direct_memcopy, emit_sparse_commit_worklist, emit_sparse_dirty_word,
     emit_sparse_inline_commits,
 };
 use operands::{

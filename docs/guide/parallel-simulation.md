@@ -104,7 +104,8 @@ The report includes:
   ownership and placement decisions are available in the event inspector.
 - Dependencies recomputed from optimized SIR and, for native backends, from
   final compiled task effects. Select a node to inspect RAW/WAR/WAW conflicts,
-  state byte ranges, widened write envelopes, and shared runtime resources.
+  state bit ranges (`StateBits`), widened write envelopes (bytes), and shared
+  runtime resources.
 - Each captured dispatch, task duration and individual dependency wait/check,
   with arrows to producer tasks, measured overlap and ordering checks. Click a
   task for its merged SIR inputs and signal names. The SIR listing precedes

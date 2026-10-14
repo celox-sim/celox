@@ -1235,7 +1235,9 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         self.sample_waiting_events(executor, time)?;
-        let result = self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false);
+        let mut events = Vec::new();
+        let ready = self.take_ready_processes(executor, time, &mut events);
+        let result = self.step_round(executor, time, events, Vec::new(), ready, false);
         let progressed = result.as_ref().is_ok_and(|ran| *ran);
         self.finish_clock_round(time, Vec::new(), &[], result)?;
         if !progressed {
@@ -1744,17 +1746,8 @@ impl<B: SimBackend> SimulationState<B> {
         // Pending host writes share this round with current-time scheduled
         // edges. Record their net transitions before scheduled values replace
         // them and before clearing the backend's transient trigger hints.
-        for (signal, id, _) in &self.topo_signals {
-            if *id != usize::MAX
-                && self.edge_triggers(
-                    *id,
-                    (
-                        self.last_clock_values.contains(*id),
-                        self.unknown_clock_values.contains(*id),
-                    ),
-                    sample_event_signal(executor.backend(), *signal),
-                )
-            {
+        for (_, id, _) in &self.topo_signals {
+            if *id != usize::MAX && self.stable_edge_triggered(executor.backend(), *id) {
                 scheduled_edges.insert(*id);
             }
         }
@@ -1889,12 +1882,14 @@ impl<B: SimBackend> SimulationState<B> {
         if !self.finished
             && !self.tick_budget_spent()
             && (reset_edge_due
+                || !scheduled_edges.is_empty()
                 || !events_to_process.is_empty()
                 || !process_driven.is_empty()
                 || !generated_events.is_empty())
         {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
+                    && clock.falling_edge != Some(current_time)
                     && self.clock_has_waiters(*id)
                     && sample_event_signal(executor.backend(), clock.signal) != (true, false)
                     && !events_to_process
@@ -1976,6 +1971,9 @@ impl<B: SimBackend> SimulationState<B> {
             self.finished = true;
             return Ok(true);
         }
+        // Capture every waiter before any continuation can remove a
+        // propagated edge produced by the active process writes.
+        self.sample_waiting_events(executor, current_time)?;
         // Settle process writes before deciding whether they restored an
         // early edge. Persistent edges follow the ordinary cascade after
         // source FF publication; only vanished edges need explicit replay.
