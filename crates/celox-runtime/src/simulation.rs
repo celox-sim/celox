@@ -1400,8 +1400,6 @@ impl<B: SimBackend> SimulationState<B> {
                             };
                             self.waiting.remove(&process);
                             if count == 0 {
-                                // Nothing to wait for: the process continues in
-                                // the next pass, after its release.
                                 // Nothing to wait for: the release is made and
                                 // the process continues at once, as a zero
                                 // count documents.
@@ -1413,6 +1411,7 @@ impl<B: SimBackend> SimulationState<B> {
                                     executor.eval_comb()?;
                                 }
                                 any_ran = true;
+                                count_delta_pass(delta_rounds)?;
                                 continue;
                             } else {
                                 let id = clock.event.id();
