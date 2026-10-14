@@ -278,6 +278,14 @@ test('physical signals include all state regions and preserve storage and progra
  assert.ok(matches.every(s=>s.name==='actual'));
  assert.equal(signalsForFootprints([{reads:'Exact(MemoryLocation { object: Scratch, offset: 10, byte_len: 1 })'}],signals,'p').length,0);
 });
+test('StateBits footprints are matched by the bytes holding their bits',async()=>{
+ const {signalsForFootprints,stateByteRange}=await import('./parallel-report.mjs');
+ assert.deepEqual(stateByteRange('StateBits',83,7),{storage:'StateBits',offset:10,length:2,bit_offset:83,bit_length:7});
+ assert.deepEqual(stateByteRange('State',10,1),{storage:'State',offset:10,length:1});
+ const signals=[{event:'signal',program:'p',name:'low',offset:10,width:8},{event:'signal',program:'p',name:'high',offset:11,width:8},{event:'signal',program:'p',name:'far',offset:12,width:8}];
+ const matches=signalsForFootprints([{reads:'Exact(MemoryLocation { object: StateBits, offset: 83, byte_len: 7 })'}],signals,'p');
+ assert.deepEqual(matches.map(s=>s.name),['low','high']);
+});
 test('final native SIR is selected by schedule even when phase and task are identical',async()=>{
  const {nativeSirForTask}=await import('./parallel-report.mjs');
  const records=['first','second'].map(schedule=>({event:'native_task_sir',schedule,kind:'Comb',task:0,sir:schedule}));

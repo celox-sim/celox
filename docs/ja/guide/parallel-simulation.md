@@ -91,8 +91,8 @@ cargo run --locked --release -p celox-bench --bin parallel-report -- \
 
 - **Source partition**: 配置候補・推定コストと依存グラフ。ノードを選ぶと、
   個々の LogicPath、読み書きする信号、共有式による結合、配置制約を確認できます。
-- **Memory dependencies**: 最適化後の物理バイト範囲に基づく RAW/WAR/WAW、
-  書き込み幅の拡大、最終タスク間の依存関係を確認できます。
+- **Memory dependencies**: 最適化後の物理ビット範囲（`StateBits`）に基づく
+  RAW/WAR/WAW、書き込み幅の拡大（バイト単位）、最終タスク間の依存関係を確認できます。
 - **Execution**: タスク本体と依存先ごとの待機時間、レーン間の重なり、
   順序違反の検査結果を表示します。タスクを選ぶと SIR と信号名を確認できます。
 - **Event inspector**: 信号名などで検索し、SLT の式、FF の配置判断、逐次／並列の

@@ -72,10 +72,13 @@ export function explainWaits(events) {
   function names(effect, program) {
     const key = JSON.stringify([program, effect]);
     if (cache.has(key)) return cache.get(key);
-    const m = effect?.match(/object: (State|WriteEnvelope), offset: (\d+), byte_len: (\d+)/);
+    const m = effect?.match(/object: (StateBits|State|WriteEnvelope), offset: (\d+), byte_len: (\d+)/);
     const matches = [];
     if (m) {
-      const low = Number(m[2]), high = low + Number(m[3]);
+      // StateBits locations count bits; older captures and envelopes count bytes.
+      const bits = m[1] === "StateBits";
+      const low = bits ? Math.floor(Number(m[2]) / 8) : Number(m[2]);
+      const high = bits ? Math.ceil((Number(m[2]) + Number(m[3])) / 8) : low + Number(m[3]);
       for (const s of signals.filter(s => s.program === program)) for (const region of ["offset", "working_offset", "sparse_offset"]) {
         const raw = s[region];
         const start = typeof raw === "number" ? raw : Number(raw?.match(/Some\((\d+)\)/)?.[1]);
