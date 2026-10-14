@@ -465,14 +465,36 @@ pub(super) struct TaskTiming {
     ff_offsets: BTreeMap<String, Vec<usize>>,
     calls: BTreeMap<String, Vec<(usize, String)>>,
     instance_types: BTreeMap<String, Vec<(usize, String, String)>>,
+    generic_bindings: BTreeMap<(String, String), std::collections::BTreeSet<String>>,
     imports: BTreeMap<String, Vec<(String, Option<String>)>>,
     exports: BTreeMap<String, Vec<(Option<String>, Option<String>)>>,
+}
+
+// `interface` inside an ANSI header is a generic formal, not a container.
+fn generic_interface_keyword(source: &str, start: usize) -> bool {
+    let mut at = 0;
+    let mut depth = 0usize;
+    while at < start {
+        if skip_token(source, &mut at) {
+            continue;
+        }
+        match source.as_bytes()[at] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        at += 1;
+    }
+    depth > 0
 }
 
 fn container_at(source: &str, at: usize) -> String {
     let words = sv_words(&source[..at]);
     let mut scope = String::new();
-    for (index, (_, _, word)) in words.iter().enumerate() {
+    for (index, (start, _, word)) in words.iter().enumerate() {
+        if *word == "interface" && generic_interface_keyword(source, *start) {
+            continue;
+        }
         match *word {
             "module" | "interface" | "package" => {
                 if let Some((_, _, name)) = words[index + 1..]
@@ -494,6 +516,9 @@ fn container_at(source: &str, at: usize) -> String {
 fn lexical_scope_at(source: &str, at: usize, generates: &[(usize, usize)]) -> Vec<usize> {
     let mut scopes = Vec::new();
     for (start, _, word) in sv_words(&source[..at]) {
+        if word == "interface" && generic_interface_keyword(source, start) {
+            continue;
+        }
         match word {
             "module" | "interface" | "package" | "begin" | "fork" | "task" | "function" => {
                 scopes.push(start)
@@ -628,6 +653,18 @@ impl TaskTiming {
     }
     pub(super) fn new(sources: &[String]) -> Self {
         let mut result = Self::default();
+        let paths: Vec<_> = sources
+            .iter()
+            .map(|s| (s.as_str(), Path::new("timed.sv")))
+            .collect();
+        if let Ok(elaboration) = celox_sv_analyzer::elaborate_interfaces_with_metadata(&paths, &[])
+        {
+            result.generic_bindings = elaboration
+                .generic_bindings
+                .into_iter()
+                .map(|(key, types)| (key, types.into_iter().collect()))
+                .collect();
+        }
         let mut records = Vec::new();
         for (index, source) in sources.iter().enumerate() {
             result.units.insert(source.clone(), index);
@@ -804,6 +841,18 @@ impl TaskTiming {
         if let Some(prefix) = prefix.strip_suffix('.') {
             let instance = sv_words(prefix).last()?.2;
             let scope = container_at(source, at);
+            if let Some(types) = self
+                .generic_bindings
+                .get(&(scope.clone(), instance.to_owned()))
+            {
+                let mut timed = false;
+                for typ in types {
+                    timed |= *self
+                        .tasks
+                        .get(&(typ.clone(), None, Vec::new(), name.to_owned()))?;
+                }
+                return Some(timed);
+            }
             if let Some(instances) = self.instance_types.get(source) {
                 let call_scope = self.lexical_scope(source, at);
                 let found = instances
@@ -953,6 +1002,21 @@ impl TaskTiming {
 #[cfg(test)]
 mod callable_analysis_tests {
     use super::*;
+    #[test]
+    fn generic_interface_formals_resolve_from_specialized_bindings() {
+        let source="interface Scale;function automatic bit scaled(input bit v);return v;endfunction endinterface\nmodule User(interface s,input bit clk,v,output bit q);always @(posedge clk)q<=s.scaled(v);endmodule\nmodule Top(input bit clk,v,output bit q);Scale s();\nUser u(.s(s),.clk(clk),.v(v),.q(q));endmodule".to_owned();
+        let e = celox_sv_analyzer::elaborate_interfaces_with_metadata(
+            &[(source.as_str(), Path::new("test.sv"))],
+            &[],
+        )
+        .unwrap();
+        assert!(!e.generic_bindings.is_empty());
+        let tasks = TaskTiming::new(std::slice::from_ref(&source));
+        assert_eq!(
+            tasks.resolve(&source, source.find("scaled(v)").unwrap(), "scaled"),
+            Some(false)
+        );
+    }
     #[test]
     fn modport_formals_resolve_their_interface_methods() {
         let source="interface Scale;function automatic bit scaled(input bit v);return v;endfunction modport user(import scaled);endinterface module User(Scale.user s,input bit clk, v,output bit q);always @(posedge clk)q<=s.scaled(v);endmodule".to_owned();

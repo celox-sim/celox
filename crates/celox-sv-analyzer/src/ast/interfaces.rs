@@ -249,6 +249,8 @@ pub struct InterfaceElaboration {
     pub sources: Option<Vec<String>>,
     pub root_names: HashMap<String, String>,
     pub interface_ports: HashMap<String, HashSet<String>>,
+    /// Concrete generic port types encountered during specialization.
+    pub generic_bindings: HashMap<(String, String), HashSet<String>>,
 }
 
 pub fn elaborate_interfaces_with_metadata(
@@ -398,8 +400,11 @@ pub fn elaborate_interfaces_with_metadata_and_roots(
             )
         })
         .collect();
+    let mut generic_bindings = HashMap::default();
+    let sources = design.elaborate_with_roots(clones, scales, &mut generic_bindings)?;
     Ok(InterfaceElaboration {
-        sources: Some(design.elaborate_with_roots(clones, scales)?),
+        sources: Some(sources),
+        generic_bindings,
         root_names: names,
         interface_ports,
     })
@@ -1520,6 +1525,7 @@ impl<'a> Design<'a> {
         &self,
         mut clones: Vec<(String, Vec<(String, String)>)>,
         scales: &super::timescales::Timescales,
+        generic_bindings: &mut HashMap<(String, String), HashSet<String>>,
     ) -> Result<Vec<String>, AnalyzerError> {
         let mut edits: Vec<Vec<Edit>> = vec![Vec::new(); self.files.len()];
         let mut names: Vec<String> = self.modules.keys().cloned().collect();
@@ -1544,6 +1550,12 @@ impl<'a> Design<'a> {
             }
         }
         while let Some((name, bindings)) = clones.pop() {
+            for (port, interface) in &bindings {
+                generic_bindings
+                    .entry((name.clone(), port.clone()))
+                    .or_default()
+                    .insert(interface.clone());
+            }
             let clone_name = clone_module_name(&name, &bindings);
             if !cloned.insert(clone_name.clone()) {
                 continue;
