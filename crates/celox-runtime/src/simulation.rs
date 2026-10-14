@@ -1296,6 +1296,7 @@ impl<B: SimBackend> SimulationState<B> {
 
         let num_events = executor.backend().num_events();
         let mut scheduled_edges = BitSet::with_capacity(num_events);
+        let mut early_settle_edges = BitSet::with_capacity(num_events);
         // Pending host writes share this round with current-time scheduled
         // edges. Record their net transitions before scheduled values replace
         // them and before clearing the backend's transient trigger hints.
@@ -1351,7 +1352,11 @@ impl<B: SimBackend> SimulationState<B> {
                         sample_event_signal(executor.backend(), *signal),
                     )
                 {
-                    scheduled_edges.insert(*id);
+                    if capture_batch_edges {
+                        scheduled_edges.insert(*id);
+                    } else {
+                        early_settle_edges.insert(*id);
+                    }
                 }
             }
             self.sample_waiting_events(executor)?;
@@ -1477,6 +1482,15 @@ impl<B: SimBackend> SimulationState<B> {
         if executor.finish_requested(current_time) {
             self.finished = true;
             return Ok(true);
+        }
+        // Settle process writes before deciding whether they restored an
+        // early edge. Persistent edges follow the ordinary cascade after
+        // source FF publication; only vanished edges need explicit replay.
+        for id in early_settle_edges.iter() {
+            if !self.stable_edge_triggered(executor.backend(), id) {
+                recorded_edges.insert(id);
+                scheduled_trigger_ids.insert(id);
+            }
         }
         if track_stable_edges {
             // Combinational settling before an active scheduled source domain
