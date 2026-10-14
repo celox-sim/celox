@@ -558,6 +558,9 @@ impl<B: SimBackend> Simulation<B> {
                 .is_some_and(|next| next <= time)
         {
             self.settle_host_writes()?;
+            if self.state.is_finished() {
+                return Ok(());
+            }
             let mut drained = false;
             while self
                 .state
@@ -3002,5 +3005,36 @@ mod additional_host_edge_reviews {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), op);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_queued_settle_review {
+    use super::*;
+    #[test]
+    fn host_finish_prevents_a_queued_current_time_edge() {
+        let source = "module Top(input bit go,clk,output bit q);always @(posedge clk)q<=1;always_comb if(go)$finish;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.schedule("clk", 0, 1).unwrap();
+            sim.set_wide(go, 1u8.into());
+            sim.settle().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(q), 0u8.into());
+            assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("queued-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }

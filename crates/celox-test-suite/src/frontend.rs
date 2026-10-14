@@ -164,6 +164,7 @@ const TIMED_CONTROL: &str = r#"package celox_suite_timed_control;
     started = 1;
   endfunction
   function automatic void celox_suite_finish_design(input int code = 1);
+    if (!started) return;
     finished = 1;
     case (code)
       0: $finish(0);
@@ -280,14 +281,28 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             previous = body_end;
             continue;
         }
+        // Keep the startup dependency in the caller: @* excludes globals
+        // read only inside a function, unlike always_comb.
+        if word == "$finish" {
+            let body_end =
+                timed_ff::statement_end(source, start).ok_or("unterminated $finish statement")?;
+            let call = if after_trivia(&source[end..]).starts_with('(') {
+                format!("{}{}", names.finish, &source[end..body_end])
+            } else {
+                format!("{}();", names.finish)
+            };
+            let replacement = format!("begin if ({}::started) {call} end ", names.package);
+            output.push_str(&source[previous..start]);
+            output.push_str(&timed_ff::in_macro(source, start, replacement));
+            previous = body_end;
+            continue;
+        }
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
             "always" if timed_ff::wildcard_control(source, end, tasks) => continue,
             "always" => {
                 format!("always wait ({}::started)", names.package)
             }
-            "$finish" if after_trivia(&source[end..]).starts_with('(') => names.finish.clone(),
-            "$finish" => format!("{}()", names.finish),
             _ => continue,
         };
         output.push_str(&source[previous..start]);
