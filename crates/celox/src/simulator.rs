@@ -873,6 +873,14 @@ mod host {
             self.collect_formatted_runtime_events(ctx)
         }
 
+        pub(crate) fn drain_runtime_events_without_evaluation(&mut self) -> Vec<RuntimeEvent> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active"
+            );
+            self.collect_formatted_runtime_events(RuntimeFormatContext::default())
+        }
+
         pub(crate) fn drain_runtime_events_deferred_with_context(
             &mut self,
             ctx: RuntimeFormatContext<'_>,

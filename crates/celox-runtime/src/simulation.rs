@@ -978,17 +978,9 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Whether a pending transition activates its clock/reset domain.
     pub fn has_unsettled_active_edges(&self, backend: &B) -> bool {
-        self.topo_signals.iter().any(|(signal, id, _)| {
-            *id != usize::MAX
-                && self.edge_triggers(
-                    *id,
-                    (
-                        self.last_clock_values.contains(*id),
-                        self.unknown_clock_values.contains(*id),
-                    ),
-                    sample_event_signal(backend, *signal),
-                )
-        })
+        self.topo_signals
+            .iter()
+            .any(|(_, id, _)| *id != usize::MAX && self.stable_edge_triggered(backend, *id))
     }
 
     /// Whether any process is suspended on an event or a condition.
@@ -1021,6 +1013,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let time = self.scheduler.time;
+        self.sample_waiting_events(executor)?;
         let result = self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false);
         let progressed = result.as_ref().is_ok_and(|ran| *ran);
         self.finish_clock_round(time, Vec::new(), &[], result)?;
@@ -1332,10 +1325,14 @@ impl<B: SimBackend> SimulationState<B> {
             let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
             let after = sample_event_signal(executor.backend(), event.signal);
+            let mut blocking_source = false;
             if let Some(&id) = self.signal_to_id.get(&event.signal)
                 && self.edge_triggers(id, before, after)
             {
                 scheduled_edges.insert(id);
+                blocking_source = self
+                    .active_ff_domains
+                    .contains(self.event_info[id].canonical_id);
             }
             if settle_update {
                 executor.eval_comb()?;
@@ -1352,7 +1349,9 @@ impl<B: SimBackend> SimulationState<B> {
                         sample_event_signal(executor.backend(), *signal),
                     )
                 {
-                    if capture_batch_edges {
+                    if capture_batch_edges || blocking_source {
+                        // Blocking source FF stores run in the active region
+                        // and can remove an edge already sampled by waiters.
                         scheduled_edges.insert(*id);
                     } else {
                         early_settle_edges.insert(*id);
