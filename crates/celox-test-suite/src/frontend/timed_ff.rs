@@ -258,13 +258,14 @@ pub(super) fn gated(
     let armed = fresh("armed");
     let captured = fresh("captured");
     let package = &names.package;
-    let event = &source[begin + 1..event_end - 1];
+    let original_event = &source[begin + 1..event_end - 1];
+    let event = event_leaves(original_event).join(" or ");
     let replacement_start = attributes_start(source, start);
     let attributes = &source[replacement_start..start];
     let mut declarations = String::new();
     let mut samples = Vec::new();
     let mut active = Vec::new();
-    for (index, leaf) in event_leaves(event).into_iter().enumerate() {
+    for (index, leaf) in event_leaves(&event).into_iter().enumerate() {
         let leaf = after_trivia(leaf);
         let (_, end, edge) = *sv_words(leaf).first().ok_or("empty FF event")?;
         if !matches!(edge, "posedge" | "negedge") {
@@ -326,6 +327,7 @@ pub(super) fn edge_control(source: &str, end: usize, tasks: &TaskTiming) -> bool
 }
 
 fn event_leaves(event: &str) -> Vec<&str> {
+    let event = unwrap_event_leaf(event);
     let ors = sv_words(event)
         .into_iter()
         .filter_map(|(start, _, word)| (word == "or").then_some(start))
@@ -352,7 +354,18 @@ fn event_leaves(event: &str) -> Vec<&str> {
         at += 1;
     }
     leaves.push(&event[start..]);
-    leaves
+    leaves.into_iter().map(unwrap_event_leaf).collect()
+}
+
+fn unwrap_event_leaf(mut event: &str) -> &str {
+    event = after_trivia(event).trim();
+    while let Some(end) = parens(event, 0) {
+        if !after_trivia(&event[end..]).is_empty() {
+            break;
+        }
+        event = after_trivia(&event[1..end - 1]).trim();
+    }
+    event
 }
 
 /// Multiline macro replacements must keep every generated line in the
@@ -775,7 +788,7 @@ impl TaskTiming {
                     || prefix.ends_with([';', ')', ':', '.'])
                     || sv_words(prefix)
                         .last()
-                        .is_some_and(|word| matches!(word.2, "begin" | "end" | "else"));
+                        .is_some_and(|word| matches!(word.2, "begin" | "end" | "else" | "forever"));
                 (tail.starts_with('(') || (tail.starts_with(';') && statement_start))
                     && self.resolve(source, start + at, name).unwrap_or(true)
             })

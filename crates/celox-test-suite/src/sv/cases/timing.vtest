@@ -816,3 +816,15 @@ endmodule"#)
  (top Top)(set a 1)(run_until 0)(assert_eq seen 0)
  (set a 0)(eval)(set a 1)(eval)(assert_eq seen 1)
  (set b 1)(eval)(set b 0)(eval)(assert_eq seen 2))
+
+(case timed_calls_after_forever_do_not_replay_setup_edges
+ (source "forever-task.sv" #"module Top(input bit clk,output bit q);
+ task automatic tick();#1 q=1;endtask
+ always @(posedge clk)forever tick;
+ initial begin #3;$finish;end endmodule"#)
+ (top Top)(set clk 1)(run_to_finish)(assert_eq q 0))
+
+(case parenthesized_ff_event_leaves_preserve_setup_edges
+ (source "parenthesized.sv" #"module Top(input bit clk,output bit q,r);
+ always @((posedge clk))q<=1;always_ff @((posedge clk))r<=1;endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1)(assert_eq r 1))
