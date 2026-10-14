@@ -548,11 +548,10 @@ impl<B: SimBackend> Simulation<B> {
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                self.state.step(&mut self.simulator)?;
-            } else {
-                self.state.settle_at(&mut self.simulator, time)?;
+                return self.state.step(&mut self.simulator);
             }
-            if active || queued {
+            self.state.settle_at(&mut self.simulator, time)?;
+            if active {
                 return Ok(Some(time));
             }
         }
@@ -3700,10 +3699,17 @@ mod coincident_host_edge_limit_review_tests {
     use super::*;
     use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
     fn design() -> crate::frontend_sdk::FrontendArtifact {
+        design_with_initial_host(false)
+    }
+    fn design_with_initial_host(high: bool) -> crate::frontend_sdk::FrontendArtifact {
         let bit = ValueType::bits(1).unwrap();
         let byte = ValueType::bits(8).unwrap();
         let mut m = ModuleBuilder::new("Top").unwrap();
         let host = m.input("host", bit).unwrap();
+        if high {
+            m.set_initial(host, Constant::two_state(1u8, 1).unwrap())
+                .unwrap();
+        }
         let clk = m.internal("clk", bit).unwrap();
         let seen = m.output("seen", bit).unwrap();
         let q = m.output("q", byte).unwrap();
@@ -3747,6 +3753,25 @@ mod coincident_host_edge_limit_review_tests {
         assert_eq!(sim.ticks(), 8);
         assert_eq!(sim.get(sim.signal("q")), 8u8.into());
     }
+    #[test]
+    fn coincident_host_edges_report_the_time_reached_by_step() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.set_wide(sim.signal("host"), 0u8.into());
+            let reached = sim.step().unwrap().unwrap();
+            assert_eq!(reached, sim.time());
+            assert_eq!(sim.get(sim.signal("q")), (sim.ticks() as u8).into());
+            sim.run_until(28).unwrap();
+            assert_eq!(sim.ticks(), 8);
+            assert_eq!(sim.get(sim.signal("q")), 8u8.into());
+        }
+        let build = || Simulator::from_frontend(design_with_initial_host(true));
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
     #[test]
     fn coincident_host_edges_do_not_fuse_past_public_time_limits() {
         for (method, limit) in [
