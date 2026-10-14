@@ -470,6 +470,10 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             )?;
             apply_component_writes(sim, writes);
             if sim.components.finish_requested() {
+                if sim.dirty {
+                    sim.eval_comb_checked().map_err(|error| error.to_string())?;
+                    sim.dirty = false;
+                }
                 return Ok(false);
             }
             let Some(result) = result else {
@@ -726,12 +730,16 @@ mod event_yield_settle_tests {
             nargs: usize,
             _: *mut sys::VrlValue,
         ) -> i32 {
-            if unsafe { name.as_str() } != "drive" || nargs != 1 {
+            let method = unsafe { name.as_str() };
+            if !matches!(method, "drive" | "drive_finish") || nargs != 1 {
                 return 1;
             }
             let state = unsafe { &*state.cast::<Host>() };
             let value = unsafe { (*args).words.as_ref() }.copied().unwrap();
             unsafe { ((*state.api).write_output)(ctx, state.output, &value, std::ptr::null()) };
+            if method == "drive_finish" {
+                unsafe { ((*state.api).finish)(ctx) };
+            }
             0
         }
         static COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
@@ -749,7 +757,7 @@ mod event_yield_settle_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("component")).unwrap();
         std::fs::write(dir.path().join("Veryl.toml"), "[project]\nname=\"settled_writer_test\"\nversion=\"0.1.0\"\n[[components]]\npath=\"component\"\n").unwrap();
-        std::fs::write(dir.path().join("component/veryl.manifest.json"), r#"{"types":{"settled_writer":{"kind":"clocked","ports":[{"name":"clk","dir":"input","role":"clock"},{"name":"q","dir":"output"}],"methods":[{"name":"drive","args":[{"name":"value","type":"value"}]}]}}}"#).unwrap();
+        std::fs::write(dir.path().join("component/veryl.manifest.json"), r#"{"types":{"settled_writer":{"kind":"clocked","ports":[{"name":"clk","dir":"input","role":"clock"},{"name":"q","dir":"output"}],"methods":[{"name":"drive","args":[{"name":"value","type":"value"}]},{"name":"drive_finish","args":[{"name":"value","type":"value"}]}]}}}"#).unwrap();
         let code = r#"#[test(Top)]module Top{
           inst clk:$tb::clock_gen;var q:u8;var source:u8;var derived:u8;
           inst c:$comp::settled_writer(clk,q);
@@ -796,22 +804,26 @@ mod event_yield_settle_tests {
             assert_eq!(executor.combs, 1, "{}", std::any::type_name::<B>());
         }
         macro_rules! check_backend {
-            ($build:ident) => {
+            ($build:ident, $source:expr) => {
                 let metadata =
                     veryl_metadata::Metadata::load(dir.path().join("Veryl.toml")).unwrap();
                 check(
-                    Simulator::builder(code, "Top")
+                    Simulator::builder($source, "Top")
                         .with_metadata(metadata)
                         .$build()
                         .unwrap(),
                 );
             };
         }
-        check_backend!(build_interpreter);
-        check_backend!(build_cranelift);
-        check_backend!(build_wasm);
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        check_backend!(build_native);
+        for method in ["drive", "drive_finish"] {
+            let code = code.replace("c.drive(7)", &format!("c.{method}(7)"));
+            let code = code.as_str();
+            check_backend!(build_interpreter, code);
+            check_backend!(build_cranelift, code);
+            check_backend!(build_wasm, code);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check_backend!(build_native, code);
+        }
     }
 
     #[test]
