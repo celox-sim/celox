@@ -2508,3 +2508,16 @@ fn timed_task_branches_do_not_claim_an_earlier_write_wave() {
     let source = "module Child(input bit sel,output bit[1:0]q);task automatic delayed();#5;q[0]=1;endtask initial begin #1;if(sel)delayed();end initial begin #6;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.sel(1'b1),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
     assert!(build_error(source).contains("multiple blocking writes"));
 }
+
+#[test]
+fn coincident_pulse_writers_in_different_instances_are_rejected() {
+    let source = "module Child(input bit clk,output bit q);always_ff @(posedge clk)q<=!q;endmodule module Top(input bit clk,output bit seen);wire a,b;Child c0(.clk(clk),.q(a));Child c1(.clk(clk),.q(b));initial forever begin @(a^b);seen=1;end endmodule";
+    assert!(build_error(source).contains("multiple nonblocking writes"));
+    let timed = "module Child0(output bit q);initial begin #1;q=1;end endmodule module Child1(output bit q);initial begin #2;q=1;end endmodule module Top(output bit[7:0]seen);wire a,b;Child0 c0(.q(a));Child1 c1(.q(b));initial forever begin @(a^b);seen=seen+1;end endmodule";
+    assert!(build_error(&timed.replace("#2;", "#1;")).contains("multiple blocking writes"));
+    let mut sim = simulation(timed);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+}

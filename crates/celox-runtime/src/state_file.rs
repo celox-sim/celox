@@ -8,7 +8,7 @@
 //! The encoding is little-endian binary:
 //!
 //! ```text
-//! magic "CXSTATE\0" | version u16 | flags u16
+//! magic "CXSTATE\0" | version u16 | flags u16 (finished in version 4)
 //! object count u32, then per object:
 //!   path str | width u64 | role u8 | is_4state u8
 //!   value [ceil(width/8) bytes] | mask [same size, only for four-state objects
@@ -29,10 +29,11 @@
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
 const FLAG_CAPTURED_EDGES: u16 = 1 << 2;
+const FLAG_FINISHED: u16 = 1 << 3;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,8 @@ pub struct ScheduledEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScheduleRecord {
     pub time: u64,
+    /// The design has requested simulation termination.
+    pub finished: bool,
     /// Periodic clocks as (event path, period).
     pub clocks: Vec<(String, u64)>,
     /// Pending events, in no particular order.
@@ -132,7 +135,13 @@ impl StateFile {
             .schedule
             .as_ref()
             .is_some_and(|s| !s.captured_edges.is_empty());
-        let version = if captured {
+        let finished = self
+            .schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.finished);
+        let version = if finished {
+            4
+        } else if captured {
             3
         } else if self
             .schedule
@@ -153,6 +162,9 @@ impl StateFile {
         }
         if captured {
             flags |= FLAG_CAPTURED_EDGES;
+        }
+        if finished {
+            flags |= FLAG_FINISHED;
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -200,6 +212,8 @@ impl StateFile {
                 for event in &schedule.captured_edges {
                     put_str(w, event)?;
                 }
+            }
+            if version >= 3 {
                 // Version 3 preserves the distinction between legacy unknown
                 // baselines and an explicitly known baseline.
                 w.write_all(&[u8::from(schedule.unknown_events.is_some())])?;
@@ -229,6 +243,11 @@ impl StateFile {
         if flags & FLAG_CAPTURED_EDGES != 0 && version < 2 {
             return Err(StateFileError::Malformed(
                 "captured edges require version 2".into(),
+            ));
+        }
+        if flags & FLAG_FINISHED != 0 && (version < 4 || flags & FLAG_SCHEDULE == 0) {
+            return Err(StateFileError::Malformed(
+                "finished state requires a version-4 schedule".into(),
             ));
         }
         let four_state = flags & FLAG_FOUR_STATE != 0;
@@ -312,6 +331,7 @@ impl StateFile {
                 None
             };
             Some(ScheduleRecord {
+                finished: flags & FLAG_FINISHED != 0,
                 captured_edges,
                 unknown_events,
                 time,
@@ -516,6 +536,7 @@ mod tests {
             ],
             schedule: Some(ScheduleRecord {
                 time: 10,
+                finished: false,
                 clocks: vec![("clk".into(), 10)],
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
@@ -523,6 +544,23 @@ mod tests {
                 captured_edges: Vec::new(),
                 unknown_events: Some(vec!["clk".into()]),
             }),
+        }
+    }
+
+    #[test]
+    fn finished_schedules_preserve_optional_baselines() {
+        for unknown in [None, Some(vec![])] {
+            for captured in [vec![], vec!["clk".into()]] {
+                let mut file = sample();
+                let schedule = file.schedule.as_mut().unwrap();
+                schedule.finished = true;
+                schedule.unknown_events = unknown.clone();
+                schedule.captured_edges = captured;
+                let mut bytes = Vec::new();
+                file.write_to(&mut bytes).unwrap();
+                assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 4);
+                assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+            }
         }
     }
 

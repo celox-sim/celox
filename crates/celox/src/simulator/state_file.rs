@@ -277,7 +277,11 @@ impl<B: SimBackend> Simulator<B> {
             self.restore(&previous)?;
             return Err(StateError::Runtime(error));
         }
-        self.reset_runtime_finish(false);
+        self.reset_runtime_finish(
+            file.schedule
+                .as_ref()
+                .is_some_and(|schedule| schedule.finished),
+        );
         self.pending_host_writes.clear();
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
         self.comb_observer_initial_eval = false;
@@ -363,6 +367,7 @@ impl<B: SimBackend> Simulator<B> {
         };
         ScheduleRecord {
             time: parts.time,
+            finished: parts.finished,
             clocks: parts
                 .clocks
                 .into_iter()
@@ -503,7 +508,7 @@ impl<B: SimBackend> Simulator<B> {
             scheduled_clock_time: record.time,
             scheduled_clock_drives: Vec::new(),
             inactive_processes: Vec::new(),
-            finished: false,
+            finished: record.finished,
         })
     }
 }

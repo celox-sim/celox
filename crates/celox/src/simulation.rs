@@ -5142,3 +5142,73 @@ mod implicit_host_edge_review {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod finished_state_file_review {
+    use super::*;
+    #[test]
+    fn finished_state_files_do_not_revive_ff_or_comb_designs() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, mut restored: Simulation<B>, comb: bool) {
+            sim.schedule("clk", 1, 1).unwrap();
+            if comb {
+                let go = sim.signal("go");
+                sim.modify(|io| io.set(go, 1u8)).unwrap();
+                sim.eval_comb().unwrap();
+            } else {
+                let clk = sim.signal("clk");
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                sim.run_until(0).unwrap();
+            }
+            assert!(sim.is_finished());
+            let file = sim.save_state().unwrap();
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+            restored.load_state(&file).unwrap();
+            assert!(restored.is_finished());
+            assert!(restored.simulator.has_pending_runtime_finish());
+            assert_eq!(restored.step().unwrap(), None);
+            restored.run_until(2).unwrap();
+            assert_eq!(restored.time(), 0);
+            assert_eq!(restored.get(restored.signal("q")), 1u8.into());
+            restored
+                .simulator
+                .set_wide(restored.signal("go"), 0u8.into());
+            assert_eq!(restored.get(restored.signal("q")), 1u8.into());
+        }
+        for comb in [true, false] {
+            let source = if comb {
+                "module Top(input bit clk,go,output bit q,dummy);always_comb begin q=go;if(go)$finish;end always @(posedge clk)dummy<=1;endmodule"
+            } else {
+                "module Top(input bit clk,go,output bit q);always @(posedge clk)begin q=1;$finish;end endmodule"
+            };
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("finished-state-file.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                Simulation::new(build().build_interpreter().unwrap()),
+                comb,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                Simulation::new(build().build_cranelift().unwrap()),
+                comb,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                Simulation::new(build().build_wasm().unwrap()),
+                comb,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                Simulation::new(build().build_native().unwrap()),
+                comb,
+            );
+        }
+    }
+}
