@@ -2089,3 +2089,64 @@ mod public_host_edge_review_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod scheduled_derived_concat_review_tests {
+    use super::*;
+    use std::path::Path;
+    #[test]
+    fn queued_source_pulses_wake_derived_signal_waiters() {
+        let source = "module Top(input bit a,output bit q,seen);bit unused;assign q=a;always @(posedge a)unused<=1;initial begin @(negedge q);seen=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            sim.run_until(0).unwrap();
+            sim.schedule("a", 1, 1).unwrap();
+            sim.schedule("a", 1, 0).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        }
+        let build =
+            || Simulator::from_sv_sources(vec![(source, Path::new("derived-pulse.sv"))], "Top");
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build().unwrap()));
+    }
+    #[test]
+    fn concatenated_nbas_do_not_invent_expression_pulses() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, value: u8, seen: u8) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), seen.into(), "{value}");
+            assert_eq!(sim.get(sim.signal("q")), value.into());
+        }
+        for (value, seen) in [(3u8, 0u8), (2, 1)] {
+            let source = format!(
+                "module Top(input bit clk,output bit seen);bit[1:0]q;always @(posedge clk){{q[1],q[0]}}<=2'd{value};initial begin @(q[1]^q[0]);seen=1;end endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), Path::new("concat-nba.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                value,
+                seen,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                value,
+                seen,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), value, seen);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build().unwrap()), value, seen);
+        }
+    }
+}
