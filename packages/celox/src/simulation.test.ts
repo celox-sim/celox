@@ -933,3 +933,21 @@ for (const maxSteps of [0, 1]) {
 		sim.dispose();
 	});
 }
+
+for (const method of ["step", "runUntil", "waitUntil"] as const) {
+	test(`${method} does not settle after finish`, () => {
+		const { create, handle } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		handle.isFinished = vi.fn().mockReturnValue(true);
+		sim.dut.d = 1n;
+		if (method === "step") expect(sim.step()).toBe(null);
+		else if (method === "runUntil") sim.runUntil(10);
+		else
+			sim.waitUntil(() => {
+				throw new Error("finished run evaluated its predicate");
+			});
+		expect(sim.dut.q).toBe(0n);
+		expect(handle.evalComb).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}

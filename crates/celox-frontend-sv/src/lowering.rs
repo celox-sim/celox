@@ -105,7 +105,7 @@ pub(crate) struct LoweredSvModule {
     pub instances: Vec<LoweredSvInstance>,
     /// Variables that denote a package variable, with its package and name.
     package_variables: Vec<(SourceVarId, String, String)>,
-    event_dependencies: HashSet<SourceVarId>,
+    event_dependencies: Vec<Vec<(SourceVarId, BitAccess)>>,
 }
 
 #[derive(Clone)]
@@ -1278,7 +1278,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             parameter_types: HashMap::default(),
             instances: Vec::new(),
             package_variables: Vec::new(),
-            event_dependencies: HashSet::default(),
+            event_dependencies: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -2106,7 +2106,21 @@ fn lower_module_with_overrides(
     let event_dependencies = event_watch_plan
         .0
         .iter()
-        .flat_map(|watcher| watcher.dependencies.iter().copied())
+        .map(|watcher| {
+            let mut reads = event_read_accesses(
+                &watcher.expr,
+                &variables,
+                &name_to_id,
+                &constants,
+                &parameter_types,
+            );
+            for &id in &watcher.dependencies {
+                if !reads.iter().any(|(read, _)| *read == id) {
+                    reads.push((id, BitAccess::new(0, variables[&id].width - 1)));
+                }
+            }
+            reads
+        })
         .collect();
     mark_ff_event_domains(module, &mut variables, &name_to_id);
     let (initial_values, processes, process_event_counters) = lower_initial_processes(
@@ -2503,9 +2517,120 @@ fn array_element_connections(
         .collect()
 }
 
-/// Cross-instance pulse counters are not shared through ordinary port glue.
-/// Reject only dependencies whose procedural source can hide an intermediate
-/// blocking write; single writes and scheduled updates still settle normally.
+/// The selected bits read by an event expression. Unknown selections remain
+/// whole-variable dependencies; fixed selects retain their physical offsets.
+fn event_read_accesses(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    names: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Vec<(SourceVarId, BitAccess)> {
+    use sv::ir::Expr;
+    let mut reads = Vec::new();
+    let mut add = |expr| {
+        reads.extend(event_read_accesses(
+            expr, variables, names, constants, types,
+        ))
+    };
+    match expr {
+        Expr::Ident(_) => {
+            if let Some(access) = output_lvalue_access(expr, variables, names, constants, types) {
+                reads.push(access);
+            }
+        }
+        Expr::Select {
+            expr: base,
+            msb,
+            lsb,
+            ..
+        } => {
+            if let Some(access) = output_lvalue_access(expr, variables, names, constants, types) {
+                reads.push(access);
+            } else {
+                add(base);
+                let mut indices = HashSet::default();
+                procedural::const_idents(msb, &mut indices);
+                procedural::const_idents(lsb, &mut indices);
+                reads.extend(
+                    indices
+                        .iter()
+                        .filter_map(|name| names.get(name))
+                        .map(|&id| (id, BitAccess::new(0, variables[&id].width - 1))),
+                );
+            }
+        }
+        Expr::Concat(parts) => parts.iter().for_each(add),
+        Expr::RepeatConcat { count, parts } => {
+            parts.iter().for_each(add);
+            let mut indices = HashSet::default();
+            procedural::const_idents(count, &mut indices);
+            reads.extend(
+                indices
+                    .iter()
+                    .filter_map(|name| names.get(name))
+                    .map(|&id| (id, BitAccess::new(0, variables[&id].width - 1))),
+            );
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => add(expr),
+        Expr::Binary { left, right, .. } => {
+            add(left);
+            add(right);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            add(condition);
+            add(then_expr);
+            add(else_expr);
+        }
+        Expr::Call { args, .. } => args.iter().flatten().for_each(add),
+        Expr::Inside { expr, items } => {
+            add(expr);
+            for item in items {
+                item.exprs().into_iter().for_each(&mut add);
+            }
+        }
+        Expr::Literal(_) => {}
+    }
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
+fn event_access_expr(
+    id: SourceVarId,
+    access: BitAccess,
+    variables: &HashMap<SourceVarId, SvVariable>,
+) -> sv::ir::Expr {
+    let variable = &variables[&id];
+    let base = sv::ir::Expr::Ident(variable.path.join("."));
+    if access == BitAccess::new(0, variable.width - 1)
+        || !variable.array_dims.is_empty()
+        || variable.packed_ranges.len() != 1
+    {
+        return base;
+    }
+    let (left, right) = variable.packed_ranges[0];
+    let index = |offset: usize| {
+        if left >= right {
+            right + offset as i128
+        } else {
+            right - offset as i128
+        }
+    };
+    sv::ir::Expr::Select {
+        expr: Box::new(base),
+        msb: sv::ir::ConstExpr::Literal(index(access.msb).to_string()),
+        lsb: sv::ir::ConstExpr::Literal(index(access.lsb).to_string()),
+        signed: false,
+    }
+}
+
+/// Ordinary port glue does not share pulse counters. Keep bit ranges through
+/// bindings and reject cross-instance waves with multiple relevant writes.
 fn validate_cross_instance_event_pulses(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     modules: &HashMap<ModuleId, LoweredSvModule>,
@@ -2517,9 +2642,16 @@ fn validate_cross_instance_event_pulses(
     {
         return Ok(());
     }
+    let width = |access: BitAccess| access.msb - access.lsb + 1;
     type Signal = (ModuleId, SourceVarId);
-    let mut dependencies: HashMap<Signal, Vec<(Signal, bool)>> = HashMap::default();
-    let mut pulsed = HashSet::default();
+    struct Edge {
+        source: Signal,
+        target: BitAccess,
+        read: BitAccess,
+        linear: bool,
+        port: bool,
+    }
+    let mut dependencies: HashMap<Signal, Vec<Edge>> = HashMap::default();
     for (&id, module) in modules {
         let mut variables = module.variables.clone();
         let mut names = module.signal_names.clone();
@@ -2555,38 +2687,54 @@ fn validate_cross_instance_event_pulses(
                 false,
             )
         };
-        let active =
-            |condition| condition_is_active(condition, &module.constants, &module.parameter_types);
-        let bodies = module
-            .source
-            .initial_processes()
-            .iter()
-            .filter(|p| active(p.condition()))
-            .map(|p| p.body())
-            .chain(module.source.ff_processes().iter().map(|p| p.body()))
-            .chain(
-                module
-                    .source
-                    .comb_processes()
-                    .iter()
-                    .filter(|p| active(p.condition()))
-                    .map(|p| p.body()),
-            );
-        for body in bodies {
-            for (name, writes) in count(body) {
-                if writes > 1
-                    && let Some(signal) = module.signal_names.get(&name)
-                {
-                    pulsed.insert((id, *signal));
+        let access = |expr: &sv::ir::Expr| {
+            output_lvalue_access(
+                expr,
+                &module.variables,
+                &module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+            )
+        };
+        for process in module.source.comb_processes().iter().filter(|p| {
+            condition_is_active(p.condition(), &module.constants, &module.parameter_types)
+        }) {
+            if let [sv::ir::Stmt::Assign { lhs, rhs, .. }] = process.body() {
+                let lhs = match lhs {
+                    sv::ir::LValue::Ident(name) => sv::ir::Expr::Ident(name.clone()),
+                    sv::ir::LValue::Select { name, msb, lsb, .. } => sv::ir::Expr::Select {
+                        expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                        msb: msb.clone(),
+                        lsb: lsb.clone(),
+                        signed: false,
+                    },
+                };
+                if let Some((target, target_bits)) = access(&lhs) {
+                    let reads = event_read_accesses(
+                        rhs,
+                        &module.variables,
+                        &module.signal_names,
+                        &module.constants,
+                        &module.parameter_types,
+                    );
+                    for (source, read) in reads {
+                        dependencies.entry((id, target)).or_default().push(Edge {
+                            source: (id, source),
+                            target: target_bits,
+                            read,
+                            linear: access(rhs) == Some((source, read))
+                                && width(target_bits) == width(read),
+                            port: false,
+                        });
+                    }
+                    // Calls can read globals beyond their explicit operands.
+                    let mut calls = Vec::new();
+                    procedural::stmt_calls(&process.body()[0], &mut calls);
+                    if calls.is_empty() {
+                        continue;
+                    }
                 }
             }
-        }
-        for process in module
-            .source
-            .comb_processes()
-            .iter()
-            .filter(|p| active(p.condition()))
-        {
             let mut reads = HashSet::default();
             let mut pending = vec![process.body()];
             let mut visited = HashSet::default();
@@ -2608,15 +2756,40 @@ fn validate_cross_instance_event_pulses(
             }
             for name in count(process.body()).keys() {
                 if let Some(&target) = module.signal_names.get(name) {
-                    dependencies
-                        .entry((id, target))
-                        .or_default()
-                        .extend(reads.iter().filter_map(|name| {
-                            module
-                                .signal_names
-                                .get(name)
-                                .map(|&source| ((id, source), false))
-                        }));
+                    let range = |lhs: &sv::ir::LValue| {
+                        net_lvalue_range(lhs, &module.constants, &module.parameter_types)
+                    };
+                    let scan = DriverScan {
+                        signal_name: name,
+                        subroutines: module.source.subroutines(),
+                        range: &range,
+                    };
+                    let mut targets = Vec::new();
+                    body_driver_ranges(&mut targets, process.body(), 0, &scan);
+                    for (_, range) in targets {
+                        let target_bits = range
+                            .and_then(|(low, high)| {
+                                Some((
+                                    packed_index_offset(&module.variables[&target], low)?,
+                                    packed_index_offset(&module.variables[&target], high)?,
+                                ))
+                            })
+                            .map(|(a, b)| BitAccess::new(a.min(b), a.max(b)))
+                            .unwrap_or(BitAccess::new(0, module.variables[&target].width - 1));
+                        for source in reads
+                            .iter()
+                            .filter_map(|name| module.signal_names.get(name))
+                            .copied()
+                        {
+                            dependencies.entry((id, target)).or_default().push(Edge {
+                                source: (id, source),
+                                target: target_bits,
+                                read: BitAccess::new(0, module.variables[&source].width - 1),
+                                linear: false,
+                                port: false,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2628,64 +2801,189 @@ fn validate_cross_instance_event_pulses(
             let Some(child) = modules.get(&child_id) else {
                 continue;
             };
-            for connection in &instance.port_connections {
+            let connections = match instance.array_element {
+                Some((position, count)) => array_element_connections(
+                    &instance.port_connections,
+                    child,
+                    position,
+                    count,
+                    &module.variables,
+                    &module.signal_names,
+                    &module.constants,
+                    &module.parameter_types,
+                )?,
+                None => instance.port_connections.clone(),
+            };
+            for connection in &connections {
                 let Some(&formal) = child.signal_names.get(&connection.formal) else {
                     continue;
                 };
-                let mut actuals = HashSet::default();
-                if let Some(expr) = &connection.actual_expr {
-                    procedural::expr_idents(expr, &mut actuals);
-                } else {
-                    actuals.insert(connection.actual.clone());
-                }
-                for actual in actuals
-                    .iter()
-                    .filter_map(|name| module.signal_names.get(name))
-                    .copied()
+                let formal_bits = BitAccess::new(0, child.variables[&formal].width - 1);
+                let expr = connection
+                    .actual_expr
+                    .clone()
+                    .unwrap_or_else(|| sv::ir::Expr::Ident(connection.actual.clone()));
+                let pieces = output_lvalue_accesses(
+                    &expr,
+                    &module.variables,
+                    &module.signal_names,
+                    &module.constants,
+                    &module.parameter_types,
+                );
+                if let Some(pieces) = pieces
+                    && pieces.iter().map(|p| width(p.access)).sum::<usize>() == width(formal_bits)
                 {
-                    match child.variables[&formal].kind {
-                        VariableKind::Input => dependencies
-                            .entry((child_id, formal))
-                            .or_default()
-                            .push(((id, actual), true)),
-                        VariableKind::Output => dependencies
-                            .entry((id, actual))
-                            .or_default()
-                            .push(((child_id, formal), true)),
-                        _ => {}
+                    let mut offset = 0;
+                    for piece in pieces.into_iter().rev() {
+                        let port_bits = BitAccess::new(offset, offset + width(piece.access) - 1);
+                        offset += width(piece.access);
+                        match child.variables[&formal].kind {
+                            VariableKind::Input => dependencies
+                                .entry((child_id, formal))
+                                .or_default()
+                                .push(Edge {
+                                    source: (id, piece.signal),
+                                    target: port_bits,
+                                    read: piece.access,
+                                    linear: true,
+                                    port: true,
+                                }),
+                            VariableKind::Output => dependencies
+                                .entry((id, piece.signal))
+                                .or_default()
+                                .push(Edge {
+                                    source: (child_id, formal),
+                                    target: piece.access,
+                                    read: port_bits,
+                                    linear: true,
+                                    port: true,
+                                }),
+                            _ => {}
+                        }
+                    }
+                } else {
+                    for (actual, read) in event_read_accesses(
+                        &expr,
+                        &module.variables,
+                        &module.signal_names,
+                        &module.constants,
+                        &module.parameter_types,
+                    ) {
+                        if child.variables[&formal].kind == VariableKind::Input {
+                            dependencies
+                                .entry((child_id, formal))
+                                .or_default()
+                                .push(Edge {
+                                    source: (id, actual),
+                                    target: formal_bits,
+                                    read,
+                                    linear: false,
+                                    port: true,
+                                });
+                        }
                     }
                 }
             }
         }
     }
     for (&id, module) in modules {
-        for &watched in &module.event_dependencies {
-            let mut pending = vec![((id, watched), false)];
+        for watched in &module.event_dependencies {
+            let mut pending = watched
+                .iter()
+                .map(|&(signal, range)| ((id, signal), range, false))
+                .collect::<Vec<_>>();
             let mut visited = HashSet::default();
-            while let Some((signal, crossed_port)) = pending.pop() {
-                if !visited.insert((signal, crossed_port)) {
-                    continue;
+            while !pending.is_empty() {
+                let wave = std::mem::take(&mut pending);
+                let mut cross: HashMap<ModuleId, Vec<(SourceVarId, BitAccess)>> =
+                    HashMap::default();
+                for (signal, range, crossed) in wave {
+                    if !visited.insert((signal, range, crossed)) {
+                        continue;
+                    }
+                    if crossed {
+                        cross.entry(signal.0).or_default().push((signal.1, range));
+                    }
+                    if let Some(edges) = dependencies.get(&signal) {
+                        for edge in edges {
+                            if !range.overlaps(&edge.target) {
+                                continue;
+                            }
+                            let read = if edge.linear {
+                                BitAccess::new(
+                                    edge.read.lsb + range.lsb.max(edge.target.lsb)
+                                        - edge.target.lsb,
+                                    edge.read.lsb + range.msb.min(edge.target.msb)
+                                        - edge.target.lsb,
+                                )
+                            } else {
+                                edge.read
+                            };
+                            pending.push((edge.source, read, crossed || edge.port));
+                        }
+                    }
                 }
-                if crossed_port && pulsed.contains(&signal) {
-                    return Err(ParserError::unsupported(
-                        sv::SV_FRONTEND_TRACKING_ISSUE,
-                        LoweringPhase::SimulatorParser,
-                        "cross-instance event dependency with multiple blocking writes",
-                        format!(
-                            "{} watches a pulse from {}.{} through instance ports",
-                            module.sim_module.name,
-                            modules[&signal.0].sim_module.name,
-                            modules[&signal.0].variables[&signal.1].path.join(".")
-                        ),
-                        None,
-                    ));
-                }
-                if let Some(sources) = dependencies.get(&signal) {
-                    pending.extend(
-                        sources
-                            .iter()
-                            .map(|&(source, port)| (source, crossed_port || port)),
+                for (source_id, mut accesses) in cross {
+                    accesses.sort_unstable();
+                    accesses.dedup();
+                    let source = &modules[&source_id];
+                    let mut variables = source.variables.clone();
+                    let mut names = source.signal_names.clone();
+                    let pm = procedural::ProcModule::new(
+                        &source.source,
+                        &mut variables,
+                        &mut names,
+                        &source.constants,
+                        &source.parameter_types,
+                        four_state,
                     );
+                    let query = sv::ir::Expr::Concat(
+                        accesses
+                            .iter()
+                            .map(|&(id, access)| event_access_expr(id, access, &source.variables))
+                            .collect(),
+                    );
+                    let active = |condition| {
+                        condition_is_active(condition, &source.constants, &source.parameter_types)
+                    };
+                    let bodies = source
+                        .source
+                        .initial_processes()
+                        .iter()
+                        .filter(|p| active(p.condition()))
+                        .map(|p| p.body())
+                        .chain(source.source.ff_processes().iter().map(|p| p.body()))
+                        .chain(
+                            source
+                                .source
+                                .comb_processes()
+                                .iter()
+                                .filter(|p| active(p.condition()))
+                                .map(|p| p.body()),
+                        );
+                    let writes = bodies
+                        .map(|body| {
+                            ff::watched_write_count(
+                                body,
+                                &pm,
+                                &query,
+                                &mut HashSet::default(),
+                                false,
+                            )
+                        })
+                        .sum::<usize>();
+                    if writes > 1 {
+                        return Err(ParserError::unsupported(
+                            sv::SV_FRONTEND_TRACKING_ISSUE,
+                            LoweringPhase::SimulatorParser,
+                            "cross-instance event dependency with multiple blocking writes",
+                            format!(
+                                "{} watches multiple writes from {} through instance ports",
+                                module.sim_module.name, source.sim_module.name
+                            ),
+                            None,
+                        ));
+                    }
                 }
             }
         }

@@ -3172,7 +3172,7 @@ fn watched_nba_count(
     watched_write_count(stmts, pm, expr, visiting, true)
 }
 
-fn watched_write_count(
+pub(super) fn watched_write_count(
     stmts: &[sv::ir::Stmt],
     pm: &ProcModule<'_>,
     expr: &sv::ir::Expr,
@@ -3182,35 +3182,40 @@ fn watched_write_count(
     let mut names = HashSet::default();
     expr_idents(expr, &mut names);
     subroutine_reads(pm, expr, &mut names);
+    let accesses = super::event_read_accesses(
+        expr,
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+    );
     let affects = |target: &sv::ir::LValue| {
         if !names.contains(target.name()) {
             return false;
         }
-        // A fixed select depends only on the selected bits, so updates of
-        // disjoint bits do not need an ordered queue for this watcher.
-        if let sv::ir::Expr::Select {
-            expr: base,
-            msb,
-            lsb,
-            ..
-        } = expr
-            && matches!(&**base,sv::ir::Expr::Ident(name) if name==target.name())
-            && let sv::ir::LValue::Select {
-                msb: written_msb,
-                lsb: written_lsb,
-                ..
-            } = target
-        {
-            let eval = |value| {
-                sv::typecheck::eval_const_expr_with_types(value, pm.constants, pm.parameter_types)
-            };
-            if let (Some(a), Some(b), Some(c), Some(d)) =
-                (eval(msb), eval(lsb), eval(written_msb), eval(written_lsb))
-            {
-                return a.min(b) <= c.max(d) && c.min(d) <= a.max(b);
-            }
-        }
-        true
+        let Some(id) = pm.id(target.name()) else {
+            return true;
+        };
+        let reads = accesses
+            .iter()
+            .filter(|(read, _)| *read == id)
+            .map(|(_, access)| *access)
+            .collect::<Vec<_>>();
+        if reads.is_empty() {
+            return true;
+        } // implicit function-global reads
+        let Some((low, high)) = super::net_lvalue_range(target, pm.constants, pm.parameter_types)
+        else {
+            return true;
+        };
+        let Some(a) = super::packed_index_offset(&pm.variables[&id], low) else {
+            return true;
+        };
+        let Some(b) = super::packed_index_offset(&pm.variables[&id], high) else {
+            return true;
+        };
+        let written = BitAccess::new(a.min(b), a.max(b));
+        reads.iter().any(|read| read.overlaps(&written))
     };
     let mut total = 0usize;
     for stmt in stmts {

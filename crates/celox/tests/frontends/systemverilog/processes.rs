@@ -2102,3 +2102,44 @@ fn cross_instance_hidden_pulses_are_diagnosed() {
         assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
     }
 }
+
+#[test]
+fn cross_instance_split_drivers_cannot_hide_expression_pulses() {
+    let source = r#"module Child(input bit[1:0]q,output bit seen);
+      initial begin @(posedge(q[0]^q[1]));seen=1;end endmodule
+      module Top(input bit a,output bit seen);wire[1:0]q;
+      assign q[0]=a;assign q[1]=a;Child u(.q(q),.seen(seen));endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}
+
+#[test]
+fn cross_instance_disjoint_writes_do_not_poison_selected_waiters() {
+    for (range, actual, written, observed) in [
+        ("[1:0]", "q", 1, 0),
+        ("[5:4]", "q", 5, 4),
+        ("[0:1]", "q", 0, 1),
+        ("[2:0]", "q[2:1]", 2, 1),
+        ("[1:0]", "{q[1],q[0]}", 1, 0),
+        ("[1:0]", "{q[0],q[1]}", 0, 1),
+    ] {
+        let source = format!(
+            r#"module Child(input bit[1:0]q,output bit seen);
+          initial begin @(posedge q[0]);seen=1;end endmodule
+          module Top(output bit seen);bit{range}q;Child u(.q({actual}),.seen(seen));
+          initial begin #1;q[{written}]=1;q[{written}]=0;#1;q[{observed}]=1;end endmodule"#
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into(), "{range} {actual}");
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{range} {actual}");
+        let overlapping = source.replace(&format!("q[{written}]="), &format!("q[{observed}]="));
+        assert!(
+            build_error(&overlapping)
+                .contains("cross-instance event dependency with multiple blocking writes")
+        );
+    }
+}
