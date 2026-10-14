@@ -409,6 +409,8 @@ pub struct NativeProgramImage {
     comb_unit_offsets: Vec<usize>,
     /// Entry offset of each process kernel.
     process_offsets: Vec<usize>,
+    /// Clock-control addresses and byte offsets used to compile each process kernel.
+    compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
     required_native_features: u8,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -557,6 +559,19 @@ impl NativeProgramImage {
         }
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if self.compiled_process_clocks.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_clocks
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|((address, offset), process)| {
+                    process.clock != *address || self.layout.offsets.get(address) != Some(offset)
+                })
+        {
+            return Err(
+                "process clock control slots disagree with compiled kernel bindings".into(),
+            );
         }
         let mut process_clock_periods = fxhash::FxHashMap::default();
         for process in &self.runtime_schema.processes {
@@ -2316,6 +2331,13 @@ fn compile_program(
             comb_offset,
             comb_unit_offsets,
             process_offsets,
+            compiled_process_clocks: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| (process.clock, layout.offsets[&process.clock]))
+                .collect(),
             required_native_features,
             event_map,
             eval_only_event_map,
@@ -3404,6 +3426,9 @@ mod process_metadata_tests {
         let mut module = ModuleBuilder::new("Top").unwrap();
         let clk = module.internal("clk", bit).unwrap();
         let q = module.output("q", bit).unwrap();
+        module
+            .output("unrelated", ValueType::bits(32).unwrap())
+            .unwrap();
         let one = module.constant(Constant::two_state(1u8, 1).unwrap());
         let target = module.whole(q).unwrap();
         module
@@ -3426,6 +3451,48 @@ mod process_metadata_tests {
             .compile_native()
             .unwrap()
             .into_program_image()
+    }
+
+    #[test]
+    fn process_clock_control_cannot_name_an_unrelated_register() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        let clock = original.runtime_schema.processes[0].clock;
+        let unrelated = *original
+            .design
+            .state_objects
+            .iter()
+            .find(|(addr, metadata)| {
+                **addr != clock
+                    && metadata.width == celox_design::PROCESS_CLOCK_WIDTH
+                    && !original
+                        .runtime_schema
+                        .processes
+                        .iter()
+                        .any(|p| [p.resume, p.status, p.delay, p.clock].contains(addr))
+            })
+            .unwrap()
+            .0;
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clock = unrelated;
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
+    }
+
+    #[test]
+    fn process_clock_control_layout_matches_the_compiled_kernel() {
+        let mut broken = image();
+        let process = &broken.runtime_schema.processes[0];
+        broken
+            .layout
+            .offsets
+            .insert(process.clock, broken.layout.offsets[&process.resume]);
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
     }
 
     #[test]
