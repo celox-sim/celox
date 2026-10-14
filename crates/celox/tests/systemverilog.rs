@@ -245,3 +245,13 @@ sv_backends! {
  fn staged_ff_edge_can_finish_without_scheduled_work(sim) { @case "timing::staged_ff_edge_can_finish_without_scheduled_work"; }
  fn coalesced_setup_writes_do_not_invent_ff_edges(sim) { @case "timing::coalesced_setup_writes_do_not_invent_ff_edges"; }
 }
+
+sv_backends! {
+ fn computed_edge_always_processes_arm_after_setup(sim) { @case "timing::computed_edge_always_processes_arm_after_setup"; }
+ fn non_ff_multiple_edge_always_processes_arm_after_setup(sim) { @case "timing::non_ff_multiple_edge_always_processes_arm_after_setup"; }
+}
+
+sv_backends! {
+ fn timed_calls_after_forever_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_forever_do_not_replay_setup_edges"; }
+ fn parenthesized_ff_event_leaves_preserve_setup_edges(sim) { @case "timing::parenthesized_ff_event_leaves_preserve_setup_edges"; }
+}

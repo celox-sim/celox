@@ -106,6 +106,7 @@ pub(crate) struct LoweredSvModule {
     pub instances: Vec<LoweredSvInstance>,
     /// Variables that denote a package variable, with its package and name.
     package_variables: Vec<(SourceVarId, String, String)>,
+    event_dependencies: HashSet<SourceVarId>,
 }
 
 #[derive(Clone)]
@@ -1278,6 +1279,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             parameter_types: HashMap::default(),
             instances: Vec::new(),
             package_variables: Vec::new(),
+            event_dependencies: HashSet::default(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -2082,6 +2084,9 @@ fn lower_module_with_overrides(
         let bodies = module
             .initial_processes()
             .iter()
+            .filter(|process| {
+                condition_is_active(process.condition(), &constants, &parameter_types)
+            })
             .map(|process| process.body())
             .collect::<Vec<_>>();
         ff::declare_event_counters(&mut pm, &bodies, &package_aliases)?;
@@ -2099,6 +2104,11 @@ fn lower_module_with_overrides(
             ),
         )
     };
+    let event_dependencies = event_watch_plan
+        .0
+        .iter()
+        .flat_map(|watcher| watcher.dependencies.iter().copied())
+        .collect();
     mark_ff_event_domains(module, &mut variables, &name_to_id);
     let (initial_values, processes, process_event_counters) = lower_initial_processes(
         module,
@@ -2219,6 +2229,7 @@ fn lower_module_with_overrides(
         parameter_types,
         instances,
         package_variables,
+        event_dependencies,
     })
 }
 
@@ -2493,6 +2504,196 @@ fn array_element_connections(
         .collect()
 }
 
+/// Cross-instance pulse counters are not shared through ordinary port glue.
+/// Reject only dependencies whose procedural source can hide an intermediate
+/// blocking write; single writes and scheduled updates still settle normally.
+fn validate_cross_instance_event_pulses(
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+    four_state: bool,
+) -> Result<(), ParserError> {
+    if modules
+        .values()
+        .all(|module| module.event_dependencies.is_empty())
+    {
+        return Ok(());
+    }
+    type Signal = (ModuleId, SourceVarId);
+    let mut dependencies: HashMap<Signal, Vec<(Signal, bool)>> = HashMap::default();
+    let mut pulsed = HashSet::default();
+    for (&id, module) in modules {
+        let mut variables = module.variables.clone();
+        let mut names = module.signal_names.clone();
+        let pm = procedural::ProcModule::new(
+            &module.source,
+            &mut variables,
+            &mut names,
+            &module.constants,
+            &module.parameter_types,
+            four_state,
+        );
+        let count = |body: &[sv::ir::Stmt]| {
+            procedural::procedural_write_counts(
+                body,
+                &pm.subroutines,
+                &|expr| {
+                    procedural::known_loop_value(
+                        expr,
+                        pm.variables,
+                        pm.name_to_id,
+                        pm.constants,
+                        pm.parameter_types,
+                    )
+                },
+                &|expr| {
+                    procedural::expr_is_two_state(
+                        expr,
+                        pm.variables,
+                        pm.name_to_id,
+                        &pm.subroutines,
+                    )
+                },
+                false,
+            )
+        };
+        let active =
+            |condition| condition_is_active(condition, &module.constants, &module.parameter_types);
+        let bodies = module
+            .source
+            .initial_processes()
+            .iter()
+            .filter(|p| active(p.condition()))
+            .map(|p| p.body())
+            .chain(module.source.ff_processes().iter().map(|p| p.body()))
+            .chain(
+                module
+                    .source
+                    .comb_processes()
+                    .iter()
+                    .filter(|p| active(p.condition()))
+                    .map(|p| p.body()),
+            );
+        for body in bodies {
+            for (name, writes) in count(body) {
+                if writes > 1
+                    && let Some(signal) = module.signal_names.get(&name)
+                {
+                    pulsed.insert((id, *signal));
+                }
+            }
+        }
+        for process in module
+            .source
+            .comb_processes()
+            .iter()
+            .filter(|p| active(p.condition()))
+        {
+            let mut reads = HashSet::default();
+            let mut pending = vec![process.body()];
+            let mut visited = HashSet::default();
+            while let Some(body) = pending.pop() {
+                for stmt in body {
+                    stmt.walk(&mut |stmt| {
+                        procedural::stmt_reads(stmt, &mut reads);
+                        let mut calls = Vec::new();
+                        procedural::stmt_calls(stmt, &mut calls);
+                        for (name, _) in calls {
+                            if visited.insert(name.clone())
+                                && let Some(function) = pm.subroutines.get(&name)
+                            {
+                                pending.push(&function.body);
+                            }
+                        }
+                    });
+                }
+            }
+            for name in count(process.body()).keys() {
+                if let Some(&target) = module.signal_names.get(name) {
+                    dependencies
+                        .entry((id, target))
+                        .or_default()
+                        .extend(reads.iter().filter_map(|name| {
+                            module
+                                .signal_names
+                                .get(name)
+                                .map(|&source| ((id, source), false))
+                        }));
+                }
+            }
+        }
+        for instance in &module.instances {
+            let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
+            else {
+                continue;
+            };
+            let Some(child) = modules.get(&child_id) else {
+                continue;
+            };
+            for connection in &instance.port_connections {
+                let Some(&formal) = child.signal_names.get(&connection.formal) else {
+                    continue;
+                };
+                let mut actuals = HashSet::default();
+                if let Some(expr) = &connection.actual_expr {
+                    procedural::expr_idents(expr, &mut actuals);
+                } else {
+                    actuals.insert(connection.actual.clone());
+                }
+                for actual in actuals
+                    .iter()
+                    .filter_map(|name| module.signal_names.get(name))
+                    .copied()
+                {
+                    match child.variables[&formal].kind {
+                        VariableKind::Input => dependencies
+                            .entry((child_id, formal))
+                            .or_default()
+                            .push(((id, actual), true)),
+                        VariableKind::Output => dependencies
+                            .entry((id, actual))
+                            .or_default()
+                            .push(((child_id, formal), true)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    for (&id, module) in modules {
+        for &watched in &module.event_dependencies {
+            let mut pending = vec![((id, watched), false)];
+            let mut visited = HashSet::default();
+            while let Some((signal, crossed_port)) = pending.pop() {
+                if !visited.insert((signal, crossed_port)) {
+                    continue;
+                }
+                if crossed_port && pulsed.contains(&signal) {
+                    return Err(ParserError::unsupported(
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
+                        LoweringPhase::SimulatorParser,
+                        "cross-instance event dependency with multiple blocking writes",
+                        format!(
+                            "{} watches a pulse from {}.{} through instance ports",
+                            module.sim_module.name,
+                            modules[&signal.0].sim_module.name,
+                            modules[&signal.0].variables[&signal.1].path.join(".")
+                        ),
+                        None,
+                    ));
+                }
+                if let Some(sources) = dependencies.get(&signal) {
+                    pending.extend(
+                        sources
+                            .iter()
+                            .map(|&(source, port)| (source, crossed_port || port)),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn attach_instance_glue(
     module: &mut SimModule,
     lowered: &LoweredSvModule,
@@ -2501,6 +2702,7 @@ pub(crate) fn attach_instance_glue(
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
 ) -> Result<(), ParserError> {
+    validate_cross_instance_event_pulses(module_ids, lowered_modules, four_state)?;
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
     let mut implicit_output_signals = HashSet::default();

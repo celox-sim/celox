@@ -2884,17 +2884,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             .copied()
             .map(|(id, access)| VarAtomBase::new(id, access.lsb, access.msb))
             .collect::<Vec<_>>();
-        for target in &nonblocking_targets {
-            let watchers = self
-                .m
-                .watchers_by_var
-                .get(&target.id)
-                .cloned()
-                .unwrap_or_default();
-            let previous = self.snapshot_watchers(&watchers)?;
-            emit_ff_commits(&mut self.b, std::slice::from_ref(target));
-            self.count_watchers(&watchers, previous)?;
-        }
+        // Supported watched NBA expressions see one atomic publication.
+        // Multiple distinct updates affecting an expression are rejected above.
+        let mut watchers = nonblocking_targets
+            .iter()
+            .flat_map(|target| {
+                self.m
+                    .watchers_by_var
+                    .get(&target.id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        watchers.sort_unstable();
+        watchers.dedup();
+        let previous = self.snapshot_watchers(&watchers)?;
+        emit_ff_commits(&mut self.b, &nonblocking_targets);
+        self.count_watchers(&watchers, previous)?;
         let zero = self.b.alloc_bit(1, false);
         self.b
             .emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
@@ -3263,47 +3270,67 @@ fn watched_write_count(
             }
             _ => 0,
         };
-        let before_calls = count;
-        let mut calls = Vec::new();
-        stmt_calls(stmt, &mut calls);
-        for (name, args) in calls {
-            if visiting.insert(name.clone()) {
-                if let Some(subroutine) = pm.subroutine(&name) {
-                    count += watched_write_count(&subroutine.body, pm, expr, visiting, nonblocking);
-                    if !nonblocking {
-                        for (param, arg) in subroutine.params.iter().zip(&args) {
-                            if param.direction.is_written() {
-                                count += arg
-                                    .as_ref()
-                                    .and_then(lvalue_from_expr)
-                                    .into_iter()
-                                    .flatten()
-                                    .filter(|target| affects(target))
-                                    .count();
+        let effects = stmt_call_effects(
+            stmt,
+            &|condition| {
+                known_loop_value(
+                    condition,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                )
+            },
+            &|condition| expr_is_two_state(condition, pm.variables, pm.name_to_id, &pm.subroutines),
+        );
+        let call_count = effects.fold(
+            &mut |name, args| {
+                let mut count = 0usize;
+                if visiting.insert(name.to_string()) {
+                    if let Some(subroutine) = pm.subroutine(name) {
+                        count +=
+                            watched_write_count(&subroutine.body, pm, expr, visiting, nonblocking);
+                        if !nonblocking {
+                            for (param, arg) in subroutine.params.iter().zip(args) {
+                                if param.direction.is_written() {
+                                    count += arg
+                                        .as_ref()
+                                        .and_then(lvalue_from_expr)
+                                        .into_iter()
+                                        .flatten()
+                                        .filter(|target| affects(target))
+                                        .count();
+                                }
                             }
                         }
+                        let mut defaults = Vec::new();
+                        default_calls(subroutine, args, &mut defaults);
+                        for (name, args) in defaults {
+                            count += watched_write_count(
+                                &[sv::ir::Stmt::Call {
+                                    name,
+                                    args,
+                                    arg_order: Vec::new(),
+                                }],
+                                pm,
+                                expr,
+                                visiting,
+                                nonblocking,
+                            );
+                        }
                     }
-                    let mut defaults = Vec::new();
-                    default_calls(subroutine, &args, &mut defaults);
-                    for (name, args) in defaults {
-                        count += watched_write_count(
-                            &[sv::ir::Stmt::Call {
-                                name,
-                                args,
-                                arg_order: Vec::new(),
-                            }],
-                            pm,
-                            expr,
-                            visiting,
-                            nonblocking,
-                        );
-                    }
+                    visiting.remove(name);
                 }
-                visiting.remove(&name);
-            }
-        }
-        count = before_calls + (count - before_calls) * call_evaluations;
+                count.min(2)
+            },
+            &|a: usize, b: usize| (a + b).min(2),
+            &usize::max,
+        );
+        count += call_count * call_evaluations;
         total = (total + count).min(2);
+        if !stmt_may_fall_through(stmt) {
+            break;
+        }
     }
     total
 }
