@@ -4989,7 +4989,12 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_interpreter().unwrap()));
         check(Simulation::new(build().build_cranelift().unwrap()));
         check(Simulation::new(build().build_wasm().unwrap()));
-        #[cfg(test)]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
 mod host_clock_activation_review {
     use super::*;
     use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
