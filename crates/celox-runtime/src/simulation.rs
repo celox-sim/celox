@@ -1072,7 +1072,8 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         self.sample_waiting_events(executor)?;
-        let result = self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false);
+        let ready = self.take_ready_processes(time);
+        let result = self.step_round(executor, time, Vec::new(), Vec::new(), ready, false);
         let progressed = result.as_ref().is_ok_and(|ran| *ran);
         self.finish_clock_round(time, Vec::new(), &[], result)?;
         if !progressed {
@@ -1475,12 +1476,14 @@ impl<B: SimBackend> SimulationState<B> {
         // to existing source events before any coincident FF domain commits.
         // With no other event, retain the later fused-tick path.
         if !self.finished
-            && (!events_to_process.is_empty()
+            && (!scheduled_edges.is_empty()
+                || !events_to_process.is_empty()
                 || !process_driven.is_empty()
                 || !generated_events.is_empty())
         {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
+                    && clock.falling_edge != Some(current_time)
                     && self.clock_has_waiters(*id)
                     && sample_event_signal(executor.backend(), clock.signal) != (true, false)
                     && !events_to_process

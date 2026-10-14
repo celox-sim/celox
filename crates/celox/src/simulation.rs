@@ -4989,3 +4989,57 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_native().unwrap()));
     }
 }
+
+#[cfg(test)]
+mod host_clock_activation_review {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let host = m.input("host", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let source = m.output("source", bit).unwrap();
+        let sampled = m.output("sampled", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(source).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let old = m.read(source).unwrap();
+        let target = m.whole(sampled).unwrap();
+        m.register(target, old, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let host = sim.signal("host");
+        sim.modify(|io| io.set(host, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("source")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn captured_host_edges_share_pre_edge_state_with_first_clock_wait() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
