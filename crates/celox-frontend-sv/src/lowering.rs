@@ -3060,7 +3060,10 @@ fn validate_cross_instance_event_pulses(
             let kind = variable.domain_kind;
             if matches!(
                 kind,
-                celox_design::DomainKind::ClockPosedge | celox_design::DomainKind::ClockNegedge
+                celox_design::DomainKind::ClockPosedge
+                    | celox_design::DomainKind::ClockNegedge
+                    | celox_design::DomainKind::ResetAsyncHigh
+                    | celox_design::DomainKind::ResetAsyncLow
             ) {
                 let source = alias_root(&alias_parents, (id, signal));
                 if let Some(previous) = alias_polarities.insert(source, kind)
@@ -3069,8 +3072,16 @@ fn validate_cross_instance_event_pulses(
                     return Err(ParserError::unsupported(
                         sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
-                        "mixed clock-edge polarities through aliases",
-                        "posedge and negedge FF clocks share one canonical clock signal",
+                        if matches!(
+                            previous,
+                            DomainKind::ClockPosedge | DomainKind::ClockNegedge
+                        ) && matches!(kind, DomainKind::ClockPosedge | DomainKind::ClockNegedge)
+                        {
+                            "mixed clock-edge polarities through aliases"
+                        } else {
+                            "mixed clock/reset-edge polarities through aliases"
+                        },
+                        "incompatible FF clock/reset domains share one canonical signal",
                         None,
                     ));
                 }
