@@ -447,6 +447,19 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.signal(path)
     }
 
+    fn record_escaped_host_clock_writes(&mut self) {
+        if self.simulator.escaped_mutable_memory {
+            for signal in self
+                .state
+                .escaped_host_clock_writes(&self.simulator.backend)
+            {
+                if !self.simulator.pending_host_writes.contains(&signal) {
+                    self.simulator.pending_host_writes.push(signal);
+                }
+            }
+        }
+    }
+
     fn synchronize_runtime_finish(&mut self, was_dirty: bool) {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
@@ -460,6 +473,7 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get(signal)
@@ -475,6 +489,7 @@ impl<B: SimBackend> Simulation<B> {
         &mut self,
         signal: SignalRef,
     ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get_four_state(signal)
@@ -644,6 +659,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_finished() {
             return Ok(());
         }
+        self.record_escaped_host_clock_writes();
         let writes = self.simulator.take_host_writes();
         for &signal in &writes {
             if let Err(error) = self.state.validate_host_write(signal) {
@@ -773,6 +789,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let events = if self.state.is_finished() {
             self.simulator.drain_runtime_events_without_evaluation()
@@ -790,6 +807,10 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.record_escaped_host_clock_writes();
+        for &signal in &self.simulator.pending_host_writes {
+            self.state.validate_host_write(signal)?;
+        }
         self.simulator.eval_comb()?;
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
@@ -3002,6 +3023,47 @@ mod host_clock_review_tests {
         settle(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         settle(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn retained_memory_cannot_inject_generated_clock_edges() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, explicit: bool) {
+            let clk = sim.signal("clk");
+            let (ptr, len) = sim.memory_as_mut_ptr();
+            assert!(clk.offset < len);
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.ticks(), 1);
+            unsafe {
+                ptr.add(clk.offset).write(1);
+            }
+            let result = if explicit {
+                sim.eval_comb()
+            } else {
+                sim.run_until(2)
+            };
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("direct host write")
+            );
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.time(), 1);
+            assert_eq!(sim.simulator.backend.get(sim.signal("q")), 1u8.into());
+        }
+        for explicit in [false, true] {
+            let build = || Simulator::from_frontend(design());
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                explicit,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                explicit,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), explicit);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), explicit);
+        }
     }
     #[test]
     fn direct_host_clock_writes_are_rejected_before_activation() {

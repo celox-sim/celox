@@ -411,6 +411,8 @@ pub struct NativeProgramImage {
     process_offsets: Vec<usize>,
     /// Clock-control addresses and byte offsets used to compile each process kernel.
     compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
+    compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
+    compiled_clock_phase_sensitive_comb: bool,
     required_native_features: u8,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -625,6 +627,20 @@ impl NativeProgramImage {
                     return Err("process clocks for one event have conflicting periods".into());
                 }
             }
+        }
+        if self.compiled_process_clock_lists.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_clock_lists
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| compiled != &process.clocks)
+        {
+            return Err("process clock lists disagree with compiled kernel indices".into());
+        }
+        if self.compiled_clock_phase_sensitive_comb
+            != self.runtime_schema.clock_phase_sensitive_comb
+        {
+            return Err("clock phase sensitivity disagrees with compiled kernels".into());
         }
         for counters in &self.runtime_schema.process_event_counters {
             if !self.event_map.contains_key(&counters.signal) {
@@ -2338,6 +2354,17 @@ fn compile_program(
                 .iter()
                 .map(|process| (process.clock, layout.offsets[&process.clock]))
                 .collect(),
+            compiled_process_clock_lists: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| process.clocks.clone())
+                .collect(),
+            compiled_clock_phase_sensitive_comb: sir
+                .runtime()
+                .runtime_schema
+                .clock_phase_sensitive_comb,
             required_native_features,
             event_map,
             eval_only_event_map,
@@ -3425,6 +3452,7 @@ mod process_metadata_tests {
         let bit = ValueType::bits(1).unwrap();
         let mut module = ModuleBuilder::new("Top").unwrap();
         let clk = module.internal("clk", bit).unwrap();
+        let clk2 = module.internal("clk2", bit).unwrap();
         let q = module.output("q", bit).unwrap();
         module
             .output("unrelated", ValueType::bits(32).unwrap())
@@ -3434,12 +3462,24 @@ mod process_metadata_tests {
         module
             .register(target, one, clk, Edge::Posedge, None, None)
             .unwrap();
+        let q2 = module.output("q2", bit).unwrap();
+        let target2 = module.whole(q2).unwrap();
+        module
+            .register(target2, one, clk2, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk2, 4).unwrap();
         module.clock_period(clk, 2).unwrap();
         module
-            .process(vec![Statement::ClockCycles {
-                clock: clk,
-                count: one,
-            }])
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: one,
+                },
+                Statement::ClockCycles {
+                    clock: clk2,
+                    count: one,
+                },
+            ])
             .unwrap();
         module
             .process(vec![Statement::ClockCycles {
@@ -3453,6 +3493,26 @@ mod process_metadata_tests {
             .into_program_image()
     }
 
+    #[test]
+    fn process_clock_lists_match_the_compiled_indices() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        assert_eq!(original.runtime_schema.processes[0].clocks.len(), 2);
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clocks.swap(0, 1);
+        assert!(broken.to_container_bytes().is_err());
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clocks[0] =
+            original.runtime_schema.processes[0].clocks[1];
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn clock_phase_sensitivity_matches_compilation() {
+        let mut broken = image();
+        broken.runtime_schema.clock_phase_sensitive_comb =
+            !broken.runtime_schema.clock_phase_sensitive_comb;
+        assert!(broken.to_container_bytes().is_err());
+    }
     #[test]
     fn process_clock_control_cannot_name_an_unrelated_register() {
         let original = image();

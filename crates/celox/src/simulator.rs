@@ -102,6 +102,7 @@ mod host {
         pub(crate) dirty: bool,
         pub(crate) pending_host_writes: Vec<SignalRef>,
         host_clock_signals: Vec<SignalRef>,
+        pub(crate) escaped_mutable_memory: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
@@ -705,6 +706,7 @@ mod host {
                 vcd_writer: None,
                 dirty: false,
                 pending_host_writes: Vec::new(),
+                escaped_mutable_memory: false,
                 warnings,
                 components: Default::default(),
                 component_simulation: None,
@@ -1629,6 +1631,7 @@ mod host {
 
         /// Returns a mutable raw pointer to the backend memory and its total size in bytes.
         pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
+            self.escaped_mutable_memory = true;
             self.backend.memory_as_mut_ptr()
         }
 
