@@ -433,7 +433,11 @@ function defineSignalProperty(
 		get(): bigint {
 			if (state.disposed) throw new Error("Simulator has been disposed");
 			// Output reads: lazy evalComb if dirty
-			if (state.dirty && !isInput) {
+			if (
+				state.dirty &&
+				!isInput &&
+				!("isFinished" in handle && handle.isFinished?.())
+			) {
 				handle.evalComb();
 				state.dirty = false;
 			}
@@ -818,7 +822,11 @@ function createArrayDut(
 		at(index: number): bigint {
 			if (state.disposed) throw new Error("Simulator has been disposed");
 			assertArrayIndex(index, totalElements);
-			if (state.dirty && !isInput) {
+			if (
+				state.dirty &&
+				!isInput &&
+				!("isFinished" in handle && handle.isFinished?.())
+			) {
 				handle.evalComb();
 				state.dirty = false;
 			}

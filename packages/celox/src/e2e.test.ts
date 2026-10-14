@@ -3946,3 +3946,36 @@ test("finished simulation checkpoints preserve unsettled output until explicit e
 		raw.dispose();
 	}
 });
+
+test("DUT lazy reads preserve finished outputs until explicit evalComb", () => {
+	const artifact = JSON.parse(FRONTEND_FINISH_ARTIFACT);
+	artifact.signals[0].direction = "Input";
+	artifact.signals.push({
+		...artifact.signals[0],
+		id: 1,
+		name: "derived",
+		direction: "Output",
+	});
+	artifact.port_order.push(1);
+	artifact.expressions.push({
+		id: 2,
+		node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+		value_type: { width: 8, signed: false, four_state: false },
+	});
+	artifact.assignments = [
+		{ target: { signal: 1, lsb: 0, width: 8 }, value: 2 },
+	];
+	artifact.processes[0].body = ["Finish"];
+	const sim = Simulation.fromFrontendArtifact<{
+		y: bigint;
+		readonly derived: bigint;
+	}>(JSON.stringify(artifact));
+	try {
+		sim.runUntil(0);
+		expect(sim.isFinished()).toBe(true);
+		sim.dut.y = 7n;
+		expect(sim.dut.derived).toBe(0n);
+	} finally {
+		sim.dispose();
+	}
+});

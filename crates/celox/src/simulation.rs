@@ -606,6 +606,9 @@ impl<B: SimBackend> Simulation<B> {
                 .is_some_and(|next| next <= time)
         {
             self.settle_host_writes()?;
+            if self.state.is_finished() {
+                return Ok(());
+            }
             let mut drained = false;
             while self
                 .state
@@ -779,6 +782,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
         }
+        self.state.sample_waiting_events(&mut self.simulator)?;
         Ok(())
     }
 
@@ -4431,5 +4435,67 @@ mod additional_host_edge_reviews {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), op);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_queued_settle_review {
+    use super::*;
+    #[test]
+    fn host_finish_prevents_a_queued_current_time_edge() {
+        let source = "module Top(input bit go,clk,output bit q);always @(posedge clk)q<=1;always_comb if(go)$finish;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.schedule("clk", 0, 1).unwrap();
+            sim.set_wide(go, 1u8.into());
+            sim.settle().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(q), 0u8.into());
+            assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("queued-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod lazy_event_pulse_review {
+    use super::*;
+    #[test]
+    fn lazy_settles_retain_host_event_pulses() {
+        let source = "module Top(input bit go,output bit y,woke);assign y=go;initial begin @(posedge go);woke=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let y = sim.signal("y");
+            let woke = sim.signal("woke");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(y), 1u8.into());
+            assert_eq!(sim.get(woke), 0u8.into());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(woke), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("lazy-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
