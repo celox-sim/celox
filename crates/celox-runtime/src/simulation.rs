@@ -1157,7 +1157,9 @@ impl<B: SimBackend> SimulationState<B> {
                             };
                             self.waiting.remove(&process);
                             if count == 0 {
-                                // A zero-count wait does not yield to another process.
+                                // A zero-count wait does not yield to another process,
+                                // but repeated immediate continuations must be bounded.
+                                count_delta_pass(delta_rounds)?;
                                 continue;
                             } else {
                                 let id = clock.event.id();

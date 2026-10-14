@@ -1229,3 +1229,22 @@ fn newly_started_process_clocks_share_scheduled_domains_pre_edge_state() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(Simulation::from_frontend(design()).build_native().unwrap());
 }
+
+#[test]
+fn repeating_zero_count_clock_waits_report_non_progress() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let zero = constant(&mut module, 0, 64);
+    module
+        .process(vec![Statement::Forever {
+            body: vec![Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            }],
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let error = sim.step().unwrap_err().to_string();
+    assert!(error.contains("delta limit"), "{error}");
+    assert_eq!(sim.time(), 0);
+    assert_eq!(sim.ticks(), 0);
+}
