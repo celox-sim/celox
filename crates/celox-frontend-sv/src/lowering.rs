@@ -3023,7 +3023,7 @@ fn validate_cross_instance_event_pulses(
             }
         }
     }
-    // Whole scalar port connections share storage after elaboration. Keep
+    // Whole scalar linear aliases share a clock domain after elaboration. Keep
     // the existing mixed-polarity limitation consistent across those aliases.
     fn alias_root(parents: &HashMap<Signal, Signal>, mut signal: Signal) -> Signal {
         while let Some(&parent) = parents.get(&signal) {
@@ -3037,15 +3037,14 @@ fn validate_cross_instance_event_pulses(
         for edge in edges {
             let lhs = variable(target);
             let rhs = variable(edge.source);
-            if edge.port
-                && edge.linear
+            if edge.linear
                 && edge.target == BitAccess::new(0, 0)
                 && edge.read == BitAccess::new(0, 0)
                 && lhs.width == 1
                 && rhs.width == 1
                 && lhs.array_dims.is_empty()
                 && rhs.array_dims.is_empty()
-                && lhs.is_4state == rhs.is_4state
+                && (!edge.port || lhs.is_4state == rhs.is_4state)
             {
                 let target = alias_root(&alias_parents, target);
                 let source = alias_root(&alias_parents, edge.source);
@@ -3071,7 +3070,7 @@ fn validate_cross_instance_event_pulses(
                         sv::SV_FRONTEND_TRACKING_ISSUE,
                         LoweringPhase::SimulatorParser,
                         "mixed clock-edge polarities through aliases",
-                        "posedge and negedge FF clocks share one physical port signal",
+                        "posedge and negedge FF clocks share one canonical clock signal",
                         None,
                     ));
                 }
