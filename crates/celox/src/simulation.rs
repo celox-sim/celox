@@ -4210,3 +4210,27 @@ mod lazy_finish_settle_review {
         check(Simulation::new(build().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod post_nba_retrigger_review_tests {
+    use super::*;
+    #[test]
+    fn nba_woken_processes_retrigger_the_same_ff_domain() {
+        let source = "module Top(output bit[7:0]q);bit clk;always @(posedge clk)q<=q+1;initial begin clk=1;wait(q==1);clk=0;clk=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("nba-retrigger.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}

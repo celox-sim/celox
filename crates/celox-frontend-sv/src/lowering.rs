@@ -2811,123 +2811,126 @@ fn validate_cross_instance_event_pulses(
         for process in module.source.comb_processes().iter().filter(|p| {
             condition_is_active(p.condition(), &module.constants, &module.parameter_types)
         }) {
-            if let [sv::ir::Stmt::Assign { lhs, rhs, .. }] = process.body() {
-                let lhs = match lhs {
-                    sv::ir::LValue::Ident(name) => sv::ir::Expr::Ident(name.clone()),
-                    sv::ir::LValue::Select { name, msb, lsb, .. } => sv::ir::Expr::Select {
-                        expr: Box::new(sv::ir::Expr::Ident(name.clone())),
-                        msb: msb.clone(),
-                        lsb: lsb.clone(),
-                        signed: false,
-                    },
-                };
-                if let Some((target, target_bits)) = access(&lhs) {
-                    // Direct concatenated wiring preserves each piece's range,
-                    // just like concatenated instance port connections.
-                    if let Some(pieces) = output_lvalue_accesses(
-                        rhs,
-                        &module.variables,
-                        &module.signal_names,
-                        &module.constants,
-                        &module.parameter_types,
-                    ) && pieces
-                        .iter()
-                        .map(|piece| width(piece.access))
-                        .sum::<usize>()
-                        == width(target_bits)
-                    {
-                        let mut offset = target_bits.lsb;
-                        for piece in pieces.into_iter().rev() {
-                            let bits = BitAccess::new(offset, offset + width(piece.access) - 1);
-                            offset += width(piece.access);
-                            dependencies.entry((id, target)).or_default().push(Edge {
-                                source: (id, piece.signal),
-                                target: bits,
-                                read: piece.access,
-                                linear: true,
-                                port: false,
-                            });
-                        }
-                        continue;
-                    }
-                    let reads = event_read_accesses(
-                        rhs,
-                        &module.variables,
-                        &module.signal_names,
-                        &module.constants,
-                        &module.parameter_types,
-                    );
-                    for (source, read) in reads {
-                        dependencies.entry((id, target)).or_default().push(Edge {
-                            source: (id, source),
-                            target: target_bits,
-                            read,
-                            linear: access(rhs) == Some((source, read))
-                                && width(target_bits) == width(read),
-                            port: false,
-                        });
-                    }
-                    // Calls can read globals beyond their explicit operands.
-                    let mut calls = Vec::new();
-                    procedural::stmt_calls(&process.body()[0], &mut calls);
-                    if calls.is_empty() {
-                        continue;
-                    }
-                }
-            }
-            let mut reads = HashSet::default();
-            let mut pending = vec![process.body()];
-            let mut visited = HashSet::default();
-            while let Some(body) = pending.pop() {
-                for stmt in body {
-                    stmt.walk(&mut |stmt| {
-                        procedural::stmt_reads(stmt, &mut reads);
-                        let mut calls = Vec::new();
-                        procedural::stmt_calls(stmt, &mut calls);
-                        for (name, _) in calls {
-                            if visited.insert(name.clone())
-                                && let Some(function) = pm.subroutines.get(&name)
-                            {
-                                pending.push(&function.body);
-                            }
-                        }
-                    });
-                }
-            }
-            for name in count(process.body()).keys() {
-                if let Some(&target) = module.signal_names.get(name) {
-                    let range = |lhs: &sv::ir::LValue| {
-                        net_lvalue_range(lhs, &module.constants, &module.parameter_types)
+            for stmt in process.body() {
+                let body = std::slice::from_ref(stmt);
+                if let [sv::ir::Stmt::Assign { lhs, rhs, .. }] = body {
+                    let lhs = match lhs {
+                        sv::ir::LValue::Ident(name) => sv::ir::Expr::Ident(name.clone()),
+                        sv::ir::LValue::Select { name, msb, lsb, .. } => sv::ir::Expr::Select {
+                            expr: Box::new(sv::ir::Expr::Ident(name.clone())),
+                            msb: msb.clone(),
+                            lsb: lsb.clone(),
+                            signed: false,
+                        },
                     };
-                    let scan = DriverScan {
-                        signal_name: name,
-                        subroutines: module.source.subroutines(),
-                        range: &range,
-                    };
-                    let mut targets = Vec::new();
-                    body_driver_ranges(&mut targets, process.body(), 0, &scan);
-                    for (_, range) in targets {
-                        let target_bits = range
-                            .and_then(|(low, high)| {
-                                Some((
-                                    packed_index_offset(&module.variables[&target], low)?,
-                                    packed_index_offset(&module.variables[&target], high)?,
-                                ))
-                            })
-                            .map(|(a, b)| BitAccess::new(a.min(b), a.max(b)))
-                            .unwrap_or(BitAccess::new(0, module.variables[&target].width - 1));
-                        for source in reads
+                    if let Some((target, target_bits)) = access(&lhs) {
+                        // Direct concatenated wiring preserves each piece's range,
+                        // just like concatenated instance port connections.
+                        if let Some(pieces) = output_lvalue_accesses(
+                            rhs,
+                            &module.variables,
+                            &module.signal_names,
+                            &module.constants,
+                            &module.parameter_types,
+                        ) && pieces
                             .iter()
-                            .filter_map(|name| module.signal_names.get(name))
-                            .copied()
+                            .map(|piece| width(piece.access))
+                            .sum::<usize>()
+                            == width(target_bits)
                         {
+                            let mut offset = target_bits.lsb;
+                            for piece in pieces.into_iter().rev() {
+                                let bits = BitAccess::new(offset, offset + width(piece.access) - 1);
+                                offset += width(piece.access);
+                                dependencies.entry((id, target)).or_default().push(Edge {
+                                    source: (id, piece.signal),
+                                    target: bits,
+                                    read: piece.access,
+                                    linear: true,
+                                    port: false,
+                                });
+                            }
+                            continue;
+                        }
+                        let reads = event_read_accesses(
+                            rhs,
+                            &module.variables,
+                            &module.signal_names,
+                            &module.constants,
+                            &module.parameter_types,
+                        );
+                        for (source, read) in reads {
                             dependencies.entry((id, target)).or_default().push(Edge {
                                 source: (id, source),
                                 target: target_bits,
-                                read: BitAccess::new(0, module.variables[&source].width - 1),
-                                linear: false,
+                                read,
+                                linear: access(rhs) == Some((source, read))
+                                    && width(target_bits) == width(read),
                                 port: false,
                             });
+                        }
+                        // Calls can read globals beyond their explicit operands.
+                        let mut calls = Vec::new();
+                        procedural::stmt_calls(&body[0], &mut calls);
+                        if calls.is_empty() {
+                            continue;
+                        }
+                    }
+                }
+                let mut reads = HashSet::default();
+                let mut pending = vec![body];
+                let mut visited = HashSet::default();
+                while let Some(body) = pending.pop() {
+                    for stmt in body {
+                        stmt.walk(&mut |stmt| {
+                            procedural::stmt_reads(stmt, &mut reads);
+                            let mut calls = Vec::new();
+                            procedural::stmt_calls(stmt, &mut calls);
+                            for (name, _) in calls {
+                                if visited.insert(name.clone())
+                                    && let Some(function) = pm.subroutines.get(&name)
+                                {
+                                    pending.push(&function.body);
+                                }
+                            }
+                        });
+                    }
+                }
+                for name in count(body).keys() {
+                    if let Some(&target) = module.signal_names.get(name) {
+                        let range = |lhs: &sv::ir::LValue| {
+                            net_lvalue_range(lhs, &module.constants, &module.parameter_types)
+                        };
+                        let scan = DriverScan {
+                            signal_name: name,
+                            subroutines: module.source.subroutines(),
+                            range: &range,
+                        };
+                        let mut targets = Vec::new();
+                        body_driver_ranges(&mut targets, body, 0, &scan);
+                        for (_, range) in targets {
+                            let target_bits = range
+                                .and_then(|(low, high)| {
+                                    Some((
+                                        packed_index_offset(&module.variables[&target], low)?,
+                                        packed_index_offset(&module.variables[&target], high)?,
+                                    ))
+                                })
+                                .map(|(a, b)| BitAccess::new(a.min(b), a.max(b)))
+                                .unwrap_or(BitAccess::new(0, module.variables[&target].width - 1));
+                            for source in reads
+                                .iter()
+                                .filter_map(|name| module.signal_names.get(name))
+                                .copied()
+                            {
+                                dependencies.entry((id, target)).or_default().push(Edge {
+                                    source: (id, source),
+                                    target: target_bits,
+                                    read: BitAccess::new(0, module.variables[&source].width - 1),
+                                    linear: false,
+                                    port: false,
+                                });
+                            }
                         }
                     }
                 }
