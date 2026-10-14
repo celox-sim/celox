@@ -2415,3 +2415,78 @@ mod host_finish_edge_review_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod cross_mode_clock_baseline_review_tests {
+    use super::*;
+    #[test]
+    fn unknown_clock_baselines_coerce_with_loaded_state() {
+        let source =
+            "module Top(input logic clk,output bit[7:0]q);always @(negedge clk)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>, payload: u8) {
+            let clk = source.signal("clk");
+            source
+                .modify(|io| io.set_four_state(clk, payload.into(), 1u8.into()))
+                .unwrap();
+            source.run_until(0).unwrap();
+            assert_eq!(source.get(source.signal("q")), 0u8.into());
+            let file = source.save_state().unwrap();
+            target.load_state(&file).unwrap();
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 0u8.into());
+            let clk = target.signal("clk");
+            target.set_wide(clk, 1u8.into());
+            target.settle().unwrap();
+            target.set_wide(clk, 0u8.into());
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 1u8.into());
+        }
+        let bit_source = source.replace("input logic clk", "input bit clk");
+        for (payload, target_four_state, target_bit) in [
+            (0, false, false),
+            (1, false, false),
+            (0, true, true),
+            (1, true, true),
+            (0, true, false),
+            (1, true, false),
+        ] {
+            let build = |four_state, bit| {
+                let code = if bit { bit_source.as_str() } else { source };
+                Simulator::from_sv_sources(
+                    vec![(code, std::path::Path::new("baseline-coercion.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            check(
+                Simulation::new(build(true, false).build_interpreter().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_interpreter()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_cranelift().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_cranelift()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_wasm().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_wasm().unwrap()),
+                payload,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build(true, false).build_native().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_native().unwrap()),
+                payload,
+            );
+        }
+    }
+}

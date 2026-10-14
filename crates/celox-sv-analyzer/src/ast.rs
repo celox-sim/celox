@@ -2555,3 +2555,35 @@ pub fn package_import_export_clauses(
     }
     clauses
 }
+
+/// Instance bindings retain their declared type across parameter assignments.
+pub fn instance_type_sites(tree: &SyntaxTree) -> Vec<(usize, String, String)> {
+    let mut sites = Vec::new();
+    for node in tree {
+        let RefNode::ModuleInstantiation(instance) = node else {
+            continue;
+        };
+        let Some(module) = identifier_text(RefNode::ModuleIdentifier(&instance.nodes.0), tree)
+        else {
+            continue;
+        };
+        for child in RefNode::ModuleInstantiation(instance) {
+            if let RefNode::NameOfInstance(name) = child {
+                let node = RefNode::InstanceIdentifier(&name.nodes.0);
+                let Some(identifier) = identifier_text(node.clone(), tree) else {
+                    continue;
+                };
+                if let Some(offset) = node.into_iter().find_map(|node| {
+                    if let RefNode::Locate(loc) = node {
+                        Some(loc.offset)
+                    } else {
+                        None
+                    }
+                }) {
+                    sites.push((offset, identifier, module.clone()));
+                }
+            }
+        }
+    }
+    sites
+}
