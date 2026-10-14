@@ -152,3 +152,7 @@ sv_backends! {
  fn single_item_case_generate_ff_is_staged_together(sim){@case "timing::single_item_case_generate_ff_is_staged_together";}
  fn timed_expansion_preserves_adapter_macros(sim){@case "timing::timed_expansion_preserves_adapter_macros";}
 }
+
+sv_backends! {
+ fn comment_semicolons_in_function_headers_preserve_setup_edges(sim){@case "timing::comment_semicolons_in_function_headers_preserve_setup_edges";}
+}

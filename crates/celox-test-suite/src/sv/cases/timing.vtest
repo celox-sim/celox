@@ -863,3 +863,10 @@ endmodule"#)
  `endif
  module Top(output bit q);initial begin #1;q=1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq q 1))
+
+(case comment_semicolons_in_function_headers_preserve_setup_edges
+ (source "function-comment.sv" #"module Other;task automatic tick();#1;endtask endmodule
+ module Top(input bit clk,output bit q);
+ function int /* ; */ tick();return 1;endfunction
+ always @(posedge clk)q<=tick();endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
