@@ -5,8 +5,8 @@ mod timed_ff;
 use crate::process::write_if_changed;
 use crate::script::ScriptCase;
 use crate::script::sv::{DesignInfo, TESTBENCH_TOP, testbench as generate_testbench};
+use crate::script::timed::validate_timed_design_with_defines;
 use crate::script::timed::{after_trivia, sv_words};
-use crate::validate_timed_design;
 use crate::verification::{EmissionError, panic_message};
 use crate::{Design, Expectation, Result};
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ pub(crate) fn stage(
     script: Option<&ScriptCase>,
     defines: &[&str],
 ) -> Result<Staged> {
-    validate_timed_design(design)?;
+    validate_timed_design_with_defines(design, defines)?;
     fs::create_dir_all(directory)?;
     let directory = fs::canonicalize(directory)?;
     for (index, source) in design.sources.iter().enumerate() {

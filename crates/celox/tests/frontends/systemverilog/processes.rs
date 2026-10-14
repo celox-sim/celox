@@ -2232,3 +2232,66 @@ fn cross_instance_ordered_nbas_require_pulse_preservation() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
 }
+
+#[test]
+fn local_comb_aliases_diagnose_hidden_source_pulses() {
+    let source = "module Top(output bit q,seen);bit a;wire clk=a;always_ff @(posedge clk)q<=1;initial begin #1;a=1;a=0;end initial begin @(posedge clk);seen=1;end endmodule";
+    assert!(build_error(source).contains("event dependency through combinational propagation"));
+    let source = source.replace("a=1;a=0;", "a=1;#1;a=0;");
+    let mut sim = simulation(&source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn distinct_fixed_time_writes_through_ports_are_observable() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=seen+1;@(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]"))
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}
+
+#[test]
+fn readmem_word_stores_cannot_hide_propagated_expression_pulses() {
+    let directory =
+        std::env::temp_dir().join(format!("celox-readmem-pulse-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let data = directory.join("words.bin");
+    std::fs::write(&data, "1\n1\n").unwrap();
+    let source = format!(
+        "module Child(input bit[1:0]q,output bit seen);initial begin @(q[0]^q[1]);seen=1;end endmodule module Top(output bit seen);bit mem[0:1];wire[1:0]q={{mem[1],mem[0]}};Child u(.q(q),.seen(seen));initial begin #1;$readmemb(\"{}\",mem);end endmodule",
+        data.display()
+    );
+    for source in [
+        source.clone(),
+        source
+            .replace(
+                "initial begin #1;$readmemb",
+                "always @(posedge clk) begin $readmemb",
+            )
+            .replace(
+                "module Top(output bit seen)",
+                "module Top(input bit clk,output bit seen)",
+            ),
+    ] {
+        let error = build_error(&source);
+        assert!(error.contains("multiple blocking writes"), "{error}");
+    }
+    // One loaded word, or one selected destination word, cannot hide a pulse.
+    for source in [
+        source.replace(",mem);", ",mem,0,0);"),
+        source.replace("@(q[0]^q[1])", "@(q[0])"),
+    ] {
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}

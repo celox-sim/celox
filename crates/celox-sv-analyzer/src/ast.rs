@@ -2467,3 +2467,46 @@ pub fn ff_always_offsets(syntax_tree: &SyntaxTree) -> Vec<usize> {
         })
         .collect()
 }
+
+/// Actual call identifiers, excluding named argument labels and declarations.
+/// Bare identifiers in expressions are not call sites; bare statement calls are.
+pub fn procedural_call_sites(tree: &SyntaxTree) -> Vec<(usize, String)> {
+    let mut sites = Vec::new();
+    for node in tree {
+        let identifier = match node {
+            RefNode::TfCall(call) if call.nodes.2.is_some() => {
+                Some(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))
+            }
+            RefNode::SubroutineCallStatement(
+                sv_parser::SubroutineCallStatement::SubroutineCall(statement),
+            ) => match &statement.0 {
+                sv_parser::SubroutineCall::TfCall(call) => {
+                    Some(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))
+                }
+                _ => None,
+            },
+            RefNode::MethodCallBodyUser(call) => Some(RefNode::MethodIdentifier(&call.nodes.0)),
+            _ => None,
+        };
+        if let Some(identifier) = identifier {
+            let name = identifier
+                .into_iter()
+                .filter_map(|node| match node {
+                    RefNode::SimpleIdentifier(id) => tree
+                        .get_str(&id.nodes.0)
+                        .map(|text| (id.nodes.0.offset, text.trim().to_owned())),
+                    RefNode::EscapedIdentifier(id) => tree
+                        .get_str(&id.nodes.0)
+                        .map(|text| (id.nodes.0.offset, text.trim().to_owned())),
+                    _ => None,
+                })
+                .last();
+            if let Some(name) = name {
+                sites.push(name);
+            }
+        }
+    }
+    sites.sort_unstable();
+    sites.dedup();
+    sites
+}
