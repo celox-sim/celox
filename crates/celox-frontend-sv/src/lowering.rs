@@ -2642,8 +2642,63 @@ fn validate_cross_instance_event_pulses(
     {
         return Ok(());
     }
+    struct Instance {
+        module: ModuleId,
+        children: Vec<(usize, usize)>,
+    }
+    fn instantiate(
+        id: ModuleId,
+        module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+        modules: &HashMap<ModuleId, LoweredSvModule>,
+        active: &mut HashSet<ModuleId>,
+        nodes: &mut Vec<Instance>,
+    ) -> Result<usize, ParserError> {
+        if !active.insert(id) {
+            return Err(unsupported_sv_instance(
+                modules[&id].sim_module.name.clone(),
+            ));
+        }
+        let index = nodes.len();
+        nodes.push(Instance {
+            module: id,
+            children: Vec::new(),
+        });
+        for (position, instance) in modules[&id].instances.iter().enumerate() {
+            if let Some(&child) = module_ids.get(&LoweredSvModuleKey::instance_key(instance)) {
+                let child = instantiate(child, module_ids, modules, active, nodes)?;
+                nodes[index].children.push((position, child));
+            }
+        }
+        active.remove(&id);
+        Ok(index)
+    }
+    let referenced = modules
+        .values()
+        .flat_map(|module| &module.instances)
+        .filter_map(|instance| module_ids.get(&LoweredSvModuleKey::instance_key(instance)))
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut roots = modules
+        .keys()
+        .filter(|id| !referenced.contains(id))
+        .copied()
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        roots.extend(modules.keys().copied());
+    }
+    roots.sort_unstable();
+    let mut nodes = Vec::new();
+    for root in roots {
+        instantiate(
+            root,
+            module_ids,
+            modules,
+            &mut HashSet::default(),
+            &mut nodes,
+        )?;
+    }
     let width = |access: BitAccess| access.msb - access.lsb + 1;
-    type Signal = (ModuleId, SourceVarId);
+    type Signal = (usize, SourceVarId);
     struct Edge {
         source: Signal,
         target: BitAccess,
@@ -2652,7 +2707,8 @@ fn validate_cross_instance_event_pulses(
         port: bool,
     }
     let mut dependencies: HashMap<Signal, Vec<Edge>> = HashMap::default();
-    for (&id, module) in modules {
+    for (id, occurrence) in nodes.iter().enumerate() {
+        let module = &modules[&occurrence.module];
         let mut variables = module.variables.clone();
         let mut names = module.signal_names.clone();
         let pm = procedural::ProcModule::new(
@@ -2793,14 +2849,9 @@ fn validate_cross_instance_event_pulses(
                 }
             }
         }
-        for instance in &module.instances {
-            let Some(&child_id) = module_ids.get(&LoweredSvModuleKey::instance_key(instance))
-            else {
-                continue;
-            };
-            let Some(child) = modules.get(&child_id) else {
-                continue;
-            };
+        for &(position, child_id) in &occurrence.children {
+            let instance = &module.instances[position];
+            let child = &modules[&nodes[child_id].module];
             let connections = match instance.array_element {
                 Some((position, count)) => array_element_connections(
                     &instance.port_connections,
@@ -2886,7 +2937,8 @@ fn validate_cross_instance_event_pulses(
             }
         }
     }
-    for (&id, module) in modules {
+    for (id, occurrence) in nodes.iter().enumerate() {
+        let module = &modules[&occurrence.module];
         for watched in &module.event_dependencies {
             let mut pending = watched
                 .iter()
@@ -2895,8 +2947,7 @@ fn validate_cross_instance_event_pulses(
             let mut visited = HashSet::default();
             while !pending.is_empty() {
                 let wave = std::mem::take(&mut pending);
-                let mut cross: HashMap<ModuleId, Vec<(SourceVarId, BitAccess)>> =
-                    HashMap::default();
+                let mut cross: HashMap<usize, Vec<(SourceVarId, BitAccess)>> = HashMap::default();
                 for (signal, range, crossed) in wave {
                     if !visited.insert((signal, range, crossed)) {
                         continue;
@@ -2923,10 +2974,11 @@ fn validate_cross_instance_event_pulses(
                         }
                     }
                 }
+                let mut wave_writes = [0usize; 2];
                 for (source_id, mut accesses) in cross {
                     accesses.sort_unstable();
                     accesses.dedup();
-                    let source = &modules[&source_id];
+                    let source = &modules[&nodes[source_id].module];
                     let mut variables = source.variables.clone();
                     let mut names = source.signal_names.clone();
                     let pm = procedural::ProcModule::new(
@@ -2961,28 +3013,32 @@ fn validate_cross_instance_event_pulses(
                                 .filter(|p| active(p.condition()))
                                 .map(|p| p.body()),
                         );
-                    let writes = bodies
-                        .map(|body| {
-                            ff::watched_write_count(
-                                body,
-                                &pm,
-                                &query,
-                                &mut HashSet::default(),
-                                false,
-                            )
-                        })
-                        .sum::<usize>();
-                    if writes > 1 {
-                        return Err(ParserError::unsupported(
-                            sv::SV_FRONTEND_TRACKING_ISSUE,
-                            LoweringPhase::SimulatorParser,
-                            "cross-instance event dependency with multiple blocking writes",
-                            format!(
-                                "{} watches multiple writes from {} through instance ports",
-                                module.sim_module.name, source.sim_module.name
-                            ),
-                            None,
-                        ));
+                    let bodies = bodies.collect::<Vec<_>>();
+                    for nonblocking in [false, true] {
+                        let index = usize::from(nonblocking);
+                        let writes = bodies
+                            .iter()
+                            .map(|body| {
+                                ff::runtime_watched_write_count(body, &pm, &query, nonblocking)
+                            })
+                            .sum::<usize>();
+                        wave_writes[index] = wave_writes[index].saturating_add(writes);
+                        if wave_writes[index] > 1 {
+                            return Err(ParserError::unsupported(
+                                sv::SV_FRONTEND_TRACKING_ISSUE,
+                                LoweringPhase::SimulatorParser,
+                                if nonblocking {
+                                    "cross-instance event dependency with multiple nonblocking writes"
+                                } else {
+                                    "cross-instance event dependency with multiple blocking writes"
+                                },
+                                format!(
+                                    "{} watches multiple writes from {} through instance ports",
+                                    module.sim_module.name, source.sim_module.name
+                                ),
+                                None,
+                            ));
+                        }
                     }
                 }
             }

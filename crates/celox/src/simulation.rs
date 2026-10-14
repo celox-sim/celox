@@ -80,6 +80,17 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         &mut self.backend
     }
 
+    fn scheduled_updates_need_settle(&self) -> bool {
+        !self.program.runtime_schema.comb_observers.is_empty()
+            || self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| matches!(site.kind, celox_design::RuntimeEventKind::Finish))
+            || self.components.has_scheduled_components()
+    }
+
     fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.eval_comb_checked()
     }
@@ -2200,5 +2211,57 @@ mod past_by_id_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod finish_during_round_review_tests {
+    use super::*;
+    use std::path::Path;
+    fn queued_finish<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        sim.schedule("go", 1, 0).unwrap();
+        sim.schedule("later", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.simulator.backend.get_as::<u8>(sim.signal("later")), 0);
+    }
+    fn nba_finish<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.simulator.backend.get_as::<u8>(sim.signal("a")), 1);
+        assert_eq!(sim.simulator.backend.get_as::<u8>(sim.signal("y")), 0);
+    }
+    #[test]
+    fn scheduled_finishes_stop_remaining_work() {
+        for waiter in ["initial wait(0);", ""] {
+            let source = format!(
+                "module Top(input bit go,later);bit q,r;initial go=1;always @(negedge go)q<=1;always @(posedge later)r<=1;always_comb if(!go)$finish;{waiter} endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), Path::new("queued-finish.sv"))],
+                    "Top",
+                )
+            };
+            queued_finish(Simulation::new(build().build_interpreter().unwrap()));
+            queued_finish(Simulation::new(build().build_cranelift().unwrap()));
+            queued_finish(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            queued_finish(Simulation::new(build().build_native().unwrap()));
+        }
+    }
+    #[test]
+    fn nba_woken_finishes_stop_remaining_work() {
+        let source = "module Top(input bit clk,output bit a,y);bit q;assign y=a;always @(posedge clk)q<=1;initial begin @(posedge q);a=1;$finish;end endmodule";
+        let build =
+            || Simulator::from_sv_sources(vec![(source, Path::new("nba-finish.sv"))], "Top");
+        nba_finish(Simulation::new(build().build_interpreter().unwrap()));
+        nba_finish(Simulation::new(build().build_cranelift().unwrap()));
+        nba_finish(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        nba_finish(Simulation::new(build().build_native().unwrap()));
     }
 }
