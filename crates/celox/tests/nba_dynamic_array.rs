@@ -52,6 +52,12 @@ all_backends! {
         @case "nba_dynamic_array::test_line_write_loop_updates_large_sparse_ff_array";
     }
 
+    // Partitioned kernels commit sparse state in a task of its own, which
+    // scans every summary word of the object.
+    fn test_sparse_commit_reaches_every_summary_word(sim) {
+        @case "nba_dynamic_array::test_sparse_commit_reaches_every_summary_word";
+    }
+
     fn test_out_of_range_dynamic_ff_stores_are_ignored(sim) {
         @case "nba_dynamic_array::test_out_of_range_dynamic_ff_stores_are_ignored";
     }

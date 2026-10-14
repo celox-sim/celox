@@ -70,10 +70,17 @@ export function nativeSirForTask(events, schedule, task) {
         e.schedule === schedule && e.task === task && schedule !== undefined);
 }
 
+// StateBits locations count bits; older captures and envelopes count bytes.
+export function stateByteRange(storage, offset, length) {
+    if (storage !== "StateBits") return {storage, offset, length};
+    const first = Math.floor(offset / 8);
+    return {storage, offset:first, length:Math.ceil((offset + length) / 8) - first, bit_offset:offset, bit_length:length};
+}
+
 export function signalsForFootprints(footprints, signals, program) {
     const ranges = [...JSON.stringify(footprints).matchAll(
-        /object: (State|WriteEnvelope), offset: (-?\d+), byte_len: (\d+)/g
-    )].map(m => ({storage:m[1],offset:Number(m[2]),length:Number(m[3])}));
+        /object: (StateBits|State|WriteEnvelope), offset: (-?\d+), byte_len: (\d+)/g
+    )].map(m => stateByteRange(m[1], Number(m[2]), Number(m[3])));
     const matches = [];
     for (const signal of signals.filter(s => s.event === "signal" && s.program === program)) {
         for (const region of ["offset", "working_offset", "sparse_offset"]) {

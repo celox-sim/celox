@@ -689,6 +689,13 @@ impl X86SimdInst {
 // MIR instructions
 // ────────────────────────────────────────────────────────────────
 
+/// Summary words of a [`MInst::SparseCommit`] whose scan is unrolled.
+/// Larger regions walk their summary words in a loop.
+pub const SPARSE_UNROLLED_SUMMARY_WORDS: usize = 4;
+
+/// Summary words a looped [`MInst::SparseCommit`] tests at once.
+pub const SPARSE_SUMMARY_GROUP: usize = 4;
+
 /// Word-level SSA instruction. All operands are virtual registers.
 ///
 /// Instructions use 3-operand form (dst, src1, src2). The emit phase

@@ -9484,6 +9484,26 @@
       ]
     },
     {
+      "case": "nba_dynamic_array::test_sparse_commit_reaches_every_summary_word",
+      "expectation": "Simulation",
+      "category": "Arrays",
+      "source": {
+        "file": "src/veryl/cases/nba_dynamic_array.vtest",
+        "script_sha256": "a8f24081526b87b0b64e17a91dd395f3f06465bc9e1cfee74d0adbfbee8e1913"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "1d867833429f4e8fc823efa0cd4f4b82988877a4452f4fb14dbf449a606465dc",
+          "protocol_sha256": "4e34798faee03f2146fd05e439c3385d539640e8e333daa78a9c76c7f0e21d16",
+          "reads": 15,
+          "commands": 54,
+          "operations": 14,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "nba_dynamic_array::test_static_ff_writes_are_applied_after_all_rhs_evaluation",
       "expectation": "Simulation",
       "category": "Arrays",
