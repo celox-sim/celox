@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792017460370,
+  "lastUpdate": 1792019307266,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -375454,6 +375454,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-tiered-x86_64/heliodor_suite_66_smp_linux_boot_4hart_end_to_end",
             "unit": "ms",
             "value": 4415491.348425
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "ca66a26c7eb063d325d77da5bb1d881a4fa5aee9",
+          "message": "fix(vite): remove orphan declarations after startup generation (#1239)",
+          "timestamp": "2026-10-14T03:49:19Z",
+          "url": "https://github.com/celox-sim/celox/commit/ca66a26c7eb063d325d77da5bb1d881a4fa5aee9"
+        },
+        "date": 1792019307266,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 408983.195727
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_suite_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 3960975.345328
           }
         ]
       }
