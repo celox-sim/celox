@@ -21,6 +21,10 @@ impl<B: SimBackend> TimedBackend<B> {
                 "fatal assertion: {}",
                 String::from_utf8(message.clone()).unwrap_or_else(|_| format!("{message:?}"))
             )),
+            RuntimeEvent::AssertContinue { message } => Some(format!(
+                "failed assertion: {}",
+                String::from_utf8(message.clone()).unwrap_or_else(|_| format!("{message:?}"))
+            )),
             RuntimeEvent::Missed { count } => Some(format!("{count} runtime events were missed")),
             _ => None,
         });
@@ -411,6 +415,30 @@ fn buffered_host_fatal_cannot_be_hidden_by_a_later_finish() {
                 .unwrap_err()
                 .to_string()
                 .contains("fatal"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn continuing_assertions_cannot_pass_a_timed_finish() {
+    let source = "module Top;initial begin #1;$error(\"timed failure\");#1;$finish;end endmodule";
+    let text = format!(
+        "(group protocol (category sequential))(case assertion (source \"assertion.sv\" #\"{source}\"#)(top Top)(run_to_finish))"
+    );
+    let case =
+        celox_test_suite::load_group("assertion.vtest", &text, celox_test_suite::no_std_library)[0];
+    for name in [
+        "native",
+        "cranelift",
+        "native-parallel",
+        "cranelift-parallel",
+        "wasm",
+    ] {
+        let mut backend = build(&case.design(), name).unwrap();
+        let result = backend.run_to_finish();
+        assert!(
+            result.unwrap_err().to_string().contains("timed failure"),
             "{name}"
         );
     }

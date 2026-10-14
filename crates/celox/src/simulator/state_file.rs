@@ -176,7 +176,12 @@ impl StateSchema {
         let mut seeds = Vec::new();
         let mut writes = Vec::new();
         for object in &self.objects {
-            if object.role == StateRole::Comb {
+            if object.role == StateRole::Comb
+                && !file
+                    .schedule
+                    .as_ref()
+                    .is_some_and(|schedule| schedule.finished)
+            {
                 if let Some(saved) = saved.get(object.path.as_str())
                     && saved.width == object.signal.width
                 {
@@ -272,7 +277,12 @@ impl<B: SimBackend> Simulator<B> {
             .map_err(StateError::Mismatch)?;
         // The loaded state replaces the simulation history, so combinational
         // observers take it as their baseline instead of reporting changes.
-        if let Err(error) = self.backend.eval_comb() {
+        if !file
+            .schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.finished)
+            && let Err(error) = self.backend.eval_comb()
+        {
             let error = self.decorate_runtime_error(error);
             self.restore(&previous)?;
             return Err(StateError::Runtime(error));

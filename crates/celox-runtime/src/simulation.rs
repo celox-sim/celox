@@ -1841,6 +1841,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             if polled {
+                self.sample_waiting_events(executor)?;
                 let counter_values = self.event_counter_values(executor.backend());
                 any_process_ran |=
                     self.run_processes(executor, current_time, Vec::new(), &mut delta_rounds)?;

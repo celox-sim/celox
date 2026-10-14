@@ -380,7 +380,13 @@ impl<B: SimBackend> Simulation<B> {
             return Err(StateError::Processes);
         }
         let was_dirty = self.simulator.dirty;
-        let mut file = self.simulator.save_state()?;
+        let mut file = if self.state.is_finished() {
+            self.simulator
+                .state_schema()
+                .capture(&self.simulator.backend)
+        } else {
+            self.simulator.save_state()?
+        };
         self.synchronize_runtime_finish(was_dirty);
         let parts = self.state.export_schedule(&self.simulator.backend);
         file.schedule = Some(self.simulator.name_schedule(parts));
@@ -4923,5 +4929,63 @@ mod finished_state_file_review {
                 comb,
             );
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod nba_waiter_sampling_review {
+    use super::*;
+    #[test]
+    fn all_nba_woken_waiters_sample_before_any_continuation() {
+        let source = "module Child(input bit clk,output bit go);always_ff @(posedge clk)go<=1;endmodule module Top(input bit clk,output bit a,b);bit enable=1;wire go;Child child(.clk(clk),.go(go));initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("nba-waiters.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn finished_save_preserves_unsettled_output_and_roundtrip() {
+        let source = "module Top(input bit clk,go,output bit q,derived);assign derived=q;always_comb begin q=go;if(go)$finish;end always @(posedge clk)begin end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert!(sim.is_finished());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            let file = sim.save_state().unwrap();
+            let q = file.objects.iter().find(|obj| obj.path == "q").unwrap();
+            assert_eq!(q.value, [1]);
+            sim.load_state(&file).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("derived")), 1u8.into());
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("finished-dirty-save.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
