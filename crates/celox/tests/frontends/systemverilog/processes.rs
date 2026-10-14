@@ -2427,3 +2427,10 @@ fn mixed_clock_polarities_through_port_aliases_are_rejected() {
         .replace("Neg n(.clk(clk)", "Neg n(.clk(cn)");
     simulation(&separate);
 }
+
+#[test]
+fn mixed_clock_polarities_through_local_aliases_are_rejected() {
+    let source = "module Top(input bit clk,output bit p_seen,n_seen);wire p=clk,n=clk;always @(posedge p)p_seen<=1;always @(negedge n)n_seen<=1;endmodule";
+    assert!(build_error(source).contains("mixed clock-edge polarities through aliases"));
+    simulation(&source.replace("negedge n", "posedge n"));
+}
