@@ -1929,3 +1929,14 @@ fn runtime_case_scans_only_the_unmatched_path_to_later_patterns() {
         );
     }
 }
+
+#[test]
+fn output_selector_scratch_follows_a_looping_callee() {
+    let code = r#"#[test(Top)] module Top {
+ var random:$tb::random::<u8>; var words:u8[2];
+ function index()->u32 { var sample:u8; sample=random.get(); return (sample & 0) as u32; }
+ function give(value:output u8) { value=0; for i in 0..3 { value+=1; } }
+ initial { give(words[index()]); $assert(words[0]==3); $finish(); }
+ }"#;
+    check_passes_on_every_backend(code);
+}

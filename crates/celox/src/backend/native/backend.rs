@@ -614,6 +614,51 @@ impl NativeProgramImage {
             {
                 return Err("a process clock control slot has an invalid state object".into());
             }
+            for release in &process.releases {
+                if !self
+                    .design
+                    .state_objects
+                    .get(&release.signal)
+                    .is_some_and(|m| m.width == 1 && m.array_dims.is_empty())
+                    || release.value > 1
+                    || release
+                        .clock
+                        .is_some_and(|clock| !process.clocks.iter().any(|c| c.signal == clock))
+                {
+                    return Err("a process release has an invalid signal, value or clock".into());
+                }
+            }
+            let valid_host_value = |value: &celox_design::HostValue<_>| {
+                value.width > 0
+                    && self
+                        .design
+                        .state_objects
+                        .get(&value.signal)
+                        .is_some_and(|m| {
+                            m.width == value.width && !m.is_4state && m.array_dims.is_empty()
+                        })
+            };
+            for request in &process.host_requests {
+                use celox_design::HostRequest;
+                let valid = match request {
+                    HostRequest::RandomSeed { value, .. } => valid_host_value(value),
+                    HostRequest::RandomGet { result, .. }
+                    | HostRequest::RandomGetSeed { result, .. } => valid_host_value(result),
+                    HostRequest::RandomGetRange {
+                        min, max, result, ..
+                    } => [min, max, result].into_iter().all(valid_host_value),
+                    HostRequest::Component { args, result, .. } => {
+                        args.iter().all(valid_host_value)
+                            && result.as_ref().is_none_or(valid_host_value)
+                    }
+                    HostRequest::FileOpen { path, .. } => valid_host_value(path),
+                    HostRequest::FileWrite { args, .. } => args.iter().all(valid_host_value),
+                    HostRequest::FileFlush { .. } | HostRequest::FileClose { .. } => true,
+                };
+                if !valid {
+                    return Err("a process host request has an invalid state value".into());
+                }
+            }
             for clock in &process.clocks {
                 if clock.period < 2
                     || !self.event_map.contains_key(&clock.signal)
@@ -3465,6 +3510,51 @@ mod process_metadata_tests {
             .compile_native()
             .unwrap()
             .into_program_image()
+    }
+
+    #[test]
+    fn process_release_and_host_values_are_checked_before_attachment() {
+        let original = image();
+        for kind in 0..5 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes[0];
+            let unknown = if kind == 4 {
+                celox_design::StateAddr {
+                    var_id: celox_design::StateObjectId::from_raw(u32::MAX),
+                    ..slots.delay
+                }
+            } else {
+                slots.delay
+            };
+            match kind {
+                0 => slots.releases.push(celox_design::ProcessRelease {
+                    signal: slots.delay,
+                    value: 0,
+                    clock: None,
+                }),
+                1 => slots.releases.push(celox_design::ProcessRelease {
+                    signal: slots.clocks[0].signal,
+                    value: 0,
+                    clock: Some(slots.delay),
+                }),
+                _ => slots
+                    .host_requests
+                    .push(celox_design::HostRequest::RandomGet {
+                        handle: "test".into(),
+                        result: celox_design::HostValue {
+                            signal: unknown,
+                            width: if kind == 2 { 0 } else { 1 },
+                            signed: false,
+                            is_string: false,
+                        },
+                    }),
+            }
+            assert!(broken.validate().is_err(), "corruption {kind} accepted");
+            assert!(matches!(
+                broken.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
+        }
     }
 
     #[test]
