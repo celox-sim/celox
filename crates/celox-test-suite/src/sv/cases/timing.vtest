@@ -828,3 +828,10 @@ endmodule"#)
  (source "parenthesized.sv" #"module Top(input bit clk,output bit q,r);
  always @((posedge clk))q<=1;always_ff @((posedge clk))r<=1;endmodule"#)
  (top Top)(set clk 1)(run_until 0)(assert_eq q 1)(assert_eq r 1))
+
+(case named_arguments_do_not_invent_timed_calls
+ (source "named-call.sv" #"module Top(input bit clk,output bit q);
+ task automatic tick();#1;endtask
+ function automatic bit f(input bit tick);return tick;endfunction
+ always @(posedge clk)q<=f(.tick(1));endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
