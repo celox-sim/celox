@@ -1024,3 +1024,16 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(set sel 1)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
+
+(case case_writes_preserve_distinct_activation_times
+ (source "case-writes.sv" #"
+ module Child(input bit[1:0]sel,output bit[1:0]q);
+ initial begin #1;case(sel) 0:q[0]=0;1:q[0]=1;default:q[0]=1;endcase end
+ initial begin #2;q[1]=1;end
+ endmodule
+ module Top(input bit[1:0]sel,output bit[7:0]seen);
+ wire[1:0]q;Child u(.sel(sel),.q(q));
+ initial forever begin @(q[0]^q[1]);seen=seen+1;end
+ endmodule
+ "#)
+ (top Top)(set sel 1)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))

@@ -3576,6 +3576,25 @@ pub(super) fn fixed_runtime_write_times(
                     runtime_watched_write_count(else_body, pm, expr, nonblocking),
                 )
             }
+            Stmt::Case { items, default, .. }
+                if items
+                    .iter()
+                    .all(|item| branch_without_suspension_or_exit(&item.body))
+                    && default
+                        .as_ref()
+                        .is_none_or(|body| branch_without_suspension_or_exit(body)) =>
+            {
+                items
+                    .iter()
+                    .map(|item| runtime_watched_write_count(&item.body, pm, expr, nonblocking))
+                    .chain(
+                        default
+                            .iter()
+                            .map(|body| runtime_watched_write_count(body, pm, expr, nonblocking)),
+                    )
+                    .max()
+                    .unwrap_or(0)
+            }
             Stmt::If { .. }
             | Stmt::Case { .. }
             | Stmt::Loop { .. }

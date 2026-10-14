@@ -187,3 +187,5 @@ sv_backends! { fn inherited_interface_methods_keep_setup_edges(sim) { @case "tim
 sv_backends! { fn pure_function_rhs_preserves_distinct_write_times(sim) { @case "timing::pure_function_rhs_preserves_distinct_write_times"; } }
 
 sv_backends! { fn conditional_writes_preserve_distinct_activation_times(sim) { @case "timing::conditional_writes_preserve_distinct_activation_times"; } }
+
+sv_backends! { fn case_writes_preserve_distinct_activation_times(sim) { @case "timing::case_writes_preserve_distinct_activation_times"; } }
