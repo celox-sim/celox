@@ -264,3 +264,7 @@ sv_backends! {
 sv_backends! {
  fn timed_calls_after_named_blocks_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_named_blocks_do_not_replay_setup_edges"; }
 }
+sv_backends! {
+ fn timed_calls_after_endcase_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_endcase_do_not_replay_setup_edges"; }
+ fn inactive_time_directives_do_not_change_scheduler_units(sim) { @case "timing::inactive_time_directives_do_not_change_scheduler_units"; }
+}

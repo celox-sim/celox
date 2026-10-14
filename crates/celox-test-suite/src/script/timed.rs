@@ -3,18 +3,42 @@ use crate::{Design, Result};
 /// Raw scheduler units are portable only with the suite's injected scale.
 /// Comments, strings and escaped identifiers are not declarations.
 pub fn validate_timed_design(design: &Design) -> Result<()> {
-    if design.timed
-        && design.sources.iter().any(|source| {
-            sv_words(&source.text).iter().any(|(start, _, word)| {
-                matches!(*word, "timeunit" | "timeprecision")
-                    || (matches!(*word, "timescale" | "resetall")
-                        && source.text[..*start].ends_with('`'))
-            })
-        })
-    {
-        return Err(
-            "explicit time scales and resetall are not supported in timed shared cases".into(),
+    validate_timed_design_with_defines(design, &[])
+}
+
+pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]) -> Result<()> {
+    if !design.timed {
+        return Ok(());
+    }
+    let mut defines: sv_parser::Defines = Default::default();
+    for name in names {
+        defines.insert(
+            (*name).to_owned(),
+            Some(sv_parser::Define::new((*name).to_owned(), Vec::new(), None)),
         );
+    }
+    let includes: Vec<&std::path::Path> = Vec::new();
+    for source in &design.sources {
+        let (active, _) = sv_parser::preprocess_str(
+            &source.text,
+            &source.path,
+            &defines,
+            &includes,
+            true,
+            false,
+            0,
+            0,
+        )
+        .map_err(|error| format!("timed source preprocessing: {error}"))?;
+        let text = active.text();
+        if sv_words(text).iter().any(|(start, _, word)| {
+            matches!(*word, "timeunit" | "timeprecision")
+                || (matches!(*word, "timescale" | "resetall") && text[..*start].ends_with('`'))
+        }) {
+            return Err(
+                "explicit time scales and resetall are not supported in timed shared cases".into(),
+            );
+        }
     }
     Ok(())
 }
@@ -112,5 +136,20 @@ mod tests {
         }
         let source = "// `timescale 10ns/1ps\nmodule Top; bit timescale; initial $display(\"timeunit 10ns\"); endmodule";
         assert!(validate_timed_design(&design(source)).is_ok());
+    }
+    #[test]
+    fn scales_follow_active_preprocessor_defines() {
+        for directive in [
+            "`timescale 10ns/1ps",
+            "`resetall",
+            "timeunit 10ns;",
+            "timeprecision 1fs;",
+        ] {
+            let source = format!("`ifdef TOOL_ACTIVE\n{directive}\n`endif\nmodule Top;endmodule");
+            assert!(validate_timed_design(&design(&source)).is_ok());
+            assert!(
+                validate_timed_design_with_defines(&design(&source), &["TOOL_ACTIVE"]).is_err()
+            );
+        }
     }
 }
