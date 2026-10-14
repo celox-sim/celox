@@ -2347,3 +2347,23 @@ fn recurring_startup_writes_do_not_inherit_an_incorrect_fixed_phase() {
     let source = "module Child(output bit[1:0]q);always begin q[0]=~q[0];#1;#0;end always begin #1;#0;q[1]=~q[1];end endmodule module Top(output bit seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=1;end endmodule";
     assert!(build_error(source).contains("multiple blocking writes"));
 }
+
+#[test]
+fn pure_rhs_calls_preserve_distinct_cross_instance_write_times() {
+    let source = "module Child(output bit[1:0]q);function automatic bit one();return 1;endfunction initial begin #1;q[0]=one();end initial begin #2;q[1]=one();end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+#[test]
+fn folded_initial_values_are_not_runtime_cross_instance_pulses() {
+    let source = "module Child(output bit[1:0]q);initial q[0]=1;initial q[1]=1;endmodule module Top(output bit seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+}
