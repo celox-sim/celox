@@ -2905,7 +2905,10 @@ fn test_run_test_stops_on_ff_fatal_runtime_event() {
             }
         }
     "#;
-    let result = Simulator::builder(code, "t").run_test().unwrap();
+    let result = Simulator::builder(code, "t")
+        .testbench_kernels(false)
+        .run_test()
+        .unwrap();
     assert_eq!(result, TestResult::Fail("ff fatal".to_string()));
 }
 

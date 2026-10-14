@@ -21,7 +21,9 @@ pub trait SimulationExecutor {
     type Backend: SimBackend;
     /// Whether individual scheduled writes have observable combinational
     /// effects even without an event waiter.
-    fn scheduled_updates_need_settle(&self) -> bool { false }
+    fn scheduled_updates_need_settle(&self) -> bool {
+        false
+    }
 
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
