@@ -5,14 +5,14 @@
 //! relation from the units' final memory effects on the physical state layout
 //! and cuts every lane's units into tasks with minimal cross-lane waits.
 //!
-//! Accesses are exact physical byte ranges, so aliased objects and
+//! Accesses are exact physical bit ranges, so aliased objects and
 //! overlapping fields are compared by their storage rather than by name.
 //! Generated code may widen a partial store into a read-modify-write of
-//! neighbouring bytes. Such a widened store writes back the unchanged bytes it
-//! read, which is invisible to a concurrent reader, but it would lose a
-//! concurrent write. Every write therefore also claims the bytes its code
+//! neighbouring bits and bytes. Such a widened store writes back the unchanged
+//! bits it read, which is invisible to a concurrent reader, but it would lose
+//! a concurrent write. Every write therefore also claims the bytes its code
 //! generator may store (its *envelope*, see [`CodegenFootprint`]), and writes
-//! with overlapping envelopes are ordered, while reads of untouched bytes
+//! with overlapping envelopes are ordered, while reads of untouched bits
 //! stay independent. Runtime buffers shared by every lane (the event ring,
 //! comb-capture flags, and trigger bytes) are serialized as whole resources.
 //! Waveform notification bytes need no ordering: generated code only ever
@@ -36,8 +36,12 @@ use crate::ir::{
 /// Storage domains compared by the dependency analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Storage {
-    /// The simulation state image, addressed by physical byte offset.
-    State,
+    /// The simulation state image, addressed by physical bit offset.
+    ///
+    /// Generated code never changes bits outside an access, even when it
+    /// stores a wider envelope, so reads and writes are compared by bit.
+    /// Location lengths in this storage count bits.
+    StateBits,
     /// Read-modify-write envelopes of writes, by physical byte offset.
     WriteEnvelope,
     /// The runtime-event ring, which has a single-producer append protocol.
@@ -173,11 +177,17 @@ impl<'a> UnitEffects<'a> {
         }
     }
 
+    /// State bytes `[offset, offset + byte_len)`.
     fn range(offset: usize, byte_len: usize) -> MemoryEffect<Storage> {
+        Self::bit_range(offset * 8, byte_len * 8)
+    }
+
+    /// State bits `[offset, offset + bit_len)`.
+    fn bit_range(offset: usize, bit_len: usize) -> MemoryEffect<Storage> {
         MemoryEffect::Exact(MemoryLocation {
-            object: Storage::State,
+            object: Storage::StateBits,
             offset: offset as i64,
-            byte_len,
+            byte_len: bit_len,
         })
     }
 
@@ -305,7 +315,7 @@ impl<'a> UnitEffects<'a> {
             .region_base(address)
             .filter(|_| self.layout.widths.contains_key(&object))
         else {
-            effects.push(MemoryEffect::UnknownObject(Storage::State));
+            effects.push(MemoryEffect::UnknownObject(Storage::StateBits));
             return;
         };
         let plane = self.layout.plane_size(&object);
@@ -327,8 +337,8 @@ impl<'a> UnitEffects<'a> {
         effects.push(Self::range(base, (plane * self.planes()).max(1)));
     }
 
-    /// The bytes holding one logical bit range of an object.
-    fn bytes(
+    /// The bits holding one logical bit range of an object.
+    fn bits(
         &self,
         address: &RegionedAbsoluteAddr,
         offset: &SIROffset,
@@ -343,20 +353,23 @@ impl<'a> UnitEffects<'a> {
             self.home(address, effects);
             return;
         };
-        let plane = self.layout.plane_size(&object);
+        let plane = self.layout.plane_size(&object) * 8;
         for part in parts {
-            let first = part.byte.min(plane);
-            let end = (part.byte + (part.shift + part.width).div_ceil(8))
-                .clamp(first + 1, plane.max(first + 1));
+            let first = (part.byte * 8 + part.shift).min(plane);
+            let end =
+                (part.byte * 8 + part.shift + part.width).clamp(first + 1, plane.max(first + 1));
             for plane_index in 0..self.planes() {
-                effects.push(Self::range(base + plane_index * plane + first, end - first));
+                effects.push(Self::bit_range(
+                    base * 8 + plane_index * plane + first,
+                    end - first,
+                ));
             }
         }
     }
 
     fn read(&mut self, address: &RegionedAbsoluteAddr, offset: &SIROffset, width: usize) {
         let mut effects = std::mem::take(&mut self.reads);
-        self.bytes(address, offset, width, &mut effects);
+        self.bits(address, offset, width, &mut effects);
         self.reads = effects;
     }
 
@@ -368,7 +381,7 @@ impl<'a> UnitEffects<'a> {
         kind: WriteKind,
     ) {
         let mut effects = std::mem::take(&mut self.writes);
-        self.bytes(address, offset, width, &mut effects);
+        self.bits(address, offset, width, &mut effects);
         self.envelope(address, offset, width, kind, &mut effects);
         self.writes = effects;
     }
@@ -853,6 +866,27 @@ mod tests {
         assert_eq!(dependencies[2], vec![1]);
         // Unit 1's read is already ordered before unit 2's write.
         assert_eq!(dependencies[3], vec![0, 2]);
+    }
+
+    #[test]
+    fn reads_and_writes_of_disjoint_bits_in_one_byte_are_independent() {
+        let units = [
+            unit(0, vec![store(0, 0, 3)]),
+            // Bits 3..8 share byte 0 with the store but not its bits.
+            unit(1, vec![load(0, 3, 5)]),
+            unit(1, vec![store(0, 4, 1)]),
+            unit(2, vec![load(0, 2, 2)]),
+        ];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &layout(Vec::new()),
+            CodegenFootprint::Native,
+        );
+        assert!(dependencies[1].is_empty());
+        // Bit 4 is read by unit 1; both writes of byte 0 are ordered.
+        assert_eq!(dependencies[2], vec![0, 1]);
+        // Bit 2 is written by unit 0, bit 3 is untouched by unit 2.
+        assert_eq!(dependencies[3], vec![0]);
     }
 
     #[test]
