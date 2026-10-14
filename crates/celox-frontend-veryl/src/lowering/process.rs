@@ -772,6 +772,11 @@ fn collect_scratch_needs(
                         );
                     }
                 }
+                TbMethod::ClockNext {
+                    count: Some(count), ..
+                } if expressions::has_call(count) => {
+                    need(needs, "clock_count", PROCESS_DELAY_WIDTH)
+                }
                 TbMethod::ClockNext { .. }
                 | TbMethod::ResetAssert { .. }
                 | TbMethod::FileClose
@@ -2369,8 +2374,18 @@ impl<'a> BlockLowering<'a> {
             None
         };
         let start_reg = self.for_bound(shape.start, width, cmp_signed)?;
+        if let ForBound::Expression(expression) = shape.start
+            && self.argument_ended(expression)
+        {
+            return Ok(Flow::Ended);
+        }
         self.store_scratch(start_slot, width, start_reg);
         let end_reg = self.for_bound(shape.end, width, cmp_signed)?;
+        if let ForBound::Expression(expression) = shape.end
+            && self.argument_ended(expression)
+        {
+            return Ok(Flow::Ended);
+        }
         self.store_scratch(end_slot, width, end_reg);
         // Bounds can write design state even when the range is empty.
         self.settle_if_dirty()?;
@@ -3213,6 +3228,14 @@ impl<'a> BlockLowering<'a> {
                         self.unsigned_bits(value, PROCESS_DELAY_WIDTH)
                     }
                     None => self.constant(1, PROCESS_DELAY_WIDTH),
+                };
+                let count = if self.dirty {
+                    let (_, slot) = self.take_scratch("clock_count", PROCESS_DELAY_WIDTH)?;
+                    self.store_scratch(slot, PROCESS_DELAY_WIDTH, count);
+                    self.settle_if_dirty()?;
+                    self.load_scratch(slot, PROCESS_DELAY_WIDTH, false)
+                } else {
+                    count
                 };
                 self.kernel
                     .wait_clock(clock, count, None)

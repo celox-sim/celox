@@ -2039,3 +2039,35 @@ fn terminating_event_argument_skips_later_clock_argument() {
         check_passes_on_every_backend(&code);
     }
 }
+
+#[test]
+fn terminating_for_start_skips_a_later_clock_bound() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var seed:u32;function stop()->u32{$finish();return seed;}function later()->u32{clk.next();return 2;}initial{for i in stop()..later(){$assert(0);}}}"#;
+    check_passes_on_every_backend(code);
+}
+#[test]
+fn zero_clock_count_keeps_helper_design_writes_dirty() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var source:u32;let derived:u32=source+1;function change(dst:output u32)->u32{dst=7;return 0;}initial{source=1;clk.next(change(source));$assert(derived==source+1);$finish();}}"#;
+    check_passes_on_every_backend(code);
+}
+#[test]
+fn repeated_hierarchical_clock_edges_keep_their_count() {
+    let code = r#"module Child(clk:input clock,q:output u32){always_ff(clk){q=q+1;}}#[test(Top)]module Top{var q:u32;inst dut:Child(q);initial{dut.q=0;dut.clk=1;$assert(dut.q==0);dut.clk=0;$assert(dut.q==0);dut.clk=1;$assert(dut.q==0);dut.clk=0;}}"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+    }
+    for four_state in [false, true] {
+        let build = || {
+            Simulator::builder(code, "Top")
+                .testbench_kernels(true)
+                .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+}

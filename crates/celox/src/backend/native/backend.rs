@@ -413,8 +413,8 @@ pub struct NativeProgramImage {
     comb_unit_offsets: Vec<usize>,
     /// Entry offset of each process kernel.
     process_offsets: Vec<usize>,
-    /// Clock-control addresses and byte offsets used to compile each process kernel.
-    compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
+    /// Control addresses and byte offsets used to compile each process kernel.
+    compiled_process_controls: Vec<Vec<(AbsoluteAddr, usize)>>,
     required_native_features: u8,
     #[serde(serialize_with = "celox_design::serde_sorted::map")]
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -584,18 +584,33 @@ impl NativeProgramImage {
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
         }
-        if self.compiled_process_clocks.len() != self.runtime_schema.processes.len()
+        if self.compiled_process_controls.len() != self.runtime_schema.processes.len()
             || self
-                .compiled_process_clocks
+                .compiled_process_controls
                 .iter()
                 .zip(&self.runtime_schema.processes)
-                .any(|((address, offset), process)| {
-                    process.clock != *address || self.layout.offsets.get(address) != Some(offset)
+                .any(|(bindings, process)| {
+                    let addresses = [
+                        process.resume,
+                        process.status,
+                        process.delay,
+                        process.clock,
+                        process.release,
+                    ]
+                    .into_iter()
+                    .chain(process.comb_clean)
+                    .collect::<Vec<_>>();
+                    bindings.len() != addresses.len()
+                        || bindings
+                            .iter()
+                            .zip(addresses)
+                            .any(|((address, offset), expected)| {
+                                *address != expected
+                                    || self.layout.offsets.get(address) != Some(offset)
+                            })
                 })
         {
-            return Err(
-                "process clock control slots disagree with compiled kernel bindings".into(),
-            );
+            return Err("process control slots disagree with compiled kernel bindings".into());
         }
         let mut process_clock_periods = fxhash::FxHashMap::default();
         for process in &self.runtime_schema.processes {
@@ -2423,12 +2438,24 @@ fn compile_program(
             comb_offset,
             comb_unit_offsets,
             process_offsets,
-            compiled_process_clocks: sir
+            compiled_process_controls: sir
                 .runtime()
                 .runtime_schema
                 .processes
                 .iter()
-                .map(|process| (process.clock, layout.offsets[&process.clock]))
+                .map(|process| {
+                    [
+                        process.resume,
+                        process.status,
+                        process.delay,
+                        process.clock,
+                        process.release,
+                    ]
+                    .into_iter()
+                    .chain(process.comb_clean)
+                    .map(|address| (address, layout.offsets[&address]))
+                    .collect()
+                })
                 .collect(),
             required_native_features,
             event_map,
@@ -3602,6 +3629,42 @@ mod process_metadata_tests {
                 broken.to_container_bytes(),
                 Err(NativeImageContainerError::InvalidImage(_))
             ));
+        }
+    }
+
+    #[test]
+    fn process_release_control_bindings_cannot_be_swapped() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for control in 0..5 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes;
+            let get = |p: &celox_design::ProcessSlots<AbsoluteAddr>| match control {
+                0 => p.resume,
+                1 => p.status,
+                2 => p.delay,
+                3 => p.clock,
+                _ => p.release,
+            };
+            let a = get(&slots[0]);
+            let b = get(&slots[1]);
+            assert_ne!(a, b);
+            for (p, value) in [(0, b), (1, a)] {
+                match control {
+                    0 => slots[p].resume = value,
+                    1 => slots[p].status = value,
+                    2 => slots[p].delay = value,
+                    3 => slots[p].clock = value,
+                    _ => slots[p].release = value,
+                }
+            }
+            assert!(
+                matches!(
+                    broken.to_container_bytes(),
+                    Err(NativeImageContainerError::InvalidImage(_))
+                ),
+                "control {control}"
+            );
         }
     }
 

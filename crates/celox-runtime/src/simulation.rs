@@ -1281,6 +1281,43 @@ impl<B: SimBackend> SimulationState<B> {
             .collect()
     }
 
+    fn add_process_edge_replays(
+        &self,
+        backend: &B,
+        before: &[(u32, u32)],
+        replays: &mut std::collections::BTreeMap<usize, u64>,
+    ) {
+        let mut extra = std::collections::BTreeMap::<usize, u64>::new();
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let rise = backend.get_as::<u32>(*rises).wrapping_sub(*old_rises) as u64;
+            let fall = backend.get_as::<u32>(*falls).wrapping_sub(*old_falls) as u64;
+            let count = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => fall,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => rise,
+                _ => rise + fall,
+            };
+            let canonical = self.event_info[*id].canonical_id;
+            let Some(info) = self.event_info.get(canonical) else {
+                continue;
+            };
+            if info.eval_ff_event.is_none()
+                && info.eval_only_event.is_none()
+                && info.apply_event.is_none()
+            {
+                continue;
+            }
+            extra
+                .entry(canonical)
+                .and_modify(|n| *n = (*n).max(count.saturating_sub(1)))
+                .or_insert(count.saturating_sub(1));
+        }
+        for (id, count) in extra {
+            *replays.entry(id).or_default() += count;
+        }
+    }
+
     fn process_counter_edges(&self, backend: &B, before: &[(u32, u32)]) -> BitSet {
         let mut edges = BitSet::with_capacity(backend.num_events());
         for ((id, rises, falls), (old_rises, old_falls)) in
@@ -1290,7 +1327,13 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
                     backend.get_as::<u32>(*falls) != *old_falls
                 }
-                _ => backend.get_as::<u32>(*rises) != *old_rises,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                    backend.get_as::<u32>(*rises) != *old_rises
+                }
+                _ => {
+                    backend.get_as::<u32>(*rises) != *old_rises
+                        || backend.get_as::<u32>(*falls) != *old_falls
+                }
             };
             if changed {
                 edges.insert(*id);
@@ -1816,6 +1859,8 @@ impl<B: SimBackend> SimulationState<B> {
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         // Counter-recorded kernel edges survive later blocking stores that
         // restored the signal before the kernel returned.
+        let mut edge_replays = std::collections::BTreeMap::new();
+        self.add_process_edge_replays(executor.backend(), &counter_values, &mut edge_replays);
         let mut recorded_edges = self.process_counter_edges(executor.backend(), &counter_values);
         recorded_edges.union_with(&scheduled_edges);
         let mut scheduled_trigger_ids = recorded_edges.clone();
@@ -1965,6 +2010,7 @@ impl<B: SimBackend> SimulationState<B> {
                         self.finished = true;
                         return Ok(true);
                     }
+                    self.add_process_edge_replays(executor.backend(), &before, &mut edge_replays);
                     ff_body_edges
                         .union_with(&self.process_counter_edges(executor.backend(), &before));
                 }
@@ -2075,6 +2121,11 @@ impl<B: SimBackend> SimulationState<B> {
                     )?
                 };
                 if progressed {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &inactive_counter_values,
+                        &mut edge_replays,
+                    );
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &inactive_counter_values);
                     recorded_edges.union_with(&driven);
@@ -2109,7 +2160,22 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
-                break;
+                let replay = edge_replays
+                    .iter()
+                    .filter_map(|(&id, &count)| (count > 0).then_some(id))
+                    .collect::<Vec<_>>();
+                if replay.is_empty() {
+                    break;
+                }
+                discovered_in_this_step.make_empty();
+                triggered_domains.make_empty();
+                executor.backend_mut().clear_triggered_bits();
+                for id in replay {
+                    *edge_replays.get_mut(&id).unwrap() -= 1;
+                    recorded_edges.insert(id);
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
+                continue;
             }
 
             // Publish all simultaneous NBA updates before polling waiters.
@@ -2163,6 +2229,11 @@ impl<B: SimBackend> SimulationState<B> {
                     return Ok(true);
                 }
                 if any_process_ran {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &counter_values,
+                        &mut edge_replays,
+                    );
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &counter_values);
                     recorded_edges.union_with(&driven);
