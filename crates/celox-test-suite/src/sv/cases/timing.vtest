@@ -884,3 +884,17 @@ endmodule"#)
  module Top(input bit clk,output bit q);import \A,items ::tick;
  always @(posedge clk)q<=tick();endmodule"#)
  (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case parameterized_interface_methods_keep_setup_edges
+ (source "interface-method.sv" #"
+ interface Scale #(parameter int K=1);
+   function automatic logic [3:0] scaled(input logic [3:0] v);
+     return v*K;
+   endfunction
+ endinterface
+ module Top(input bit clk,input logic [3:0] v,output logic [3:0] q);
+   Scale #(.K(5)) s();
+   always @(posedge clk) q <= s.scaled(v);
+ endmodule
+ "#)
+ (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))

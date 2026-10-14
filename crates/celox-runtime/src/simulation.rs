@@ -1757,12 +1757,22 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        // Inactive (#0) continuations can keep one native step busy forever.
+        // Bound delta rounds independently of the caller's time/step budget.
+        let mut delta_rounds = 0usize;
         let mut comb_already_done = false;
         loop {
             let mut any_new_outer_loop_trigger = false;
             let mut newly_triggered = Vec::new();
 
             loop {
+                delta_rounds += 1;
+                if delta_rounds > 100_000 {
+                    return Err(SimulatorErrorCode::Runtime {
+                        message: "process delta limit exceeded without advancing time".to_owned(),
+                        signals: Vec::new(),
+                    });
+                }
                 let marked_bits = executor.backend().get_triggered_bits();
                 executor.backend_mut().clear_triggered_bits();
 

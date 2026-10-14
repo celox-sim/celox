@@ -164,3 +164,7 @@ sv_backends! {
 sv_backends! {
  fn escaped_import_commas_keep_explicit_callable_selection(sim){@case "timing::escaped_import_commas_keep_explicit_callable_selection";}
 }
+
+sv_backends! {
+ fn parameterized_interface_methods_keep_setup_edges(sim){@case "timing::parameterized_interface_methods_keep_setup_edges";}
+}

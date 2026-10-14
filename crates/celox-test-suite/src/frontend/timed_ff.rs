@@ -464,6 +464,7 @@ pub(super) struct TaskTiming {
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
     ff_offsets: BTreeMap<String, Vec<usize>>,
     calls: BTreeMap<String, Vec<(usize, String)>>,
+    instance_types: BTreeMap<String, Vec<(usize, String, String)>>,
     imports: BTreeMap<String, Vec<(String, Option<String>)>>,
     exports: BTreeMap<String, Vec<(Option<String>, Option<String>)>>,
 }
@@ -641,6 +642,13 @@ impl TaskTiming {
                     })
                     .map_or(offset, |(_, origin)| origin)
                 };
+                result.instance_types.insert(
+                    source.clone(),
+                    celox_sv_analyzer::ast::instance_type_sites(&tree)
+                        .into_iter()
+                        .map(|(offset, name, typ)| (origin(offset), name, typ))
+                        .collect(),
+                );
                 result.import_clauses.insert(
                     source.clone(),
                     celox_sv_analyzer::ast::package_import_export_clauses(&tree)
@@ -796,6 +804,27 @@ impl TaskTiming {
         if let Some(prefix) = prefix.strip_suffix('.') {
             let instance = sv_words(prefix).last()?.2;
             let scope = container_at(source, at);
+            if let Some(instances) = self.instance_types.get(source) {
+                let call_scope = self.lexical_scope(source, at);
+                let found = instances
+                    .iter()
+                    .filter(|(offset, n, _)| {
+                        n.trim_start_matches('\\') == instance.trim_start_matches('\\')
+                            && container_at(source, *offset) == scope
+                            && call_scope.starts_with(&self.lexical_scope(source, *offset))
+                    })
+                    .max_by_key(|(offset, _, _)| self.lexical_scope(source, *offset).len());
+                return found.and_then(|(_, _, typ)| {
+                    self.tasks
+                        .get(&(
+                            typ.trim_start_matches('\\').to_owned(),
+                            None,
+                            Vec::new(),
+                            name.to_owned(),
+                        ))
+                        .copied()
+                });
+            }
             let words = sv_words(&source[..at]);
             for pair in words.windows(2) {
                 if pair[1].2 == instance && container_at(source, pair[0].0) == scope {
@@ -924,6 +953,15 @@ impl TaskTiming {
 #[cfg(test)]
 mod callable_analysis_tests {
     use super::*;
+    #[test]
+    fn parameterized_instances_resolve_their_declared_method_type() {
+        let source="interface Scale #(parameter int K=1);function automatic bit scaled(input bit v);return v;endfunction endinterface module Top;Scale #(.K(5)) s();always @(posedge clk)q<=s.scaled(v);endmodule".to_owned();
+        let tasks = TaskTiming::new(std::slice::from_ref(&source));
+        assert_eq!(
+            tasks.resolve(&source, source.rfind("scaled(v)").unwrap(), "scaled"),
+            Some(false)
+        );
+    }
     #[test]
     fn parsed_imports_keep_escaped_names_and_comment_commas_whole() {
         for imports in [

@@ -656,11 +656,10 @@ impl<B: SimBackend> Simulation<B> {
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                self.state.step(&mut self.simulator)?;
-            } else {
-                self.state.settle_at(&mut self.simulator, time)?;
+                return self.state.step(&mut self.simulator);
             }
-            if active || queued {
+            self.state.settle_at(&mut self.simulator, time)?;
+            if active {
                 return Ok(Some(time));
             }
         }
@@ -3909,10 +3908,17 @@ mod coincident_host_edge_limit_review_tests {
     use super::*;
     use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
     fn design() -> crate::frontend_sdk::FrontendArtifact {
+        design_with_initial_host(false)
+    }
+    fn design_with_initial_host(high: bool) -> crate::frontend_sdk::FrontendArtifact {
         let bit = ValueType::bits(1).unwrap();
         let byte = ValueType::bits(8).unwrap();
         let mut m = ModuleBuilder::new("Top").unwrap();
         let host = m.input("host", bit).unwrap();
+        if high {
+            m.set_initial(host, Constant::two_state(1u8, 1).unwrap())
+                .unwrap();
+        }
         let clk = m.internal("clk", bit).unwrap();
         let seen = m.output("seen", bit).unwrap();
         let q = m.output("q", byte).unwrap();
@@ -3956,6 +3962,25 @@ mod coincident_host_edge_limit_review_tests {
         assert_eq!(sim.ticks(), 8);
         assert_eq!(sim.get(sim.signal("q")), 8u8.into());
     }
+    #[test]
+    fn coincident_host_edges_report_the_time_reached_by_step() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.set_wide(sim.signal("host"), 0u8.into());
+            let reached = sim.step().unwrap().unwrap();
+            assert_eq!(reached, sim.time());
+            assert_eq!(sim.get(sim.signal("q")), (sim.ticks() as u8).into());
+            sim.run_until(28).unwrap();
+            assert_eq!(sim.ticks(), 8);
+            assert_eq!(sim.get(sim.signal("q")), 8u8.into());
+        }
+        let build = || Simulator::from_frontend(design_with_initial_host(true));
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
     #[test]
     fn coincident_host_edges_do_not_fuse_past_public_time_limits() {
         for (method, limit) in [
@@ -4082,5 +4107,159 @@ mod ordinary_simulation_testbench_scope_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod cross_mode_clock_baseline_review_tests {
+    use super::*;
+    #[test]
+    fn unknown_clock_baselines_coerce_with_loaded_state() {
+        let source =
+            "module Top(input logic clk,output bit[7:0]q);always @(negedge clk)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>, payload: u8) {
+            let clk = source.signal("clk");
+            source
+                .modify(|io| io.set_four_state(clk, payload.into(), 1u8.into()))
+                .unwrap();
+            source.run_until(0).unwrap();
+            assert_eq!(source.get(source.signal("q")), 0u8.into());
+            let file = source.save_state().unwrap();
+            target.load_state(&file).unwrap();
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 0u8.into());
+            let clk = target.signal("clk");
+            target.set_wide(clk, 1u8.into());
+            target.settle().unwrap();
+            target.set_wide(clk, 0u8.into());
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 1u8.into());
+        }
+        let bit_source = source.replace("input logic clk", "input bit clk");
+        for (payload, target_four_state, target_bit) in [
+            (0, false, false),
+            (1, false, false),
+            (0, true, true),
+            (1, true, true),
+            (0, true, false),
+            (1, true, false),
+        ] {
+            let build = |four_state, bit| {
+                let code = if bit { bit_source.as_str() } else { source };
+                Simulator::from_sv_sources(
+                    vec![(code, std::path::Path::new("baseline-coercion.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            check(
+                Simulation::new(build(true, false).build_interpreter().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_interpreter()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_cranelift().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_cranelift()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_wasm().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_wasm().unwrap()),
+                payload,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build(true, false).build_native().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_native().unwrap()),
+                payload,
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod zero_delay_review_tests {
+    use super::*;
+    #[test]
+    fn zero_delay_repeating_processes_report_non_progress() {
+        let source = "module Top(output bit clk);always #0 clk=~clk;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let error = sim.run_until(0).unwrap_err().to_string();
+            assert!(error.contains("delta"), "{error}");
+            assert_eq!(sim.time(), 0);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("zero-delay.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn finite_inactive_delays_and_positive_time_loops_still_run() {
+        for source in [
+            "module Top(output bit q);initial begin repeat(3) #0 q=~q;end endmodule",
+            "module Top(output bit q);always #1 q=~q;endmodule",
+        ] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("delta-control.sv"))],
+                "Top",
+            )
+            .build()
+            .unwrap();
+            sim.run_until(3).unwrap();
+            assert_eq!(sim.time(), 3);
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+    }
+
+    #[test]
+    fn static_logic_locals_start_unknown_and_retain_updates() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, ff: bool) {
+            if ff {
+                sim.schedule("clk", 1, 1).unwrap();
+            }
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("out")), 1u8.into());
+            if ff {
+                sim.schedule("clk", 2, 0).unwrap();
+                sim.schedule("clk", 3, 1).unwrap();
+            }
+            sim.run_until(if ff { 3 } else { 2 }).unwrap();
+            assert_eq!(sim.get(sim.signal("out")), 0u8.into());
+        }
+        for (source, ff) in [
+            (
+                "module Top(input bit clk,output bit out);task t;static logic x;out=(x===1'bx);x=1;endtask always @(posedge clk)t();endmodule",
+                true,
+            ),
+            (
+                "module Top(output bit out);task t;static logic x;out=(x===1'bx);x=1;endtask initial begin #1;t();#1;t();end endmodule",
+                false,
+            ),
+        ] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("static-x.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()), ff);
+            check(Simulation::new(build().build_cranelift().unwrap()), ff);
+            check(Simulation::new(build().build_wasm().unwrap()), ff);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), ff);
+        }
     }
 }

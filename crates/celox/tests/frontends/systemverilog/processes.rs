@@ -2295,3 +2295,25 @@ fn readmem_word_stores_cannot_hide_propagated_expression_pulses() {
     }
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn recurring_disjoint_port_writes_keep_known_phases() {
+    let source = "module Child(output bit[1:0]q);always begin #1;q[0]=~q[0];#99;end always begin #2;q[1]=~q[1];#98;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    for (time, seen) in [(1, 1u8), (2, 2), (101, 3), (102, 4)] {
+        sim.run_until(time).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), seen.into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]").replace("#98;", "#99;"))
+            .contains("multiple blocking writes")
+    );
+    // Different periods can also remain disjoint by their GCD residues.
+    let different = source.replace("#99;", "#5;").replace("#98;", "#2;");
+    let mut sim = simulation(&different);
+    sim.run_until(7).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 4u8.into());
+    // Coprime periods eventually coincide even when startup phases differ.
+    let coincident = source.replace("#99;", "#2;").replace("#98;", "#3;");
+    assert!(build_error(&coincident).contains("multiple blocking writes"));
+}

@@ -3425,6 +3425,11 @@ pub(super) fn runtime_watched_write_count(
     body(stmts, pm, expr, &mut HashSet::default(), nonblocking).maximum
 }
 
+pub(super) struct FixedWriteTimes {
+    pub times: std::collections::BTreeMap<u64, usize>,
+    pub period: Option<u64>,
+}
+
 /// Exact times for a straight-line initial activation with constant delays.
 /// Other control flow retains the conservative activation summary above.
 pub(super) fn fixed_runtime_write_times(
@@ -3432,8 +3437,21 @@ pub(super) fn fixed_runtime_write_times(
     pm: &ProcModule<'_>,
     expr: &sv::ir::Expr,
     nonblocking: bool,
-) -> Option<std::collections::BTreeMap<u64, usize>> {
-    use sv::ir::Stmt;
+) -> Option<FixedWriteTimes> {
+    use sv::ir::{LoopKind, Stmt};
+    let (stmts, recurring) = match stmts {
+        [
+            Stmt::Loop {
+                kind: LoopKind::Forever,
+                init,
+                condition: None,
+                body,
+                step,
+            },
+        ] if init.is_empty() && step.is_empty() => (body.as_slice(), true),
+        _ => (stmts, false),
+    };
+    let mut recurring = recurring;
     let mut time = 0u64;
     let mut times = std::collections::BTreeMap::<u64, usize>::new();
     for stmt in stmts {
@@ -3493,14 +3511,27 @@ pub(super) fn fixed_runtime_write_times(
             | Stmt::Wait(_)
             | Stmt::WaitEvent(_)
             | Stmt::Call { .. } => return None,
-            Stmt::Return(_) | Stmt::Break | Stmt::Continue => break,
-            Stmt::SystemTask { name, .. } if matches!(name.as_str(), "$finish" | "$fatal") => break,
+            Stmt::Return(_) | Stmt::Break => {
+                recurring = false;
+                break;
+            }
+            Stmt::Continue => break,
+            Stmt::SystemTask { name, .. } if matches!(name.as_str(), "$finish" | "$fatal") => {
+                recurring = false;
+                break;
+            }
             _ => 0,
         };
         let value = times.entry(time).or_default();
         *value = (*value + count).min(2);
     }
-    Some(times)
+    if recurring && time == 0 {
+        return None;
+    }
+    Some(FixedWriteTimes {
+        times,
+        period: recurring.then_some(time),
+    })
 }
 
 fn watched_nba_count(

@@ -430,6 +430,19 @@ impl<B: SimBackend> Simulator<B> {
             signal: signals[&event.signal],
             next_val: event.value,
         };
+        // Loading unknown state into a two-state object coerces it to zero.
+        // Apply that coercion to its historical edge sample too, while V1
+        // known-Boolean baselines retain their pending known transitions.
+        let saved_unknown: std::collections::BTreeSet<&str> = record
+            .unknown_events
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let supports_unknown = |name: &str| {
+            self.backend.layout().four_state
+                && self.backend.resolve_signal(&events[name].addr()).is_4state
+        };
         Ok(ScheduleParts {
             time: record.time,
             clocks: record
@@ -443,11 +456,17 @@ impl<B: SimBackend> Simulator<B> {
                 .iter()
                 .map(|(event, count)| (resolve(event), *count))
                 .collect(),
-            high_events: record.high_events.iter().map(|name| events[name]).collect(),
+            high_events: record
+                .high_events
+                .iter()
+                .filter(|name| !saved_unknown.contains(name.as_str()) || supports_unknown(name))
+                .map(|name| events[name])
+                .collect(),
             unknown_events: record
                 .unknown_events
                 .iter()
                 .flatten()
+                .filter(|name| supports_unknown(name))
                 .map(|name| events[name])
                 .collect(),
             // State files are rejected for designs with processes.
