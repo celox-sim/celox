@@ -3536,7 +3536,16 @@ pub(super) fn fixed_runtime_write_times(
         let value = times.entry((time, phase)).or_default();
         *value = (*value + count).min(2);
     }
-    if recurring && time == 0 {
+    // A leading write inherits the previous cycle's terminal phase after
+    // startup. Until that separate startup wave is represented, keep such
+    // schedules conservative. A positive delay resets the phase each cycle.
+    if recurring
+        && (time == 0
+            || (phase != 0
+                && times
+                    .iter()
+                    .any(|((time, _), writes)| *time == 0 && *writes != 0)))
+    {
         return None;
     }
     Some(FixedWriteTimes {
