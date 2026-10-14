@@ -183,3 +183,5 @@ sv_backends! { fn interface_modport_methods_keep_setup_edges(sim) { @case "timin
 sv_backends! { fn generic_interface_methods_keep_setup_edges(sim) { @case "timing::generic_interface_methods_keep_setup_edges"; } }
 
 sv_backends! { fn inherited_interface_methods_keep_setup_edges(sim) { @case "timing::inherited_interface_methods_keep_setup_edges"; } }
+
+sv_backends! { fn pure_function_rhs_preserves_distinct_write_times(sim) { @case "timing::pure_function_rhs_preserves_distinct_write_times"; } }

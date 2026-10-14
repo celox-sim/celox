@@ -997,3 +997,17 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))
+
+(case pure_function_rhs_preserves_distinct_write_times
+ (source "pure-timed-writes.sv" #"
+ module Child(output bit[1:0]q);
+ function automatic bit one();return 1;endfunction
+ initial begin #1;q[0]=one();end
+ initial begin #2;q[1]=one();end
+ endmodule
+ module Top(output bit[7:0]seen);
+ wire[1:0]q;Child u(.q(q));
+ initial forever begin @(q[0]^q[1]);seen=seen+1;end
+ endmodule
+ "#)
+ (top Top)(run_until 1)(assert_eq seen 1)(run_until 2)(assert_eq seen 2))
