@@ -939,6 +939,23 @@ impl<B: SimBackend> SimulationState<B> {
         })
     }
 
+    /// Pending external clock/reset changes, excluding drives whose phase
+    /// belongs to a process clock. Those must retry with their scheduled batch.
+    pub fn has_unsettled_host_edges(&self, backend: &B) -> bool {
+        self.topo_signals.iter().any(|(signal, id, _)| {
+            *id != usize::MAX
+                && !self
+                    .processes
+                    .iter()
+                    .flat_map(|process| &process.clocks)
+                    .any(|clock| clock.signal == *signal)
+                && (
+                    self.last_clock_values.contains(*id),
+                    self.unknown_clock_values.contains(*id),
+                ) != sample_event_signal(backend, *signal)
+        })
+    }
+
     /// Whether any process is suspended on an event or a condition.
     pub fn has_waiting_processes(&self) -> bool {
         !self.waiting.is_empty()

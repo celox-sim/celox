@@ -517,7 +517,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.poll_waiting(&mut self.simulator)? {
             return Ok(Some(self.state.time()));
         }
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             if self.state.next_event_time() == Some(time) {
                 self.state.step(&mut self.simulator)?;
@@ -603,7 +603,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.poll_waiting_until(&mut self.simulator, limit)? {
             return Ok(Some(self.state.time()));
         }
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             if self.state.next_event_time() == Some(time) {
                 self.state.step(&mut self.simulator)?;
@@ -627,7 +627,6 @@ impl<B: SimBackend> Simulation<B> {
     /// [`Self::step`], processes that a host write woke resume first. A time
     /// before the current time leaves the simulation unchanged.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-
         if self.state.is_finished() {
             return Ok(());
         }
@@ -635,8 +634,9 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         self.settle_host_writes()?;
-        self.state.poll_waiting_until(&mut self.simulator, end_time)?;
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        self.state
+            .poll_waiting_until(&mut self.simulator, end_time)?;
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             if self.state.next_event_time() == Some(time) {
                 self.state.step(&mut self.simulator)?;
