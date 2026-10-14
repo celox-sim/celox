@@ -487,6 +487,9 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         self.settle_host_writes()?;
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         if self.state.poll_waiting(&mut self.simulator)? {
             return Ok(Some(self.state.time()));
         }
@@ -571,6 +574,9 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         self.settle_host_writes()?;
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         if self.state.poll_waiting(&mut self.simulator)? {
             return Ok(Some(self.state.time()));
         }
@@ -2368,5 +2374,44 @@ mod queued_derived_ff_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_edge_review_tests {
+    use super::*;
+    #[test]
+    fn host_finish_and_edge_do_not_report_a_step() {
+        let source = "module Top(input bit a,output bit q);always_comb if(a)$finish;always @(posedge a)q<=1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>, bounded: bool) {
+            sim.run_until(0).unwrap();
+            assert!(!sim.is_finished());
+            sim.set_wide(sim.signal("a"), 1u8.into());
+            let result = if bounded {
+                sim.step_until(0)
+            } else {
+                sim.step()
+            };
+            assert_eq!(result.unwrap(), None);
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            assert_eq!(sim.time(), 0);
+        }
+        for bounded in [false, true] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("host-finish-edge.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                bounded,
+            );
+            check(Simulation::new(build().build_cranelift().unwrap()), bounded);
+            check(Simulation::new(build().build_wasm().unwrap()), bounded);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), bounded);
+        }
     }
 }

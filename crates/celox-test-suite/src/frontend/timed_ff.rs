@@ -35,6 +35,18 @@ fn skip_token(source: &str, at: &mut usize) -> bool {
     }
     true
 }
+fn semicolon(source: &str, mut at: usize) -> Option<usize> {
+    while at < source.len() {
+        if skip_token(source, &mut at) {
+            continue;
+        }
+        if source.as_bytes()[at] == b';' {
+            return Some(at);
+        }
+        at += 1;
+    }
+    None
+}
 fn parens(source: &str, begin: usize) -> Option<usize> {
     if source.as_bytes().get(begin) != Some(&b'(') {
         return None;
@@ -601,7 +613,7 @@ impl TaskTiming {
                     continue;
                 }
                 let tail = &source[*end..];
-                let Some(end) = tail.find(';') else {
+                let Some(end) = semicolon(tail, 0) else {
                     continue;
                 };
                 for item in tail[..end].split(',') {
@@ -627,10 +639,7 @@ impl TaskTiming {
             }
             for (index, (start, end, word)) in words.iter().enumerate() {
                 if *word == "function" {
-                    let header_end = source[*end..]
-                        .find(';')
-                        .map(|offset| end + offset)
-                        .unwrap_or(source.len());
+                    let header_end = semicolon(source, *end).unwrap_or(source.len());
                     let header = &source[*end..header_end];
                     let mut name_end = header.len();
                     let mut at = 0;
@@ -677,9 +686,8 @@ impl TaskTiming {
                     continue;
                 };
                 let key = result.callable_key(source, *start, name);
-                let header_end = source[*end..*body_end]
-                    .find(';')
-                    .map_or(*end, |offset| end + offset + 1);
+                let header_end =
+                    semicolon(&source[..*body_end], *end).map_or(*end, |offset| offset + 1);
                 result
                     .tasks
                     .insert(key.clone(), has_timing(&source[header_end..*body_end]));
@@ -749,7 +757,7 @@ impl TaskTiming {
             }
             let (explicit, wildcard) = imports.entry(lexical.len()).or_default();
             let tail = &source[end..];
-            let clause = &tail[..tail.find(';')?];
+            let clause = &tail[..semicolon(tail, 0)?];
             for item in clause.split(',') {
                 let words = sv_words(item);
                 let Some((_, _, package)) = words.first() else {
