@@ -2304,3 +2304,16 @@ fn inactive_phases_keep_cross_instance_expression_transitions() {
         build_error(&source.replace("#1;#0;q[1]", "#1;q[1]")).contains("multiple blocking writes")
     );
 }
+
+#[test]
+fn recurring_terminal_inactive_phases_keep_cross_instance_edges() {
+    let source = "module Child(output bit[1:0]q);always begin #1;#0;q[0]=~q[0];end always begin #1;q[1]=~q[1];end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    for time in 1..=4 {
+        sim.run_until(time).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (time * 2).into());
+    }
+    assert!(
+        build_error(&source.replace("#1;#0;q[0]", "#1;q[0]")).contains("multiple blocking writes")
+    );
+}
