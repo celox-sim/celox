@@ -375,6 +375,7 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (named(event), *count))
                 .collect(),
             high_events: parts.high_events.into_iter().map(event_path).collect(),
+            captured_edges: parts.captured_edges.into_iter().map(event_path).collect(),
             unknown_events: Some(parts.unknown_events.into_iter().map(event_path).collect()),
         }
     }
@@ -406,6 +407,7 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .map(|(name, _)| name)
             .chain(&record.high_events)
+            .chain(&record.captured_edges)
             .chain(record.unknown_events.iter().flatten())
             .chain(scheduled.clone().map(|event| &event.event))
             .filter(|name| !events.contains_key(*name))
@@ -460,6 +462,11 @@ impl<B: SimBackend> Simulator<B> {
                 .high_events
                 .iter()
                 .filter(|name| !saved_unknown.contains(name.as_str()) || supports_unknown(name))
+                .map(|name| events[name])
+                .collect(),
+            captured_edges: record
+                .captured_edges
+                .iter()
                 .map(|name| events[name])
                 .collect(),
             unknown_events: record

@@ -371,8 +371,9 @@ impl<B: SimBackend> Simulation<B> {
         if self.has_processes() {
             return Err(StateError::Processes);
         }
+        let was_dirty = self.simulator.dirty;
         let mut file = self.simulator.save_state()?;
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         let parts = self.state.export_schedule(&self.simulator.backend);
         file.schedule = Some(self.simulator.name_schedule(parts));
         Ok(file)
@@ -419,14 +420,16 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
+        let was_dirty = self.simulator.dirty;
         self.simulator.dump(timestamp);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
+        let was_dirty = self.simulator.dirty;
         let result = self.simulator.try_dump(timestamp);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         result
     }
 
@@ -444,20 +447,26 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.signal(path)
     }
 
-    fn synchronize_runtime_finish(&mut self) {
+    fn synchronize_runtime_finish(&mut self, was_dirty: bool) {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
+        } else if was_dirty && !self.simulator.dirty && !self.state.is_finished() {
+            self.state
+                .sample_waiting_events(&mut self.simulator)
+                .unwrap();
+            self.state.capture_host_edges(&self.simulator.backend);
         }
     }
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
+        let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get(signal)
         } else {
             self.simulator.get(signal)
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         value
     }
 
@@ -466,12 +475,13 @@ impl<B: SimBackend> Simulation<B> {
         &mut self,
         signal: SignalRef,
     ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get_four_state(signal)
         } else {
             self.simulator.get_four_state(signal)
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         value
     }
 
@@ -496,8 +506,9 @@ impl<B: SimBackend> Simulation<B> {
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
+        let was_dirty = self.simulator.dirty;
         let result = self.simulator.modify(f);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         result
     }
 
@@ -762,12 +773,13 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        let was_dirty = self.simulator.dirty;
         let events = if self.state.is_finished() {
             self.simulator.drain_runtime_events_without_evaluation()
         } else {
             self.simulator.drain_runtime_events()
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         events
     }
 
@@ -783,6 +795,7 @@ impl<B: SimBackend> Simulation<B> {
             self.state.finish();
         }
         self.state.sample_waiting_events(&mut self.simulator)?;
+        self.state.capture_host_edges(&self.simulator.backend);
         Ok(())
     }
 
@@ -4491,6 +4504,72 @@ mod lazy_event_pulse_review {
         }
         let build = || {
             Simulator::from_sv_sources(vec![(source, std::path::Path::new("lazy-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod lazy_read_and_ff_edges_review {
+    use super::*;
+    #[test]
+    fn lazy_rust_reads_retain_host_event_pulses() {
+        let source = "module Top(input bit go,output bit y,woke);assign y=go;initial begin @(posedge go);woke=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let y = sim.signal("y");
+            let woke = sim.signal("woke");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            assert_eq!(sim.get(y), 1u8.into());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            assert_eq!(sim.get(y), 0u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(woke), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("read-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn explicit_settles_retain_derived_ff_pulses() {
+        let source = "module Top(input bit go,output bit derived,output bit[7:0]q);assign derived=go;always_ff @(posedge derived)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(q), 0u8.into());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.eval_comb().unwrap();
+            let checkpoint = sim.checkpoint().unwrap();
+            let file = sim.save_state().unwrap();
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+            sim.restore(&checkpoint).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            sim.load_state(&file).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("ff-pulse.sv"))], "Top")
         };
         check(Simulation::new(build().build_interpreter().unwrap()));
         check(Simulation::new(build().build_cranelift().unwrap()));

@@ -3502,6 +3502,73 @@ pub(super) fn fixed_runtime_write_times(
         }
         safe
     }
+    fn bounded_for(
+        init: &[sv::ir::Stmt],
+        condition: Option<&sv::ir::Expr>,
+        step: &[sv::ir::Stmt],
+        body: &[sv::ir::Stmt],
+        pm: &ProcModule<'_>,
+    ) -> bool {
+        let Some(loop_) = canonical_for_loop(init, condition, step) else {
+            return false;
+        };
+        let eval = |expr| {
+            known_loop_value(
+                expr,
+                pm.variables,
+                pm.name_to_id,
+                pm.constants,
+                pm.parameter_types,
+            )
+        };
+        let (Some(start), Some(end), Some(id)) =
+            (eval(&loop_.start), eval(&loop_.end), pm.id(&loop_.var))
+        else {
+            return false;
+        };
+        let variable = pm.var(id);
+        if variable.width == 0
+            || variable.width > 64
+            || loop_.step == 0
+            || loop_.step_op != celox_slt::SLTStepOp::Add
+        {
+            return false;
+        }
+        let (low, high) = if variable.signed {
+            let half = 1i128 << (variable.width - 1);
+            (-half, half - 1)
+        } else {
+            (0, (1i128 << variable.width) - 1)
+        };
+        if !(low..=high).contains(&start) || !(low..=high).contains(&end) {
+            return false;
+        }
+        let stride = loop_.step as i128;
+        let bounded = match (loop_.decreasing, loop_.compare) {
+            (false, sv::ir::BinaryOp::Lt | sv::ir::BinaryOp::Le) => {
+                end.checked_add(stride).is_some_and(|last| last <= high)
+            }
+            (true, sv::ir::BinaryOp::Gt | sv::ir::BinaryOp::Ge) => {
+                end.checked_sub(stride).is_some_and(|last| last >= low)
+            }
+            (false, sv::ir::BinaryOp::Ne) => end >= start && (end - start) % stride == 0,
+            (true, sv::ir::BinaryOp::Ne) => end <= start && (start - end) % stride == 0,
+            _ => false,
+        };
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        let mut nested = false;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt_calls(stmt, &mut calls);
+            stmt.walk(&mut |stmt| nested |= matches!(stmt, sv::ir::Stmt::Loop { .. }));
+        }
+        bounded
+            && !written.contains(&loop_.var)
+            && !nested
+            && calls.is_empty()
+            && branch_without_suspension_or_exit(body)
+    }
     use sv::ir::{LoopKind, Stmt};
     let (stmts, recurring) = match stmts {
         [
@@ -3613,6 +3680,15 @@ pub(super) fn fixed_runtime_write_times(
                 .is_some_and(|count| count >= 0)
                 && branch_without_suspension_or_exit(body) =>
             {
+                runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
+            }
+            Stmt::Loop {
+                kind: LoopKind::For,
+                init,
+                condition,
+                step,
+                body,
+            } if bounded_for(init, condition.as_ref(), step, body, pm) => {
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
             Stmt::If { .. }
