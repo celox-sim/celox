@@ -704,7 +704,18 @@ impl<B: SimBackend> SimulationState<B> {
                 scheduled_edges.insert(*id);
             }
         }
+        // A same-time batch may restore a derived clock before its final
+        // settle. Preserve actual domain transitions across each source store.
+        let capture_batch_edges = events_to_process.len() > 1;
         for event in &events_to_process {
+            let domain_values: Vec<(bool, bool)> = if capture_batch_edges {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
             let after = sample_event_signal(executor.backend(), event.signal);
@@ -713,11 +724,25 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 scheduled_edges.insert(id);
             }
-            if !self.waiting.is_empty() || executor.scheduled_updates_need_settle() {
+            if capture_batch_edges
+                || !self.waiting.is_empty()
+                || executor.scheduled_updates_need_settle()
+            {
                 executor.eval_comb()?;
                 if executor.finish_requested(current_time) {
                     self.finished = true;
                     return Ok(true);
+                }
+            }
+            for ((signal, id, _), before) in self.topo_signals.iter().zip(domain_values) {
+                if *id != usize::MAX
+                    && self.edge_triggers(
+                        *id,
+                        before,
+                        sample_event_signal(executor.backend(), *signal),
+                    )
+                {
+                    scheduled_edges.insert(*id);
                 }
             }
             self.sample_waiting_events(executor)?;

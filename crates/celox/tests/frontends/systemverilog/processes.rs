@@ -2257,3 +2257,41 @@ fn distinct_fixed_time_writes_through_ports_are_observable() {
             .contains("cross-instance event dependency with multiple blocking writes")
     );
 }
+
+#[test]
+fn readmem_word_stores_cannot_hide_propagated_expression_pulses() {
+    let directory =
+        std::env::temp_dir().join(format!("celox-readmem-pulse-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let data = directory.join("words.bin");
+    std::fs::write(&data, "1\n1\n").unwrap();
+    let source = format!(
+        "module Child(input bit[1:0]q,output bit seen);initial begin @(q[0]^q[1]);seen=1;end endmodule module Top(output bit seen);bit mem[0:1];wire[1:0]q={{mem[1],mem[0]}};Child u(.q(q),.seen(seen));initial begin #1;$readmemb(\"{}\",mem);end endmodule",
+        data.display()
+    );
+    for source in [
+        source.clone(),
+        source
+            .replace(
+                "initial begin #1;$readmemb",
+                "always @(posedge clk) begin $readmemb",
+            )
+            .replace(
+                "module Top(output bit seen)",
+                "module Top(input bit clk,output bit seen)",
+            ),
+    ] {
+        let error = build_error(&source);
+        assert!(error.contains("multiple blocking writes"), "{error}");
+    }
+    // One loaded word, or one selected destination word, cannot hide a pulse.
+    for source in [
+        source.replace(",mem);", ",mem,0,0);"),
+        source.replace("@(q[0]^q[1])", "@(q[0])"),
+    ] {
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
