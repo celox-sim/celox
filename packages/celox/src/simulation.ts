@@ -443,6 +443,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return;
 		if (this._handle.time() > endTime) return;
 		const needsHostPoll = this.needsHostPoll();
 		this.settleSharedWrites();
@@ -508,6 +509,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	step(): number | null {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return null;
 		this.settleSharedWrites();
 		const t = this._handle.step();
 		this._state.pendingHostWrites = false;
@@ -522,7 +524,15 @@ export class Simulation<P = Record<string, unknown>> {
 		);
 	}
 
+	private stopFinishedRun(): boolean {
+		if (!this.isFinished()) return false;
+		this._state.pendingHostWrites = false;
+		this._state.dirty = false;
+		return true;
+	}
+
 	private settleSharedWrites(): void {
+		if (this.stopFinishedRun()) return;
 		if (this._state.dirty) {
 			this._handle.evalComb();
 			this._state.dirty = false;
@@ -562,6 +572,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	waitUntil(condition: () => boolean, opts?: { maxSteps?: number }): number {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return this._handle.time();
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {

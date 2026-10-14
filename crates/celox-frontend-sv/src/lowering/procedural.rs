@@ -2300,12 +2300,12 @@ pub(super) fn stmt_call_effects(
         let mut items = Vec::new();
         match expr {
             Expr::Call { name, args, .. } => {
-                items.push(CallEffects::Call(name.clone(), args.clone()));
                 items.extend(
                     args.iter()
                         .flatten()
                         .map(|arg| expression(arg, eval, two_state)),
                 );
+                items.push(CallEffects::Call(name.clone(), args.clone()));
             }
             Expr::Mux {
                 condition,
@@ -2366,14 +2366,14 @@ pub(super) fn stmt_call_effects(
     }
     let mut calls = Vec::new();
     let exprs = stmt_call_exprs(stmt, &mut calls);
-    let mut items = calls
+    let mut items = exprs
         .into_iter()
-        .map(|(name, args)| CallEffects::Call(name, args))
+        .map(|expr| expression(expr, eval, two_state))
         .collect::<Vec<_>>();
     items.extend(
-        exprs
+        calls
             .into_iter()
-            .map(|expr| expression(expr, eval, two_state)),
+            .map(|(name, args)| CallEffects::Call(name, args)),
     );
     CallEffects::Sequence(items)
 }
