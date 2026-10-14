@@ -3492,16 +3492,49 @@ pub(super) fn fixed_runtime_write_times(
         active.remove(name);
         pure
     }
-    fn branch_without_suspension_or_exit(stmts: &[sv::ir::Stmt]) -> bool {
+    fn call_preserves_time(
+        name: &str,
+        args: &[Option<sv::ir::Expr>],
+        pm: &ProcModule<'_>,
+        active: &mut HashSet<String>,
+    ) -> bool {
+        if !active.insert(name.into()) {
+            return false;
+        }
+        let safe = if let Some(sub) = pm.subroutine(name) {
+            let mut ending = false;
+            let mut calls = Vec::new();
+            default_calls(sub, args, &mut calls);
+            for stmt in &sub.body {
+                stmt.walk(&mut |stmt| {
+                    ending|=matches!(stmt,sv::ir::Stmt::SystemTask{name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
+                    stmt_calls(stmt,&mut calls);
+                });
+            }
+            !ending
+                && !has_own_timing(&sub.body)
+                && calls
+                    .iter()
+                    .all(|(name, args)| call_preserves_time(name, args, pm, active))
+        } else {
+            false
+        };
+        active.remove(name);
+        safe
+    }
+    fn branch_without_suspension_or_exit(stmts: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> bool {
         let mut safe = true;
+        let mut calls = Vec::new();
         for stmt in stmts {
             stmt.walk(&mut |stmt| {
-                safe &= !matches!(stmt, sv::ir::Stmt::Delay(_) | sv::ir::Stmt::Wait(_) | sv::ir::Stmt::WaitEvent(_)
-                    | sv::ir::Stmt::Return(_) | sv::ir::Stmt::Break | sv::ir::Stmt::Continue);
-                safe &= !matches!(stmt,sv::ir::Stmt::SystemTask {name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
+                safe &= !matches!(stmt,sv::ir::Stmt::Delay(_)|sv::ir::Stmt::Wait(_)|sv::ir::Stmt::WaitEvent(_)|sv::ir::Stmt::Return(_)|sv::ir::Stmt::Break|sv::ir::Stmt::Continue);
+                safe &= !matches!(stmt,sv::ir::Stmt::SystemTask{name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
+                stmt_calls(stmt,&mut calls);
             });
         }
-        safe
+        safe && calls
+            .iter()
+            .all(|(name, args)| call_preserves_time(name, args, pm, &mut HashSet::default()))
     }
     fn bounded_for(
         init: &[sv::ir::Stmt],
@@ -3568,7 +3601,7 @@ pub(super) fn fixed_runtime_write_times(
             && !written.contains(&loop_.var)
             && !nested
             && calls.is_empty()
-            && branch_without_suspension_or_exit(body)
+            && branch_without_suspension_or_exit(body, pm)
     }
     use sv::ir::{LoopKind, Stmt};
     let (stmts, recurring) = match stmts {
@@ -3590,9 +3623,10 @@ pub(super) fn fixed_runtime_write_times(
     for stmt in stmts {
         let mut calls = Vec::new();
         stmt_calls(stmt, &mut calls);
-        if !calls
-            .iter()
-            .all(|(name, args)| pure_call(name, args, pm, expr, &mut HashSet::default()))
+        if !matches!(stmt, Stmt::Call { .. })
+            && !calls
+                .iter()
+                .all(|(name, args)| pure_call(name, args, pm, expr, &mut HashSet::default()))
         {
             return None;
         }
@@ -3637,8 +3671,8 @@ pub(super) fn fixed_runtime_write_times(
                 then_body,
                 else_body,
                 ..
-            } if branch_without_suspension_or_exit(then_body)
-                && branch_without_suspension_or_exit(else_body) =>
+            } if branch_without_suspension_or_exit(then_body, pm)
+                && branch_without_suspension_or_exit(else_body, pm) =>
             {
                 runtime_watched_write_count(then_body, pm, expr, nonblocking).max(
                     runtime_watched_write_count(else_body, pm, expr, nonblocking),
@@ -3647,10 +3681,10 @@ pub(super) fn fixed_runtime_write_times(
             Stmt::Case { items, default, .. }
                 if items
                     .iter()
-                    .all(|item| branch_without_suspension_or_exit(&item.body))
+                    .all(|item| branch_without_suspension_or_exit(&item.body, pm))
                     && default
                         .as_ref()
-                        .is_none_or(|body| branch_without_suspension_or_exit(body)) =>
+                        .is_none_or(|body| branch_without_suspension_or_exit(body, pm)) =>
             {
                 items
                     .iter()
@@ -3679,7 +3713,7 @@ pub(super) fn fixed_runtime_write_times(
                     pm.parameter_types,
                 )
                 .is_some_and(|count| count >= 0)
-                && branch_without_suspension_or_exit(body) =>
+                && branch_without_suspension_or_exit(body, pm) =>
             {
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
@@ -3690,6 +3724,11 @@ pub(super) fn fixed_runtime_write_times(
                 step,
                 body,
             } if bounded_for(init, condition.as_ref(), step, body, pm) => {
+                runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
+            }
+            Stmt::Call { .. }
+                if branch_without_suspension_or_exit(std::slice::from_ref(stmt), pm) =>
+            {
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
             Stmt::If { .. }

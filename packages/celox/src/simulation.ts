@@ -730,8 +730,7 @@ export class Simulation<P = Record<string, unknown>> {
 			);
 		}
 		if (this._state.dirty && sig.direction !== "input") {
-			this._handle.evalComb();
-			this._state.dirty = false;
+			this.settleSharedWrites();
 		}
 		const [value, mask] = readFourState(this._buffer, sig);
 		return { __fourState: true, value, mask };
