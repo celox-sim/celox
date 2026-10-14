@@ -184,6 +184,15 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             && !self.program.runtime_schema.clock_phase_sensitive_comb
     }
 
+    fn host_request_changes_design(&self, process: usize, request: usize) -> bool {
+        self.program
+            .runtime_schema
+            .processes
+            .get(process)
+            .and_then(|process| process.host_requests.get(request))
+            .is_none_or(|request| matches!(request, celox_design::HostRequest::Component { .. }))
+    }
+
     fn host_request(
         &mut self,
         process: usize,

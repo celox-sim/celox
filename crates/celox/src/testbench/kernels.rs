@@ -544,6 +544,17 @@ mod event_yield_settle_tests {
     }
     impl<B: SimBackend> SimulationExecutor for CountingExecutor<B> {
         type Backend = B;
+        fn host_request_changes_design(&self, process: usize, request: usize) -> bool {
+            SimulationExecutor::host_request_changes_design(&self.sim, process, request)
+        }
+        fn host_request(
+            &mut self,
+            process: usize,
+            request: usize,
+            time: u64,
+        ) -> Result<bool, RuntimeErrorCode> {
+            SimulationExecutor::host_request(&mut self.sim, process, request, time)
+        }
         fn backend(&self) -> &B {
             &self.sim.backend
         }
@@ -615,6 +626,63 @@ mod event_yield_settle_tests {
             }
         }
         panic!("process did not finish");
+    }
+    #[test]
+    fn clean_random_host_requests_preserve_settled_design_state() {
+        fn count_host<B: SimBackend>(mut sim: Simulator<B>) -> usize {
+            sim.testbench_random = Some(RandomTable::new(7));
+            sim.testbench_files = Some(FileTable {
+                files: crate::HashMap::default(),
+                base: None,
+            });
+            let mut state = crate::simulation::simulation_state(&sim);
+            let mut executor = CountingExecutor {
+                sim,
+                settles: 0,
+                combs: 0,
+                fused: 0,
+                combs_before_edge: None,
+            };
+            state.step(&mut executor).unwrap();
+            assert!(state.is_finished());
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("derived")),
+                1
+            );
+            executor.combs
+        }
+        let source = |body: &str| {
+            format!(
+                "#[test(Top)]module Top{{var random:$tb::random::<u8>;var f:$tb::file;var source:u8;var derived:u8;always_comb{{derived=source;}}initial{{source=1;{body}$finish();}}}}"
+            )
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("clean.txt");
+        let file_body = format!(
+            "f.open(\"{}\");f.write(\"x\");f.flush();f.close();",
+            file.display()
+        );
+        macro_rules! check {
+            ($build:ident) => {{
+                let baseline = source("");
+                let expected = count_host(Simulator::builder(&baseline, "Top").$build().unwrap());
+                for body in ["random.seed(7);", file_body.as_str()] {
+                    let seeded = source(body);
+                    assert_eq!(
+                        count_host(Simulator::builder(&seeded, "Top").$build().unwrap()),
+                        expected
+                    );
+                }
+            }};
+        }
+        check!(build_interpreter);
+        check!(build_cranelift);
+        check!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check!(build_native);
     }
     #[test]
     fn private_loop_counters_do_not_request_settles() {

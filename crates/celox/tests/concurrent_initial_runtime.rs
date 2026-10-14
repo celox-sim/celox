@@ -1940,3 +1940,65 @@ fn output_selector_scratch_follows_a_looping_callee() {
  }"#;
     check_passes_on_every_backend(code);
 }
+
+#[test]
+fn value_system_statement_operands_leave_reachable_clocks_registered() {
+    let code = r#"#[test(Top)] module Top {inst clk:$tb::clock_gen;var q:u32;
+ always_ff(clk){q+=1;} function stop()->u32{$finish();return 0;}
+ initial{$bits(stop());clk.next(1);$assert(q==1);$finish();}}
+ "#;
+    check_passes_on_every_backend(code);
+}
+#[test]
+fn terminating_assignment_expressions_do_not_lower_their_clock_tail() {
+    for statement in ["value=stop();", "value=1+stop();", "value=stop()+other();"] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{inst clk:$tb::clock_gen;var value:u32;
+ function stop()->u32{{$finish();return 0;}} function other()->u32{{clk.next();return 1;}}
+ initial{{{statement}clk.next();}}}}"#
+        );
+
+        check_passes_on_every_backend(&code);
+    }
+}
+
+#[test]
+fn clean_random_seed_does_not_replay_combinational_observers() {
+    let count = |body: &str| {
+        let code = format!(
+            r#"#[test(Top)]module Top{{var random:$tb::random::<u8>;var source:u8;var derived:u8;always_comb{{derived=source;$assert(1,"comb");}}initial{{source=1;{body}$finish();}}}}"#
+        );
+        let result = Simulator::builder(&code, "Top")
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        result
+            .assertions
+            .iter()
+            .filter(|a| a.message.as_deref() == Some(b"comb".as_slice()))
+            .count()
+    };
+    assert_eq!(count("random.seed(7);"), count(""));
+}
+
+#[test]
+fn no_op_value_operands_do_not_initialize_an_unused_clock() {
+    let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;inst unused:$tb::clock_gen;
+ function hidden()->u32{unused.next();return 0;}
+ initial{$bits(hidden());clk.next();$finish();}}"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let unused = sim.signal("unused");
+        sim.set(unused, 1u8);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert_eq!(sim.get(unused), 1u8.into());
+    }
+    check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+    check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+    check(Simulator::builder(code, "Top").build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulator::builder(code, "Top").build_native().unwrap());
+}

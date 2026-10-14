@@ -126,7 +126,15 @@ pub(crate) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
                     .flat_map(|dst| selection(&dst.index, &dst.select))
             }))
             .collect(),
-        Statement::SystemFunctionCall(call) => system_inputs(&call.kind),
+        Statement::SystemFunctionCall(call) => match call.kind {
+            SystemFunctionKind::Bits(_)
+            | SystemFunctionKind::Size(..)
+            | SystemFunctionKind::Clog2(_)
+            | SystemFunctionKind::Onehot(_)
+            | SystemFunctionKind::Signed(_)
+            | SystemFunctionKind::Unsigned(_) => Vec::new(),
+            _ => system_inputs(&call.kind),
+        },
         Statement::TbMethodCall(tb) => {
             let mut inputs: Vec<&Expression> = match &tb.method {
                 TbMethod::ClockNext { count, .. } => count.iter().collect(),
@@ -356,6 +364,9 @@ impl BlockLowering<'_> {
         };
         for child in &inputs {
             let value = self.expression(child)?;
+            if !self.scan_expression_clocks(child, &mut HashSet::default(), false) {
+                return Ok(self.constant(0, storage_width(expr)));
+            }
             self.save_expression(child, value)?;
         }
         let values = inputs
@@ -372,6 +383,9 @@ impl BlockLowering<'_> {
         is_and: bool,
     ) -> Result<RegisterId, ParserError> {
         let left = self.expression(lhs)?;
+        if !self.scan_expression_clocks(lhs, &mut HashSet::default(), false) {
+            return Ok(self.constant(0, storage_width(expr)));
+        }
         self.save_expression(lhs, left)?;
         let builder = self.kernel.builder();
         let not = builder.alloc_logic(1);
@@ -441,6 +455,9 @@ impl BlockLowering<'_> {
             return Ok(self.saved_expression(expr));
         }
         let value = self.expression(cond)?;
+        if !self.scan_expression_clocks(cond, &mut HashSet::default(), false) {
+            return Ok(self.constant(0, storage_width(expr)));
+        }
         self.save_expression(cond, value)?;
         let truth = self
             .parser

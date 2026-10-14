@@ -2028,6 +2028,21 @@ impl<'a> BlockLowering<'a> {
     }
 
     fn lower_statement(&mut self, statement: &Statement) -> Result<Flow, ParserError> {
+        let flow = self.lower_statement_body(statement)?;
+        if matches!(flow, Flow::Continue)
+            && !self.scan_clocks(
+                std::slice::from_ref(statement),
+                &mut HashSet::default(),
+                false,
+            )
+        {
+            self.kernel.finish();
+            return Ok(Flow::Ended);
+        }
+        Ok(flow)
+    }
+
+    fn lower_statement_body(&mut self, statement: &Statement) -> Result<Flow, ParserError> {
         let reads = match statement {
             Statement::Null | Statement::Break => false,
             Statement::SystemFunctionCall(call) => !matches!(call.kind, SystemFunctionKind::Finish),
@@ -2057,6 +2072,11 @@ impl<'a> BlockLowering<'a> {
                     Some(false) => self.lower_statements(&stmt.false_side),
                     None => {
                         let condition = self.condition(&stmt.cond)?;
+                        if !self.scan_expression_clocks(&stmt.cond, &mut HashSet::default(), false)
+                        {
+                            self.kernel.finish();
+                            return Ok(Flow::Ended);
+                        }
                         self.branch(condition, &stmt.true_side, &stmt.false_side)
                     }
                 }

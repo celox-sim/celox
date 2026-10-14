@@ -97,6 +97,13 @@ pub trait SimulationExecutor {
         true
     }
 
+    /// Whether this request can modify design state outside kernel stores.
+    /// Unknown hosts remain conservative; random/file scratch-only services
+    /// can preserve an already completed combinational settle.
+    fn host_request_changes_design(&self, _process: usize, _request: usize) -> bool {
+        true
+    }
+
     /// Serve host request `request` of process `process` at `time`, reading
     /// and writing the scratch state the request names. Returns whether the
     /// process resumes; `false` ends the simulation, as when a host
@@ -1449,7 +1456,9 @@ impl<B: SimBackend> SimulationState<B> {
                             }
                             // A component or host service may write design
                             // state outside this kernel's store instrumentation.
-                            *comb_current = false;
+                            if executor.host_request_changes_design(process, request as usize) {
+                                *comb_current = false;
+                            }
                             any_ran = true;
                             continue;
                         }
