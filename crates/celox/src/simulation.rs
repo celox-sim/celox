@@ -4273,3 +4273,116 @@ mod zero_delay_review_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_feedback_review_tests {
+    use super::*;
+
+    #[test]
+    fn active_waiter_feedback_reports_non_progress() {
+        let source = "module Top(output bit a,b);initial begin #1;a=1;end always @(a)b=~b;always @(b)a=~a;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let error = sim.step().unwrap_err().to_string();
+            assert!(error.contains("delta limit"), "{error}");
+            let error = sim.run_until(1).unwrap_err().to_string();
+            assert!(error.contains("delta limit"), "{error}");
+            assert_eq!(sim.time(), 1);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("feedback.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
+    #[test]
+    fn finite_feedback_settles_and_time_advanced_feedback_runs() {
+        for (body, time, expected) in [
+            (
+                "always @(a) if(a<8'b100) b=a;always @(b) if(b<8'b100) a=b+1;",
+                1,
+                4u8,
+            ),
+            (
+                "always @(a) begin #1;b=a;end always @(b) begin #1;a=b+1;end",
+                5,
+                3u8,
+            ),
+        ] {
+            let source =
+                format!("module Top(output bit[7:0]a,b);initial begin #1;a=1;end {body} endmodule");
+            fn check<B: SimBackend>(mut sim: Simulation<B>, time: u64, expected: u8) {
+                sim.run_until(time).unwrap();
+                assert_eq!(sim.get(sim.signal("a")), expected.into());
+            }
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("finite-feedback.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                time,
+                expected,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                time,
+                expected,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                time,
+                expected,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                time,
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn blocking_concat_records_only_the_complete_assignment() {
+        for body in [
+            "initial begin #1;{q[1],q[0]}=2'b11;#1;q[0]=0;end",
+            "always @(posedge clk){q[1],q[0]}=2'b11;",
+        ] {
+            let source = format!(
+                "module Top(input bit clk,output bit[1:0]q,output bit seen);{body} initial begin @(posedge(q[1]^q[0]));seen=1;end endmodule"
+            );
+            fn check<B: SimBackend>(mut sim: Simulation<B>, timed: bool) {
+                sim.run_until(0).unwrap();
+                if !timed {
+                    sim.schedule("clk", 1, 1).unwrap();
+                }
+                sim.run_until(1).unwrap();
+                assert_eq!(sim.get(sim.signal("q")), 3u8.into());
+                assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+                if timed {
+                    sim.run_until(2).unwrap();
+                    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+                }
+            }
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("concat-event.sv"))],
+                    "Top",
+                )
+            };
+            let timed = body.starts_with("initial");
+            check(Simulation::new(build().build_interpreter().unwrap()), timed);
+            check(Simulation::new(build().build_cranelift().unwrap()), timed);
+            check(Simulation::new(build().build_wasm().unwrap()), timed);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), timed);
+        }
+    }
+}

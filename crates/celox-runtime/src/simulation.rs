@@ -13,6 +13,20 @@ use crate::{
     scheduler::{ClockDef, Scheduler, SimEvent},
 };
 
+/// Bound all active and inactive passes within one simulation time slot.
+const PROCESS_DELTA_LIMIT: usize = 100_000;
+
+fn count_delta_pass(rounds: &mut usize) -> Result<(), SimulatorErrorCode> {
+    *rounds += 1;
+    if *rounds > PROCESS_DELTA_LIMIT {
+        return Err(SimulatorErrorCode::Runtime {
+            message: "process delta limit exceeded without advancing time".to_owned(),
+            signals: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Backend execution hooks needed by the timed simulation engine.
 ///
 /// The facade implements this contract to retain policy such as runtime-event
@@ -1256,6 +1270,7 @@ impl<B: SimBackend> SimulationState<B> {
         current_time: u64,
         ready: Vec<usize>,
         comb_current: &mut bool,
+        delta_rounds: &mut usize,
     ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -1273,6 +1288,7 @@ impl<B: SimBackend> SimulationState<B> {
             if pass.is_empty() {
                 return Ok(progressed);
             }
+            count_delta_pass(delta_rounds)?;
             let mut any_ran = false;
             for process in pass.drain(..) {
                 // A settle resumes the same process at once.
@@ -1527,6 +1543,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.round_triggered_domains.make_empty();
         self.round_evaluated = false;
         self.round_new_rising.make_empty();
+        let mut delta_rounds = 0usize;
 
         // Keep periodic provenance private so the public SimEvent shape stays
         // stable. Consume matching sidecar counts before fallible work so an
@@ -1639,8 +1656,13 @@ impl<B: SimBackend> SimulationState<B> {
                 .iter()
                 .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                 .collect();
-            let progressed =
-                self.run_processes(executor, current_time, ready_processes, &mut comb_current)?;
+            let progressed = self.run_processes(
+                executor,
+                current_time,
+                ready_processes,
+                &mut comb_current,
+                &mut delta_rounds,
+            )?;
             if self.finished && self.finish_round {
                 return Ok(true);
             }
@@ -1777,22 +1799,14 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        // Inactive (#0) continuations can keep one native step busy forever.
-        // Bound delta rounds independently of the caller's time/step budget.
-        let mut delta_rounds = 0usize;
+        // Share the time-slot budget with active waiter feedback passes.
         let mut comb_already_done = false;
         loop {
             let mut any_new_outer_loop_trigger = false;
             let mut newly_triggered = Vec::new();
 
             loop {
-                delta_rounds += 1;
-                if delta_rounds > 100_000 {
-                    return Err(SimulatorErrorCode::Runtime {
-                        message: "process delta limit exceeded without advancing time".to_owned(),
-                        signals: Vec::new(),
-                    });
-                }
+                count_delta_pass(&mut delta_rounds)?;
                 let marked_bits = executor.backend().get_triggered_bits();
                 executor.backend_mut().clear_triggered_bits();
 
@@ -1892,8 +1906,13 @@ impl<B: SimBackend> SimulationState<B> {
                 // batch, including evaluations a combinational settle woke.
                 let inactive_counter_values = self.process_counter_values(executor.backend());
                 let mut inactive_samples = None;
-                let mut active_ran =
-                    self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
+                let mut active_ran = self.run_processes(
+                    executor,
+                    current_time,
+                    Vec::new(),
+                    &mut comb_current,
+                    &mut delta_rounds,
+                )?;
                 if !active_ran {
                     // Drain active combinational effects of blocking FF stores
                     // before either inactive continuations or NBA publication.
@@ -1919,8 +1938,13 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                         executor.backend_mut().clear_triggered_bits();
                     }
-                    active_ran =
-                        self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
+                    active_ran = self.run_processes(
+                        executor,
+                        current_time,
+                        Vec::new(),
+                        &mut comb_current,
+                        &mut delta_rounds,
+                    )?;
                 }
                 if self.finished && self.finish_round {
                     return Ok(true);
@@ -1965,7 +1989,13 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                     }
                     inactive_samples = Some(before);
-                    self.run_processes(executor, current_time, ready, &mut comb_current)?
+                    self.run_processes(
+                        executor,
+                        current_time,
+                        ready,
+                        &mut comb_current,
+                        &mut delta_rounds,
+                    )?
                 };
                 if progressed {
                     let mut driven =
@@ -2045,8 +2075,13 @@ impl<B: SimBackend> SimulationState<B> {
 
             if polled {
                 let counter_values = self.process_counter_values(executor.backend());
-                any_process_ran |=
-                    self.run_processes(executor, current_time, Vec::new(), &mut comb_current)?;
+                any_process_ran |= self.run_processes(
+                    executor,
+                    current_time,
+                    Vec::new(),
+                    &mut comb_current,
+                    &mut delta_rounds,
+                )?;
                 if self.finished && self.finish_round {
                     return Ok(true);
                 }

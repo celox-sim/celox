@@ -1730,17 +1730,44 @@ impl<'p, 'a> Ff<'p, 'a> {
         let (temp, temp_name) = self.m.temp("concat", total, false, true);
         let value = self.lower_slt(&arena, node)?;
         self.store(temp, SIROffset::Static(0), total, value)?;
-        let mut lsb = total;
-        for (part, width) in parts.iter().zip(widths) {
-            lsb -= width;
-            let slice = sv::ir::Expr::Select {
-                expr: Box::new(sv::ir::Expr::Ident(temp_name.clone())),
-                msb: sv::ir::ConstExpr::Literal((lsb + width - 1).to_string()),
-                lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
-                signed: false,
-            };
-            self.assign_with_kind(part, &slice, nonblocking)?;
+        // A concatenation publishes one assignment. Index/RHS calls above
+        // retain their own events; only the part stores are grouped here.
+        let mut watchers = Vec::new();
+        if !nonblocking && !self.recording_events {
+            for part in &parts {
+                if let Some(id) = self.m.id(part.name()) {
+                    let id = self.aliases.get(&id).copied().unwrap_or(id);
+                    if self.kernel.is_some() || self.working.contains(&id) {
+                        let id = self.private.get(&id).copied().unwrap_or(id);
+                        if let Some(indices) = self.m.watchers_by_var.get(&id) {
+                            watchers.extend(indices.iter().copied());
+                        }
+                    }
+                }
+            }
+            watchers.sort_unstable();
+            watchers.dedup();
         }
+        let previous = self.snapshot_watchers(&watchers)?;
+        let recording_events = self.recording_events;
+        self.recording_events |= !watchers.is_empty();
+        let result = (|| {
+            let mut lsb = total;
+            for (part, width) in parts.iter().zip(widths) {
+                lsb -= width;
+                let slice = sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(temp_name.clone())),
+                    msb: sv::ir::ConstExpr::Literal((lsb + width - 1).to_string()),
+                    lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                    signed: false,
+                };
+                self.assign_with_kind(part, &slice, nonblocking)?;
+            }
+            Ok(())
+        })();
+        self.recording_events = recording_events;
+        result?;
+        self.count_watchers(&watchers, previous)?;
         Ok(())
     }
 
@@ -3327,19 +3354,11 @@ pub(super) fn runtime_watched_write_count(
                         parts,
                         nonblocking: nba,
                         ..
-                    } if *nba == nonblocking => {
-                        if nonblocking {
-                            effects.then(WritePhases::writes(usize::from(
-                                parts
-                                    .iter()
-                                    .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
-                            )))
-                        } else {
-                            parts
-                                .iter()
-                                .fold(effects, |writes, lhs| writes.then(target(pm, expr, lhs)))
-                        }
-                    }
+                    } if *nba == nonblocking => effects.then(WritePhases::writes(usize::from(
+                        parts
+                            .iter()
+                            .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
+                    ))),
                     Stmt::SystemTask { name, args } if !nonblocking => effects.then(
                         WritePhases::writes(watched_readmem_count(pm, expr, name, args)),
                     ),
@@ -3470,21 +3489,11 @@ pub(super) fn fixed_runtime_write_times(
                 parts,
                 nonblocking: nba,
                 ..
-            } if *nba == nonblocking => {
-                if nonblocking {
-                    usize::from(
-                        parts
-                            .iter()
-                            .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
-                    )
-                } else {
-                    parts
-                        .iter()
-                        .filter(|lhs| watched_lvalue_affects(pm, expr, lhs))
-                        .count()
-                        .min(2)
-                }
-            }
+            } if *nba == nonblocking => usize::from(
+                parts
+                    .iter()
+                    .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
+            ),
             Stmt::SystemTask { name, args }
                 if !nonblocking && readmem_destination(name, args).is_some() =>
             {
@@ -3662,13 +3671,7 @@ pub(super) fn watched_write_count(
                 parts,
                 nonblocking: nba,
                 ..
-            } if *nba == nonblocking => {
-                if nonblocking {
-                    usize::from(parts.iter().any(affects))
-                } else {
-                    parts.iter().filter(|part| affects(part)).count().min(2)
-                }
-            }
+            } if *nba == nonblocking => usize::from(parts.iter().any(affects)),
             sv::ir::Stmt::SystemTask { name, args } if !nonblocking => {
                 watched_readmem_count(pm, expr, name, args)
             }
