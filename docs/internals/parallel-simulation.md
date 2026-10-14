@@ -102,11 +102,15 @@ the lanes:
 
 - homes written by one lane are packed into that lane's segment;
 - homes written by several lanes are isolated in their own segment;
-- every segment starts on a 128-byte boundary at least 16 bytes after the
+- every segment starts on a 256-byte boundary at least 16 bytes after the
   previous one, so a widened access stays inside storage of the same lane;
 - sparse write metadata is grouped by lane in the same way.
 
-Without partitioned kernels the layout is unchanged.
+Without partitioned kernels the relative layout is unchanged. The host state
+allocation itself is always 256-byte aligned; aligned relative offsets alone
+cannot guarantee cache-line isolation. Completion counters use the same
+boundary. Objects within each lane segment remain packed; this does not
+introduce per-object padding or CPU-specific code generation.
 
 ## Happens-before from final effects
 

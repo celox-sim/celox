@@ -421,6 +421,35 @@
 :1234:   ab:|00a|
 "#))
 
+; Field flag compatibility with Icarus and Verilator. Include consecutive
+; conversions and a surplus argument to check frontend argument counting.
+; Keep right padding last: Verilator 5.052 leaks a runtime '-' flag into
+; later conversions when it combines adjacent output tasks.
+(case display_field_flags
+  (source "flags.sv" #"
+    module Top(input logic clk, input logic [31:0] a, input logic [31:0] b);
+      always_ff @(posedge clk) begin
+        $display("zero:[%05d] pad:[%3d]", b, a);
+        $write("write-zero:[%05d] %%\n", b);
+        $display("left:[%-5d]", a);
+        $display("both:[%-05d] min:[%0d] wide:[%02d]", a, b, 1234);
+        $write("string:[%-5s] next:[%0d]", "ab", b);
+        $display(" surplus:[%-5d]", a, "!");
+        $write("write-left:[%-5d]\n", a);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 5) (set b 42))
+  (tick clk)
+  (expect_output #"zero:[00042] pad:[  5]
+write-zero:[00042] %
+left:[5    ]
+both:[5    ] min:[42] wide:[1234]
+string:[ab   ] next:[42] surplus:[5    ]!
+write-left:[5    ]
+"#))
+
 ; IEEE 1800-2023 21.2.1.2: a value wider than its field width expands the
 ; field without leading zeros (`%3h` of 32'h1234 displays 1234).
 (case display_field_widths_expand_to_the_value
@@ -2336,6 +2365,24 @@ Time scale of (P) is 100ns / 10ps
   (assert_eq bits_c 48)
   (assert_eq size_e 2)
   (assert_eq body_bits 16))
+
+; Self-determined display arguments still propagate their own operation width
+; and signedness into context-determined operands (IEEE 1800-2023 11.8.2).
+(case display_expressions_propagate_operand_widths
+  (source "display_width.sv" #"
+module Top(input logic clk, input logic signed [7:0] sa,
+           input logic [7:0] a, b);
+    always_ff @(posedge clk)
+        $display("%0h %0d %0h %0h %0h %0h %0h", sa + 1, sa + 1,
+            b | (~4'd9), 16'h80 + (-b), ((-a) >> 8'd1) + 16'h80,
+            (~1'b1) ^ 8'sd5, a ** 32'd2);
+endmodule
+"#)
+  (top Top)
+  (modify (set sa 0xfe) (set a 0x9e) (set b 0x13))
+  (expect_output "")
+  (tick clk)
+  (expect_output "ffffffff -1 f7 6d 8031 fb 84\n"))
 
 (case time_format_consumes_its_expression_argument
   (source "time_format.sv" #"

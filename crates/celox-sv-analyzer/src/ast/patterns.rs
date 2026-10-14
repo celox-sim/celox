@@ -6,6 +6,9 @@
 
 use super::*;
 
+mod validation;
+pub(super) use validation::validate_skipped_patterns;
+
 /// The assignment pattern an expression consists of, if any.
 pub(super) fn pattern_expression(
     expr: &sv_parser::Expression,
@@ -299,13 +302,15 @@ fn positional_items<'p>(
             .and_then(|times| usize::try_from(times).ok())
             .ok_or_else(|| unsupported("assignment pattern repetition count"))?;
             let items = items.nodes.1.contents();
-            let repeated: Vec<_> = (0..times)
-                .flat_map(|_| items.iter().copied().map(Item::Explicit))
-                .collect();
-            if repeated.len() != count {
-                return Err(item_count(repeated.len()));
+            let repeated_count = times
+                .checked_mul(items.len())
+                .ok_or_else(|| unsupported("assignment pattern repetition size"))?;
+            if repeated_count != count {
+                return Err(item_count(repeated_count));
             }
-            Ok(repeated)
+            Ok((0..times)
+                .flat_map(|_| items.iter().copied().map(Item::Explicit))
+                .collect())
         }
         sv_parser::AssignmentPattern::Array(array) => {
             let mut slots: Vec<Option<Item>> = vec![None; count];
@@ -522,12 +527,11 @@ pub(super) fn expr_from_pattern(
 
 /// A pattern for a packed structure: its members in declaration order, the
 /// first one the most significant.
-fn struct_pattern(
-    pattern: &sv_parser::AssignmentPattern,
+fn struct_pattern_values<'p>(
+    pattern: &'p sv_parser::AssignmentPattern,
     shape: &VariableDimensions,
     tree: &SyntaxTree,
-    dims: &PackedDimensions,
-) -> Converted<Expr> {
+) -> Converted<Vec<&'p sv_parser::Expression>> {
     let members = &shape.members;
     let values: Vec<&sv_parser::Expression> = match pattern {
         sv_parser::AssignmentPattern::List(list) => {
@@ -586,6 +590,17 @@ fn struct_pattern(
         }
         _ => return Err(unsupported("structure assignment pattern form")),
     };
+    Ok(values)
+}
+
+fn struct_pattern(
+    pattern: &sv_parser::AssignmentPattern,
+    shape: &VariableDimensions,
+    tree: &SyntaxTree,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let members = &shape.members;
+    let values = struct_pattern_values(pattern, shape, tree)?;
     let parts = members
         .iter()
         .zip(values)

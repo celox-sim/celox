@@ -7,6 +7,8 @@ use std::{any::Any, cell::UnsafeCell, sync::Arc};
 /// state, or background compilation workers.
 struct MemoryAllocation {
     words: Box<[UnsafeCell<u64>]>,
+    start_word: usize,
+    capacity_words: usize,
 }
 
 // SAFETY: `MemoryAllocation` only owns storage. Safe access to its contents is
@@ -19,23 +21,40 @@ unsafe impl Sync for MemoryAllocation {}
 
 impl MemoryAllocation {
     fn zeroed(capacity_words: usize) -> Self {
+        let alignment = celox_state_layout::LANE_SEGMENT_ALIGN;
+        let extra_words = alignment / std::mem::size_of::<u64>();
+        let allocation_words = capacity_words
+            .checked_add(extra_words)
+            .expect("simulation memory allocation size overflow");
         let words = std::iter::repeat_with(|| UnsafeCell::new(0u64))
-            .take(capacity_words)
+            .take(allocation_words)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { words }
+        // Offset alignment in MemoryLayout only isolates cache lines if the
+        // exposed allocation base has the same alignment. Keep the original
+        // Box as owner so allocation and deallocation layouts still match.
+        let start_word = words.as_ptr().align_offset(alignment);
+        assert!(start_word < extra_words);
+        Self {
+            words,
+            start_word,
+            capacity_words,
+        }
     }
 
     fn as_ptr(&self) -> *const u64 {
-        self.words.as_ptr().cast::<u64>()
+        // SAFETY: the initialized padding covers start_word and the entire
+        // requested capacity; even an empty image has an in-allocation base.
+        unsafe { self.words.as_ptr().add(self.start_word).cast::<u64>() }
     }
 
     fn as_mut_ptr(&self) -> *mut u64 {
-        UnsafeCell::raw_get(self.words.as_ptr())
+        // SAFETY: start_word lies within the allocated initialized padding.
+        unsafe { UnsafeCell::raw_get(self.words.as_ptr().add(self.start_word)) }
     }
 
     fn capacity_words(&self) -> usize {
-        self.words.len()
+        self.capacity_words
     }
 }
 
@@ -181,6 +200,34 @@ impl Default for MemoryImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocation_and_reserved_growth_preserve_coherence_alignment() {
+        for size in [0, 1, 2, 31, 32, 33, 129, 1025] {
+            let mut image = MemoryImage::zeroed(size);
+            assert_eq!(
+                image.as_ptr() as usize % celox_state_layout::LANE_SEGMENT_ALIGN,
+                0
+            );
+            assert_eq!(image.capacity_words(), size);
+            image.as_mut_slice().fill(17);
+            image.reserve_total(size + 33);
+            assert_eq!(
+                image.as_ptr() as usize % celox_state_layout::LANE_SEGMENT_ALIGN,
+                0
+            );
+            assert_eq!(image.as_slice(), vec![17; size]);
+            let pointer = image.as_ptr();
+            let owner = image.owner();
+            image.resize_zeroed_within_capacity(size + 33);
+            assert_eq!(image.as_ptr(), pointer);
+            assert!(image.as_slice()[size..].iter().all(|word| *word == 0));
+            drop(image);
+            // An escaped view remains valid for the lifetime of its owner.
+            assert_eq!(unsafe { *pointer.add(size) }, 0);
+            drop(owner);
+        }
+    }
 
     #[test]
     fn owner_keeps_only_the_allocation_alive() {

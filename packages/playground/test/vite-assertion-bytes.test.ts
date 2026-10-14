@@ -32,12 +32,12 @@ test("generated assertion diagnostics explicitly decode or escape message bytes"
 			configResolved(config: { root: string }): void;
 			buildStart(): Promise<void>;
 			resolveId(path: string): string;
-			load(id: string): string;
+			load(this: { addWatchFile(file: string): void }, id: string): string;
 		};
 		plugin.configResolved({ root });
 		await plugin.buildStart();
-		const code = plugin
-			.load(plugin.resolveId(join(root, "t.veryl")))
+		const code = plugin.load
+			.call({ addWatchFile: vi.fn() }, plugin.resolveId(join(root, "t.veryl")))
 			.replace(/^import .*\n/gm, "");
 		for (const [bytes, expected] of [
 			[new TextEncoder().encode("failure é"), "failure é"],
