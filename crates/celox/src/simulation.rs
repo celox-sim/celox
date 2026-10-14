@@ -488,6 +488,14 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Save the design state, simulation time, clocks and pending events.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
+        if self.simulator.escaped_mutable_memory
+            && !self
+                .state
+                .escaped_host_clock_writes(&self.simulator.backend)
+                .is_empty()
+        {
+            return Err(CheckpointError::UntrackedHostClockWrite);
+        }
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
@@ -3256,6 +3264,33 @@ mod host_clock_review_tests {
         settle(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         settle(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn checkpoint_rejects_escaped_generated_clock_writes() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let clk = sim.signal("clk");
+            let (ptr, len) = sim.memory_as_mut_ptr();
+            assert!(clk.offset < len);
+            sim.run_until(1).unwrap();
+            sim.checkpoint().unwrap();
+            unsafe {
+                ptr.add(clk.offset).write(1);
+            }
+            assert!(sim.checkpoint().is_err());
+            unsafe {
+                ptr.add(clk.offset).write(0);
+            }
+            let checkpoint = sim.checkpoint().unwrap();
+            sim.restore(&checkpoint).unwrap();
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.ticks(), 2);
+        }
+        let build = || Simulator::from_frontend(design());
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
     #[test]
     fn retained_memory_cannot_inject_generated_clock_edges() {

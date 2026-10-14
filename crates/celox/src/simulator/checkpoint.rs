@@ -116,6 +116,10 @@ impl std::fmt::Debug for Checkpoint {
 /// Reasons a checkpoint cannot be taken or restored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckpointError {
+    #[error(
+        "cannot checkpoint a process clock changed by a direct host write through escaped memory"
+    )]
+    UntrackedHostClockWrite,
     /// External component instances hold opaque state. They currently exist
     /// only while a testbench runs, when no checkpoint can be taken.
     #[error(
