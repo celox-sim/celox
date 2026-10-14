@@ -417,6 +417,7 @@ pub struct NativeProgramImage {
     compiled_process_controls: Vec<Vec<(AbsoluteAddr, usize)>>,
     compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
     compiled_clock_phase_sensitive_comb: bool,
+    compiled_process_releases: Vec<Vec<celox_design::ProcessRelease<(AbsoluteAddr, usize)>>>,
     compiled_process_host_requests: Vec<Vec<celox_design::HostRequest<(AbsoluteAddr, usize)>>>,
     required_native_features: u8,
     #[serde(serialize_with = "celox_design::serde_sorted::map")]
@@ -744,6 +745,34 @@ impl NativeProgramImage {
                 .any(|(compiled, process)| compiled != &process.clocks)
         {
             return Err("process clock lists disagree with compiled kernel indices".into());
+        }
+        if self.compiled_process_releases.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_releases
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| {
+                    let bound = process
+                        .releases
+                        .iter()
+                        .cloned()
+                        .map(|release| {
+                            release.map(|address| {
+                                (
+                                    address,
+                                    self.layout
+                                        .offsets
+                                        .get(&address)
+                                        .copied()
+                                        .unwrap_or(usize::MAX),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    compiled != &bound
+                })
+        {
+            return Err("process releases disagree with compiled release indices".into());
         }
         if self.compiled_process_host_requests.len() != self.runtime_schema.processes.len()
             || self
@@ -2509,6 +2538,20 @@ fn compile_program(
                 .iter()
                 .map(|process| process.clocks.clone())
                 .collect(),
+            compiled_process_releases: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .releases
+                        .iter()
+                        .cloned()
+                        .map(|release| release.map(|address| (address, layout.offsets[&address])))
+                        .collect()
+                })
+                .collect(),
             compiled_process_host_requests: sir
                 .runtime()
                 .runtime_schema
@@ -3715,6 +3758,20 @@ mod process_metadata_tests {
         }
     }
 
+    #[test]
+    fn ordered_release_bindings_match_compiled_indices() {
+        let source = "#[test(Top)]module Top{inst clk:$tb::clock_gen;inst a:$tb::reset_gen(clk);inst b:$tb::reset_gen(clk);initial{a.assert(1);b.assert(1);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let mut broken = original.clone();
+        assert_eq!(broken.runtime_schema.processes[0].releases.len(), 2);
+        broken.runtime_schema.processes[0].releases.swap(0, 1);
+        assert!(broken.to_container_bytes().is_err());
+    }
     #[test]
     fn host_request_values_bind_to_compiled_scratch() {
         let source = "#[test(Top)]module Top{var random:$tb::random::<u32>;var value:u32;initial{value=random.get_range(1,2);$finish();}}";

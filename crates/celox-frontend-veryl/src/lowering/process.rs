@@ -393,13 +393,23 @@ fn constant_nonempty_range(range: &ForRange) -> bool {
         && !constant_empty_range(range)
 }
 fn contains_loop_break(statements: &[Statement]) -> bool {
-    statements.iter().any(|stmt| {
-        matches!(stmt, Statement::Break)
-            || (!matches!(stmt, Statement::For(_))
-                && expressions::statement_bodies(stmt)
-                    .iter()
-                    .any(|body| contains_loop_break(body)))
-    })
+    for statement in statements {
+        if matches!(statement, Statement::Break) {
+            return true;
+        }
+        if !matches!(statement, Statement::For(_))
+            && expressions::statement_bodies(statement)
+                .iter()
+                .any(|body| contains_loop_break(body))
+        {
+            return true;
+        }
+        if matches!(statement,Statement::SystemFunctionCall(call) if matches!(call.kind,SystemFunctionKind::Finish))
+        {
+            break;
+        }
+    }
+    false
 }
 
 /// How a `for` loop compares and steps, following the testbench

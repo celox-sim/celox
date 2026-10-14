@@ -493,6 +493,7 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|name| !saved_unknown.contains(name.as_str()) || supports_unknown(name))
                 .map(|name| events[name])
                 .collect(),
+            settled_process_edges: Vec::new(),
             captured_edges: record
                 .captured_edges
                 .iter()

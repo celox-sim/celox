@@ -2111,3 +2111,49 @@ fn repeated_runs_reset_the_rtl_finish_tracker() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(build().build_native().unwrap());
 }
+
+#[test]
+fn unreachable_breaks_after_finish_do_not_declare_clocks() {
+    let source = "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{for i in 0..1{$finish();break;}clk.next();}}";
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let clk = sim.signal("clk");
+        sim.set(clk, 1u8);
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(clk), 1u8.into());
+    }
+    let build = || Simulator::builder(source, "Top").testbench_kernels(true);
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}
+#[test]
+fn derived_clock_pulses_survive_process_settles() {
+    for expression in ["go", "go & enable"] {
+        for four_state in [false, true] {
+            for pulses in [1, 2] {
+                let body = "go=1;$assert(q==0);go=0;$assert(q==0);".repeat(pulses);
+                let source = format!(
+                    "module Child(clk:input clock,q:output u32){{always_ff(clk){{q+=1;}}}}#[test(Top)]module Top{{var go:logic;var enable:logic;let gated:clock={expression};var q:u32;inst dut:Child(clk:gated,q);initial{{enable=1;dut.q=0;{body}}}}}"
+                );
+                fn check<B: SimBackend>(mut sim: Simulator<B>, pulses: usize) {
+                    let tb = compile_initial_testbench(&sim).unwrap();
+                    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+                    assert_eq!(sim.get(sim.signal("q")), pulses.into());
+                }
+                let build = || {
+                    Simulator::builder(&source, "Top")
+                        .testbench_kernels(true)
+                        .four_state(four_state)
+                };
+                check(build().build_interpreter().unwrap(), pulses);
+                check(build().build_cranelift().unwrap(), pulses);
+                check(build().build_wasm().unwrap(), pulses);
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(build().build_native().unwrap(), pulses);
+            }
+        }
+    }
+}
