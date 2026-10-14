@@ -3164,6 +3164,264 @@ fn ff_cascades(
         .any(|event| writes(source.body(), event.signal(), pm, &mut HashSet::default()))
 }
 
+/// Capped writes before the first suspension, after the last suspension,
+/// and within any activation. Composition also counts the joining activation.
+#[derive(Clone, Copy, Default)]
+struct WritePhases {
+    prefix: usize,
+    suffix: usize,
+    maximum: usize,
+    split: bool,
+}
+impl WritePhases {
+    fn writes(count: usize) -> Self {
+        let count = count.min(2);
+        Self {
+            prefix: count,
+            suffix: count,
+            maximum: count,
+            split: false,
+        }
+    }
+    fn barrier() -> Self {
+        Self {
+            split: true,
+            ..Self::default()
+        }
+    }
+    fn then(self, next: Self) -> Self {
+        Self {
+            prefix: if self.split {
+                self.prefix
+            } else {
+                (self.prefix + next.prefix).min(2)
+            },
+            suffix: if next.split {
+                next.suffix
+            } else {
+                (self.suffix + next.suffix).min(2)
+            },
+            maximum: self
+                .maximum
+                .max(next.maximum)
+                .max((self.suffix + next.prefix).min(2)),
+            split: self.split || next.split,
+        }
+    }
+    fn choice(self, other: Self) -> Self {
+        Self {
+            prefix: self.prefix.max(other.prefix),
+            suffix: self.suffix.max(other.suffix),
+            maximum: self.maximum.max(other.maximum),
+            split: self.split && other.split,
+        }
+    }
+}
+
+/// A timed process may write repeatedly across suspensions without hiding a
+/// pulse. Keep the prefix/suffix of each activation so a loop boundary or a
+/// task return can still join two writes in the same activation.
+pub(super) fn runtime_watched_write_count(
+    stmts: &[sv::ir::Stmt],
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    nonblocking: bool,
+) -> usize {
+    fn eval(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<i128> {
+        known_loop_value(
+            expr,
+            pm.variables,
+            pm.name_to_id,
+            pm.constants,
+            pm.parameter_types,
+        )
+    }
+    fn target(pm: &ProcModule<'_>, expr: &sv::ir::Expr, lhs: &sv::ir::LValue) -> WritePhases {
+        WritePhases::writes(usize::from(watched_lvalue_affects(pm, expr, lhs)))
+    }
+    fn exits_loop(body: &[sv::ir::Stmt]) -> bool {
+        for stmt in body {
+            let exits = match stmt {
+                sv::ir::Stmt::Break | sv::ir::Stmt::Return(_) => true,
+                sv::ir::Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => exits_loop(then_body) && exits_loop(else_body),
+                sv::ir::Stmt::Case { items, default, .. } => {
+                    default.as_ref().is_some_and(|body| exits_loop(body))
+                        && items.iter().all(|item| exits_loop(&item.body))
+                }
+                _ => false,
+            };
+            if exits {
+                return true;
+            }
+            if !stmt_may_fall_through(stmt) {
+                return false;
+            }
+        }
+        false
+    }
+    fn call(
+        name: &str,
+        args: &[Option<sv::ir::Expr>],
+        pm: &ProcModule<'_>,
+        expr: &sv::ir::Expr,
+        active: &mut HashSet<String>,
+        nonblocking: bool,
+    ) -> WritePhases {
+        if !active.insert(name.to_owned()) {
+            return WritePhases::writes(2);
+        }
+        let mut result = WritePhases::default();
+        if let Some(sub) = pm.subroutine(name) {
+            let mut defaults = Vec::new();
+            default_calls(sub, args, &mut defaults);
+            for (name, args) in defaults {
+                result = result.then(call(&name, &args, pm, expr, active, nonblocking));
+            }
+            result = result.then(body(&sub.body, pm, expr, active, nonblocking));
+            for (param, arg) in sub.params.iter().zip(args) {
+                if !nonblocking && param.direction.is_written() {
+                    for lhs in arg
+                        .as_ref()
+                        .and_then(lvalue_from_expr)
+                        .into_iter()
+                        .flatten()
+                    {
+                        result = result.then(target(pm, expr, &lhs));
+                    }
+                }
+            }
+        }
+        active.remove(name);
+        result
+    }
+    fn body(
+        stmts: &[sv::ir::Stmt],
+        pm: &ProcModule<'_>,
+        expr: &sv::ir::Expr,
+        active: &mut HashSet<String>,
+        nonblocking: bool,
+    ) -> WritePhases {
+        use sv::ir::{LoopKind, Stmt};
+        let mut result = WritePhases::default();
+        for stmt in stmts {
+            let effects = stmt_call_effects(stmt, &|expr| eval(pm, expr), &|expr| {
+                expr_is_two_state(expr, pm.variables, pm.name_to_id, &pm.subroutines)
+            });
+            let effects = effects.fold(
+                &mut |name, args| call(name, args, pm, expr, active, nonblocking),
+                &WritePhases::then,
+                &WritePhases::choice,
+            );
+            let next =
+                match stmt {
+                    Stmt::Assign {
+                        lhs,
+                        nonblocking: nba,
+                        ..
+                    } if *nba == nonblocking => effects.then(target(pm, expr, lhs)),
+                    Stmt::AssignConcat {
+                        parts,
+                        nonblocking: nba,
+                        ..
+                    } if *nba == nonblocking => {
+                        if nonblocking {
+                            effects.then(WritePhases::writes(usize::from(
+                                parts
+                                    .iter()
+                                    .any(|lhs| watched_lvalue_affects(pm, expr, lhs)),
+                            )))
+                        } else {
+                            parts
+                                .iter()
+                                .fold(effects, |writes, lhs| writes.then(target(pm, expr, lhs)))
+                        }
+                    }
+                    Stmt::If {
+                        condition,
+                        then_body,
+                        else_body,
+                    } => {
+                        let branches =
+                            match eval(pm, condition) {
+                                Some(value) => body(
+                                    if value != 0 { then_body } else { else_body },
+                                    pm,
+                                    expr,
+                                    active,
+                                    nonblocking,
+                                ),
+                                None => body(then_body, pm, expr, active, nonblocking)
+                                    .choice(body(else_body, pm, expr, active, nonblocking)),
+                            };
+                        effects.then(branches)
+                    }
+                    Stmt::Case { items, default, .. } => {
+                        let default = default.as_ref().map_or_else(WritePhases::default, |stmts| {
+                            body(stmts, pm, expr, active, nonblocking)
+                        });
+                        let branches = items
+                            .iter()
+                            .map(|item| body(&item.body, pm, expr, active, nonblocking))
+                            .chain(std::iter::once(default))
+                            .reduce(WritePhases::choice)
+                            .unwrap_or_default();
+                        effects.then(branches)
+                    }
+                    Stmt::Loop {
+                        kind,
+                        init,
+                        condition,
+                        body: stmts,
+                        step,
+                    } => {
+                        let exits = exits_loop(stmts);
+                        let trips = loop_trip_cap(kind, init, condition.as_ref(), step, &|expr| {
+                            eval(pm, expr)
+                        })
+                        .min(if exits { 1 } else { 2 });
+                        let mut loop_writes = body(init, pm, expr, active, nonblocking);
+                        let mut cycle = body(stmts, pm, expr, active, nonblocking);
+                        if !exits {
+                            cycle = cycle.then(body(step, pm, expr, active, nonblocking));
+                        }
+                        match kind {
+                            LoopKind::Repeat(_) => loop_writes = loop_writes.then(effects),
+                            LoopKind::DoWhile => {
+                                if !exits {
+                                    cycle = cycle.then(effects);
+                                }
+                            }
+                            _ => {
+                                loop_writes = loop_writes.then(effects);
+                                if !exits {
+                                    cycle = cycle.then(effects);
+                                }
+                            }
+                        }
+                        for _ in 0..trips {
+                            loop_writes = loop_writes.then(cycle);
+                        }
+                        loop_writes
+                    }
+                    Stmt::Delay(_) | Stmt::WaitEvent(_) => effects.then(WritePhases::barrier()),
+                    _ => effects,
+                };
+            result = result.then(next);
+            if !stmt_may_fall_through(stmt)
+                || matches!(stmt,Stmt::Wait(condition) if eval(pm,condition)==Some(0))
+            {
+                break;
+            }
+        }
+        result
+    }
+    body(stmts, pm, expr, &mut HashSet::default(), nonblocking).maximum
+}
+
 fn watched_nba_count(
     stmts: &[sv::ir::Stmt],
     pm: &ProcModule<'_>,
@@ -3173,46 +3431,58 @@ fn watched_nba_count(
     watched_write_count(stmts, pm, expr, visiting, true)
 }
 
-fn watched_write_count(
+fn watched_lvalue_affects(
+    pm: &ProcModule<'_>,
+    expr: &sv::ir::Expr,
+    target: &sv::ir::LValue,
+) -> bool {
+    let mut names = HashSet::default();
+    expr_idents(expr, &mut names);
+    subroutine_reads(pm, expr, &mut names);
+    let accesses = super::event_read_accesses(
+        expr,
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+    );
+
+    if !names.contains(target.name()) {
+        return false;
+    }
+    let Some(id) = pm.id(target.name()) else {
+        return true;
+    };
+    let reads = accesses
+        .iter()
+        .filter(|(read, _)| *read == id)
+        .map(|(_, access)| *access)
+        .collect::<Vec<_>>();
+    if reads.is_empty() {
+        return true;
+    } // implicit function-global reads
+    let Some((low, high)) = super::net_lvalue_range(target, pm.constants, pm.parameter_types)
+    else {
+        return true;
+    };
+    let Some(a) = super::packed_index_offset(&pm.variables[&id], low) else {
+        return true;
+    };
+    let Some(b) = super::packed_index_offset(&pm.variables[&id], high) else {
+        return true;
+    };
+    let written = BitAccess::new(a.min(b), a.max(b));
+    reads.iter().any(|read| read.overlaps(&written))
+}
+
+pub(super) fn watched_write_count(
     stmts: &[sv::ir::Stmt],
     pm: &ProcModule<'_>,
     expr: &sv::ir::Expr,
     visiting: &mut HashSet<String>,
     nonblocking: bool,
 ) -> usize {
-    let mut names = HashSet::default();
-    expr_idents(expr, &mut names);
-    subroutine_reads(pm, expr, &mut names);
-    let affects = |target: &sv::ir::LValue| {
-        if !names.contains(target.name()) {
-            return false;
-        }
-        // A fixed select depends only on the selected bits, so updates of
-        // disjoint bits do not need an ordered queue for this watcher.
-        if let sv::ir::Expr::Select {
-            expr: base,
-            msb,
-            lsb,
-            ..
-        } = expr
-            && matches!(&**base,sv::ir::Expr::Ident(name) if name==target.name())
-            && let sv::ir::LValue::Select {
-                msb: written_msb,
-                lsb: written_lsb,
-                ..
-            } = target
-        {
-            let eval = |value| {
-                sv::typecheck::eval_const_expr_with_types(value, pm.constants, pm.parameter_types)
-            };
-            if let (Some(a), Some(b), Some(c), Some(d)) =
-                (eval(msb), eval(lsb), eval(written_msb), eval(written_lsb))
-            {
-                return a.min(b) <= c.max(d) && c.min(d) <= a.max(b);
-            }
-        }
-        true
-    };
+    let affects = |target: &sv::ir::LValue| watched_lvalue_affects(pm, expr, target);
     let mut total = 0usize;
     for stmt in stmts {
         let mut call_evaluations = 1;

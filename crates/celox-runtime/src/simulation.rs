@@ -19,6 +19,10 @@ use crate::{
 /// decoration and waveform capture outside the backend-independent scheduler.
 pub trait SimulationExecutor {
     type Backend: SimBackend;
+    /// Whether individual scheduled writes have observable combinational
+    /// effects even without an event waiter.
+    fn scheduled_updates_need_settle(&self) -> bool { false }
+
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
@@ -1549,8 +1553,12 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 scheduled_edges.insert(id);
             }
-            if !self.waiting.is_empty() {
+            if !self.waiting.is_empty() || executor.scheduled_updates_need_settle() {
                 executor.eval_comb()?;
+                if executor.finish_requested(current_time) {
+                    self.finished = true;
+                    return Ok(true);
+                }
             }
             self.sample_waiting_events(executor, current_time)?;
         }
@@ -1964,6 +1972,9 @@ impl<B: SimBackend> SimulationState<B> {
             if polled {
                 let counter_values = self.process_counter_values(executor.backend());
                 any_process_ran |= self.run_processes(executor, current_time, Vec::new())?;
+                if self.finished && self.finish_round {
+                    return Ok(true);
+                }
                 if any_process_ran {
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &counter_values);

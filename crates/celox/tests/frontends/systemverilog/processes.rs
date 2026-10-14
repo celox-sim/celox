@@ -2126,3 +2126,109 @@ fn cross_instance_hidden_pulses_are_diagnosed() {
         assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
     }
 }
+
+#[test]
+fn cross_instance_split_drivers_cannot_hide_expression_pulses() {
+    let source = r#"module Child(input bit[1:0]q,output bit seen);
+      initial begin @(posedge(q[0]^q[1]));seen=1;end endmodule
+      module Top(input bit a,output bit seen);wire[1:0]q;
+      assign q[0]=a;assign q[1]=a;Child u(.q(q),.seen(seen));endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}
+
+#[test]
+fn cross_instance_disjoint_writes_do_not_poison_selected_waiters() {
+    for (range, actual, written, observed) in [
+        ("[1:0]", "q", 1, 0),
+        ("[5:4]", "q", 5, 4),
+        ("[0:1]", "q", 0, 1),
+        ("[2:0]", "q[2:1]", 2, 1),
+        ("[1:0]", "{q[1],q[0]}", 1, 0),
+        ("[1:0]", "{q[0],q[1]}", 0, 1),
+    ] {
+        let source = format!(
+            r#"module Child(input bit[1:0]q,output bit seen);
+          initial begin @(posedge q[0]);seen=1;end endmodule
+          module Top(output bit seen);bit{range}q;Child u(.q({actual}),.seen(seen));
+          initial begin #1;q[{written}]=1;q[{written}]=0;#1;q[{observed}]=1;end endmodule"#
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into(), "{range} {actual}");
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{range} {actual}");
+        let overlapping = source.replace(&format!("q[{written}]="), &format!("q[{observed}]="));
+        assert!(
+            build_error(&overlapping)
+                .contains("cross-instance event dependency with multiple blocking writes")
+        );
+    }
+}
+
+#[test]
+fn cross_instance_counts_keep_distinct_instance_occurrences() {
+    let source = r#"module Child(output bit a);initial begin #1;a=1;end endmodule
+      module Top(output bit seen);wire a,b;Child one(.a(a));Child two(.a(b));
+      initial begin @(posedge(a^b));seen=1;end endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+    let source = r#"module Child #(parameter bit ON=1)(output bit a);
+      if(ON)initial begin #1;a=1;end endmodule
+      module Top(output bit seen);wire a,b;Child one(.a(a));Child #(.ON(0))two(.a(b));
+      initial begin @(posedge(a^b));seen=1;end endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn cross_instance_clock_generators_settle_between_activations() {
+    for body in [
+        "initial forever begin #1;a=~a;end",
+        "task automatic tick;#1;a=~a;endtask initial forever tick;",
+        "initial begin #1;a=1;wait(0);a=0;end",
+    ] {
+        let source = format!(
+            "module Child(input bit a,output bit seen);initial begin @(posedge a);seen=1;end endmodule module Top(output bit seen);bit a;Child u(.a(a),.seen(seen));{body} endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+    for body in [
+        "initial forever begin a=1;#1;a=0;end",
+        "task automatic tick;#1;a=0;endtask initial forever begin a=1;tick;end",
+        "initial begin #1;a=1;wait(1);a=0;end",
+    ] {
+        let source = format!(
+            "module Child(input bit a,output bit seen);initial begin @(posedge a);seen=1;end endmodule module Top(output bit seen);bit a;Child u(.a(a),.seen(seen));{body} endmodule"
+        );
+        assert!(
+            build_error(&source)
+                .contains("cross-instance event dependency with multiple blocking writes")
+        );
+    }
+}
+
+#[test]
+fn cross_instance_ordered_nbas_require_pulse_preservation() {
+    let source = r#"module Child(input bit[1:0]q,output bit seen);
+      initial begin @(q[0]^q[1]);seen=1;end endmodule
+      module Top(input bit clk,output bit seen);bit[1:0]q;Child u(.q(q),.seen(seen));
+      always @(posedge clk)begin q[0]<=1;q[1]<=1;end endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple nonblocking writes")
+    );
+    let source = source.replace("q[0]<=1;q[1]<=1;", "{q[1],q[0]}<=2;");
+    let mut sim = simulation(&source);
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
