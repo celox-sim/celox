@@ -281,6 +281,19 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             previous = body_end;
             continue;
         }
+        if word == "always_comb" {
+            let body_end =
+                timed_ff::statement_end(source, end).ok_or("unterminated always_comb statement")?;
+            let body = timed_content(&source[end..body_end], names, tasks)?;
+            let replacement = format!(
+                "always_comb begin if ({}::started) begin {body} end end",
+                names.package
+            );
+            output.push_str(&source[previous..start]);
+            output.push_str(&timed_ff::in_macro(source, start, replacement));
+            previous = body_end;
+            continue;
+        }
         // Keep the startup dependency in the caller: @* excludes globals
         // read only inside a function, unlike always_comb.
         if word == "$finish" {

@@ -385,6 +385,20 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         record: &ScheduleRecord,
     ) -> Result<ScheduleParts<B>, StateError> {
+        if let Some(event) = record
+            .events
+            .iter()
+            .chain(record.periodic.iter().map(|(event, _)| event))
+            .find(|event| event.time < record.time)
+        {
+            return Err(StateError::Runtime(RuntimeErrorCode::Runtime {
+                message: format!(
+                    "cannot load an event in the past: {} before {}",
+                    event.time, record.time
+                ),
+                signals: Vec::new(),
+            }));
+        }
         let events: HashMap<String, B::Event> = self
             .backend
             .id_to_event_slice()
