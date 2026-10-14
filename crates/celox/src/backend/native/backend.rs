@@ -634,9 +634,7 @@ impl NativeProgramImage {
                         .design
                         .state_objects
                         .get(&value.signal)
-                        .is_some_and(|m| {
-                            m.width == value.width && !m.is_4state && m.array_dims.is_empty()
-                        })
+                        .is_some_and(|m| m.width == value.width && m.array_dims.is_empty())
             };
             for request in &process.host_requests {
                 use celox_design::HostRequest;
