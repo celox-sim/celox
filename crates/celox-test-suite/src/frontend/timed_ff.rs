@@ -784,6 +784,13 @@ impl TaskTiming {
                 }
                 let tail = after_trivia(&source[start + word_end..end]);
                 let prefix = source[start..start + at].trim_end();
+                // .formal(expr) is a named actual, not a method call. A
+                // qualified call has an identifier before the dot.
+                if let Some(before_dot) = prefix.strip_suffix('.')
+                    && before_dot.trim_end().ends_with(['(', ','])
+                {
+                    return false;
+                }
                 let statement_start = prefix.is_empty()
                     || prefix.ends_with([';', ')', ':', '.'])
                     || sv_words(prefix)

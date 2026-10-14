@@ -255,3 +255,6 @@ sv_backends! {
  fn timed_calls_after_forever_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_forever_do_not_replay_setup_edges"; }
  fn parenthesized_ff_event_leaves_preserve_setup_edges(sim) { @case "timing::parenthesized_ff_event_leaves_preserve_setup_edges"; }
 }
+sv_backends! {
+ fn named_arguments_do_not_invent_timed_calls(sim) { @case "timing::named_arguments_do_not_invent_timed_calls"; }
+}
