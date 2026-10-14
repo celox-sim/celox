@@ -3444,7 +3444,7 @@ pub(super) fn runtime_watched_write_count(
 }
 
 pub(super) struct FixedWriteTimes {
-    pub times: std::collections::BTreeMap<u64, usize>,
+    pub times: std::collections::BTreeMap<(u64, u64), usize>,
     pub period: Option<u64>,
 }
 
@@ -3471,7 +3471,8 @@ pub(super) fn fixed_runtime_write_times(
     };
     let mut recurring = recurring;
     let mut time = 0u64;
-    let mut times = std::collections::BTreeMap::<u64, usize>::new();
+    let mut phase = 0u64;
+    let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
     for stmt in stmts {
         let mut calls = Vec::new();
         stmt_calls(stmt, &mut calls);
@@ -3508,9 +3509,11 @@ pub(super) fn fixed_runtime_write_times(
                 )?)
                 .ok()?;
                 if delay == 0 {
-                    return None;
-                } // inactive-region ordering needs a delta index
-                time = time.checked_add(delay)?;
+                    phase = phase.checked_add(1)?;
+                } else {
+                    time = time.checked_add(delay)?;
+                    phase = 0;
+                }
                 0
             }
             Stmt::If { .. }
@@ -3530,10 +3533,10 @@ pub(super) fn fixed_runtime_write_times(
             }
             _ => 0,
         };
-        let value = times.entry(time).or_default();
+        let value = times.entry((time, phase)).or_default();
         *value = (*value + count).min(2);
     }
-    if recurring && time == 0 {
+    if recurring && (time == 0 || phase != 0) {
         return None;
     }
     Some(FixedWriteTimes {
