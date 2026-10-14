@@ -177,3 +177,5 @@ sv_backends! {
         @case "timing::finite_active_feedback_preserves_convergence";
     }
 }
+
+sv_backends! { fn interface_modport_methods_keep_setup_edges(sim) { @case "timing::interface_modport_methods_keep_setup_edges"; } }

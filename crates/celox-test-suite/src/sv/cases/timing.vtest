@@ -943,3 +943,21 @@ endmodule"#)
   (run_until 2)
   (assert_eq a 4)
   (assert_eq b 3))
+
+(case interface_modport_methods_keep_setup_edges
+ (source "modport-method.sv" #"
+ interface Scale #(parameter int K=5);
+ logic[3:0] base;
+ function automatic logic[3:0] scaled(input logic[3:0] v);return base+v*K;endfunction
+ modport user(import scaled);
+ endinterface
+ module User(Scale.user s,input bit clk,input logic[3:0] v,output logic[3:0] q);
+ always @(posedge clk)q<=s.scaled(v);
+ endmodule
+ module Top(input bit clk,input logic[3:0] v,output logic[3:0] q);
+ Scale #(.K(5)) s();
+ assign s.base=0;
+ User u(.s(s),.clk(clk),.v(v),.q(q));
+ endmodule
+ "#)
+ (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))

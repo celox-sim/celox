@@ -2650,28 +2650,29 @@ fn known_write_times_coincide(a: u64, pa: Option<u64>, b: u64, pb: Option<u64>) 
     }
 }
 
-fn known_write_wave_peak(writes: &[(u64, Option<u64>, usize)]) -> usize {
+fn known_write_wave_peak(writes: &[(u64, u64, Option<u64>, usize)]) -> usize {
     let mut fixed = std::collections::BTreeSet::new();
     let mut periodic = Vec::new();
-    for &(time, period, count) in writes {
+    for &(time, phase, period, count) in writes {
         if count > 1 {
             return 2;
         }
         if let Some(period) = period {
-            periodic.push((time, period));
-        } else if !fixed.insert(time) {
+            periodic.push((time, phase, period));
+        } else if !fixed.insert((time, phase)) {
             return 2;
         }
     }
-    for (position, &(time, period)) in periodic.iter().enumerate() {
+    for (position, &(time, phase, period)) in periodic.iter().enumerate() {
         if periodic[position + 1..]
             .iter()
-            .any(|&(other, other_period)| {
-                known_write_times_coincide(time, Some(period), other, Some(other_period))
+            .any(|&(other, other_phase, other_period)| {
+                phase == other_phase
+                    && known_write_times_coincide(time, Some(period), other, Some(other_period))
             })
-            || fixed
-                .range(time..)
-                .any(|&other| known_write_times_coincide(time, Some(period), other, None))
+            || fixed.range((time, 0)..).any(|&(other, other_phase)| {
+                phase == other_phase && known_write_times_coincide(time, Some(period), other, None)
+            })
         {
             return 2;
         }
@@ -3055,7 +3056,7 @@ fn validate_cross_instance_event_pulses(
                     }
                 }
                 let mut wave_unknown = [0usize; 2];
-                let mut wave_timed: [Vec<(u64, Option<u64>, usize)>; 2] =
+                let mut wave_timed: [Vec<(u64, u64, Option<u64>, usize)>; 2] =
                     std::array::from_fn(|_| Vec::new());
                 for (source_id, mut accesses) in cross {
                     accesses.sort_unstable();
@@ -3109,9 +3110,9 @@ fn validate_cross_instance_event_pulses(
                                 && let Some(times) =
                                     ff::fixed_runtime_write_times(body, &pm, &query, nonblocking)
                             {
-                                for (time, writes) in times.times {
+                                for ((time, phase), writes) in times.times {
                                     if writes != 0 {
-                                        wave_timed[index].push((time, times.period, writes));
+                                        wave_timed[index].push((time, phase, times.period, writes));
                                     }
                                 }
                             } else {
