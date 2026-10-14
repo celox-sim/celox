@@ -1983,7 +1983,7 @@ fn exec_one_detailed<B: SimBackend>(
                         let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
                         (completed, result.map_err(|error| error.to_string()))
                     };
-                    if completed == 0 || completed > batch {
+                    if (completed == 0 && result.is_ok()) || completed > batch {
                         return ExecResult::Fail(
                             "backend made invalid progress in a deferred tick batch".into(),
                         );
@@ -2051,7 +2051,7 @@ fn exec_one_detailed<B: SimBackend>(
                         let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
                         (completed, result.map_err(|error| error.to_string()))
                     };
-                    if completed == 0 || completed > batch {
+                    if (completed == 0 && result.is_ok()) || completed > batch {
                         return ExecResult::Fail(
                             "backend made invalid progress in a reset tick batch".into(),
                         );
