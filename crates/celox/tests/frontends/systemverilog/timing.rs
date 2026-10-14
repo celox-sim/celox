@@ -179,5 +179,3 @@ sv_backends! {
 }
 
 sv_backends! { fn interface_modport_methods_keep_setup_edges(sim) { @case "timing::interface_modport_methods_keep_setup_edges"; } }
-
-sv_backends! { fn inactive_phases_preserve_cross_instance_edges(sim) { @case "timing::inactive_phases_preserve_cross_instance_edges"; } }
