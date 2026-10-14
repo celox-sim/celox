@@ -558,6 +558,14 @@ mod activity {
             if step == 2 {
                 let rst = sim.signal("rst");
                 sim.modify(|io| io.set(rst, 1u8)).unwrap();
+                // An inactive host transition settles at the current time
+                // without fabricating a scheduler event. Sample that boundary
+                // in both writers before step advances to the next event.
+                sim.dump(sim.time());
+                let (ptr, size) = sim.memory_as_ptr();
+                reference
+                    .dump(sim.time(), unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
             }
             let time = sim.step().unwrap().unwrap();
             sim.dump(time);
