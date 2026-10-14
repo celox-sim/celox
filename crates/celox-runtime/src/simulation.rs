@@ -643,11 +643,14 @@ impl<B: SimBackend> SimulationState<B> {
 
         let num_events = executor.backend().num_events();
         let mut scheduled_edges = BitSet::with_capacity(num_events);
-        // A same-time batch may restore a derived clock before its final
-        // settle. Preserve actual domain transitions across each source store.
+        // Early settling can expose a derived edge that a later source store
+        // or awakened process restores. Capture every update we settle early.
         let capture_batch_edges = events_to_process.len() > 1;
         for event in &events_to_process {
-            let domain_values: Vec<u8> = if capture_batch_edges {
+            let settle_update = capture_batch_edges
+                || !self.waiting.is_empty()
+                || executor.scheduled_updates_need_settle();
+            let domain_values: Vec<u8> = if settle_update {
                 self.topo_signals
                     .iter()
                     .map(|(signal, _, _)| executor.backend().get_as(*signal))
@@ -663,10 +666,7 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 scheduled_edges.insert(id);
             }
-            if capture_batch_edges
-                || !self.waiting.is_empty()
-                || executor.scheduled_updates_need_settle()
-            {
+            if settle_update {
                 executor.eval_comb()?;
                 if executor.finish_requested(current_time) {
                     self.finished = true;
