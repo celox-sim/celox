@@ -687,6 +687,7 @@ impl<B: SimBackend> SimulationState<B> {
                         || self.unknown_clock_values.contains(**id));
                 (!events_to_process.is_empty() || pending_rise)
                     && !self.tick_budget_spent()
+                    && !falling.contains(*id)
                     && clock.next_edge == current_time
                     && self.clock_has_waiters(**id)
                     && (!high || pending_rise)
@@ -820,6 +821,7 @@ impl<B: SimBackend> SimulationState<B> {
             });
         }
         let mut rising = Vec::with_capacity(due.len());
+        let mut falling = Vec::new();
         for id in due {
             let clock = &self.tick_clocks[id];
             let high = sample_event_signal(executor.backend(), clock.signal) == (true, false);
@@ -831,10 +833,18 @@ impl<B: SimBackend> SimulationState<B> {
             });
             if !high {
                 rising.push(*id);
+            } else {
+                falling.push(*id);
             }
         }
+        for id in &falling {
+            self.tick_clocks
+                .get_mut(id)
+                .expect("a normalizing clock")
+                .falling_edge = Some(time);
+        }
         let result = self.step_round(executor, time, events, Vec::new(), Vec::new(), true);
-        self.finish_clock_round(time, rising, falling, result)
+        self.finish_clock_round(time, rising, &falling, result)
     }
 
     fn finish_clock_round(
@@ -1056,6 +1066,23 @@ impl<B: SimBackend> SimulationState<B> {
     pub fn has_unsettled_edges(&self, backend: &B) -> bool {
         self.topo_signals.iter().any(|(signal, id, _)| {
             *id != usize::MAX
+                && (
+                    self.last_clock_values.contains(*id),
+                    self.unknown_clock_values.contains(*id),
+                ) != sample_event_signal(backend, *signal)
+        })
+    }
+
+    /// Pending external clock/reset changes, excluding drives whose phase
+    /// belongs to a process clock. Those must retry with their scheduled batch.
+    pub fn has_unsettled_host_edges(&self, backend: &B) -> bool {
+        self.topo_signals.iter().any(|(signal, id, _)| {
+            *id != usize::MAX
+                && !self
+                    .processes
+                    .iter()
+                    .flat_map(|process| &process.clocks)
+                    .any(|clock| clock.signal == *signal)
                 && (
                     self.last_clock_values.contains(*id),
                     self.unknown_clock_values.contains(*id),
@@ -1509,6 +1536,9 @@ impl<B: SimBackend> SimulationState<B> {
                 && self.edge_triggers(id, before, after)
             {
                 scheduled_edges.insert(id);
+            }
+            if !self.waiting.is_empty() {
+                executor.eval_comb()?;
             }
             self.sample_waiting_events(executor, current_time)?;
         }
