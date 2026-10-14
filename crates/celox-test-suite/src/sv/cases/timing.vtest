@@ -870,3 +870,17 @@ endmodule"#)
  function int /* ; */ tick();return 1;endfunction
  always @(posedge clk)q<=tick();endmodule"#)
  (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case import_comment_commas_do_not_change_visible_callables
+ (source "import-comment.sv" #"package A;task automatic tick();#1;endtask task automatic other();endtask endpackage
+ package B;function automatic bit tick();return 1;endfunction endpackage
+ module Top(input bit clk,output bit q);import B::*, A /*,*/ :: other;
+ always @(posedge clk)q<=tick();endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
+
+(case escaped_import_commas_keep_explicit_callable_selection
+ (source "escaped-import.sv" #"package \A,items ;function automatic bit tick();return 1;endfunction endpackage
+ package B;task automatic tick();#1;endtask endpackage
+ module Top(input bit clk,output bit q);import \A,items ::tick;
+ always @(posedge clk)q<=tick();endmodule"#)
+ (top Top)(set clk 1)(run_until 0)(assert_eq q 1))
