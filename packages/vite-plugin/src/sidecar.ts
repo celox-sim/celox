@@ -1,7 +1,10 @@
 import {
+	type Dirent,
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
+	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -22,6 +25,7 @@ export const SIDECAR_DIR = ".celox";
 export function generateSidecars(
 	data: GenTsJsonOutput,
 	projectRoot: string,
+	options: { removeOrphans?: boolean } = {},
 ): string[] {
 	const written: string[] = [];
 	const root = resolve(projectRoot);
@@ -57,16 +61,84 @@ export function generateSidecars(
 		written.push(sidecarPath);
 	}
 
+	// Startup may find declarations left by an earlier server process. Sweep
+	// only after all replacement declarations have been generated successfully.
+	if (options.removeOrphans !== false && existsSync(outDir)) {
+		removeOrphanSidecars(outDir, retainedSidecars(written));
+	}
 	return written;
 }
 
+function retainedSidecars(paths: string[]): Map<string, string[]> {
+	const retained = new Map<string, string[]>();
+	for (const path of paths) {
+		const key = sidecarKey(path);
+		retained.set(key, [...(retained.get(key) ?? []), path]);
+	}
+	return retained;
+}
+
+function sidecarKey(path: string): string {
+	return path.normalize("NFC").toLowerCase().toUpperCase().normalize("NFC");
+}
+
+function isRetainedSidecar(
+	path: string,
+	retained: Map<string, string[]>,
+): boolean {
+	const candidates = retained.get(sidecarKey(path));
+	if (!candidates) return false;
+	if (candidates.includes(path)) return true;
+	// A case-only rename may leave the old directory-entry spelling. Confirm
+	// file identity so distinct case-sensitive files can still be removed.
+	const current = statSync(path, { bigint: true });
+	return candidates.some((candidate) => {
+		const written = statSync(candidate, { bigint: true });
+		return current.dev === written.dev && current.ino === written.ino;
+	});
+}
+
+function removeOrphanSidecars(
+	dir: string,
+	retained: Map<string, string[]>,
+): void {
+	let entries: Dirent<string>[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		return;
+	}
+	for (const entry of entries) {
+		const path = join(dir, entry.name);
+		try {
+			if (entry.isDirectory()) {
+				removeOrphanSidecars(path, retained);
+			} else if (
+				entry.isFile() &&
+				entry.name.endsWith(".d.veryl.ts") &&
+				!isRetainedSidecar(path, retained)
+			) {
+				unlinkSync(path);
+			}
+		} catch (error) {
+			// Another server may have cleaned this entry after readdir/stat.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+}
+
 /**
- * Remove all sidecar files that were previously generated.
+ * Remove previous sidecars while preserving replacement files and aliases.
  */
-export function cleanSidecars(paths: string[]): void {
+export function cleanSidecars(
+	paths: string[],
+	retainedPaths: string[] = [],
+): void {
+	const retained = retainedSidecars(retainedPaths);
 	for (const p of paths) {
 		try {
-			if (existsSync(p)) {
+			if (existsSync(p) && !isRetainedSidecar(p, retained)) {
 				unlinkSync(p);
 			}
 		} catch {
