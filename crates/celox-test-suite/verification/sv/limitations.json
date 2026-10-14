@@ -614,6 +614,8 @@
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element",
+        "timing::generic_interface_methods_keep_setup_edges",
+        "timing::inherited_interface_methods_keep_setup_edges",
         "timing::interface_modport_methods_keep_setup_edges"
       ]
     }

@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 14,
     "emission_error": 0,
-    "compile_error": 105,
+    "compile_error": 107,
     "runtime_error": 3,
     "unsupported": 0,
     "ignored": 0
@@ -1161,6 +1161,22 @@
       "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:6: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: Errors in port declarations.\n",
       "expectation": "Simulation",
       "name": "timing::interface_modport_methods_keep_setup_edges",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:6: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "timing::generic_interface_methods_keep_setup_edges",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:6: sorry: modport task/function ports are not yet supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "timing::inherited_interface_methods_keep_setup_edges",
       "phase": "compile",
       "status": "compile_error"
     }

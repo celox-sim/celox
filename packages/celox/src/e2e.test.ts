@@ -3905,3 +3905,44 @@ describe("E2E: four-state wildcard comparison", () => {
 		}
 	});
 });
+
+test("finished simulation checkpoints preserve unsettled output until explicit eval", () => {
+	const artifact = JSON.parse(FRONTEND_FINISH_ARTIFACT);
+	artifact.signals[0].direction = "Input";
+	artifact.signals.push({
+		...artifact.signals[0],
+		id: 1,
+		name: "derived",
+		direction: "Output",
+	});
+	artifact.port_order.push(1);
+	artifact.expressions.push({
+		id: 2,
+		node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+		value_type: { width: 8, signed: false, four_state: false },
+	});
+	artifact.assignments = [
+		{ target: { signal: 1, lsb: 0, width: 8 }, value: 2 },
+	];
+	artifact.processes[0].body = ["Finish"];
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const raw = Handle.fromFrontendArtifact(JSON.stringify(artifact));
+	try {
+		raw.runUntil(0);
+		expect(raw.isFinished?.()).toBe(true);
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.y.offset] = 7;
+		expect(memory[layout.derived.offset]).toBe(0);
+		if (!raw.checkpoint || !raw.restore)
+			throw new Error("checkpoint unavailable");
+		const saved = raw.checkpoint();
+		raw.restore(saved);
+		expect(memory[layout.derived.offset]).toBe(0);
+		raw.evalComb();
+		expect(memory[layout.derived.offset]).toBe(7);
+	} finally {
+		raw.dispose();
+	}
+});

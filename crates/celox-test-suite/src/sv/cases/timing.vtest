@@ -961,3 +961,39 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))
+
+(case generic_interface_methods_keep_setup_edges
+ (source "generic_interface_methods_keep_setup_edges.sv" #"
+ interface Scale #(parameter int K=5);
+ logic[3:0] base;
+ function automatic logic[3:0] scaled(input logic[3:0] v);return base+v*K;endfunction
+ modport user(import scaled);
+ endinterface
+ module User(interface s,input bit clk,input logic[3:0] v,output logic[3:0] q);
+ always @(posedge clk)q<=s.scaled(v);
+ endmodule
+ module Top(input bit clk,input logic[3:0] v,output logic[3:0] q);
+ Scale #(.K(5)) s();
+ assign s.base=0;
+ User u(.s(s),.clk(clk),.v(v),.q(q));
+ endmodule
+ "#)
+ (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))
+
+(case inherited_interface_methods_keep_setup_edges
+ (source "inherited_interface_methods_keep_setup_edges.sv" #"
+ interface Scale #(parameter int K=5);
+ logic[3:0] base;
+ function automatic logic[3:0] scaled(input logic[3:0] v);return base+v*K;endfunction
+ modport user(import scaled);
+ endinterface
+ module User(Scale.user unused, s,input bit clk,input logic[3:0] v,output logic[3:0] q);
+ always @(posedge clk)q<=s.scaled(v);
+ endmodule
+ module Top(input bit clk,input logic[3:0] v,output logic[3:0] q);
+ Scale #(.K(5)) s();
+ assign s.base=0;
+ User u(.unused(s),.s(s),.clk(clk),.v(v),.q(q));
+ endmodule
+ "#)
+ (top Top)(set v 2)(set clk 1)(run_until 0)(assert_eq q 10))
