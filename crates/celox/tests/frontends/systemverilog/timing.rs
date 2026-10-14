@@ -156,3 +156,11 @@ sv_backends! {
 sv_backends! {
  fn comment_semicolons_in_function_headers_preserve_setup_edges(sim){@case "timing::comment_semicolons_in_function_headers_preserve_setup_edges";}
 }
+
+sv_backends! {
+ fn import_comment_commas_do_not_change_visible_callables(sim){@case "timing::import_comment_commas_do_not_change_visible_callables";}
+}
+
+sv_backends! {
+ fn escaped_import_commas_keep_explicit_callable_selection(sim){@case "timing::escaped_import_commas_keep_explicit_callable_selection";}
+}

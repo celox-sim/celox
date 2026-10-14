@@ -2510,3 +2510,48 @@ pub fn procedural_call_sites(tree: &SyntaxTree) -> Vec<(usize, String)> {
     sites.dedup();
     sites
 }
+
+/// Parsed import/export clauses, keyed by the declaration keyword offset.
+/// A missing package/member denotes a wildcard; comments never become items.
+pub fn package_import_export_clauses(
+    tree: &SyntaxTree,
+) -> std::collections::BTreeMap<usize, Vec<(Option<String>, Option<String>)>> {
+    let mut clauses = std::collections::BTreeMap::new();
+    for node in tree {
+        let (offset, declaration) = match node {
+            RefNode::PackageImportDeclaration(item) => (
+                item.nodes.0.nodes.0.offset,
+                RefNode::PackageImportDeclaration(item),
+            ),
+            RefNode::PackageExportDeclaration(sv_parser::PackageExportDeclaration::Item(item)) => (
+                item.nodes.0.nodes.0.offset,
+                RefNode::PackageExportDeclarationItem(item),
+            ),
+            RefNode::PackageExportDeclaration(sv_parser::PackageExportDeclaration::Asterisk(
+                item,
+            )) => {
+                clauses.insert(item.nodes.0.nodes.0.offset, vec![(None, None)]);
+                continue;
+            }
+            _ => continue,
+        };
+        let items = declaration
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
+                    Some((
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
+                    ))
+                }
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => Some((
+                    identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                    None,
+                )),
+                _ => None,
+            })
+            .collect();
+        clauses.insert(offset, items);
+    }
+    clauses
+}
