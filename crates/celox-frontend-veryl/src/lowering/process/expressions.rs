@@ -88,6 +88,10 @@ pub(crate) fn statement_inputs(statement: &Statement) -> Vec<&Expression> {
             )
             .collect(),
         Statement::If(stmt) => vec![&stmt.cond],
+        // A statically selected arm never evaluates later pattern helpers.
+        Statement::Case(stmt) if selected_case_body(stmt).is_some() => {
+            vec![stmt.case_target.as_ref()]
+        }
         Statement::Case(stmt) => std::iter::once(stmt.case_target.as_ref())
             .chain(stmt.arms.iter().flat_map(|arm| {
                 arm.patterns.iter().flat_map(|pattern| match pattern {

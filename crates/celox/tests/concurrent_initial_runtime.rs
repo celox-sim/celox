@@ -1772,3 +1772,82 @@ fn bounded_testbench_with_background_delay_returns_after_clock_and_reset_boundar
         check(build().build_native().unwrap(), limit);
     }
 }
+
+#[test]
+fn skipped_case_pattern_finish_does_not_hide_a_reachable_clock_wait() {
+    for (target, helper) in [(1, "$finish();"), (2, "")] {
+        let code = format!(
+            r#"#[test(Top)] module Top {{
+            inst clk:$tb::clock_gen;
+            var q:u32; always_ff(clk) {{q+=1;}}
+            function later()->u32 {{{helper}return 2;}}
+            initial {{case {target} {{1:{{$assert({target}==1);}} later():{{$assert({target}==2);}}}}
+                clk.next(1);$finish();}}
+        }}"#
+        );
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            assert_eq!(sim.get(sim.signal("q")), 1u32.into());
+        }
+        check(
+            Simulator::builder(&code, "Top")
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(Simulator::builder(&code, "Top").build_cranelift().unwrap());
+        check(Simulator::builder(&code, "Top").build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulator::builder(&code, "Top").build_native().unwrap());
+    }
+}
+
+#[test]
+fn repeated_clockless_runs_settle_residual_writes_before_entry_reads() {
+    let code = r#"#[test(Top)] module Top {var source:u32;var derived:u32;
+        always_comb {derived=source;}
+        initial {$assert(derived==source,"entry read");source=1;$finish();}
+    }"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            // Raw reads prove the final TB settle happened without a lazy get.
+            assert_eq!(sim.backend_ref().get_as::<u32>(sim.signal("source")), 1);
+            assert_eq!(sim.backend_ref().get_as::<u32>(sim.signal("derived")), 1);
+        }
+    }
+    for kernels in [false, true] {
+        check(
+            Simulator::builder(code, "Top")
+                .testbench_kernels(kernels)
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulator::builder(code, "Top")
+                .testbench_kernels(kernels)
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(
+            Simulator::builder(code, "Top")
+                .testbench_kernels(kernels)
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulator::builder(code, "Top")
+                .testbench_kernels(kernels)
+                .build_native()
+                .unwrap(),
+        );
+    }
+}

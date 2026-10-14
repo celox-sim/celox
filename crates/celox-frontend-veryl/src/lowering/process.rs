@@ -997,6 +997,9 @@ fn lower_block(
     lowering.store_scratch(lowering.event_yield_clean.unwrap(), 1, clean);
     if contains_runtime_event(ir, statements, &mut HashSet::default()) {
         lowering.event_yield = Some(lowering.take_scratch("event_yield", EVENT_YIELD_WIDTH)?.1);
+        // Resume-zero entry starts a new run of this compiled kernel.
+        let zero = lowering.constant(0, EVENT_YIELD_WIDTH);
+        lowering.store_scratch(lowering.event_yield.unwrap(), EVENT_YIELD_WIDTH, zero);
     }
     lowering.declare_clocks(statements);
     // A block that ends right after a store settles, so a process that runs

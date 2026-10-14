@@ -819,4 +819,52 @@ mod event_yield_settle_tests {
             .unwrap();
         assert_eq!(execution_counts(restored, 1).0, 1);
     }
+    #[test]
+    fn repeated_kernel_entries_restart_the_event_yield_count() {
+        let code = r#"#[test(Top)]module Top{var source:u32;var derived:u32;
+            always_comb{derived=source;}
+            function mark(o:output u32)->u32{o=1;return 1;}
+            initial{$assert(1,"value %d",mark(source));$finish();}}
+        "#;
+        fn check<B: SimBackend>(sim: Simulator<B>) {
+            let source = sim.signal("source");
+            let derived = sim.signal("derived");
+            let mut executor = CountingExecutor {
+                sim,
+                settles: 0,
+                combs: 0,
+                fused: 0,
+                combs_before_edge: None,
+            };
+            for run in 1..=256 {
+                // Restart control slots as the public runner does, retaining
+                // the same compiled kernel and its other scratch storage.
+                for slots in &executor.sim.program.runtime_schema.processes {
+                    for address in slots.iter() {
+                        let signal = executor.sim.backend.resolve_signal(address);
+                        executor.sim.backend.set(signal, 0u64);
+                    }
+                }
+                executor.sim.backend.set(source, 0u32);
+                executor.eval_comb().unwrap();
+                let mut state = crate::simulation::simulation_state(&executor.sim);
+                let before = executor.settles;
+                while !state.is_finished() {
+                    assert!(state.step(&mut executor).unwrap().is_some());
+                }
+                assert_eq!(
+                    executor.settles - before,
+                    0,
+                    "run {run} inherited an event-yield budget"
+                );
+                assert_eq!(executor.sim.backend.get_as::<u32>(source), 1);
+                assert_eq!(executor.sim.backend.get_as::<u32>(derived), 1);
+            }
+        }
+        check(Simulator::builder(code, "Top").build_interpreter().unwrap());
+        check(Simulator::builder(code, "Top").build_cranelift().unwrap());
+        check(Simulator::builder(code, "Top").build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulator::builder(code, "Top").build_native().unwrap());
+    }
 }
