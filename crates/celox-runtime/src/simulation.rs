@@ -1171,7 +1171,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let time = self.scheduler.time;
-        self.sample_waiting_events(executor)?;
+        self.sample_waiting_events(executor, time)?;
         let result = self.step_round(executor, time, Vec::new(), Vec::new(), Vec::new(), false);
         let progressed = result.as_ref().is_ok_and(|ran| *ran);
         self.finish_clock_round(time, Vec::new(), &[], result)?;
