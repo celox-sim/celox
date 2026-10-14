@@ -201,8 +201,10 @@ pub struct LaneTaskFailure {
 /// Status reported for a task whose runner panicked.
 pub const LANE_TASK_PANICKED: i64 = i64::MIN;
 
-#[repr(align(128))]
+// repr requires a literal; keep the common layout boundary checked below.
+#[repr(align(256))]
 struct Padded<T>(T);
+const _: () = assert!(std::mem::align_of::<Padded<u8>>() == celox_state_layout::LANE_SEGMENT_ALIGN);
 
 #[derive(Clone, Copy)]
 struct Job {
