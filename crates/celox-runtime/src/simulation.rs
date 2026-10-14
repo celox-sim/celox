@@ -643,6 +643,7 @@ impl<B: SimBackend> SimulationState<B> {
 
         let num_events = executor.backend().num_events();
         let mut scheduled_edges = BitSet::with_capacity(num_events);
+        let mut early_settle_edges = BitSet::with_capacity(num_events);
         // Early settling can expose a derived edge that a later source store
         // or awakened process restores. Capture every update we settle early.
         let capture_batch_edges = events_to_process.len() > 1;
@@ -681,7 +682,11 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend().get_as::<u8>(*signal) != 0,
                     )
                 {
-                    scheduled_edges.insert(*id);
+                    if capture_batch_edges {
+                        scheduled_edges.insert(*id);
+                    } else {
+                        early_settle_edges.insert(*id);
+                    }
                 }
             }
             self.sample_waiting_events(executor)?;
@@ -750,6 +755,15 @@ impl<B: SimBackend> SimulationState<B> {
         if executor.finish_requested(current_time) {
             self.finished = true;
             return Ok(true);
+        }
+        // Settle process writes before deciding whether they restored an
+        // early edge. Persistent edges follow the ordinary cascade after
+        // source FF publication; only vanished edges need explicit replay.
+        for id in early_settle_edges.iter() {
+            if !self.stable_edge_triggered(executor.backend(), id) {
+                recorded_edges.insert(id);
+                scheduled_trigger_ids.insert(id);
+            }
         }
         if track_stable_edges {
             // Combinational settling before an active scheduled source domain
