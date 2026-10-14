@@ -629,6 +629,9 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 scheduled_edges.insert(id);
             }
+            if !self.waiting.is_empty() {
+                executor.eval_comb()?;
+            }
             self.sample_waiting_events(executor)?;
         }
 

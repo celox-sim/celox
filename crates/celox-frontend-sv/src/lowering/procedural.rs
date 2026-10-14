@@ -173,10 +173,16 @@ impl<'a> ProcModule<'a> {
         let comb_writes = module
             .comb_processes()
             .iter()
+            .filter(|process| condition_is_active(process.condition(), constants, parameter_types))
             .map(|process| {
-                combinational_write_counts(process.body(), &subroutines, &|expr| {
-                    known_loop_value(expr, variables, name_to_id, constants, parameter_types)
-                })
+                combinational_write_counts(
+                    process.body(),
+                    &subroutines,
+                    &|expr| {
+                        known_loop_value(expr, variables, name_to_id, constants, parameter_types)
+                    },
+                    &|expr| expr_is_two_state(expr, variables, name_to_id, &subroutines),
+                )
             })
             .collect::<Vec<_>>();
         let mut total_writes: HashMap<String, usize> = HashMap::default();
@@ -226,6 +232,9 @@ impl<'a> ProcModule<'a> {
             comb_bodies: module
                 .comb_processes()
                 .iter()
+                .filter(|process| {
+                    condition_is_active(process.condition(), constants, parameter_types)
+                })
                 .map(|process| process.body().to_vec())
                 .collect(),
             watchers_by_var: HashMap::default(),
@@ -2166,10 +2175,10 @@ fn lvalue_position_calls(
     }
 }
 
-pub(super) fn stmt_calls(
-    stmt: &sv::ir::Stmt,
+fn stmt_call_exprs<'a>(
+    stmt: &'a sv::ir::Stmt,
     calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
-) {
+) -> Vec<&'a sv::ir::Expr> {
     let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
     match stmt {
         sv::ir::Stmt::Call { name, args, .. } => {
@@ -2225,8 +2234,177 @@ pub(super) fn stmt_calls(
         }
         _ => {}
     }
-    for expr in exprs {
+    exprs
+}
+
+pub(super) fn stmt_calls(
+    stmt: &sv::ir::Stmt,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    for expr in stmt_call_exprs(stmt, calls) {
         collect_calls(expr, calls);
+    }
+}
+
+pub(super) enum CallEffects {
+    Call(String, Vec<Option<sv::ir::Expr>>),
+    Sequence(Vec<Self>),
+    Choice(Box<Self>, Box<Self>),
+}
+impl CallEffects {
+    pub(super) fn fold<T: Default>(
+        &self,
+        call: &mut impl FnMut(&str, &[Option<sv::ir::Expr>]) -> T,
+        add: &impl Fn(T, T) -> T,
+        max: &impl Fn(T, T) -> T,
+    ) -> T {
+        match self {
+            Self::Call(name, args) => call(name, args),
+            Self::Sequence(items) => items.iter().fold(T::default(), |value, item| {
+                add(value, item.fold(call, add, max))
+            }),
+            Self::Choice(left, right) => max(left.fold(call, add, max), right.fold(call, add, max)),
+        }
+    }
+}
+
+pub(super) fn stmt_call_effects(
+    stmt: &sv::ir::Stmt,
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+    two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+) -> CallEffects {
+    fn constant(
+        expr: &sv::ir::ConstExpr,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    ) -> CallEffects {
+        if let Some(expr) = expr_from_const_expr(expr) {
+            return expression(&expr, eval, two_state);
+        }
+        let mut calls = Vec::new();
+        collect_const_calls(expr, &mut calls);
+        CallEffects::Sequence(
+            calls
+                .into_iter()
+                .map(|(name, args)| CallEffects::Call(name, args))
+                .collect(),
+        )
+    }
+    fn expression(
+        expr: &sv::ir::Expr,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    ) -> CallEffects {
+        use sv::ir::Expr;
+        let mut items = Vec::new();
+        match expr {
+            Expr::Call { name, args, .. } => {
+                items.push(CallEffects::Call(name.clone(), args.clone()));
+                items.extend(
+                    args.iter()
+                        .flatten()
+                        .map(|arg| expression(arg, eval, two_state)),
+                );
+            }
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                items.push(expression(condition, eval, two_state));
+                match eval(condition) {
+                    Some(value) => items.push(expression(
+                        if value != 0 { then_expr } else { else_expr },
+                        eval,
+                        two_state,
+                    )),
+                    None if two_state(condition) => items.push(CallEffects::Choice(
+                        Box::new(expression(then_expr, eval, two_state)),
+                        Box::new(expression(else_expr, eval, two_state)),
+                    )),
+                    None => {
+                        items.push(expression(then_expr, eval, two_state));
+                        items.push(expression(else_expr, eval, two_state));
+                    }
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Resize { expr, .. } => {
+                items.push(expression(expr, eval, two_state))
+            }
+            Expr::Binary { left, right, .. } => {
+                items.push(expression(left, eval, two_state));
+                items.push(expression(right, eval, two_state));
+            }
+            Expr::Concat(parts) => {
+                items.extend(parts.iter().map(|part| expression(part, eval, two_state)))
+            }
+            Expr::RepeatConcat { count, parts } => {
+                items.push(constant(count, eval, two_state));
+                items.extend(parts.iter().map(|part| expression(part, eval, two_state)));
+            }
+            Expr::Select { expr, msb, lsb, .. } => {
+                items.push(expression(expr, eval, two_state));
+                items.push(constant(msb, eval, two_state));
+                items.push(constant(lsb, eval, two_state));
+            }
+            Expr::Inside {
+                expr,
+                items: inside,
+            } => {
+                items.push(expression(expr, eval, two_state));
+                items.extend(
+                    inside
+                        .iter()
+                        .flat_map(sv::ir::InsideItem::exprs)
+                        .map(|arg| expression(arg, eval, two_state)),
+                );
+            }
+            Expr::Ident(_) | Expr::Literal(_) => {}
+        }
+        CallEffects::Sequence(items)
+    }
+    let mut calls = Vec::new();
+    let exprs = stmt_call_exprs(stmt, &mut calls);
+    let mut items = calls
+        .into_iter()
+        .map(|(name, args)| CallEffects::Call(name, args))
+        .collect::<Vec<_>>();
+    items.extend(
+        exprs
+            .into_iter()
+            .map(|expr| expression(expr, eval, two_state)),
+    );
+    CallEffects::Sequence(items)
+}
+
+pub(super) fn expr_is_two_state(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    ids: &HashMap<String, SourceVarId>,
+    subroutines: &HashMap<String, sv::ir::Subroutine>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => ids.get(name).is_some_and(|id| !variables[id].is_4state),
+        sv::ir::Expr::Literal(value) => !value
+            .chars()
+            .any(|c| matches!(c, 'x' | 'X' | 'z' | 'Z' | '?')),
+        sv::ir::Expr::Call { name, .. } => subroutines
+            .get(name)
+            .and_then(|sub| sub.return_var.as_deref())
+            .and_then(|name| ids.get(name))
+            .is_some_and(|id| !variables[id].is_4state),
+        sv::ir::Expr::Binary {
+            op: sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase,
+            ..
+        } => true,
+        sv::ir::Expr::Unary { expr, .. } | sv::ir::Expr::Resize { expr, .. } => {
+            expr_is_two_state(expr, variables, ids, subroutines)
+        }
+        sv::ir::Expr::Binary { left, right, .. } => {
+            expr_is_two_state(left, variables, ids, subroutines)
+                && expr_is_two_state(right, variables, ids, subroutines)
+        }
+        _ => false,
     }
 }
 
@@ -2413,12 +2591,14 @@ fn combinational_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
     eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+    two_state: &dyn Fn(&sv::ir::Expr) -> bool,
 ) -> HashMap<String, usize> {
     fn counts(
         stmts: &[sv::ir::Stmt],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
         eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
     ) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
@@ -2438,8 +2618,8 @@ fn combinational_write_counts(
                     else_body,
                     ..
                 } => {
-                    next = counts(then_body, subroutines, visiting, eval);
-                    for (name, count) in counts(else_body, subroutines, visiting, eval) {
+                    next = counts(then_body, subroutines, visiting, eval, two_state);
+                    for (name, count) in counts(else_body, subroutines, visiting, eval, two_state) {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry).max(count);
                     }
@@ -2450,7 +2630,7 @@ fn combinational_write_counts(
                         .map(|item| item.body.as_slice())
                         .chain(default.iter().map(Vec::as_slice))
                     {
-                        for (name, count) in counts(body, subroutines, visiting, eval) {
+                        for (name, count) in counts(body, subroutines, visiting, eval, two_state) {
                             let entry = next.entry(name).or_default();
                             *entry = (*entry).max(count);
                         }
@@ -2463,12 +2643,12 @@ fn combinational_write_counts(
                     body,
                     step,
                 } => {
-                    next = counts(init, subroutines, visiting, eval);
+                    next = counts(init, subroutines, visiting, eval, two_state);
                     let trips = loop_trip_cap(kind, init, condition.as_ref(), step, eval);
                     call_evaluations = loop_condition_eval_cap(kind, trips);
-                    for (name, count) in counts(body, subroutines, visiting, eval)
+                    for (name, count) in counts(body, subroutines, visiting, eval, two_state)
                         .into_iter()
-                        .chain(counts(step, subroutines, visiting, eval))
+                        .chain(counts(step, subroutines, visiting, eval, two_state))
                     {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry + count * trips).min(2);
@@ -2476,17 +2656,35 @@ fn combinational_write_counts(
                 }
                 _ => {}
             }
-            let mut calls = Vec::new();
-            stmt_calls(stmt, &mut calls);
-            for (name, args) in calls {
-                for (name, count) in call_counts(&name, &args, subroutines, visiting, eval) {
-                    let entry = next.entry(name).or_default();
-                    *entry = (*entry + count * call_evaluations).min(2);
+            let effects = stmt_call_effects(stmt, eval, two_state);
+            let combine = |mut left: HashMap<String, usize>,
+                           right: HashMap<String, usize>,
+                           exclusive: bool| {
+                for (name, count) in right {
+                    let value = left.entry(name).or_default();
+                    *value = if exclusive {
+                        (*value).max(count)
+                    } else {
+                        (*value + count).min(2)
+                    };
                 }
+                left
+            };
+            let writes = effects.fold(
+                &mut |name, args| call_counts(name, args, subroutines, visiting, eval, two_state),
+                &|a, b| combine(a, b, false),
+                &|a, b| combine(a, b, true),
+            );
+            for (name, count) in writes {
+                let value = next.entry(name).or_default();
+                *value = (*value + count * call_evaluations).min(2);
             }
             for (name, count) in next {
                 let entry = result.entry(name).or_default();
                 *entry = (*entry + count).min(2);
+            }
+            if !stmt_may_fall_through(stmt) {
+                break;
             }
         }
         result
@@ -2497,13 +2695,14 @@ fn combinational_write_counts(
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
         eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
     ) -> HashMap<String, usize> {
         if !visiting.insert(name.to_string()) {
             return HashMap::default();
         }
         let mut result = HashMap::default();
         if let Some(subroutine) = subroutines.get(name) {
-            result = counts(&subroutine.body, subroutines, visiting, eval);
+            result = counts(&subroutine.body, subroutines, visiting, eval, two_state);
             for param in &subroutine.params {
                 result.remove(&param.name);
             }
@@ -2523,7 +2722,9 @@ fn combinational_write_counts(
             let mut defaults = Vec::new();
             default_calls(subroutine, args, &mut defaults);
             for (name, args) in defaults {
-                for (name, count) in call_counts(&name, &args, subroutines, visiting, eval) {
+                for (name, count) in
+                    call_counts(&name, &args, subroutines, visiting, eval, two_state)
+                {
                     let entry = result.entry(name).or_default();
                     *entry = (*entry + count).min(2);
                 }
@@ -2532,5 +2733,24 @@ fn combinational_write_counts(
         visiting.remove(name);
         result
     }
-    counts(stmts, subroutines, &mut HashSet::default(), eval)
+    counts(stmts, subroutines, &mut HashSet::default(), eval, two_state)
+}
+
+/// Whether a sequence can reach the statement after it. Loop exits are local
+/// to the loop; direct return/break/continue end the current body sequence.
+pub(super) fn stmt_may_fall_through(stmt: &sv::ir::Stmt) -> bool {
+    let body_falls = |body: &[sv::ir::Stmt]| body.iter().all(stmt_may_fall_through);
+    match stmt {
+        sv::ir::Stmt::Return(_) | sv::ir::Stmt::Break | sv::ir::Stmt::Continue => false,
+        sv::ir::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_falls(then_body) || body_falls(else_body),
+        sv::ir::Stmt::Case { items, default, .. } => {
+            default.as_ref().is_none_or(|body| body_falls(body))
+                || items.iter().any(|item| body_falls(&item.body))
+        }
+        _ => true,
+    }
 }

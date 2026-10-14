@@ -2009,3 +2009,58 @@ fn computed_and_non_ff_multi_edge_always_controls_run_as_processes() {
         assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{control}");
     }
 }
+
+#[test]
+fn inactive_comb_drivers_do_not_poison_active_waiters() {
+    let mut sim = simulation(
+        "module Top(input bit go,output bit seen);bit q;assign q=go;if(0)always_comb begin q=1;q=0;end initial begin @(posedge q);seen=1;end endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+#[test]
+fn unreachable_function_writes_do_not_poison_active_waiters() {
+    let mut sim = simulation(
+        "module Top(input bit go,output bit seen);bit q,unused;
+        function automatic bit set_q();q=go;return go;q=0;endfunction
+        always_comb unused=set_q();initial begin @(posedge q);seen=1;end endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn exclusive_conditional_calls_do_not_poison_active_waiters() {
+    let source = "module Top(input bit sel,output bit seen);bit q,unused;
+      function automatic bit one();q=1;return 1;endfunction
+      function automatic bit zero();q=0;return 0;endfunction
+      always_comb unused=sel?one():zero();initial begin @(posedge q);seen=1;end endmodule";
+    for condition in ["sel", "(sel & 1'b1)", "(sel === 1'b1)", "pick()"] {
+        let source = source
+            .replace(
+                "always_comb",
+                "function automatic bit pick();return sel;endfunction always_comb",
+            )
+            .replace("unused=sel?", &format!("unused={condition}?"));
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        let sel = sim.signal("sel");
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{condition}");
+    }
+    let ambiguous = source.replace("input bit sel", "input logic sel");
+    let error =
+        Simulation::from_sv_sources(vec![(ambiguous.as_str(), Path::new("ambiguous.sv"))], "Top")
+            .four_state(true)
+            .build()
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
