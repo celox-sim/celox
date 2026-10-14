@@ -637,11 +637,10 @@ impl<B: SimBackend> Simulation<B> {
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                self.state.step(&mut self.simulator)?;
-            } else {
-                self.state.settle_at(&mut self.simulator, time)?;
+                return self.state.step_until(&mut self.simulator, limit);
             }
-            if active || queued {
+            self.state.settle_at(&mut self.simulator, time)?;
+            if active {
                 return Ok(Some(time));
             }
         }
@@ -672,7 +671,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             if self.state.next_event_time() == Some(time) {
-                self.state.step(&mut self.simulator)?;
+                self.state.step_until(&mut self.simulator, end_time)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
@@ -3687,5 +3686,91 @@ mod queued_derived_ff_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod coincident_host_edge_limit_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let byte = ValueType::bits(8).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let host = m.input("host", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let seen = m.output("seen", bit).unwrap();
+        let q = m.output("q", byte).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(seen).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let value = m.read(q).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = m.binary(BinaryOp::Add, value, one, byte).unwrap();
+        let target = m.whole(q).unwrap();
+        m.register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(8u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>, method: &str, limit: u64) {
+        sim.set_wide(sim.signal("host"), 1u8.into());
+        if method == "step_until" {
+            let reached = sim.step_until(limit).unwrap().unwrap();
+            assert_eq!(reached, sim.time());
+            assert!(reached <= limit);
+        } else {
+            sim.run_until(limit).unwrap();
+        }
+        if method == "run_until" {
+            assert_eq!(sim.time(), limit);
+        }
+        let ticks = 1 + sim.time() / 4;
+        assert_eq!(sim.ticks(), ticks);
+        assert_eq!(sim.get(sim.signal("q")), (ticks as u8).into());
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.time(), 4);
+        assert_eq!(sim.ticks(), 2);
+        assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+        sim.run_until(28).unwrap();
+        assert_eq!(sim.ticks(), 8);
+        assert_eq!(sim.get(sim.signal("q")), 8u8.into());
+    }
+    #[test]
+    fn coincident_host_edges_do_not_fuse_past_public_time_limits() {
+        for (method, limit) in [
+            ("step_until", 0),
+            ("step_until", 4),
+            ("run_until", 0),
+            ("run_until", 4),
+        ] {
+            let build = || Simulator::from_frontend(design());
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                method,
+                limit,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                method,
+                limit,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                method,
+                limit,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                method,
+                limit,
+            );
+        }
     }
 }
