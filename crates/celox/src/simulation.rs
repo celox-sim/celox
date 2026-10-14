@@ -2805,3 +2805,70 @@ mod post_nba_retrigger_review_tests {
         check(Simulation::new(build().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod other_domain_host_step_review {
+    use super::*;
+    #[test]
+    fn any_change_runtime_domains_report_host_falls_at_current_time() {
+        let source = "module Top(input bit clk,output bit[7:0]count);always @(posedge clk)count<=count+1;endmodule";
+        fn check<B: SimBackend>(simulator: Simulator<B>, bounded: bool) {
+            // The compiled event entry is the FF operation. Its edge policy
+            // comes from runtime metadata; exercise an any-change domain here.
+            let signal = simulator.signal("clk");
+            let address = simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let event = simulator.backend.resolve_event(&address);
+            let mut kinds = vec![None; simulator.backend.num_events()];
+            kinds[event.id()] = Some(celox_design::DomainKind::Other);
+            let mut info = vec![
+                EventInfo {
+                    canonical_id: usize::MAX,
+                    is_cascaded: false,
+                    eval_ff_event: None,
+                    eval_only_event: None,
+                    apply_event: None
+                };
+                simulator.backend.num_events()
+            ];
+            info[event.id()] = EventInfo {
+                canonical_id: event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&address),
+                apply_event: simulator.backend.resolve_apply_event(&address),
+            };
+            let state = SimulationState::new(
+                &simulator.backend,
+                vec![(signal, event.id(), event.id())],
+                kinds,
+                info,
+                Vec::new(),
+            );
+            let mut sim = Simulation { simulator, state };
+            sim.set_wide(signal, 1u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+            sim.set_wide(signal, 0u8.into());
+            let time = if bounded {
+                sim.step_until(0).unwrap()
+            } else {
+                sim.step().unwrap()
+            };
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(time, Some(0));
+        }
+        for bounded in [false, true] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("any-change-operation.sv"))],
+                    "Top",
+                )
+            };
+            check(build().build_interpreter().unwrap(), bounded);
+            check(build().build_cranelift().unwrap(), bounded);
+            check(build().build_wasm().unwrap(), bounded);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), bounded);
+        }
+    }
+}

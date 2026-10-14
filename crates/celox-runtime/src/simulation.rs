@@ -450,17 +450,9 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Whether a pending transition activates its clock/reset domain.
     pub fn has_unsettled_active_edges(&self, backend: &B) -> bool {
-        self.topo_signals.iter().any(|(signal, id, _)| {
-            *id != usize::MAX
-                && self.edge_triggers(
-                    *id,
-                    (
-                        self.last_clock_values.contains(*id),
-                        self.unknown_clock_values.contains(*id),
-                    ),
-                    sample_event_signal(backend, *signal),
-                )
-        })
+        self.topo_signals
+            .iter()
+            .any(|(_, id, _)| *id != usize::MAX && self.stable_edge_triggered(backend, *id))
     }
 
     /// Whether any process is suspended on an event or a condition.
