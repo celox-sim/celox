@@ -590,6 +590,29 @@ mod event_yield_settle_tests {
         panic!("process did not finish");
     }
     #[test]
+    fn private_loop_counters_do_not_request_settles() {
+        let code = r#"#[test(Top)]module Top(limit:input u32){initial{for i in 0..limit{$assert(1);}$finish();}}"#;
+        macro_rules! check {
+            ($method:ident) => {{
+                assert_eq!(
+                    count(
+                        Simulator::builder(code, "Top")
+                            .testbench_kernels(true)
+                            .$method()
+                            .unwrap(),
+                        3
+                    ),
+                    0
+                );
+            }};
+        }
+        check!(build_interpreter);
+        check!(build_cranelift);
+        check!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check!(build_native);
+    }
+    #[test]
     fn clean_conditional_paths_do_not_request_a_settle() {
         for statement in [
             "if limit != 0 {source=1;}",

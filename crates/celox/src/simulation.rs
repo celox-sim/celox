@@ -266,6 +266,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
 // ── Backend-specific constructors ───────────────────────────────────
 
 impl Simulation {
+    /// Build a scheduler for design processes. Veryl `#[test]` kernels run
+    /// through [`crate::testbench::run_compiled_testbench`], which initializes
+    /// their random, file and component services.
     pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation> {
         crate::SimulatorBuilder::<Simulation>::new(code, top)
     }
@@ -300,7 +303,15 @@ impl Simulation {
 
 // ── Generic methods available for any backend ───────────────────────
 
+/// Scheduler state used by a testbench runner, including its kernels.
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
+    simulation_state_with_process_count(simulator, simulator.program.runtime_schema.processes.len())
+}
+
+fn simulation_state_with_process_count<B: SimBackend>(
+    simulator: &Simulator<B>,
+    process_count: usize,
+) -> SimulationState<B> {
     let num_events = simulator.backend.num_events();
     let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
         .program
@@ -375,6 +386,7 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .runtime_schema
         .processes
         .iter()
+        .take(process_count)
         .map(|slots| ProcessRefs {
             status: simulator.backend.resolve_signal(&slots.status),
             delay: simulator.backend.resolve_signal(&slots.delay),
@@ -439,7 +451,12 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
 
 impl<B: SimBackend> Simulation<B> {
     pub(crate) fn new(simulator: Simulator<B>) -> Self {
-        let state = simulation_state(&simulator);
+        let process_count = simulator
+            .program
+            .runtime_schema
+            .testbench_kernels
+            .unwrap_or(simulator.program.runtime_schema.processes.len());
+        let state = simulation_state_with_process_count(&simulator, process_count);
         Self { simulator, state }
     }
 
@@ -789,7 +806,12 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     fn has_processes(&self) -> bool {
-        !self.simulator.program.runtime_schema.processes.is_empty()
+        self.simulator
+            .program
+            .runtime_schema
+            .testbench_kernels
+            .unwrap_or(self.simulator.program.runtime_schema.processes.len())
+            != 0
     }
 
     /// Whether a process of the design requested the end of the simulation.
@@ -2468,7 +2490,11 @@ mod tick_budget_snapshot_tests {
     fn restoring_a_checkpoint_restores_the_remaining_tick_budget() {
         let code =
             "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{clk.next(3);$finish();}}";
-        let mut sim = Simulation::new(Simulator::builder(code, "Top").build_interpreter().unwrap());
+        let simulator = Simulator::builder(code, "Top").build_interpreter().unwrap();
+        // This budget belongs to a testbench run, whose scheduler includes
+        // its kernels. Ordinary Simulation constructors leave them inactive.
+        let state = simulation_state(&simulator);
+        let mut sim = Simulation { simulator, state };
         sim.state.set_tick_budget(Some(1));
         let saved = sim.checkpoint().unwrap();
         sim.run_until(0).unwrap();
@@ -4000,5 +4026,61 @@ mod host_finish_edge_review_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), bounded);
         }
+    }
+}
+
+#[cfg(test)]
+mod ordinary_simulation_testbench_scope_tests {
+    use super::*;
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn ordinary_simulation_keeps_design_processes_active() {
+        let veryl = r#"#[test(Top)]module Top{var q:logic;var r:$tb::random::<u8>;var marker:u8;inst dut:$sv::Worker(q);initial{marker=r.get_range(5,5);$finish();}}"#;
+        let sv = "module Worker(output bit q);initial begin #1;q=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("marker")), 0u8.into());
+            assert!(!sim.is_finished());
+        }
+        let build = || {
+            Simulator::from_mixed_sources(
+                vec![(veryl, std::path::Path::new("top.veryl"))],
+                vec![(sv, std::path::Path::new("worker.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
+    #[test]
+    fn ordinary_simulation_does_not_start_testbench_host_requests() {
+        let code = r#"#[test(Top)]module Top{var r:$tb::random::<u8>;var marker:u8;initial{r.seed(7);marker=r.get_range(5,5);$assert(marker==5);$finish();}}"#;
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            assert_eq!(sim.step().unwrap(), None);
+            sim.run_until(10).unwrap();
+            assert_eq!(sim.get(sim.signal("marker")), 0u8.into());
+            assert!(!sim.is_finished());
+            let tb = crate::testbench::compile_initial_testbench(&sim.simulator).unwrap();
+            assert_eq!(
+                crate::testbench::run_compiled_testbench(&mut sim.simulator, &tb),
+                crate::TestResult::Pass
+            );
+            assert_eq!(
+                sim.simulator.get(sim.simulator.signal("marker")),
+                5u8.into()
+            );
+        }
+        check(Simulation::builder(code, "Top").build().unwrap());
+        let build = || Simulator::builder(code, "Top").testbench_kernels(true);
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }

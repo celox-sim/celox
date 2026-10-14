@@ -844,6 +844,7 @@ struct BlockLowering<'a> {
     module_id: celox_design::ModuleId,
     hierarchical: HashMap<VarId, SourceAddr>,
     private: HashMap<VarId, SourceVarId>,
+    loop_counters: HashSet<VarId>,
     expression_values: HashMap<ExpressionStorageKey, (usize, SourceVarId)>,
     scratch: Vec<(ScratchNeed, SourceVarId)>,
     clocks: Vec<(StrId, ProcessClock<SourceAddr>)>,
@@ -973,6 +974,7 @@ fn lower_block(
         module_id,
         hierarchical,
         private: storage.private.clone(),
+        loop_counters: HashSet::default(),
         expression_values: storage.expression_values.clone(),
         scratch: storage.scratch.clone(),
         clocks: Vec::new(),
@@ -1659,7 +1661,7 @@ impl<'a> BlockLowering<'a> {
                 other => other,
             })?;
         }
-        if !self.private.contains_key(&destination.id) {
+        if self.is_design_variable(destination.id) {
             self.mark_dirty();
         }
         let counters = self.event_counters.get(&destination.id).copied();
@@ -1761,6 +1763,17 @@ impl<'a> BlockLowering<'a> {
                 Vec::new(),
             ));
         }
+    }
+
+    fn is_design_variable(&self, id: VarId) -> bool {
+        self.hierarchical.contains_key(&id)
+            || (!self.private.contains_key(&id)
+                && !self.loop_counters.contains(&id)
+                && self
+                    .ir
+                    .variables
+                    .get(&id)
+                    .is_some_and(|variable| variable.affiliation == Affiliation::Module))
     }
 
     fn mark_dirty(&mut self) {
@@ -1894,7 +1907,7 @@ impl<'a> BlockLowering<'a> {
                     || assign
                         .dst
                         .iter()
-                        .any(|destination| !self.private.contains_key(&destination.id))
+                        .any(|destination| self.is_design_variable(destination.id))
                 {
                     self.mark_dirty();
                 }
@@ -2165,6 +2178,7 @@ impl<'a> BlockLowering<'a> {
     /// A `for` loop whose counter and bounds live in state, so its body
     /// may suspend. See [`LoopShape`] for the semantics.
     fn lower_for(&mut self, stmt: &veryl_analyzer::ir::ForStatement) -> Result<Flow, ParserError> {
+        self.loop_counters.insert(stmt.var_id);
         let shape = loop_shape(self.ir, stmt)?;
         let LoopShape {
             inclusive,
