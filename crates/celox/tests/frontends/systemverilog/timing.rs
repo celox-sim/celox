@@ -189,3 +189,9 @@ sv_backends! { fn pure_function_rhs_preserves_distinct_write_times(sim) { @case 
 sv_backends! { fn conditional_writes_preserve_distinct_activation_times(sim) { @case "timing::conditional_writes_preserve_distinct_activation_times"; } }
 
 sv_backends! { fn case_writes_preserve_distinct_activation_times(sim) { @case "timing::case_writes_preserve_distinct_activation_times"; } }
+
+sv_backends! { fn staged_wildcard_finish_waits_for_startup(sim) { @case "timing::staged_wildcard_finish_waits_for_startup"; } }
+
+sv_backends! { fn constant_repeat_writes_preserve_distinct_activation_times(sim) { @case "timing::constant_repeat_writes_preserve_distinct_activation_times"; } }
+
+sv_backends! { fn separate_comb_assignments_preserve_selected_dependencies(sim) { @case "timing::separate_comb_assignments_preserve_selected_dependencies"; } }
