@@ -3457,6 +3457,28 @@ pub(super) fn fixed_runtime_write_times(
     expr: &sv::ir::Expr,
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
+    fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
+        known_loop_value(
+            condition,
+            pm.variables,
+            pm.name_to_id,
+            pm.constants,
+            pm.parameter_types,
+        )
+        .is_some_and(|value| value != 0)
+    }
+    fn preserves_own_time(stmts: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> bool {
+        let mut safe = true;
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                safe &= !matches!(stmt, sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_));
+                if let sv::ir::Stmt::Wait(condition) = stmt {
+                    safe &= statically_true_wait(condition, pm);
+                }
+            });
+        }
+        safe
+    }
     fn pure_call(
         name: &str,
         args: &[Option<sv::ir::Expr>],
@@ -3482,7 +3504,7 @@ pub(super) fn fixed_runtime_write_times(
             stmt_calls(stmt, &mut nested);
         }
         let pure = !ending
-            && !has_own_timing(&sub.body)
+            && preserves_own_time(&sub.body, pm)
             && sub.params.iter().all(|p| !p.direction.is_written())
             && watched_write_count(&sub.body, pm, expr, &mut HashSet::default(), false) == 0
             && watched_write_count(&sub.body, pm, expr, &mut HashSet::default(), true) == 0
@@ -3512,7 +3534,7 @@ pub(super) fn fixed_runtime_write_times(
                 });
             }
             !ending
-                && !has_own_timing(&sub.body)
+                && preserves_own_time(&sub.body, pm)
                 && calls
                     .iter()
                     .all(|(name, args)| call_preserves_time(name, args, pm, active))
@@ -3527,7 +3549,8 @@ pub(super) fn fixed_runtime_write_times(
         let mut calls = Vec::new();
         for stmt in stmts {
             stmt.walk(&mut |stmt| {
-                safe &= !matches!(stmt,sv::ir::Stmt::Delay(_)|sv::ir::Stmt::Wait(_)|sv::ir::Stmt::WaitEvent(_)|sv::ir::Stmt::Return(_)|sv::ir::Stmt::Break|sv::ir::Stmt::Continue);
+                safe &= !matches!(stmt,sv::ir::Stmt::Delay(_)|sv::ir::Stmt::WaitEvent(_)|sv::ir::Stmt::Return(_)|sv::ir::Stmt::Break|sv::ir::Stmt::Continue);
+                if let sv::ir::Stmt::Wait(condition)=stmt {safe &= statically_true_wait(condition,pm);}
                 safe &= !matches!(stmt,sv::ir::Stmt::SystemTask{name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
                 stmt_calls(stmt,&mut calls);
             });
@@ -3731,6 +3754,7 @@ pub(super) fn fixed_runtime_write_times(
             {
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
+            Stmt::Wait(condition) if statically_true_wait(condition, pm) => 0,
             Stmt::If { .. }
             | Stmt::Case { .. }
             | Stmt::Loop { .. }
