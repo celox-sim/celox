@@ -2071,3 +2071,25 @@ fn repeated_hierarchical_clock_edges_keep_their_count() {
         check(build().build_native().unwrap());
     }
 }
+
+#[test]
+fn distinct_kernels_add_clock_edge_counts() {
+    let code = r#"module Child(clk:input clock,q:output u32){always_ff(clk){q=q+1;}}#[test(Top)]module Top{var q:u32;inst dut:Child(q);initial{dut.q=0;dut.clk=1;$assert(dut.q==0);dut.clk=0;}initial{dut.clk=1;$assert(dut.q==0);dut.clk=0;}}"#;
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+        assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+    }
+    for four_state in [false, true] {
+        let build = || {
+            Simulator::builder(code, "Top")
+                .testbench_kernels(true)
+                .four_state(four_state)
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+}

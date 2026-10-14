@@ -417,6 +417,7 @@ pub struct NativeProgramImage {
     compiled_process_controls: Vec<Vec<(AbsoluteAddr, usize)>>,
     compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
     compiled_clock_phase_sensitive_comb: bool,
+    compiled_process_host_requests: Vec<Vec<celox_design::HostRequest<(AbsoluteAddr, usize)>>>,
     required_native_features: u8,
     #[serde(serialize_with = "celox_design::serde_sorted::map")]
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -743,6 +744,34 @@ impl NativeProgramImage {
                 .any(|(compiled, process)| compiled != &process.clocks)
         {
             return Err("process clock lists disagree with compiled kernel indices".into());
+        }
+        if self.compiled_process_host_requests.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_host_requests
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| {
+                    let bound = process
+                        .host_requests
+                        .iter()
+                        .cloned()
+                        .map(|request| {
+                            request.map(|address| {
+                                (
+                                    address,
+                                    self.layout
+                                        .offsets
+                                        .get(&address)
+                                        .copied()
+                                        .unwrap_or(usize::MAX),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    compiled != &bound
+                })
+        {
+            return Err("process host requests disagree with compiled scratch bindings".into());
         }
         if self.compiled_clock_phase_sensitive_comb
             != self.runtime_schema.clock_phase_sensitive_comb
@@ -2480,6 +2509,20 @@ fn compile_program(
                 .iter()
                 .map(|process| process.clocks.clone())
                 .collect(),
+            compiled_process_host_requests: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .host_requests
+                        .iter()
+                        .cloned()
+                        .map(|request| request.map(|address| (address, layout.offsets[&address])))
+                        .collect()
+                })
+                .collect(),
             compiled_clock_phase_sensitive_comb: sir
                 .runtime()
                 .runtime_schema
@@ -3672,6 +3715,27 @@ mod process_metadata_tests {
         }
     }
 
+    #[test]
+    fn host_request_values_bind_to_compiled_scratch() {
+        let source = "#[test(Top)]module Top{var random:$tb::random::<u32>;var value:u32;initial{value=random.get_range(1,2);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let mut broken = original.clone();
+        let request = broken.runtime_schema.processes[0]
+            .host_requests
+            .iter_mut()
+            .find(|request| matches!(request, celox_design::HostRequest::RandomGetRange { .. }))
+            .unwrap();
+        if let celox_design::HostRequest::RandomGetRange { min, max, .. } = request {
+            assert_ne!(min.signal, max.signal);
+            min.signal = max.signal;
+        }
+        assert!(broken.to_container_bytes().is_err());
+    }
     #[test]
     fn clean_control_cannot_redirect_to_another_valid_bit() {
         let source = "#[test(Top)] module Top (spare: output logic) { var source: u32; let derived: u32=source+1; initial {source=1;$assert(derived==2);source=7;} initial {spare=1;$assert(spare==1);spare=0;} }";

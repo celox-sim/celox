@@ -6,8 +6,8 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-// Version 24 also binds process clock lists and clock-phase sensitivity.
-const CONTAINER_VERSION: u16 = 24;
+// Version 25 also binds host requests to compiled scratch addresses.
+const CONTAINER_VERSION: u16 = 25;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

@@ -1303,7 +1303,7 @@ impl<B: SimBackend> SimulationState<B> {
         before: &[(u32, u32)],
         replays: &mut std::collections::BTreeMap<usize, u64>,
     ) {
-        let mut extra = std::collections::BTreeMap::<usize, u64>::new();
+        let mut counters = std::collections::BTreeMap::new();
         for ((id, rises, falls), (old_rises, old_falls)) in
             self.process_event_counters.iter().zip(before)
         {
@@ -1324,13 +1324,17 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 continue;
             }
-            extra
-                .entry(canonical)
-                .and_modify(|n| *n = (*n).max(count.saturating_sub(1)))
-                .or_insert(count.saturating_sub(1));
+            counters
+                .entry((canonical, *rises, *falls))
+                .and_modify(|n: &mut u64| *n = (*n).max(count))
+                .or_insert(count);
         }
-        for (id, count) in extra {
-            *replays.entry(id).or_default() += count;
+        let mut totals = std::collections::BTreeMap::<usize, u64>::new();
+        for ((id, _, _), count) in counters {
+            *totals.entry(id).or_default() += count;
+        }
+        for (id, count) in totals {
+            *replays.entry(id).or_default() += count.saturating_sub(1);
         }
     }
 
