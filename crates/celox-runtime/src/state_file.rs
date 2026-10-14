@@ -19,6 +19,7 @@
 //!   event count u32, then per event: scheduled event
 //!   periodic count u32, then per marker: scheduled event | count u64
 //!   high count u32, then per event: event str
+//!   captured count u32, then event str (only with FLAG_CAPTURED_EDGES)
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! ```
@@ -26,9 +27,10 @@
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
+const FLAG_CAPTURED_EDGES: u16 = 1 << 2;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,8 @@ pub struct ScheduleRecord {
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
     pub high_events: Vec<String>,
+    /// FF occurrences captured by explicit or lazy host evaluations.
+    pub captured_edges: Vec<String>,
 }
 
 /// Contents of a state file.
@@ -119,13 +123,24 @@ impl StateFile {
     pub fn write_to(&self, mut writer: impl Write) -> io::Result<()> {
         let w = &mut writer;
         w.write_all(MAGIC)?;
-        put_u16(w, VERSION)?;
+        let extended = self
+            .schedule
+            .as_ref()
+            .is_some_and(|s| !s.captured_edges.is_empty());
+        put_u16(w, if extended { VERSION } else { 1 })?;
         let mut flags = 0;
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
         }
         if self.schedule.is_some() {
             flags |= FLAG_SCHEDULE;
+        }
+        if self
+            .schedule
+            .as_ref()
+            .is_some_and(|s| !s.captured_edges.is_empty())
+        {
+            flags |= FLAG_CAPTURED_EDGES;
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -168,6 +183,12 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
+            if flags & FLAG_CAPTURED_EDGES != 0 {
+                put_len(w, schedule.captured_edges.len())?;
+                for event in &schedule.captured_edges {
+                    put_str(w, event)?;
+                }
+            }
         }
         Ok(())
     }
@@ -180,10 +201,15 @@ impl StateFile {
             return Err(StateFileError::BadMagic);
         }
         let version = get_u16(r)?;
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(StateFileError::UnsupportedVersion(version));
         }
         let flags = get_u16(r)?;
+        if flags & FLAG_CAPTURED_EDGES != 0 && version < 2 {
+            return Err(StateFileError::Malformed(
+                "captured edges require version 2".into(),
+            ));
+        }
         let four_state = flags & FLAG_FOUR_STATE != 0;
         let count = get_u32(r)?;
         let mut objects = Vec::new();
@@ -233,12 +259,20 @@ impl StateFile {
             let high_events = (0..get_u32(r)?)
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
+            let captured_edges = if flags & FLAG_CAPTURED_EDGES != 0 {
+                (0..get_u32(r)?)
+                    .map(|_| get_str(r))
+                    .collect::<Result<_, _>>()?
+            } else {
+                Vec::new()
+            };
             Some(ScheduleRecord {
                 time,
                 clocks,
                 events,
                 periodic,
                 high_events,
+                captured_edges,
             })
         } else {
             None
@@ -440,6 +474,7 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
+                captured_edges: Vec::new(),
             }),
         }
     }

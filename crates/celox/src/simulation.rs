@@ -396,6 +396,11 @@ impl<B: SimBackend> Simulation<B> {
     fn synchronize_runtime_finish(&mut self) {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
+        } else if !self.simulator.dirty && !self.state.is_finished() {
+            self.state
+                .sample_waiting_events(&mut self.simulator)
+                .unwrap();
+            self.state.capture_host_edges(&self.simulator.backend);
         }
     }
 
@@ -571,6 +576,7 @@ impl<B: SimBackend> Simulation<B> {
             self.state.finish();
         }
         self.state.sample_waiting_events(&mut self.simulator)?;
+        self.state.capture_host_edges(&self.simulator.backend);
         Ok(())
     }
 
@@ -2276,6 +2282,72 @@ mod lazy_event_pulse_review {
         }
         let build = || {
             Simulator::from_sv_sources(vec![(source, std::path::Path::new("lazy-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod lazy_read_and_ff_edges_review {
+    use super::*;
+    #[test]
+    fn lazy_rust_reads_retain_host_event_pulses() {
+        let source = "module Top(input bit go,output bit y,woke);assign y=go;initial begin @(posedge go);woke=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let y = sim.signal("y");
+            let woke = sim.signal("woke");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            assert_eq!(sim.get(y), 1u8.into());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            assert_eq!(sim.get(y), 0u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(woke), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("read-pulse.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn explicit_settles_retain_derived_ff_pulses() {
+        let source = "module Top(input bit go,output bit derived,output bit[7:0]q);assign derived=go;always_ff @(posedge derived)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(q), 0u8.into());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.eval_comb().unwrap();
+            let checkpoint = sim.checkpoint().unwrap();
+            let file = sim.save_state().unwrap();
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+            sim.restore(&checkpoint).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            sim.load_state(&file).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("ff-pulse.sv"))], "Top")
         };
         check(Simulation::new(build().build_interpreter().unwrap()));
         check(Simulation::new(build().build_cranelift().unwrap()));

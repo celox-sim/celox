@@ -2434,3 +2434,31 @@ fn mixed_clock_polarities_through_local_aliases_are_rejected() {
     assert!(build_error(source).contains("mixed clock-edge polarities through aliases"));
     simulation(&source.replace("negedge n", "posedge n"));
 }
+
+#[test]
+fn constant_for_writes_preserve_distinct_activation_times() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;for(int i=0;i<1;i++)q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(build_error(&source.replace("i<1", "i<2")).contains("multiple blocking writes"));
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+#[test]
+fn mixed_reset_polarities_through_aliases_are_rejected() {
+    let source = "module Top(input bit clk,rst,output bit a,b);wire rh=rst,rl=rst;always_ff @(posedge clk or posedge rh)if(rh)a<=0;else a<=1;always_ff @(posedge clk or negedge rl)if(!rl)b<=0;else b<=1;endmodule";
+    assert!(build_error(source).contains("mixed clock/reset-edge polarities through aliases"));
+    simulation(
+        &source
+            .replace("negedge rl", "posedge rl")
+            .replace("if(!rl)", "if(rl)"),
+    );
+    let role_conflict = "module Top(input bit clk,output bit a,b);wire r=clk;always_ff @(posedge clk)a<=1;always_ff @(posedge clk or posedge r)if(r)b<=0;else b<=1;endmodule";
+    assert!(
+        build_error(role_conflict).contains("mixed clock/reset-edge polarities through aliases")
+    );
+}

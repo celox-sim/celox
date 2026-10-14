@@ -374,6 +374,7 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (named(event), *count))
                 .collect(),
             high_events: parts.high_events.into_iter().map(event_path).collect(),
+            captured_edges: parts.captured_edges.into_iter().map(event_path).collect(),
         }
     }
 
@@ -404,6 +405,7 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .map(|(name, _)| name)
             .chain(&record.high_events)
+            .chain(&record.captured_edges)
             .chain(scheduled.clone().map(|event| &event.event))
             .filter(|name| !events.contains_key(*name))
             .chain(
@@ -441,6 +443,11 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (resolve(event), *count))
                 .collect(),
             high_events: record.high_events.iter().map(|name| events[name]).collect(),
+            captured_edges: record
+                .captured_edges
+                .iter()
+                .map(|name| events[name])
+                .collect(),
             // State files are rejected for designs with processes.
             process_wakeups: Vec::new(),
             waiting_processes: Vec::new(),
