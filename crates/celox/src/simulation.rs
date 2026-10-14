@@ -375,15 +375,19 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
-        let was_dirty = self.simulator.dirty;
-        self.simulator.dump(timestamp);
-        self.synchronize_runtime_finish(was_dirty);
+        if let Err(error) = self.try_dump(timestamp) {
+            panic!("VCD dump at {timestamp} failed: {error}");
+        }
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
         let was_dirty = self.simulator.dirty;
-        let result = self.simulator.try_dump(timestamp);
+        let result = if self.state.is_finished() {
+            self.simulator.try_dump_without_evaluation(timestamp)
+        } else {
+            self.simulator.try_dump(timestamp)
+        };
         self.synchronize_runtime_finish(was_dirty);
         result
     }
@@ -2604,5 +2608,68 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod active_settle_review {
+    use super::*;
+    #[test]
+    fn all_propagated_blocking_waiters_sample_before_continuations() {
+        let source = "module Child(output bit go);initial begin #1;go=1;end endmodule module Top(output bit a,b);bit enable=1;wire go;Child child(.go(go));initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("active-waiters.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn finished_dump_preserves_dirty_outputs_and_events() {
+        let source = "module Top(input bit go,output bit q);always_comb begin q=go;$display(\"q=%d\",q);if(go)$finish;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>, path: &std::path::Path) {
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert!(sim.is_finished());
+            sim.drain_runtime_events();
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.try_dump(0).unwrap();
+            sim.dump(1);
+            sim.flush_vcd().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert!(sim.drain_runtime_events().is_empty());
+            assert!(
+                std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains("$enddefinitions")
+            );
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("finished.vcd");
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("finished-dump.sv"))],
+                "Top",
+            )
+            .vcd(&path)
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()), &path);
+        check(Simulation::new(build().build_cranelift().unwrap()), &path);
+        check(Simulation::new(build().build_wasm().unwrap()), &path);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()), &path);
     }
 }

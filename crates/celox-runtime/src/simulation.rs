@@ -848,6 +848,9 @@ impl<B: SimBackend> SimulationState<B> {
             self.finished = true;
             return Ok(true);
         }
+        // Capture every waiter before any continuation can remove a
+        // propagated edge produced by the active process writes.
+        self.sample_waiting_events(executor)?;
         // Settle process writes before deciding whether they restored an
         // early edge. Persistent edges follow the ordinary cascade after
         // source FF publication; only vanished edges need explicit replay.
