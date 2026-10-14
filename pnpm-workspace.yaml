@@ -17,3 +17,20 @@ minimumReleaseAgeExclude:
   - vite@6.4.2
   # napi 3.12 requires emnapi 2 support from this CLI release.
   - "@napi-rs/cli@3.8.2"
+  # Directory watch exclusions were fixed in this release (rolldown#11008).
+  - "rolldown@1.2.13"
+  - "@rolldown/binding-darwin-x64@1.2.13"
+  - "@rolldown/binding-freebsd-x64@1.2.13"
+  - "@rolldown/binding-darwin-arm64@1.2.13"
+  - "@rolldown/binding-android-arm64@1.2.13"
+  - "@rolldown/binding-linux-x64-gnu@1.2.13"
+  - "@rolldown/binding-linux-x64-musl@1.2.13"
+  - "@rolldown/binding-win32-x64-msvc@1.2.13"
+  - "@rolldown/binding-linux-arm64-gnu@1.2.13"
+  - "@rolldown/binding-linux-ppc64-gnu@1.2.13"
+  - "@rolldown/binding-linux-s390x-gnu@1.2.13"
+  - "@rolldown/binding-android-arm-eabi@1.2.13"
+  - "@rolldown/binding-linux-arm64-musl@1.2.13"
+  - "@rolldown/binding-win32-arm64-msvc@1.2.13"
+  - "@rolldown/binding-openharmony-arm64@1.2.13"
+  - "@rolldown/binding-linux-arm-gnueabihf@1.2.13"

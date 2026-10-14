@@ -9,6 +9,8 @@ export class GenTsCache {
 	private _sourceKey = "";
 	private _configKey = "";
 	private _lockfileKey = "";
+	private _generatedLockfileKey: string | undefined;
+	private _sourceFiles: string[] = [];
 
 	constructor(
 		private readonly _projectRoot: string,
@@ -34,6 +36,16 @@ export class GenTsCache {
 			return this._data;
 		}
 		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
+		const generatedLockfileKey = this.computeContentKey("Veryl.lock");
+		if (
+			generatedLockfileKey !== lockfileKey &&
+			generatedLockfileKey !== "missing"
+		)
+			this._generatedLockfileKey = generatedLockfileKey;
+		else if (generatedLockfileKey !== this._generatedLockfileKey)
+			this._generatedLockfileKey = undefined;
+		// Module loading may perform the conservative refresh before the watch
+		// event arrives. Retain its candidate while lockfile contents match.
 		this._sourceKey = key;
 		// Preserve every pre-generation fingerprint: an external process can
 		// change even Veryl.lock after the generator has read it. A lockfile
@@ -41,6 +53,19 @@ export class GenTsCache {
 		this._configKey = configKey;
 		this._lockfileKey = lockfileKey;
 		return this._data;
+	}
+
+	/** A possible generator write still needs a conservative refresh in get(). */
+	get hasPendingLockfileWrite(): boolean {
+		return (
+			this._generatedLockfileKey !== undefined &&
+			this.computeContentKey("Veryl.lock") === this._generatedLockfileKey
+		);
+	}
+
+	/** Source paths captured during the most recent cache lookup. */
+	get sourceFiles(): readonly string[] {
+		return this._sourceFiles;
 	}
 
 	/** Force invalidation — next `get()` will re-run the generator. */
@@ -75,9 +100,12 @@ export class GenTsCache {
 	 */
 	private computeSourceKey(): string {
 		const files: Array<[path: string, mtimeMs: number, size: number]> = [];
+		const sourceFiles: string[] = [];
 		this.walkVerylFiles(this._projectRoot, (path, mtimeMs, size) => {
 			files.push([relative(this._projectRoot, path), mtimeMs, size]);
+			sourceFiles.push(path);
 		});
+		this._sourceFiles = sourceFiles;
 		files.sort(([a], [b]) => a.localeCompare(b));
 		return JSON.stringify(files);
 	}
