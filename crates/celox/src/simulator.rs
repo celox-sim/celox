@@ -1089,6 +1089,13 @@ mod host {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
+            self.try_dump_without_evaluation(timestamp)
+        }
+
+        pub(crate) fn try_dump_without_evaluation(
+            &mut self,
+            timestamp: u64,
+        ) -> Result<(), DumpError> {
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer

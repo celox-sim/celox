@@ -555,127 +555,137 @@ pub(super) fn emit_inst(
             let last_len = byte_size.saturating_sub(last_chunk * 8);
             let plane_count = if *four_state { 2 } else { 1 };
 
-            for summary_index in 0..*summary_word_count {
-                let summary_offset = *summary_words_offset + (summary_index * 8) as i32;
-                asm.mov(
-                    rax,
-                    qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
-                )?;
-                asm.mov(
-                    qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
-                    0i32,
-                )?;
+            let dirty = SparseDirtyWords {
+                src_offset: *src_offset,
+                dst_offset: *dst_offset,
+                byte_size: *byte_size,
+                dirty_words_offset: *dirty_words_offset,
+                chunk_count,
+                last_chunk,
+                last_len,
+                plane_count,
+            };
+            if *summary_word_count > SPARSE_UNROLLED_SUMMARY_WORDS {
+                // A large region (such as a memory of several megabytes) has
+                // hundreds of summary words. Unrolling the scan for each of
+                // them would execute a long straight-line body on every call,
+                // so walk them in a loop. Groups of four clear words are
+                // skipped with one test and without storing. R10 indexes the
+                // summary word; R11 ends the current run of single words.
+                let count = *summary_word_count;
+                let grouped = count - count % SPARSE_SUMMARY_GROUP;
+                let summary_word = |displacement: usize| {
+                    qword_ptr(mem_operand_indexed(
+                        BaseReg::SimState,
+                        *summary_words_offset + (displacement * 8) as i32,
+                        r10,
+                        8,
+                    ))
+                };
+                let mut group_loop = asm.create_label();
+                let mut tail = asm.create_label();
+                let mut word_loop = asm.create_label();
+                let mut word_next = asm.create_label();
                 let mut summary_loop = asm.create_label();
                 let mut summary_next = asm.create_label();
-                let final_summary = summary_index + 1 == *summary_word_count;
-                let use_continuation = final_summary && continuation_label.is_some();
-                let mut local_summary_done = asm.create_label();
-                let summary_done = if use_continuation {
-                    continuation_label
-                        .as_deref()
-                        .copied()
-                        .expect("checked sparse continuation label")
-                } else {
-                    local_summary_done
-                };
+                let mut local_done = asm.create_label();
+                let done = continuation_label.as_deref().copied().unwrap_or(local_done);
+                asm.xor(r10d, r10d)?;
+                asm.set_label(&mut group_loop)?;
+                asm.cmp(r10, grouped as i32)?;
+                asm.jae(tail)?;
+                asm.mov(rax, summary_word(0))?;
+                for displacement in 1..SPARSE_SUMMARY_GROUP {
+                    asm.or(rax, summary_word(displacement))?;
+                }
+                asm.lea(r11, ptr(r10 + SPARSE_SUMMARY_GROUP as i32))?;
+                asm.jne(word_loop)?;
+                asm.mov(r10, r11)?;
+                asm.jmp(group_loop)?;
+                asm.set_label(&mut tail)?;
+                asm.mov(r11, count as u64)?;
+                asm.cmp(r10, r11)?;
+                asm.jae(done)?;
+                asm.set_label(&mut word_loop)?;
+                asm.mov(rax, summary_word(0))?;
+                asm.test(rax, rax)?;
+                asm.je(word_next)?;
+                asm.mov(summary_word(0), 0i32)?;
                 asm.set_label(&mut summary_loop)?;
                 asm.test(rax, rax)?;
-                asm.je(summary_done)?;
+                asm.je(word_next)?;
                 asm.bsf(rcx, rax)?;
                 asm.btr(rax, rcx)?;
-                asm.mov(rdx, rcx)?;
-                if summary_index != 0 {
-                    asm.add(rdx, (summary_index * 64) as i32)?;
-                }
+                asm.mov(rdx, r10)?;
+                asm.shl(rdx, 6)?;
+                asm.add(rdx, rcx)?;
                 asm.cmp(rdx, *dirty_word_count as i32)?;
                 asm.jae(summary_next)?;
-
-                asm.mov(rdi, rdx)?;
-                asm.shl(rdi, 3)?;
-                asm.mov(
-                    r8,
-                    qword_ptr(mem_operand_indexed(
-                        BaseReg::SimState,
-                        *dirty_words_offset,
-                        rdi,
-                        1,
-                    )),
-                )?;
-                asm.mov(
-                    qword_ptr(mem_operand_indexed(
-                        BaseReg::SimState,
-                        *dirty_words_offset,
-                        rdi,
-                        1,
-                    )),
-                    0i32,
-                )?;
-
-                let mut dirty_loop = asm.create_label();
-                let mut dirty_next = asm.create_label();
-                asm.set_label(&mut dirty_loop)?;
-                asm.test(r8, r8)?;
-                asm.je(summary_next)?;
-                asm.bsf(r9, r8)?;
-                asm.btr(r8, r9)?;
-                asm.mov(rdi, rdx)?;
-                asm.shl(rdi, 6)?;
-                asm.add(rdi, r9)?;
-                asm.cmp(rdi, chunk_count as i32)?;
-                asm.jae(dirty_next)?;
-                asm.shl(rdi, 3)?;
-
-                if last_len == 8 {
-                    for plane in 0..plane_count {
-                        let delta = (plane * *byte_size) as i32;
-                        emit_sparse_chunk_copy(
-                            asm,
-                            *src_offset + delta,
-                            *dst_offset + delta,
-                            rdi,
-                            8,
-                        )?;
-                    }
-                } else {
-                    let mut full = asm.create_label();
-                    asm.cmp(rdi, (last_chunk * 8) as i32)?;
-                    asm.jne(full)?;
-                    for plane in 0..plane_count {
-                        let delta = (plane * *byte_size) as i32;
-                        emit_sparse_chunk_copy(
-                            asm,
-                            *src_offset + delta,
-                            *dst_offset + delta,
-                            rdi,
-                            last_len,
-                        )?;
-                    }
-                    asm.jmp(dirty_next)?;
-                    asm.set_label(&mut full)?;
-                    for plane in 0..plane_count {
-                        let delta = (plane * *byte_size) as i32;
-                        emit_sparse_chunk_copy(
-                            asm,
-                            *src_offset + delta,
-                            *dst_offset + delta,
-                            rdi,
-                            8,
-                        )?;
-                    }
-                }
-                asm.set_label(&mut dirty_next)?;
-                asm.jmp(dirty_loop)?;
+                emit_sparse_dirty_word(asm, &dirty, summary_next)?;
                 asm.set_label(&mut summary_next)?;
                 asm.jmp(summary_loop)?;
-                if use_continuation {
-                    asm.set_label(
-                        continuation_label
-                            .as_deref_mut()
-                            .expect("checked sparse continuation label"),
+                asm.set_label(&mut word_next)?;
+                asm.inc(r10)?;
+                asm.cmp(r10, r11)?;
+                asm.jb(word_loop)?;
+                asm.cmp(r10, count as i32)?;
+                asm.jb(group_loop)?;
+                match continuation_label.as_deref_mut() {
+                    Some(label) => {
+                        asm.set_label(label)?;
+                        bound_continuation = true;
+                    }
+                    None => asm.set_label(&mut local_done)?,
+                }
+            } else {
+                for summary_index in 0..*summary_word_count {
+                    let summary_offset = *summary_words_offset + (summary_index * 8) as i32;
+                    asm.mov(
+                        rax,
+                        qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
                     )?;
-                    bound_continuation = true;
-                } else {
-                    asm.set_label(&mut local_summary_done)?;
+                    asm.mov(
+                        qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
+                        0i32,
+                    )?;
+                    let mut summary_loop = asm.create_label();
+                    let mut summary_next = asm.create_label();
+                    let final_summary = summary_index + 1 == *summary_word_count;
+                    let use_continuation = final_summary && continuation_label.is_some();
+                    let mut local_summary_done = asm.create_label();
+                    let summary_done = if use_continuation {
+                        continuation_label
+                            .as_deref()
+                            .copied()
+                            .expect("checked sparse continuation label")
+                    } else {
+                        local_summary_done
+                    };
+                    asm.set_label(&mut summary_loop)?;
+                    asm.test(rax, rax)?;
+                    asm.je(summary_done)?;
+                    asm.bsf(rcx, rax)?;
+                    asm.btr(rax, rcx)?;
+                    asm.mov(rdx, rcx)?;
+                    if summary_index != 0 {
+                        asm.add(rdx, (summary_index * 64) as i32)?;
+                    }
+                    asm.cmp(rdx, *dirty_word_count as i32)?;
+                    asm.jae(summary_next)?;
+
+                    emit_sparse_dirty_word(asm, &dirty, summary_next)?;
+                    asm.set_label(&mut summary_next)?;
+                    asm.jmp(summary_loop)?;
+                    if use_continuation {
+                        asm.set_label(
+                            continuation_label
+                                .as_deref_mut()
+                                .expect("checked sparse continuation label"),
+                        )?;
+                        bound_continuation = true;
+                    } else {
+                        asm.set_label(&mut local_summary_done)?;
+                    }
                 }
             }
         }
