@@ -2064,3 +2064,41 @@ fn exclusive_conditional_calls_do_not_poison_active_waiters() {
             .to_string();
     assert!(error.contains("multiple blocking writes"), "{error}");
 }
+
+#[test]
+fn cross_instance_hidden_pulses_are_diagnosed() {
+    let sources = [
+        r#"module Child(input bit input_a, output bit seen);
+            initial begin @(posedge input_a); seen = 1; end
+        endmodule
+        module Top(output bit seen); bit a;
+            Child u(.input_a(a), .seen(seen));
+            initial begin #1; a = 1; a = 0; end
+        endmodule"#,
+        r#"module Child(output bit a);
+            initial begin #1; a = 1; a = 0; end
+        endmodule
+        module Top(output bit seen); wire a;
+            Child u(.a(a)); initial begin @(posedge a); seen = 1; end
+        endmodule"#,
+        r#"module Leaf(input bit a, output bit seen);
+            wire derived = a; initial begin @(posedge derived); seen = 1; end
+        endmodule
+        module Child(input bit a, output bit seen); Leaf leaf(.a(a), .seen(seen)); endmodule
+        module Top(output bit seen); bit a;
+            Child u(.a(a), .seen(seen)); initial begin #1; a = 1; a = 0; end
+        endmodule"#,
+    ];
+    for source in sources {
+        let error = build_error(source);
+        assert!(
+            error.contains("cross-instance event dependency with multiple blocking writes"),
+            "{error}"
+        );
+        // Port glue still delivers supported single updates in both directions
+        // and through another instance and a combinational alias.
+        let mut sim = simulation(&source.replace("a = 1; a = 0;", "a = 1;"));
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+}

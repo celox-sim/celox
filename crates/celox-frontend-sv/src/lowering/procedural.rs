@@ -175,13 +175,14 @@ impl<'a> ProcModule<'a> {
             .iter()
             .filter(|process| condition_is_active(process.condition(), constants, parameter_types))
             .map(|process| {
-                combinational_write_counts(
+                procedural_write_counts(
                     process.body(),
                     &subroutines,
                     &|expr| {
                         known_loop_value(expr, variables, name_to_id, constants, parameter_types)
                     },
                     &|expr| expr_is_two_state(expr, variables, name_to_id, &subroutines),
+                    true,
                 )
             })
             .collect::<Vec<_>>();
@@ -2587,11 +2588,12 @@ pub(super) fn loop_condition_eval_cap(
 }
 
 /// Variables whose combinational process can write them repeatedly in one run.
-fn combinational_write_counts(
+pub(super) fn procedural_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
     eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
     two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    include_nonblocking: bool,
 ) -> HashMap<String, usize> {
     fn counts(
         stmts: &[sv::ir::Stmt],
@@ -2599,16 +2601,21 @@ fn combinational_write_counts(
         visiting: &mut HashSet<String>,
         eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
         two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+        include_nonblocking: bool,
     ) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::default();
         for stmt in stmts {
             let mut next: HashMap<String, usize> = HashMap::default();
             let mut call_evaluations = 1;
             match stmt {
-                sv::ir::Stmt::Assign { lhs, .. } => {
+                sv::ir::Stmt::Assign {
+                    lhs, nonblocking, ..
+                } if include_nonblocking || !nonblocking => {
                     next.insert(lhs.name().to_string(), 1);
                 }
-                sv::ir::Stmt::AssignConcat { parts, .. } => {
+                sv::ir::Stmt::AssignConcat {
+                    parts, nonblocking, ..
+                } if include_nonblocking || !nonblocking => {
                     for part in parts {
                         *next.entry(part.name().to_string()).or_default() += 1;
                     }
@@ -2618,8 +2625,22 @@ fn combinational_write_counts(
                     else_body,
                     ..
                 } => {
-                    next = counts(then_body, subroutines, visiting, eval, two_state);
-                    for (name, count) in counts(else_body, subroutines, visiting, eval, two_state) {
+                    next = counts(
+                        then_body,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    );
+                    for (name, count) in counts(
+                        else_body,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    ) {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry).max(count);
                     }
@@ -2630,7 +2651,14 @@ fn combinational_write_counts(
                         .map(|item| item.body.as_slice())
                         .chain(default.iter().map(Vec::as_slice))
                     {
-                        for (name, count) in counts(body, subroutines, visiting, eval, two_state) {
+                        for (name, count) in counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        ) {
                             let entry = next.entry(name).or_default();
                             *entry = (*entry).max(count);
                         }
@@ -2643,13 +2671,33 @@ fn combinational_write_counts(
                     body,
                     step,
                 } => {
-                    next = counts(init, subroutines, visiting, eval, two_state);
+                    next = counts(
+                        init,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    );
                     let trips = loop_trip_cap(kind, init, condition.as_ref(), step, eval);
                     call_evaluations = loop_condition_eval_cap(kind, trips);
-                    for (name, count) in counts(body, subroutines, visiting, eval, two_state)
-                        .into_iter()
-                        .chain(counts(step, subroutines, visiting, eval, two_state))
-                    {
+                    for (name, count) in counts(
+                        body,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    )
+                    .into_iter()
+                    .chain(counts(
+                        step,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    )) {
                         let entry = next.entry(name).or_default();
                         *entry = (*entry + count * trips).min(2);
                     }
@@ -2671,7 +2719,17 @@ fn combinational_write_counts(
                 left
             };
             let writes = effects.fold(
-                &mut |name, args| call_counts(name, args, subroutines, visiting, eval, two_state),
+                &mut |name, args| {
+                    call_counts(
+                        name,
+                        args,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    )
+                },
                 &|a, b| combine(a, b, false),
                 &|a, b| combine(a, b, true),
             );
@@ -2696,13 +2754,21 @@ fn combinational_write_counts(
         visiting: &mut HashSet<String>,
         eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
         two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+        include_nonblocking: bool,
     ) -> HashMap<String, usize> {
         if !visiting.insert(name.to_string()) {
             return HashMap::default();
         }
         let mut result = HashMap::default();
         if let Some(subroutine) = subroutines.get(name) {
-            result = counts(&subroutine.body, subroutines, visiting, eval, two_state);
+            result = counts(
+                &subroutine.body,
+                subroutines,
+                visiting,
+                eval,
+                two_state,
+                include_nonblocking,
+            );
             for param in &subroutine.params {
                 result.remove(&param.name);
             }
@@ -2722,9 +2788,15 @@ fn combinational_write_counts(
             let mut defaults = Vec::new();
             default_calls(subroutine, args, &mut defaults);
             for (name, args) in defaults {
-                for (name, count) in
-                    call_counts(&name, &args, subroutines, visiting, eval, two_state)
-                {
+                for (name, count) in call_counts(
+                    &name,
+                    &args,
+                    subroutines,
+                    visiting,
+                    eval,
+                    two_state,
+                    include_nonblocking,
+                ) {
                     let entry = result.entry(name).or_default();
                     *entry = (*entry + count).min(2);
                 }
@@ -2733,7 +2805,14 @@ fn combinational_write_counts(
         visiting.remove(name);
         result
     }
-    counts(stmts, subroutines, &mut HashSet::default(), eval, two_state)
+    counts(
+        stmts,
+        subroutines,
+        &mut HashSet::default(),
+        eval,
+        two_state,
+        include_nonblocking,
+    )
 }
 
 /// Whether a sequence can reach the statement after it. Loop exits are local
