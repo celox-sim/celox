@@ -1248,3 +1248,65 @@ fn repeating_zero_count_clock_waits_report_non_progress() {
     assert_eq!(sim.time(), 0);
     assert_eq!(sim.ticks(), 0);
 }
+
+#[test]
+fn due_process_clock_batches_with_a_combinationally_derived_edge() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let bit = ValueType::bits(1).unwrap();
+    let src = module.internal("src", bit).unwrap();
+    let enable = module.input("enable", bit).unwrap();
+    let gated = module.internal("gated", bit).unwrap();
+    let b = module.output("b", bit).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let src_expr = module.read(src).unwrap();
+    let en_expr = module.read(enable).unwrap();
+    let value = module
+        .binary(BinaryOp::And, src_expr, en_expr, bit)
+        .unwrap();
+    let gate_target = module.whole(gated).unwrap();
+    module.assign(gate_target, value).unwrap();
+    let one = constant(&mut module, 1, 1);
+    let b_target = module.whole(b).unwrap();
+    module
+        .register(b_target, one, gated, Edge::Posedge, None, None)
+        .unwrap();
+    let b_expr = module.read(b).unwrap();
+    let q_target = module.whole(q).unwrap();
+    module
+        .register(q_target, b_expr, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+    let four = constant(&mut module, 4, 64);
+    let src_target = module.whole(src).unwrap();
+    module
+        .process(vec![
+            Statement::Delay { amount: four },
+            Statement::Assign {
+                target: src_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+    let artifact = module.finish();
+    fn check<B: celox::SimBackend>(mut sim: Simulation<B>) {
+        let en = sim.signal("enable");
+        sim.modify(|io| io.set(en, 1u8)).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        sim.run_until(8).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    let build = || Simulation::from_frontend(artifact.clone());
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}

@@ -1368,6 +1368,7 @@ impl<B: SimBackend> SimulationState<B> {
         executor.backend_mut().clear_triggered_bits();
         let counter_values = self.event_counter_values(executor.backend());
         let mut process_driven = Vec::new();
+        let mut process_settled = false;
         if !ready_processes.is_empty() || !self.waiting.is_empty() {
             let before: Vec<(bool, bool)> = self
                 .topo_signals
@@ -1381,6 +1382,16 @@ impl<B: SimBackend> SimulationState<B> {
             }
             if !progressed && !settle_idle && events_to_process.is_empty() {
                 return Ok(false);
+            }
+            // Discover combinationally derived edges before choosing the
+            // generated clocks that must share this publication round.
+            if progressed {
+                executor.eval_comb()?;
+                process_settled = true;
+                if executor.finish_requested(current_time) {
+                    self.finished = true;
+                    return Ok(true);
+                }
             }
             for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                 if *id == usize::MAX {
@@ -1442,6 +1453,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .ok_or_else(|| clock_overflow(id))?;
         }
         for event in &generated_events {
+            process_settled = false;
             executor.backend_mut().set(event.signal, event.next_val);
         }
         events_to_process.extend(generated_events);
@@ -1477,7 +1489,9 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        executor.eval_comb()?;
+        if !process_settled {
+            executor.eval_comb()?;
+        }
         self.round_evaluated = true;
         if executor.finish_requested(current_time) {
             self.finished = true;
