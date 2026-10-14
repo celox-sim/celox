@@ -2208,3 +2208,28 @@ fn cross_instance_ordered_nbas_require_pulse_preservation() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
 }
+
+#[test]
+fn local_comb_aliases_diagnose_hidden_source_pulses() {
+    let source = "module Top(output bit q,seen);bit a;wire clk=a;always_ff @(posedge clk)q<=1;initial begin #1;a=1;a=0;end initial begin @(posedge clk);seen=1;end endmodule";
+    assert!(build_error(source).contains("event dependency through combinational propagation"));
+    let source = source.replace("a=1;a=0;", "a=1;#1;a=0;");
+    let mut sim = simulation(&source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn distinct_fixed_time_writes_through_ports_are_observable() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=seen+1;@(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]"))
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}

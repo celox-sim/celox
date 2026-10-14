@@ -2942,17 +2942,19 @@ fn validate_cross_instance_event_pulses(
         for watched in &module.event_dependencies {
             let mut pending = watched
                 .iter()
-                .map(|&(signal, range)| ((id, signal), range, false))
+                .map(|&(signal, range)| ((id, signal), range, false, false))
                 .collect::<Vec<_>>();
             let mut visited = HashSet::default();
             while !pending.is_empty() {
                 let wave = std::mem::take(&mut pending);
                 let mut cross: HashMap<usize, Vec<(SourceVarId, BitAccess)>> = HashMap::default();
-                for (signal, range, crossed) in wave {
-                    if !visited.insert((signal, range, crossed)) {
+                let mut crossed_port = false;
+                for (signal, range, propagated, crossed) in wave {
+                    if !visited.insert((signal, range, propagated, crossed)) {
                         continue;
                     }
-                    if crossed {
+                    if propagated {
+                        crossed_port |= crossed;
                         cross.entry(signal.0).or_default().push((signal.1, range));
                     }
                     if let Some(edges) = dependencies.get(&signal) {
@@ -2970,11 +2972,13 @@ fn validate_cross_instance_event_pulses(
                             } else {
                                 edge.read
                             };
-                            pending.push((edge.source, read, crossed || edge.port));
+                            pending.push((edge.source, read, true, crossed || edge.port));
                         }
                     }
                 }
-                let mut wave_writes = [0usize; 2];
+                let mut wave_unknown = [0usize; 2];
+                let mut wave_timed: [std::collections::BTreeMap<u64, usize>; 2] =
+                    std::array::from_fn(|_| std::collections::BTreeMap::new());
                 for (source_id, mut accesses) in cross {
                     accesses.sort_unstable();
                     accesses.dedup();
@@ -3002,35 +3006,64 @@ fn validate_cross_instance_event_pulses(
                         .source
                         .initial_processes()
                         .iter()
-                        .filter(|p| active(p.condition()))
-                        .map(|p| p.body())
-                        .chain(source.source.ff_processes().iter().map(|p| p.body()))
+                        .filter(|p| !p.is_initializer() && active(p.condition()))
+                        .map(|p| (p.body(), true))
+                        .chain(
+                            source
+                                .source
+                                .ff_processes()
+                                .iter()
+                                .map(|p| (p.body(), false)),
+                        )
                         .chain(
                             source
                                 .source
                                 .comb_processes()
                                 .iter()
                                 .filter(|p| active(p.condition()))
-                                .map(|p| p.body()),
+                                .map(|p| (p.body(), false)),
                         );
                     let bodies = bodies.collect::<Vec<_>>();
                     for nonblocking in [false, true] {
                         let index = usize::from(nonblocking);
-                        let writes = bodies
-                            .iter()
-                            .map(|body| {
-                                ff::runtime_watched_write_count(body, &pm, &query, nonblocking)
-                            })
-                            .sum::<usize>();
-                        wave_writes[index] = wave_writes[index].saturating_add(writes);
-                        if wave_writes[index] > 1 {
+                        for &(body, initial) in &bodies {
+                            if initial
+                                && let Some(times) =
+                                    ff::fixed_runtime_write_times(body, &pm, &query, nonblocking)
+                            {
+                                for (time, writes) in times {
+                                    let value = wave_timed[index].entry(time).or_default();
+                                    *value = (*value + writes).min(2);
+                                }
+                            } else {
+                                wave_unknown[index] = wave_unknown[index].saturating_add(
+                                    ff::runtime_watched_write_count(body, &pm, &query, nonblocking),
+                                );
+                            }
+                        }
+                        let peak = wave_timed[index]
+                            .values()
+                            .copied()
+                            .max()
+                            .unwrap_or(0)
+                            .saturating_add(wave_unknown[index]);
+                        if peak > 1 {
                             return Err(ParserError::unsupported(
                                 sv::SV_FRONTEND_TRACKING_ISSUE,
                                 LoweringPhase::SimulatorParser,
-                                if nonblocking {
-                                    "cross-instance event dependency with multiple nonblocking writes"
-                                } else {
-                                    "cross-instance event dependency with multiple blocking writes"
+                                match (crossed_port, nonblocking) {
+                                    (true, true) => {
+                                        "cross-instance event dependency with multiple nonblocking writes"
+                                    }
+                                    (true, false) => {
+                                        "cross-instance event dependency with multiple blocking writes"
+                                    }
+                                    (false, true) => {
+                                        "event dependency through combinational propagation with multiple nonblocking writes"
+                                    }
+                                    (false, false) => {
+                                        "event dependency through combinational propagation with multiple blocking writes"
+                                    }
                                 },
                                 format!(
                                     "{} watches multiple writes from {} through instance ports",
