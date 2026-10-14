@@ -3023,6 +3023,61 @@ fn validate_cross_instance_event_pulses(
             }
         }
     }
+    // Whole scalar port connections share storage after elaboration. Keep
+    // the existing mixed-polarity limitation consistent across those aliases.
+    fn alias_root(parents: &HashMap<Signal, Signal>, mut signal: Signal) -> Signal {
+        while let Some(&parent) = parents.get(&signal) {
+            signal = parent;
+        }
+        signal
+    }
+    let variable = |signal: Signal| &modules[&nodes[signal.0].module].variables[&signal.1];
+    let mut alias_parents = HashMap::default();
+    for (&target, edges) in &dependencies {
+        for edge in edges {
+            let lhs = variable(target);
+            let rhs = variable(edge.source);
+            if edge.port
+                && edge.linear
+                && edge.target == BitAccess::new(0, 0)
+                && edge.read == BitAccess::new(0, 0)
+                && lhs.width == 1
+                && rhs.width == 1
+                && lhs.array_dims.is_empty()
+                && rhs.array_dims.is_empty()
+                && lhs.is_4state == rhs.is_4state
+            {
+                let target = alias_root(&alias_parents, target);
+                let source = alias_root(&alias_parents, edge.source);
+                if target != source {
+                    alias_parents.insert(target, source);
+                }
+            }
+        }
+    }
+    let mut alias_polarities = HashMap::default();
+    for (id, occurrence) in nodes.iter().enumerate() {
+        for (&signal, variable) in &modules[&occurrence.module].variables {
+            let kind = variable.domain_kind;
+            if matches!(
+                kind,
+                celox_design::DomainKind::ClockPosedge | celox_design::DomainKind::ClockNegedge
+            ) {
+                let source = alias_root(&alias_parents, (id, signal));
+                if let Some(previous) = alias_polarities.insert(source, kind)
+                    && previous != kind
+                {
+                    return Err(ParserError::unsupported(
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
+                        LoweringPhase::SimulatorParser,
+                        "mixed clock-edge polarities through aliases",
+                        "posedge and negedge FF clocks share one physical port signal",
+                        None,
+                    ));
+                }
+            }
+        }
+    }
     for (id, occurrence) in nodes.iter().enumerate() {
         let module = &modules[&occurrence.module];
         for watched in &module.event_dependencies {

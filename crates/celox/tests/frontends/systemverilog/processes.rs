@@ -2436,3 +2436,18 @@ fn separate_comb_assignments_keep_selected_dependencies() {
         build_error(&source.replace("q[0]=a;", "q[0]=b;")).contains("multiple blocking writes")
     );
 }
+
+#[test]
+fn mixed_clock_polarities_through_port_aliases_are_rejected() {
+    let source = "module Pos(input bit clk,output bit[7:0]q);always @(posedge clk)q<=q+1;endmodule module Neg(input bit clk,output bit[7:0]q);always @(negedge clk)q<=q+1;endmodule module Top(input bit clk,output bit[7:0]rise,fall);Pos p(.clk(clk),.q(rise));Neg n(.clk(clk),.q(fall));endmodule";
+    assert!(build_error(source).contains("mixed clock-edge polarities through aliases"));
+    // Separate physical clock ports keep their independent polarities.
+    let separate = source
+        .replace(
+            "input bit clk,output bit[7:0]rise,fall",
+            "input bit cp,cn,output bit[7:0]rise,fall",
+        )
+        .replace("Pos p(.clk(clk)", "Pos p(.clk(cp)")
+        .replace("Neg n(.clk(clk)", "Neg n(.clk(cn)");
+    simulation(&separate);
+}
