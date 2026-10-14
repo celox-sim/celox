@@ -168,3 +168,12 @@ sv_backends! {
 sv_backends! {
  fn parameterized_interface_methods_keep_setup_edges(sim){@case "timing::parameterized_interface_methods_keep_setup_edges";}
 }
+
+sv_backends! {
+    fn blocking_concatenation_publishes_one_event_update(sim) {
+        @case "timing::blocking_concatenation_publishes_one_event_update";
+    }
+    fn finite_active_feedback_preserves_convergence(sim) {
+        @case "timing::finite_active_feedback_preserves_convergence";
+    }
+}
