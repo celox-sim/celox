@@ -3979,3 +3979,33 @@ test("DUT lazy reads preserve finished outputs until explicit evalComb", () => {
 		sim.dispose();
 	}
 });
+
+test.each(["step", "run", "bounded"])(
+	"host FF pulses survive repeated lazy reads (%s)",
+	(method) => {
+		const sim = Simulation.fromSource<{
+			go: bigint;
+			readonly level: bigint;
+			readonly count: bigint;
+		}>(
+			"module Top(clk:input clock,go:input logic,level:output logic,count:output logic<8>){var r:logic<8>;let derived:'_ clock=clk & go;assign level=derived;assign count=r;always_ff(derived){r=r+1;}}",
+			"Top",
+		);
+		try {
+			sim.schedule("clk", { time: 0, value: 1 });
+			sim.runUntil(0);
+			sim.dut.go = 1n;
+			expect(sim.dut.level).toBe(1n);
+			expect(sim.dut.count).toBe(0n);
+			sim.dut.go = 0n;
+			expect(sim.dut.level).toBe(0n);
+			expect(sim.dut.count).toBe(0n);
+			if (method === "step") expect(sim.step()).toBe(0);
+			else sim.runUntil(0, method === "bounded" ? { maxSteps: 1 } : undefined);
+			expect(sim.dut.count).toBe(1n);
+			expect(sim.step()).toBe(null);
+		} finally {
+			sim.dispose();
+		}
+	},
+);

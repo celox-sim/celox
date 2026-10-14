@@ -19,7 +19,9 @@
 //!   event count u32, then per event: scheduled event
 //!   periodic count u32, then per marker: scheduled event | count u64
 //!   high count u32, then per event: event str
-//!   unknown count u32, then per event: event str (version 2 and later)
+//!   captured count u32, then event str (FLAG_CAPTURED_EDGES)
+//!   unknown-presence u8 (version 3), then unknown count and event str
+//!   (version 2 without captured edges always includes unknown baselines)
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! ```
@@ -27,9 +29,10 @@
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
+const FLAG_CAPTURED_EDGES: u16 = 1 << 2;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +81,8 @@ pub struct ScheduleRecord {
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
     pub high_events: Vec<String>,
+    /// FF occurrences captured by a host evaluation.
+    pub captured_edges: Vec<String>,
     /// Events whose baseline contains X/Z bits. Legacy version-1 files do
     /// not carry this information; their baselines are reconstructed on load.
     pub unknown_events: Option<Vec<String>>,
@@ -123,14 +128,20 @@ impl StateFile {
     pub fn write_to(&self, mut writer: impl Write) -> io::Result<()> {
         let w = &mut writer;
         w.write_all(MAGIC)?;
-        let version = if self
+        let captured = self
             .schedule
             .as_ref()
-            .is_some_and(|schedule| schedule.unknown_events.is_none())
+            .is_some_and(|s| !s.captured_edges.is_empty());
+        let version = if captured {
+            3
+        } else if self
+            .schedule
+            .as_ref()
+            .is_some_and(|s| s.unknown_events.is_none())
         {
             1
         } else {
-            VERSION
+            2
         };
         put_u16(w, version)?;
         let mut flags = 0;
@@ -139,6 +150,9 @@ impl StateFile {
         }
         if self.schedule.is_some() {
             flags |= FLAG_SCHEDULE;
+        }
+        if captured {
+            flags |= FLAG_CAPTURED_EDGES;
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -181,6 +195,15 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
+            if captured {
+                put_len(w, schedule.captured_edges.len())?;
+                for event in &schedule.captured_edges {
+                    put_str(w, event)?;
+                }
+                // Version 3 preserves the distinction between legacy unknown
+                // baselines and an explicitly known baseline.
+                w.write_all(&[u8::from(schedule.unknown_events.is_some())])?;
+            }
             if let Some(unknown_events) = &schedule.unknown_events {
                 put_len(w, unknown_events.len())?;
                 for event in unknown_events {
@@ -203,6 +226,11 @@ impl StateFile {
             return Err(StateFileError::UnsupportedVersion(version));
         }
         let flags = get_u16(r)?;
+        if flags & FLAG_CAPTURED_EDGES != 0 && version < 2 {
+            return Err(StateFileError::Malformed(
+                "captured edges require version 2".into(),
+            ));
+        }
         let four_state = flags & FLAG_FOUR_STATE != 0;
         let count = get_u32(r)?;
         let mut objects = Vec::new();
@@ -252,7 +280,29 @@ impl StateFile {
             let high_events = (0..get_u32(r)?)
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
-            let unknown_events = if version >= 2 {
+            let captured_edges = if flags & FLAG_CAPTURED_EDGES != 0 {
+                (0..get_u32(r)?)
+                    .map(|_| get_str(r))
+                    .collect::<Result<_, _>>()?
+            } else {
+                Vec::new()
+            };
+            let unknown_present = if version >= 3 {
+                let mut tag = [0];
+                r.read_exact(&mut tag)?;
+                match tag[0] {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(StateFileError::Malformed(
+                            "unknown baseline presence".into(),
+                        ));
+                    }
+                }
+            } else {
+                version >= 2 && flags & FLAG_CAPTURED_EDGES == 0
+            };
+            let unknown_events = if unknown_present {
                 Some(
                     (0..get_u32(r)?)
                         .map(|_| get_str(r))
@@ -262,6 +312,7 @@ impl StateFile {
                 None
             };
             Some(ScheduleRecord {
+                captured_edges,
                 unknown_events,
                 time,
                 clocks,
@@ -469,6 +520,7 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
+                captured_edges: Vec::new(),
                 unknown_events: Some(vec!["clk".into()]),
             }),
         }
@@ -486,6 +538,25 @@ mod tests {
         let mut again = Vec::new();
         loaded.write_to(&mut again).unwrap();
         assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn captured_edges_preserve_legacy_and_explicit_unknown_baselines() {
+        for unknown in [None, Some(vec!["clk".into()])] {
+            let mut file = sample();
+            let schedule = file.schedule.as_mut().unwrap();
+            schedule.captured_edges = vec!["clk".into()];
+            schedule.unknown_events = unknown;
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+            if file.schedule.as_ref().unwrap().unknown_events.is_none() {
+                // #1158's version-2 captured-edge encoding has no unknown marker.
+                assert_eq!(bytes.pop(), Some(0));
+                bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+                assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+            }
+        }
     }
 
     #[test]
