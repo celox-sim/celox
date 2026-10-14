@@ -3595,6 +3595,26 @@ pub(super) fn fixed_runtime_write_times(
                     .max()
                     .unwrap_or(0)
             }
+            Stmt::Loop {
+                kind: LoopKind::Repeat(count),
+                init,
+                body,
+                step,
+                ..
+            } if init.is_empty()
+                && step.is_empty()
+                && known_loop_value(
+                    count,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                )
+                .is_some_and(|count| count >= 0)
+                && branch_without_suspension_or_exit(body) =>
+            {
+                runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
+            }
             Stmt::If { .. }
             | Stmt::Case { .. }
             | Stmt::Loop { .. }

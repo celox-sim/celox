@@ -1139,6 +1139,13 @@ impl<B: SimBackend> SimulationState<B> {
                         self.finished = true;
                         return Ok(true);
                     }
+                    // An NBA-woken process can create a new occurrence of an
+                    // already evaluated domain in the same time slot.
+                    recorded_edges.union_with(&driven);
+                    for id in driven.iter() {
+                        discovered_in_this_step.remove(id);
+                        triggered_domains.remove(self.event_info[id].canonical_id);
+                    }
                     if track_stable_edges {
                         if driven.is_empty() {
                             self.replace_triggers_with_stable_edges(executor.backend_mut());
