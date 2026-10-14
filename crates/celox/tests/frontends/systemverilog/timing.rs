@@ -179,3 +179,7 @@ sv_backends! {
 }
 
 sv_backends! { fn interface_modport_methods_keep_setup_edges(sim) { @case "timing::interface_modport_methods_keep_setup_edges"; } }
+
+sv_backends! { fn generic_interface_methods_keep_setup_edges(sim) { @case "timing::generic_interface_methods_keep_setup_edges"; } }
+
+sv_backends! { fn inherited_interface_methods_keep_setup_edges(sim) { @case "timing::inherited_interface_methods_keep_setup_edges"; } }

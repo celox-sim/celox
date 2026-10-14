@@ -1987,6 +1987,10 @@ impl NativeSimulationHandle {
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         sim.restore(&checkpoint.inner)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        // A finished snapshot must retain its captured, possibly unsettled output.
+        if sim.is_finished() {
+            return Ok(());
+        }
         // JS reads outputs straight from memory, so settle them now.
         sim.eval_comb()
             .map_err(|e| Error::from_reason(format!("{}", e)))

@@ -3537,7 +3537,7 @@ pub(super) fn fixed_runtime_write_times(
         let value = times.entry((time, phase)).or_default();
         *value = (*value + count).min(2);
     }
-    if recurring && (time == 0 || phase != 0) {
+    if recurring && time == 0 {
         return None;
     }
     Some(FixedWriteTimes {
