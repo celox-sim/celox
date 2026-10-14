@@ -2630,6 +2630,54 @@ fn event_access_expr(
     }
 }
 
+/// Intersections of one-shot times and unbounded periodic activations.
+/// Two periodic sequences meet iff their phase difference is divisible by
+/// the GCD of their periods; a later common occurrence always exists.
+fn known_write_times_coincide(a: u64, pa: Option<u64>, b: u64, pb: Option<u64>) -> bool {
+    match (pa, pb) {
+        (None, None) => a == b,
+        (Some(period), None) => b >= a && (b - a).is_multiple_of(period),
+        (None, Some(period)) => a >= b && (a - b).is_multiple_of(period),
+        (Some(mut left), Some(mut right)) => {
+            while right != 0 {
+                let remainder = left % right;
+                left = right;
+                right = remainder;
+            }
+            a.abs_diff(b).is_multiple_of(left)
+        }
+    }
+}
+
+fn known_write_wave_peak(writes: &[(u64, Option<u64>, usize)]) -> usize {
+    let mut fixed = std::collections::BTreeSet::new();
+    let mut periodic = Vec::new();
+    for &(time, period, count) in writes {
+        if count > 1 {
+            return 2;
+        }
+        if let Some(period) = period {
+            periodic.push((time, period));
+        } else if !fixed.insert(time) {
+            return 2;
+        }
+    }
+    for (position, &(time, period)) in periodic.iter().enumerate() {
+        if periodic[position + 1..]
+            .iter()
+            .any(|&(other, other_period)| {
+                known_write_times_coincide(time, Some(period), other, Some(other_period))
+            })
+            || fixed
+                .range(time..)
+                .any(|&other| known_write_times_coincide(time, Some(period), other, None))
+        {
+            return 2;
+        }
+    }
+    usize::from(!writes.is_empty())
+}
+
 /// Ordinary port glue does not share pulse counters. Keep bit ranges through
 /// bindings and reject cross-instance waves with multiple relevant writes.
 fn validate_cross_instance_event_pulses(
@@ -3006,8 +3054,8 @@ fn validate_cross_instance_event_pulses(
                     }
                 }
                 let mut wave_unknown = [0usize; 2];
-                let mut wave_timed: [std::collections::BTreeMap<u64, usize>; 2] =
-                    std::array::from_fn(|_| std::collections::BTreeMap::new());
+                let mut wave_timed: [Vec<(u64, Option<u64>, usize)>; 2] =
+                    std::array::from_fn(|_| Vec::new());
                 for (source_id, mut accesses) in cross {
                     accesses.sort_unstable();
                     accesses.dedup();
@@ -3060,9 +3108,10 @@ fn validate_cross_instance_event_pulses(
                                 && let Some(times) =
                                     ff::fixed_runtime_write_times(body, &pm, &query, nonblocking)
                             {
-                                for (time, writes) in times {
-                                    let value = wave_timed[index].entry(time).or_default();
-                                    *value = (*value + writes).min(2);
+                                for (time, writes) in times.times {
+                                    if writes != 0 {
+                                        wave_timed[index].push((time, times.period, writes));
+                                    }
                                 }
                             } else {
                                 wave_unknown[index] = wave_unknown[index].saturating_add(
@@ -3070,11 +3119,7 @@ fn validate_cross_instance_event_pulses(
                                 );
                             }
                         }
-                        let peak = wave_timed[index]
-                            .values()
-                            .copied()
-                            .max()
-                            .unwrap_or(0)
+                        let peak = known_write_wave_peak(&wave_timed[index])
                             .saturating_add(wave_unknown[index]);
                         if peak > 1 {
                             return Err(ParserError::unsupported(
