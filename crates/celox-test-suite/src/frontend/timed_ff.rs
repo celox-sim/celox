@@ -454,9 +454,13 @@ fn has_timing(source: &str) -> bool {
     false
 }
 
+type CallableKey = (String, Option<usize>, Vec<usize>, String);
+
 #[derive(Default)]
 pub(super) struct TaskTiming {
-    tasks: BTreeMap<(String, Vec<usize>, String), bool>,
+    tasks: BTreeMap<CallableKey, bool>,
+    units: BTreeMap<String, usize>,
+    import_clauses: BTreeMap<String, BTreeMap<usize, Vec<(Option<String>, Option<String>)>>>,
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
     ff_offsets: BTreeMap<String, Vec<usize>>,
     calls: BTreeMap<String, Vec<(usize, String)>>,
@@ -474,7 +478,7 @@ fn container_at(source: &str, at: usize) -> String {
                     .iter()
                     .find(|word| !matches!(word.2, "static" | "automatic"))
                 {
-                    scope = name.to_string();
+                    scope = name.trim_start_matches('\\').to_owned();
                 }
             }
             "endmodule" | "endinterface" | "endpackage" => scope.clear(),
@@ -519,25 +523,80 @@ impl TaskTiming {
         )
     }
 
-    fn callable_key(&self, source: &str, at: usize, name: &str) -> (String, Vec<usize>, String) {
+    fn unit(&self, source: &str) -> Option<usize> {
+        self.units.get(source).copied()
+    }
+    fn clause_items(
+        &self,
+        source: &str,
+        start: usize,
+        end: usize,
+    ) -> Vec<(Option<String>, Option<String>)> {
+        if let Some(clauses) = self.import_clauses.get(source) {
+            return clauses.get(&start).cloned().unwrap_or_default();
+        }
+        // Only malformed sources use the lexical fallback. Split separators
+        // outside comments, strings and escaped identifiers.
+        let tail = &source[end..];
+        let clause = &tail[..semicolon(tail, 0).unwrap_or(tail.len())];
+        let mut parts = Vec::new();
+        let mut begin = 0;
+        let mut at = 0;
+        while at < clause.len() {
+            if skip_token(clause, &mut at) {
+                continue;
+            }
+            if clause.as_bytes()[at] == b',' {
+                parts.push(&clause[begin..at]);
+                begin = at + 1;
+            }
+            at += 1;
+        }
+        parts.push(&clause[begin..]);
+        parts
+            .into_iter()
+            .map(|item| {
+                let words = sv_words(item);
+                (
+                    words.first().map(|x| x.2.to_owned()),
+                    words.get(1).map(|x| x.2.to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    fn callable_key(&self, source: &str, at: usize, name: &str) -> CallableKey {
         let container = container_at(source, at);
         let mut scope = self.lexical_scope(source, at);
         if !container.is_empty() && !scope.is_empty() {
             scope.remove(0);
         }
-        (container, scope, name.to_owned())
+        let unit = container.is_empty().then(|| self.unit(source)).flatten();
+        (
+            container,
+            unit,
+            scope,
+            name.trim_start_matches('\\').to_owned(),
+        )
     }
 
     fn package_callable(
         &self,
+        source: &str,
         package: &str,
         name: &str,
         visiting: &mut std::collections::BTreeSet<String>,
     ) -> Option<bool> {
-        let package = if package == "$unit" { "" } else { package };
-        if let Some(value) = self
-            .tasks
-            .get(&(package.to_owned(), Vec::new(), name.to_owned()))
+        let package = package.trim_start_matches('\\');
+        let name = name.trim_start_matches('\\');
+        let (package, unit) = if package == "$unit" {
+            ("", self.unit(source))
+        } else {
+            (package, None)
+        };
+        if let Some(value) =
+            self.tasks
+                .get(&(package.to_owned(), unit, Vec::new(), name.to_owned()))
         {
             return Some(*value);
         }
@@ -558,7 +617,7 @@ impl TaskTiming {
                 }) {
                     continue;
                 }
-                if let Some(timed) = self.package_callable(origin, name, visiting) {
+                if let Some(timed) = self.package_callable(source, origin, name, visiting) {
                     result = Some(result.unwrap_or(false) || timed);
                 }
             }
@@ -569,20 +628,46 @@ impl TaskTiming {
     pub(super) fn new(sources: &[String]) -> Self {
         let mut result = Self::default();
         let mut records = Vec::new();
-        for source in sources {
+        for (index, source) in sources.iter().enumerate() {
+            result.units.insert(source.clone(), index);
             if let Ok(tree) = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))
             {
+                // Re-preprocessing can add whitespace after escaped names.
+                // All lexical joins use offsets of the source passed here.
+                let origin = |offset| {
+                    tree.get_origin(&sv_parser::Locate {
+                        offset,
+                        ..Default::default()
+                    })
+                    .map_or(offset, |(_, origin)| origin)
+                };
+                result.import_clauses.insert(
+                    source.clone(),
+                    celox_sv_analyzer::ast::package_import_export_clauses(&tree)
+                        .into_iter()
+                        .map(|(offset, items)| (origin(offset), items))
+                        .collect(),
+                );
                 result.calls.insert(
                     source.clone(),
-                    celox_sv_analyzer::ast::procedural_call_sites(&tree),
+                    celox_sv_analyzer::ast::procedural_call_sites(&tree)
+                        .into_iter()
+                        .map(|(offset, name)| (origin(offset), name))
+                        .collect(),
                 );
                 result.ff_offsets.insert(
                     source.clone(),
-                    celox_sv_analyzer::ast::ff_always_offsets(&tree),
+                    celox_sv_analyzer::ast::ff_always_offsets(&tree)
+                        .into_iter()
+                        .map(origin)
+                        .collect(),
                 );
                 result.generate_scopes.insert(
                     source.clone(),
-                    celox_sv_analyzer::ast::generate_scope_ranges(&tree),
+                    celox_sv_analyzer::ast::generate_scope_ranges(&tree)
+                        .into_iter()
+                        .map(|(start, end)| (origin(start), origin(end.saturating_sub(1)) + 1))
+                        .collect(),
                 );
             }
             let words = sv_words(source);
@@ -612,14 +697,7 @@ impl TaskTiming {
                 {
                     continue;
                 }
-                let tail = &source[*end..];
-                let Some(end) = semicolon(tail, 0) else {
-                    continue;
-                };
-                for item in tail[..end].split(',') {
-                    let item_words = sv_words(item);
-                    let package = item_words.first().map(|x| x.2.to_owned());
-                    let selected = item_words.get(1).map(|x| x.2.to_owned());
+                for (package, selected) in result.clause_items(source, *start, *end) {
                     if *word == "import" {
                         if let Some(package) = package {
                             result
@@ -709,10 +787,11 @@ impl TaskTiming {
     }
 
     fn resolve(&self, source: &str, at: usize, name: &str) -> Option<bool> {
+        let name = name.trim_start_matches('\\');
         let prefix = source[..at].trim_end();
         if let Some(prefix) = prefix.strip_suffix("::") {
             let package = sv_words(prefix).last()?.2;
-            return self.package_callable(package, name, &mut Default::default());
+            return self.package_callable(source, package, name, &mut Default::default());
         }
         if let Some(prefix) = prefix.strip_suffix('.') {
             let instance = sv_words(prefix).last()?.2;
@@ -720,10 +799,12 @@ impl TaskTiming {
             let words = sv_words(&source[..at]);
             for pair in words.windows(2) {
                 if pair[1].2 == instance && container_at(source, pair[0].0) == scope {
-                    if let Some(value) =
-                        self.tasks
-                            .get(&(pair[0].2.to_owned(), Vec::new(), name.to_owned()))
-                    {
+                    if let Some(value) = self.tasks.get(&(
+                        pair[0].2.trim_start_matches('\\').to_owned(),
+                        None,
+                        Vec::new(),
+                        name.to_owned(),
+                    )) {
                         return Some(*value);
                     }
                 }
@@ -737,7 +818,7 @@ impl TaskTiming {
             if let Some(value) = self.tasks.get(&key) {
                 return Some(*value);
             }
-            if key.1.pop().is_none() {
+            if key.2.pop().is_none() {
                 break;
             }
         }
@@ -756,19 +837,15 @@ impl TaskTiming {
                 continue;
             }
             let (explicit, wildcard) = imports.entry(lexical.len()).or_default();
-            let tail = &source[end..];
-            let clause = &tail[..semicolon(tail, 0)?];
-            for item in clause.split(',') {
-                let words = sv_words(item);
-                let Some((_, _, package)) = words.first() else {
+            for (package, selected) in self.clause_items(source, start, end) {
+                let Some(package) = package else {
                     continue;
                 };
-                let selected = words.get(1).map(|word| word.2);
-                if selected == Some(name) || (selected.is_none() && item.contains('*')) {
+                if selected.as_deref() == Some(name) || selected.is_none() {
                     if let Some(value) =
-                        self.package_callable(package, name, &mut Default::default())
+                        self.package_callable(source, &package, name, &mut Default::default())
                     {
-                        if selected == Some(name) {
+                        if selected.as_deref() == Some(name) {
                             *explicit = Some(value);
                         } else {
                             *wildcard = Some(wildcard.unwrap_or(false) || value);
@@ -783,7 +860,12 @@ impl TaskTiming {
             .find_map(|(explicit, wildcard)| explicit.or(wildcard))
             .or_else(|| {
                 self.tasks
-                    .get(&(String::new(), Vec::new(), name.to_owned()))
+                    .get(&(
+                        String::new(),
+                        self.unit(source),
+                        Vec::new(),
+                        name.to_owned(),
+                    ))
                     .copied()
             })
     }
@@ -793,14 +875,21 @@ impl TaskTiming {
             return calls.iter().any(|(at, name)| {
                 *at >= start
                     && *at < end
-                    && self.tasks.keys().any(|key| key.2 == *name)
+                    && self
+                        .tasks
+                        .keys()
+                        .any(|key| key.3 == name.trim_start_matches('\\'))
                     && self.resolve(source, *at, name).unwrap_or(true)
             });
         }
         sv_words(&source[start..end])
             .iter()
             .any(|(at, word_end, name)| {
-                if !self.tasks.keys().any(|key| key.2 == *name) {
+                if !self
+                    .tasks
+                    .keys()
+                    .any(|key| key.3 == name.trim_start_matches('\\'))
+                {
                     return false;
                 }
                 let tail = after_trivia(&source[start + word_end..end]);
@@ -836,6 +925,54 @@ impl TaskTiming {
 mod callable_analysis_tests {
     use super::*;
     #[test]
+    fn parsed_imports_keep_escaped_names_and_comment_commas_whole() {
+        for imports in [
+            "import B::*, A /*,*/ :: tick;",
+            r"import B::*, \A,items ::tick;",
+        ] {
+            let package = if imports.contains("items") {
+                r"\A,items "
+            } else {
+                "A"
+            };
+            let source = format!(
+                "package {package};function bit tick();return 1;endfunction endpackage package B;task tick;#1;endtask endpackage module Top;{imports}always @(posedge clk)q<=tick();endmodule"
+            );
+            let tasks = TaskTiming::new(std::slice::from_ref(&source));
+            assert_eq!(
+                tasks.resolve(&source, source.rfind("tick()").unwrap(), "tick"),
+                Some(false)
+            );
+            assert!(edge_control(
+                &source,
+                source.find("always").unwrap() + 6,
+                &tasks
+            ));
+        }
+    }
+    #[test]
+    fn compilation_units_keep_callable_timing_separate() {
+        for qualified in [false, true] {
+            let first =
+                "task tick;#1;endtask module Top;always @(posedge clk)tick();endmodule".to_owned();
+            let second =
+                "task tick;endtask module Other;always @(posedge clk)tick();endmodule".to_owned();
+            let first = if qualified {
+                first.replace("tick();endmodule", "$unit::tick();endmodule")
+            } else {
+                first
+            };
+            let second = if qualified {
+                second.replace("tick();endmodule", "$unit::tick();endmodule")
+            } else {
+                second
+            };
+            let timing = TaskTiming::new(&[first.clone(), second.clone()]);
+            assert!(timing.has_timed_call(&first, first.find("always").unwrap(), first.len()));
+            assert!(!timing.has_timed_call(&second, second.find("always").unwrap(), second.len()));
+        }
+    }
+    #[test]
     fn local_declarations_are_not_no_argument_task_calls() {
         for body in ["int tick; q<=1;", "int value, tick; q<=1;"] {
             let source = format!(
@@ -866,7 +1003,7 @@ mod callable_analysis_tests {
             );
             let tasks = TaskTiming::new(std::slice::from_ref(&source));
             assert_eq!(
-                tasks.package_callable("C", "tick", &mut Default::default()),
+                tasks.package_callable(&source, "C", "tick", &mut Default::default()),
                 Some(!delay.is_empty())
             );
             let at = source.rfind("tick()").unwrap();
