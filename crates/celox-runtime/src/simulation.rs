@@ -419,6 +419,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let time = self.scheduler.time;
+        self.sample_waiting_events(executor)?;
         if !self.step_round(executor, time, Vec::new(), Vec::new(), false)? {
             return Ok(false);
         }
@@ -662,10 +663,14 @@ impl<B: SimBackend> SimulationState<B> {
             let before = executor.backend().get_as::<u8>(event.signal) != 0;
             executor.backend_mut().set(event.signal, event.next_val);
             let after = executor.backend().get_as::<u8>(event.signal) != 0;
+            let mut blocking_source = false;
             if let Some(&id) = self.signal_to_id.get(&event.signal)
                 && self.edge_triggers(id, before, after)
             {
                 scheduled_edges.insert(id);
+                blocking_source = self
+                    .active_ff_domains
+                    .contains(self.event_info[id].canonical_id);
             }
             if settle_update {
                 executor.eval_comb()?;
@@ -682,7 +687,9 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend().get_as::<u8>(*signal) != 0,
                     )
                 {
-                    if capture_batch_edges {
+                    if capture_batch_edges || blocking_source {
+                        // Blocking source FF stores run in the active region
+                        // and can remove an edge already sampled by waiters.
                         scheduled_edges.insert(*id);
                     } else {
                         early_settle_edges.insert(*id);
