@@ -1127,7 +1127,8 @@ fn periodic_and_process_generators_for_one_clock_are_rejected() {
         }
         let count = sim.get(sim.signal("count"));
         let ticks = sim.ticks();
-        sim.add_clock("clk", 4, 0);
+        // Register a valid current-time edge so this tests competing drivers.
+        sim.add_clock("clk", 4, sim.time());
         let error = sim.step().unwrap_err();
         assert!(
             error.to_string().contains("already driven by add_clock"),
