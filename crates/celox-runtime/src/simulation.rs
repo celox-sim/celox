@@ -913,7 +913,7 @@ impl<B: SimBackend> SimulationState<B> {
             });
         }
         let mut rising = Vec::with_capacity(due.len());
-        let mut falling = Vec::new();
+        let mut falling = falling.to_vec();
         for id in due {
             let clock = &self.tick_clocks[id];
             let high = sample_event_signal(executor.backend(), clock.signal) == (true, false);

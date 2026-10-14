@@ -3673,6 +3673,22 @@ mod process_metadata_tests {
     }
 
     #[test]
+    fn clean_control_cannot_redirect_to_another_valid_bit() {
+        let source = "#[test(Top)] module Top (spare: output logic) { var source: u32; let derived: u32=source+1; initial {source=1;$assert(derived==2);source=7;} initial {spare=1;$assert(spare==1);spare=0;} }";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let flag = original.runtime_schema.processes[0].comb_clean.unwrap();
+        let mut broken = original.clone();
+        let address = original.runtime_schema.processes[1].comb_clean.unwrap();
+        assert_ne!(flag, address);
+        broken.runtime_schema.processes[0].comb_clean = Some(address);
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
     fn process_release_control_bindings_cannot_be_swapped() {
         let original = image();
         original.to_container_bytes().unwrap();

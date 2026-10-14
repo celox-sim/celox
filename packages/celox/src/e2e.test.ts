@@ -4017,3 +4017,61 @@ test.each(["step", "run", "bounded"])(
 		}
 	},
 );
+
+test("retained NAPI memory cannot inject a generated clock edge", () => {
+	const artifact = JSON.parse(FRONTEND_FINISH_ARTIFACT);
+	artifact.format_version = 3;
+	artifact.signals[0].initial = {
+		payload: [0],
+		mask: [],
+		value_type: artifact.signals[0].value_type,
+	};
+	artifact.signals.push({
+		id: 1,
+		name: "clk",
+		direction: "Internal",
+		value_type: { width: 1, signed: false, four_state: false },
+		initial: null,
+	});
+	artifact.expressions[0].node.Constant.payload = [1];
+	artifact.expressions.push({
+		id: 2,
+		node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+		value_type: artifact.signals[0].value_type,
+	});
+	artifact.expressions.push({
+		id: 3,
+		node: { Binary: { op: "Add", lhs: 2, rhs: 0 } },
+		value_type: artifact.signals[0].value_type,
+	});
+	artifact.registers = [
+		{
+			target: { signal: 0, lsb: 0, width: 8 },
+			next: 3,
+			clock: 1,
+			edge: "Posedge",
+			async_reset: null,
+			enable: null,
+		},
+	];
+	artifact.clock_periods = [[1, 2]];
+	artifact.processes[0].body = [{ ClockCycles: { clock: 1, count: 1 } }];
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	for (const explicit of [false, true]) {
+		const raw = Handle.fromFrontendArtifact(JSON.stringify(artifact));
+		try {
+			const memory = raw.sharedMemory();
+			const layout = parseNapiLayout(raw.layoutJson).forDut;
+			raw.runUntil(1);
+			expect(memory[layout.y.offset]).toBe(1);
+			memory[layout.clk.offset] = 1;
+			expect(() => (explicit ? raw.evalComb() : raw.runUntil(2))).toThrow(
+				/direct host write/,
+			);
+			expect(memory[layout.y.offset]).toBe(1);
+		} finally {
+			raw.dispose();
+		}
+	}
+});
