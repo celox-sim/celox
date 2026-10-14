@@ -323,8 +323,9 @@ impl<B: SimBackend> Simulation<B> {
         if self.has_processes() {
             return Err(StateError::Processes);
         }
+        let was_dirty = self.simulator.dirty;
         let mut file = self.simulator.save_state()?;
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         let parts = self.state.export_schedule(&self.simulator.backend);
         file.schedule = Some(self.simulator.name_schedule(parts));
         Ok(file)
@@ -371,14 +372,16 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
+        let was_dirty = self.simulator.dirty;
         self.simulator.dump(timestamp);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
+        let was_dirty = self.simulator.dirty;
         let result = self.simulator.try_dump(timestamp);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         result
     }
 
@@ -396,10 +399,10 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.signal(path)
     }
 
-    fn synchronize_runtime_finish(&mut self) {
+    fn synchronize_runtime_finish(&mut self, was_dirty: bool) {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
-        } else if !self.simulator.dirty && !self.state.is_finished() {
+        } else if was_dirty && !self.simulator.dirty && !self.state.is_finished() {
             self.state
                 .sample_waiting_events(&mut self.simulator)
                 .unwrap();
@@ -409,12 +412,13 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
+        let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get(signal)
         } else {
             self.simulator.get(signal)
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         value
     }
 
@@ -423,12 +427,13 @@ impl<B: SimBackend> Simulation<B> {
         &mut self,
         signal: SignalRef,
     ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get_four_state(signal)
         } else {
             self.simulator.get_four_state(signal)
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         value
     }
 
@@ -453,8 +458,9 @@ impl<B: SimBackend> Simulation<B> {
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
+        let was_dirty = self.simulator.dirty;
         let result = self.simulator.modify(f);
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         result
     }
 
@@ -704,12 +710,13 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        let was_dirty = self.simulator.dirty;
         let events = if self.state.is_finished() {
             self.simulator.drain_runtime_events_without_evaluation()
         } else {
             self.simulator.drain_runtime_events()
         };
-        self.synchronize_runtime_finish();
+        self.synchronize_runtime_finish(was_dirty);
         events
     }
 

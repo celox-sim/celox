@@ -541,6 +541,25 @@ mod tests {
     }
 
     #[test]
+    fn captured_edges_preserve_legacy_and_explicit_unknown_baselines() {
+        for unknown in [None, Some(vec!["clk".into()])] {
+            let mut file = sample();
+            let schedule = file.schedule.as_mut().unwrap();
+            schedule.captured_edges = vec!["clk".into()];
+            schedule.unknown_events = unknown;
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+            if file.schedule.as_ref().unwrap().unknown_events.is_none() {
+                // #1158's version-2 captured-edge encoding has no unknown marker.
+                assert_eq!(bytes.pop(), Some(0));
+                bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+                assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+            }
+        }
+    }
+
+    #[test]
     fn round_trips() {
         let file = sample();
         let mut bytes = Vec::new();
