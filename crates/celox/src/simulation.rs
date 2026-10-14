@@ -1852,3 +1852,82 @@ mod queued_derived_ff_review_tests {
         check(Simulation::new(build().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod zero_delay_review_tests {
+    use super::*;
+    #[test]
+    fn zero_delay_repeating_processes_report_non_progress() {
+        let source = "module Top(output bit clk);always #0 clk=~clk;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let error = sim.run_until(0).unwrap_err().to_string();
+            assert!(error.contains("delta"), "{error}");
+            assert_eq!(sim.time(), 0);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("zero-delay.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn finite_inactive_delays_and_positive_time_loops_still_run() {
+        for source in [
+            "module Top(output bit q);initial begin repeat(3) #0 q=~q;end endmodule",
+            "module Top(output bit q);always #1 q=~q;endmodule",
+        ] {
+            let mut sim = Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("delta-control.sv"))],
+                "Top",
+            )
+            .build()
+            .unwrap();
+            sim.run_until(3).unwrap();
+            assert_eq!(sim.time(), 3);
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+    }
+
+    #[test]
+    fn static_logic_locals_start_unknown_and_retain_updates() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, ff: bool) {
+            if ff {
+                sim.schedule("clk", 1, 1).unwrap();
+            }
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("out")), 1u8.into());
+            if ff {
+                sim.schedule("clk", 2, 0).unwrap();
+                sim.schedule("clk", 3, 1).unwrap();
+            }
+            sim.run_until(if ff { 3 } else { 2 }).unwrap();
+            assert_eq!(sim.get(sim.signal("out")), 0u8.into());
+        }
+        for (source, ff) in [
+            (
+                "module Top(input bit clk,output bit out);task t;static logic x;out=(x===1'bx);x=1;endtask always @(posedge clk)t();endmodule",
+                true,
+            ),
+            (
+                "module Top(output bit out);task t;static logic x;out=(x===1'bx);x=1;endtask initial begin #1;t();#1;t();end endmodule",
+                false,
+            ),
+        ] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("static-x.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()), ff);
+            check(Simulation::new(build().build_cranelift().unwrap()), ff);
+            check(Simulation::new(build().build_wasm().unwrap()), ff);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), ff);
+        }
+    }
+}
