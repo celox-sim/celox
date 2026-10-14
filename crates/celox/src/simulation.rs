@@ -2353,6 +2353,67 @@ mod inactive_host_transition_review_tests {
 mod queued_derived_ff_review_tests {
     use super::*;
     #[test]
+    fn single_scheduled_update_preserves_derived_edges_with_waiters() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let enable = sim.signal("enable");
+            sim.modify(|io| io.set(enable, 1u8)).unwrap();
+            sim.run_until(0).unwrap();
+            sim.schedule("src", 1, 1).unwrap();
+            sim.schedule("src", 2, 0).unwrap();
+            sim.schedule("src", 3, 1).unwrap();
+            for (time, expected) in [(1, 1u8), (2, 1), (3, 2)] {
+                sim.run_until(time).unwrap();
+                assert_eq!(sim.get(sim.signal("count")), expected.into(), "time {time}");
+            }
+        }
+        for waiter in ["", "initial wait(stop);"] {
+            let source = format!(
+                "module Top(input bit src,enable,stop,output bit[7:0]count);bit unused;wire gated=src&enable;always @(posedge src)unused<=1;always @(posedge gated)count<=count+1;{waiter} endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("single-derived-edge.sv"),
+                    )],
+                    "Top",
+                )
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()));
+            check(Simulation::new(build().build_cranelift().unwrap()));
+            check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()));
+        }
+    }
+
+    #[test]
+    fn single_scheduled_update_keeps_edges_before_a_waiter_restores_the_clock() {
+        let source = "module Top(input bit src,output bit[7:0]count);bit unused;bit enable=1;wire gated=src&enable;always @(posedge src)unused<=1;always @(posedge gated)count<=count+1;initial begin @(posedge gated);enable=0;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("src", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("gated")), 0u8.into());
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(
+                    source,
+                    std::path::Path::new("single-transient-derived-edge.sv"),
+                )],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
+    #[test]
     fn queued_pulse_reaches_derived_ff_without_process_waiters() {
         let source = "module Top(input bit src,enable,output bit q);bit unused;wire gated=src&enable;always @(posedge src)unused<=1;always @(negedge gated)q<=1;endmodule";
         fn check<B: SimBackend>(mut sim: Simulation<B>) {

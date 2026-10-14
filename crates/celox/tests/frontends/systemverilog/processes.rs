@@ -2384,3 +2384,23 @@ fn conditional_writes_keep_their_fixed_cross_instance_times() {
         build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
     );
 }
+
+#[test]
+fn case_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(input bit[1:0]sel,output bit[1:0]q);initial begin #1;case(sel) 0:q[0]=0;1:q[0]=1;default:q[0]=1;endcase end initial begin #2;q[1]=1;end endmodule module Top(input bit[1:0]sel,output bit[7:0]seen);wire[1:0]q;Child u(.sel(sel),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    for sel in [0u8, 1, 2] {
+        let mut sim = simulation(source);
+        let signal = sim.signal("sel");
+        sim.modify(|io| io.set(signal, sel)).unwrap();
+        sim.run_until(1).unwrap();
+        let first = u8::from(sel != 0);
+        assert_eq!(sim.get(sim.signal("seen")), first.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (first + 1).into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+    let error = build_error(&source.replace("1:q[0]=1;", "1:begin #1;q[0]=1;end "));
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
