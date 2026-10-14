@@ -2380,3 +2380,35 @@ fn case_writes_keep_their_fixed_cross_instance_times() {
     let error = build_error(&source.replace("1:q[0]=1;", "1:begin #1;q[0]=1;end "));
     assert!(error.contains("multiple blocking writes"), "{error}");
 }
+
+#[test]
+fn constant_repeat_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;repeat(1)q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("repeat(1)", "repeat(2)")).contains("multiple blocking writes")
+    );
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+    assert!(
+        build_error(&source.replace("repeat(1)q[0]=1;", "repeat(1)begin #1;q[0]=1;end "))
+            .contains("multiple blocking writes")
+    );
+}
+#[test]
+fn separate_comb_assignments_keep_selected_dependencies() {
+    let source = "module Child(input bit a,b,output bit[1:0]q);always_comb begin q[0]=a;q[1]=b;end endmodule module Top(output bit[7:0]seen);bit a,b;wire[1:0]q;Child u(.a(a),.b(b),.q(q));initial begin #1;b=1;b=0;#1;a=1;end initial forever begin @(q[0]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert!(
+        build_error(&source.replace("q[0]=a;", "q[0]=b;")).contains("multiple blocking writes")
+    );
+}
