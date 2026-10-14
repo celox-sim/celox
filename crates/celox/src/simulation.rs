@@ -479,7 +479,7 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         if self.simulator.dirty {
-            self.simulator.eval_comb()?;
+            self.eval_comb()?;
         }
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
@@ -2360,5 +2360,115 @@ mod lazy_read_and_ff_edges_review {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod implicit_host_edge_review {
+    use super::*;
+    #[test]
+    fn implicit_settles_capture_ff_edges_without_waiters() {
+        let source =
+            "module Top(input bit clk,output bit[7:0]q);always_ff @(posedge clk)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>, operation: &str) {
+            sim.run_until(0).unwrap();
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set(clk, 1u8)).unwrap();
+            match operation {
+                "step" => assert_eq!(sim.step().unwrap(), Some(0)),
+                "bounded" => assert_eq!(sim.step_until(0).unwrap(), Some(0)),
+                "run" => sim.run_until(0).unwrap(),
+                _ => unreachable!(),
+            }
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+        }
+        for operation in ["step", "bounded", "run"] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("implicit-host-clock.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                operation,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                operation,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), operation);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), operation);
+        }
+    }
+    #[test]
+    fn host_four_state_edges_use_value_and_mask() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, positive: bool) {
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set_four_state(clk, 0u8.into(), 0u8.into()))
+                .unwrap();
+            sim.eval_comb().unwrap();
+            sim.run_until(0).unwrap();
+            let q = sim.signal("q");
+            let mut count = sim.get(q);
+            for (value, mask, rise, fall) in [
+                (0u8, 1u8, true, false),
+                (1, 1, false, false),
+                (1, 0, true, false),
+                (1, 1, false, true),
+                (0, 1, false, false),
+                (0, 0, false, true),
+            ] {
+                sim.modify(|io| io.set_four_state(clk, value.into(), mask.into()))
+                    .unwrap();
+                sim.eval_comb().unwrap();
+                sim.run_until(0).unwrap();
+                count += u8::from(if positive { rise } else { fall });
+                assert_eq!(
+                    sim.get(q),
+                    count,
+                    "positive={positive} value={value} mask={mask}"
+                );
+                if mask == 1 {
+                    let checkpoint = sim.checkpoint().unwrap();
+                    let file = sim.save_state().unwrap();
+                    let mut bytes = Vec::new();
+                    file.write_to(&mut bytes).unwrap();
+                    let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+                    sim.restore(&checkpoint).unwrap();
+                    sim.load_state(&file).unwrap();
+                }
+            }
+            let checkpoint = sim.checkpoint().unwrap();
+            let file = sim.save_state().unwrap();
+            sim.restore(&checkpoint).unwrap();
+            sim.load_state(&file).unwrap();
+        }
+        for positive in [true, false] {
+            let edge = if positive { "posedge" } else { "negedge" };
+            let source = format!(
+                "module Top(input logic clk,output bit[7:0]q);always @({edge} clk)q<=q+1;endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("host-four-state.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                positive,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                positive,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), positive);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), positive);
+        }
     }
 }

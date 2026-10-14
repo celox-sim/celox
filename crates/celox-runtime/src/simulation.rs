@@ -154,6 +154,7 @@ pub struct SimulationState<B: SimBackend> {
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     pending_host_edges: BitSet,
+    unknown_clock_values: BitSet,
     topo_signals: Vec<(SignalRef, usize, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
@@ -172,6 +173,28 @@ pub struct SimulationState<B: SimBackend> {
     finish_round: bool,
 }
 
+fn transition_edges(was: (bool, bool), is: (bool, bool)) -> (bool, bool) {
+    let (was_nonzero, was_unknown) = was;
+    let (is_nonzero, is_unknown) = is;
+    match (was_unknown, is_unknown) {
+        (true, true) => (false, false),
+        (true, false) => (is_nonzero, !is_nonzero),
+        (false, true) => (!was_nonzero, was_nonzero),
+        (false, false) => (!was_nonzero && is_nonzero, was_nonzero && !is_nonzero),
+    }
+}
+
+/// The event signal's least significant bit and its X/Z mask.
+fn sample_event_signal<B: SimBackend>(backend: &B, signal: SignalRef) -> (bool, bool) {
+    if backend.layout().four_state && signal.is_4state {
+        let (value, mask) = backend.get_four_state(signal);
+        (value.bit(0), mask.bit(0))
+    } else {
+        let value: u8 = backend.get_as(signal);
+        (value & 1 != 0, false)
+    }
+}
+
 impl<B: SimBackend> SimulationState<B> {
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
@@ -181,13 +204,17 @@ impl<B: SimBackend> SimulationState<B> {
 
     fn sample_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();
+        self.unknown_clock_values.make_empty();
         for (signal, id, _) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = backend.get_as(*signal);
-            if value != 0 {
+            let (is_nonzero, is_unknown) = sample_event_signal(backend, *signal);
+            if is_nonzero {
                 self.last_clock_values.insert(*id);
+            }
+            if is_unknown {
+                self.unknown_clock_values.insert(*id);
             }
         }
     }
@@ -217,16 +244,19 @@ impl<B: SimBackend> SimulationState<B> {
         let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
             return true;
         };
-        let was_nonzero = self.last_clock_values.contains(id);
-        let is_nonzero = backend.get_as::<u8>(*signal) != 0;
+        let was = (
+            self.last_clock_values.contains(id),
+            self.unknown_clock_values.contains(id),
+        );
+        let is = sample_event_signal(backend, *signal);
         match self.domain_kinds[id] {
-            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                !was_nonzero && is_nonzero
-            }
-            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                was_nonzero && !is_nonzero
-            }
-            _ => was_nonzero != is_nonzero,
+            Some(
+                DomainKind::ClockPosedge
+                | DomainKind::ResetAsyncHigh
+                | DomainKind::ClockNegedge
+                | DomainKind::ResetAsyncLow,
+            ) => self.edge_triggers(id, was, is),
+            _ => was != is,
         }
     }
 
@@ -236,17 +266,16 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let was_nonzero = self.last_clock_values.contains(*id);
-            let value: u8 = backend.get_as(*signal);
-            let is_nonzero = value != 0;
+            let was = (
+                self.last_clock_values.contains(*id),
+                self.unknown_clock_values.contains(*id),
+            );
+            let is = sample_event_signal(backend, *signal);
+            let (posedge, negedge) = transition_edges(was, is);
             let triggered = match self.domain_kinds[*id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => was_nonzero != is_nonzero,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+                _ => was != is,
             };
             if triggered {
                 backend.mark_triggered_bit(*id);
@@ -263,6 +292,7 @@ impl<B: SimBackend> SimulationState<B> {
         processes: Vec<ProcessRefs>,
     ) -> Self {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
+        let mut unknown_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
         let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
         for (index, (signal, id, _)) in topo_signals.iter().copied().enumerate() {
@@ -271,9 +301,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
             signal_to_id.insert(signal, id);
             signal_index_by_id[id] = index;
-            let value: u8 = backend.get_as(signal);
-            if value != 0 {
+            let (value, unknown) = sample_event_signal(backend, signal);
+            if value {
                 last_clock_values.insert(id);
+            }
+            if unknown {
+                unknown_clock_values.insert(id);
             }
         }
 
@@ -282,6 +315,7 @@ impl<B: SimBackend> SimulationState<B> {
             periodic_events: FxHashMap::default(),
             last_clock_values,
             pending_host_edges: BitSet::new(),
+            unknown_clock_values,
             topo_signals,
             domain_kinds,
             event_info,
@@ -696,17 +730,17 @@ impl<B: SimBackend> SimulationState<B> {
             let settle_update = capture_batch_edges
                 || !self.waiting.is_empty()
                 || executor.scheduled_updates_need_settle();
-            let domain_values: Vec<u8> = if settle_update {
+            let domain_values: Vec<(bool, bool)> = if settle_update {
                 self.topo_signals
                     .iter()
-                    .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                    .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                     .collect()
             } else {
                 Vec::new()
             };
-            let before = executor.backend().get_as::<u8>(event.signal) != 0;
+            let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
-            let after = executor.backend().get_as::<u8>(event.signal) != 0;
+            let after = sample_event_signal(executor.backend(), event.signal);
             let mut blocking_source = false;
             if let Some(&id) = self.signal_to_id.get(&event.signal)
                 && self.edge_triggers(id, before, after)
@@ -727,8 +761,8 @@ impl<B: SimBackend> SimulationState<B> {
                 if *id != usize::MAX
                     && self.edge_triggers(
                         *id,
-                        before != 0,
-                        executor.backend().get_as::<u8>(*signal) != 0,
+                        before,
+                        sample_event_signal(executor.backend(), *signal),
                     )
                 {
                     if capture_batch_edges || blocking_source {
@@ -750,10 +784,10 @@ impl<B: SimBackend> SimulationState<B> {
         let counter_values = self.event_counter_values(executor.backend());
         let mut process_driven = Vec::new();
         if !ready_processes.is_empty() || !self.waiting.is_empty() {
-            let before: Vec<u8> = self
+            let before: Vec<(bool, bool)> = self
                 .topo_signals
                 .iter()
-                .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                 .collect();
             let progressed =
                 self.run_processes(executor, current_time, ready_processes, &mut delta_rounds)?;
@@ -771,9 +805,9 @@ impl<B: SimBackend> SimulationState<B> {
                 if *id == usize::MAX {
                     continue;
                 }
-                let value: u8 = executor.backend().get_as(*signal);
+                let value = sample_event_signal(executor.backend(), *signal);
                 if value != before {
-                    process_driven.push((*id, value != 0));
+                    process_driven.push((*id, value));
                 }
             }
         }
@@ -794,12 +828,15 @@ impl<B: SimBackend> SimulationState<B> {
             .filter_map(|event| {
                 self.signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0))
+                    .map(|&id| (id, (event.next_val & 1 != 0, false)))
             })
             .chain(process_driven);
         for (id, is_nonzero) in scheduled {
             track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
+            let was_nonzero = (
+                self.last_clock_values.contains(id),
+                self.unknown_clock_values.contains(id),
+            );
             if self.edge_triggers(id, was_nonzero, is_nonzero) {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
@@ -994,11 +1031,16 @@ impl<B: SimBackend> SimulationState<B> {
                     let before = self
                         .topo_signals
                         .iter()
-                        .map(|(signal, _, _)| executor.backend().get_as::<u8>(*signal))
+                        .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                         .collect::<Vec<_>>();
                     for ((_, id, _), value) in self.topo_signals.iter().zip(&before) {
                         if *id != usize::MAX && processed.contains(*id) {
-                            if *value != 0 {
+                            if value.1 {
+                                self.unknown_clock_values.insert(*id);
+                            } else {
+                                self.unknown_clock_values.remove(*id);
+                            }
+                            if value.0 {
                                 self.last_clock_values.insert(*id);
                             } else {
                                 self.last_clock_values.remove(*id);
@@ -1024,8 +1066,8 @@ impl<B: SimBackend> SimulationState<B> {
                             if *id != usize::MAX
                                 && self.edge_triggers(
                                     *id,
-                                    before != 0,
-                                    executor.backend().get_as::<u8>(*signal) != 0,
+                                    before,
+                                    sample_event_signal(executor.backend(), *signal),
                                 )
                             {
                                 executor.backend_mut().mark_triggered_bit(*id);
@@ -1050,10 +1092,10 @@ impl<B: SimBackend> SimulationState<B> {
             // Poll between outer cascade stages (IEEE 1800-2023 4.5), never
             // between the domains evaluated in the same active region.
             let polled = !self.waiting.is_empty() && !self.finished;
-            let before: Vec<u8> = if polled {
+            let before: Vec<(bool, bool)> = if polled {
                 self.topo_signals
                     .iter()
-                    .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                    .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                     .collect()
             } else {
                 Vec::new()
@@ -1097,8 +1139,8 @@ impl<B: SimBackend> SimulationState<B> {
                         if *id == usize::MAX {
                             continue;
                         }
-                        let value: u8 = executor.backend().get_as(*signal);
-                        if value != before && self.edge_triggers(*id, before != 0, value != 0) {
+                        let value = sample_event_signal(executor.backend(), *signal);
+                        if value != before && self.edge_triggers(*id, before, value) {
                             driven.insert(*id);
                             executor.backend_mut().mark_triggered_bit(*id);
                         }
@@ -1133,8 +1175,13 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = executor.backend().get_as(*signal);
-            if value != 0 {
+            let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+            if unknown {
+                self.unknown_clock_values.insert(*id);
+            } else {
+                self.unknown_clock_values.remove(*id);
+            }
+            if value {
                 self.last_clock_values.insert(*id);
             } else {
                 self.last_clock_values.remove(*id);
@@ -1195,15 +1242,12 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Whether a change of event signal `id` from `was_nonzero` to
     /// `is_nonzero` is the edge its domain triggers on.
-    fn edge_triggers(&self, id: usize, was_nonzero: bool, is_nonzero: bool) -> bool {
+    fn edge_triggers(&self, id: usize, was: (bool, bool), is: (bool, bool)) -> bool {
+        let (posedge, negedge) = transition_edges(was, is);
         match self.domain_kinds[id] {
-            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                !was_nonzero && is_nonzero
-            }
-            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                was_nonzero && !is_nonzero
-            }
-            _ => !was_nonzero && is_nonzero,
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+            _ => posedge,
         }
     }
 
@@ -1255,6 +1299,7 @@ impl<B: SimBackend> SimulationState<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             pending_host_edges: self.pending_host_edges.clone(),
+            unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
             waiting: self.waiting.clone(),
             inactive: self.inactive.clone(),
@@ -1292,6 +1337,8 @@ impl<B: SimBackend> SimulationState<B> {
             .clone_from(&snapshot.last_clock_values);
         self.pending_host_edges
             .clone_from(&snapshot.pending_host_edges);
+        self.unknown_clock_values
+            .clone_from(&snapshot.unknown_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.waiting.clone_from(&snapshot.waiting);
         self.inactive.clone_from(&snapshot.inactive);
@@ -1314,6 +1361,7 @@ pub struct ScheduleParts<B: SimBackend> {
     /// Events whose signal was high when edge detection last sampled it.
     pub high_events: Vec<B::Event>,
     pub captured_edges: Vec<B::Event>,
+    pub unknown_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
     /// Processes waiting for an event or a condition, in ascending order.
@@ -1358,6 +1406,11 @@ impl<B: SimBackend> SimulationState<B> {
                 .iter()
                 .map(|id| events[id])
                 .collect(),
+            unknown_events: self
+                .unknown_clock_values
+                .iter()
+                .map(|id| events[id])
+                .collect(),
             process_wakeups: {
                 let mut wakeups = self
                     .process_wakeups
@@ -1395,6 +1448,10 @@ impl<B: SimBackend> SimulationState<B> {
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
         }
+        self.unknown_clock_values.make_empty();
+        for event in parts.unknown_events {
+            self.unknown_clock_values.insert(event.id());
+        }
         self.pending_host_edges = parts
             .captured_edges
             .into_iter()
@@ -1419,6 +1476,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     pending_host_edges: BitSet,
+    unknown_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     waiting: BTreeSet<usize>,
     inactive: BTreeSet<usize>,
@@ -1434,6 +1492,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             pending_host_edges: self.pending_host_edges.clone(),
+            unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
             waiting: self.waiting.clone(),
             inactive: self.inactive.clone(),
