@@ -3457,6 +3457,41 @@ pub(super) fn fixed_runtime_write_times(
     expr: &sv::ir::Expr,
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
+    fn pure_call(
+        name: &str,
+        args: &[Option<sv::ir::Expr>],
+        pm: &ProcModule<'_>,
+        expr: &sv::ir::Expr,
+        active: &mut HashSet<String>,
+    ) -> bool {
+        let Some(sub) = pm.subroutine(name) else {
+            return false;
+        };
+        if sub.is_task || !active.insert(name.to_owned()) {
+            return false;
+        }
+        let mut ending = false;
+        for stmt in &sub.body {
+            stmt.walk(&mut |stmt| {
+                ending |= matches!(stmt, sv::ir::Stmt::SystemTask {name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
+            });
+        }
+        let mut nested = Vec::new();
+        default_calls(sub, args, &mut nested);
+        for stmt in &sub.body {
+            stmt_calls(stmt, &mut nested);
+        }
+        let pure = !ending
+            && !has_own_timing(&sub.body)
+            && sub.params.iter().all(|p| !p.direction.is_written())
+            && watched_write_count(&sub.body, pm, expr, &mut HashSet::default(), false) == 0
+            && watched_write_count(&sub.body, pm, expr, &mut HashSet::default(), true) == 0
+            && nested
+                .iter()
+                .all(|(name, args)| pure_call(name, args, pm, expr, active));
+        active.remove(name);
+        pure
+    }
     use sv::ir::{LoopKind, Stmt};
     let (stmts, recurring) = match stmts {
         [
@@ -3477,7 +3512,10 @@ pub(super) fn fixed_runtime_write_times(
     for stmt in stmts {
         let mut calls = Vec::new();
         stmt_calls(stmt, &mut calls);
-        if !calls.is_empty() {
+        if !calls
+            .iter()
+            .all(|(name, args)| pure_call(name, args, pm, expr, &mut HashSet::default()))
+        {
             return None;
         }
         let count = match stmt {
