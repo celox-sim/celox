@@ -626,7 +626,18 @@ impl<B: SimBackend> SimulationState<B> {
 
         let num_events = executor.backend().num_events();
         let mut scheduled_edges = BitSet::with_capacity(num_events);
+        // A same-time batch may restore a derived clock before its final
+        // settle. Preserve actual domain transitions across each source store.
+        let capture_batch_edges = events_to_process.len() > 1;
         for event in &events_to_process {
+            let domain_values: Vec<u8> = if capture_batch_edges {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let before = executor.backend().get_as::<u8>(event.signal) != 0;
             executor.backend_mut().set(event.signal, event.next_val);
             let after = executor.backend().get_as::<u8>(event.signal) != 0;
@@ -635,11 +646,25 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 scheduled_edges.insert(id);
             }
-            if !self.waiting.is_empty() || executor.scheduled_updates_need_settle() {
+            if capture_batch_edges
+                || !self.waiting.is_empty()
+                || executor.scheduled_updates_need_settle()
+            {
                 executor.eval_comb()?;
                 if executor.finish_requested(current_time) {
                     self.finished = true;
                     return Ok(true);
+                }
+            }
+            for ((signal, id, _), before) in self.topo_signals.iter().zip(domain_values) {
+                if *id != usize::MAX
+                    && self.edge_triggers(
+                        *id,
+                        before != 0,
+                        executor.backend().get_as::<u8>(*signal) != 0,
+                    )
+                {
+                    scheduled_edges.insert(*id);
                 }
             }
             self.sample_waiting_events(executor)?;

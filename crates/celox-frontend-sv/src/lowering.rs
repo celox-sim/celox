@@ -2608,14 +2608,15 @@ fn event_access_expr(
     let variable = &variables[&id];
     let base = sv::ir::Expr::Ident(variable.path.join("."));
     if access == BitAccess::new(0, variable.width - 1)
-        || !variable.array_dims.is_empty()
-        || variable.packed_ranges.len() != 1
+        || (variable.array_dims.is_empty() && variable.packed_ranges.len() != 1)
     {
         return base;
     }
-    let (left, right) = variable.packed_ranges[0];
+    let (left, right) = variable.packed_ranges.first().copied().unwrap_or((0, 0));
     let index = |offset: usize| {
-        if left >= right {
+        if !variable.array_dims.is_empty() {
+            offset as i128
+        } else if left >= right {
             right + offset as i128
         } else {
             right - offset as i128
@@ -2766,6 +2767,34 @@ fn validate_cross_instance_event_pulses(
                     },
                 };
                 if let Some((target, target_bits)) = access(&lhs) {
+                    // Direct concatenated wiring preserves each piece's range,
+                    // just like concatenated instance port connections.
+                    if let Some(pieces) = output_lvalue_accesses(
+                        rhs,
+                        &module.variables,
+                        &module.signal_names,
+                        &module.constants,
+                        &module.parameter_types,
+                    ) && pieces
+                        .iter()
+                        .map(|piece| width(piece.access))
+                        .sum::<usize>()
+                        == width(target_bits)
+                    {
+                        let mut offset = target_bits.lsb;
+                        for piece in pieces.into_iter().rev() {
+                            let bits = BitAccess::new(offset, offset + width(piece.access) - 1);
+                            offset += width(piece.access);
+                            dependencies.entry((id, target)).or_default().push(Edge {
+                                source: (id, piece.signal),
+                                target: bits,
+                                read: piece.access,
+                                linear: true,
+                                port: false,
+                            });
+                        }
+                        continue;
+                    }
                     let reads = event_read_accesses(
                         rhs,
                         &module.variables,
