@@ -3966,15 +3966,23 @@ test("DUT lazy reads preserve finished outputs until explicit evalComb", () => {
 		{ target: { signal: 1, lsb: 0, width: 8 }, value: 2 },
 	];
 	artifact.processes[0].body = ["Finish"];
+	artifact.signals[1].value_type.four_state = true;
+	artifact.expressions[2].value_type.four_state = true;
+	artifact.signals[0].initial = {
+		payload: [0],
+		mask: [0],
+		value_type: artifact.signals[0].value_type,
+	};
 	const sim = Simulation.fromFrontendArtifact<{
 		y: bigint;
 		readonly derived: bigint;
-	}>(JSON.stringify(artifact));
+	}>(JSON.stringify(artifact), { fourState: true });
 	try {
 		sim.runUntil(0);
 		expect(sim.isFinished()).toBe(true);
 		sim.dut.y = 7n;
 		expect(sim.dut.derived).toBe(0n);
+		expect(sim.fourState("derived")).toEqual(FourState(0n, 0n));
 	} finally {
 		sim.dispose();
 	}
