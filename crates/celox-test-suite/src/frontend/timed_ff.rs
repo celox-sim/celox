@@ -71,7 +71,7 @@ fn parens(source: &str, begin: usize) -> Option<usize> {
     }
     None
 }
-fn statement_end(source: &str, at: usize) -> Option<usize> {
+pub(super) fn statement_end(source: &str, at: usize) -> Option<usize> {
     let at = trivia(source, at);
     if source[at..].starts_with("(*") {
         return statement_end(source, parens(source, at)?);

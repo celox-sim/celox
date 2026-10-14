@@ -618,7 +618,8 @@ impl<B: SimBackend> SimulationState<B> {
         self
     }
 
-    fn sample_waiting_events<E>(
+    /// Capture suspended event waits without executing their continuations.
+    pub fn sample_waiting_events<E>(
         &mut self,
         executor: &mut E,
         time: u64,
@@ -626,6 +627,9 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        if self.finished {
+            return Ok(());
+        }
         for &process in &self.waiting {
             let refs = &self.processes[process];
             if !matches!(

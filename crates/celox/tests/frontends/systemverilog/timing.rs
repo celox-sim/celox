@@ -195,3 +195,5 @@ sv_backends! { fn staged_wildcard_finish_waits_for_startup(sim) { @case "timing:
 sv_backends! { fn constant_repeat_writes_preserve_distinct_activation_times(sim) { @case "timing::constant_repeat_writes_preserve_distinct_activation_times"; } }
 
 sv_backends! { fn separate_comb_assignments_preserve_selected_dependencies(sim) { @case "timing::separate_comb_assignments_preserve_selected_dependencies"; } }
+
+sv_backends! { fn staged_always_comb_finish_ignores_initial_inputs(sim) { @case "timing::staged_always_comb_finish_ignores_initial_inputs"; } }
