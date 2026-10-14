@@ -258,3 +258,6 @@ sv_backends! {
 sv_backends! {
  fn named_arguments_do_not_invent_timed_calls(sim) { @case "timing::named_arguments_do_not_invent_timed_calls"; }
 }
+sv_backends! {
+ fn timed_calls_after_do_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_do_do_not_replay_setup_edges"; }
+}

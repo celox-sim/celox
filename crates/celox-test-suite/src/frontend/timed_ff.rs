@@ -793,9 +793,9 @@ impl TaskTiming {
                 }
                 let statement_start = prefix.is_empty()
                     || prefix.ends_with([';', ')', ':', '.'])
-                    || sv_words(prefix)
-                        .last()
-                        .is_some_and(|word| matches!(word.2, "begin" | "end" | "else" | "forever"));
+                    || sv_words(prefix).last().is_some_and(|word| {
+                        matches!(word.2, "begin" | "end" | "else" | "forever" | "do")
+                    });
                 (tail.starts_with('(') || (tail.starts_with(';') && statement_start))
                     && self.resolve(source, start + at, name).unwrap_or(true)
             })
