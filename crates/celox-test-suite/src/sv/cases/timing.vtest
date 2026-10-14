@@ -842,3 +842,10 @@ endmodule"#)
  always @(posedge clk)do tick;while(0);
  initial begin #3;$finish;end endmodule"#)
  (top Top)(set clk 1)(run_to_finish)(assert_eq q 0))
+
+(case timed_calls_after_named_blocks_do_not_replay_setup_edges
+ (source "named-block-task.sv" #"module Top(input bit clk,output bit q);
+ task automatic tick();#1 q=1;endtask
+ always @(posedge clk)begin : work tick;end
+ initial begin #3;$finish;end endmodule"#)
+ (top Top)(set clk 1)(run_to_finish)(assert_eq q 0))

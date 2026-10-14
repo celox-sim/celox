@@ -418,11 +418,29 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.modify(f)
     }
 
+    fn validate_event_time(&self, time: u64) -> Result<(), RuntimeErrorCode> {
+        if time < self.state.time() {
+            return Err(RuntimeErrorCode::Runtime {
+                message: format!(
+                    "cannot schedule an event in the past: {time} before {}",
+                    self.state.time()
+                ),
+                signals: Vec::new(),
+            });
+        }
+        Ok(())
+    }
+
     /// Register a clock signal and its period, enqueuing the first edge.
     /// Odd periods alternate floor/ceil half periods. Periods below two
     /// time units use a two-unit period so both phases advance time.
-    /// `initial_delay` specifies when the first rising edge occurs.
+    /// `initial_delay` specifies when the first rising edge occurs. Past
+    /// timestamps are ignored by this compatibility API; use
+    /// [`Self::try_add_clock_by_id`] for an error result.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
+        if self.validate_event_time(initial_delay).is_err() {
+            return;
+        }
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
@@ -433,15 +451,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Schedule a one-shot event at a specific time.
     /// The signal must be registered as an event (clock or async reset) in the backend.
     pub fn schedule(&mut self, port: &str, time: u64, value: u64) -> Result<(), RuntimeErrorCode> {
-        if time < self.state.time() {
-            return Err(RuntimeErrorCode::Runtime {
-                message: format!(
-                    "cannot schedule an event in the past: {time} before {}",
-                    self.state.time()
-                ),
-                signals: Vec::new(),
-            });
-        }
+        self.validate_event_time(time)?;
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
@@ -706,13 +716,15 @@ impl<B: SimBackend> Simulation<B> {
     /// # Errors
     ///
     /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is unknown or
-    /// does not resolve to an event (clock or asynchronous reset).
+    /// does not resolve to an event (clock or asynchronous reset), or a runtime
+    /// error if the initial edge would precede the current time.
     pub fn try_add_clock_by_id(
         &mut self,
         event_id: u32,
         period: u64,
         initial_delay: u64,
     ) -> Result<(), RuntimeErrorCode> {
+        self.validate_event_time(initial_delay)?;
         let addr = self
             .simulator
             .backend
@@ -741,6 +753,7 @@ impl<B: SimBackend> Simulation<B> {
         time: u64,
         value: u64,
     ) -> Result<(), RuntimeErrorCode> {
+        self.validate_event_time(time)?;
         let addr = self
             .simulator
             .backend
@@ -2148,5 +2161,44 @@ mod scheduled_derived_concat_review_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build().unwrap()), value, seen);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod past_by_id_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(10).unwrap();
+        let clk = sim.signal("clk");
+        let id = sim
+            .simulator
+            .backend
+            .id_to_addr_slice()
+            .iter()
+            .position(|addr| sim.simulator.backend.resolve_signal(addr) == clk)
+            .unwrap() as u32;
+        assert!(sim.schedule_by_id(id, 5, 1).is_err());
+        assert!(sim.try_add_clock_by_id(id, 4, 5).is_err());
+        sim.add_clock("clk", 4, 5);
+        sim.add_clock_by_id(id, 4, 5);
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 10);
+        assert_eq!(sim.next_event_time(), None);
+        sim.schedule_by_id(id, 10, 1).unwrap();
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 10);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    #[test]
+    fn by_id_schedules_and_clock_registration_cannot_rewind_time() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("past-id.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }

@@ -791,9 +791,15 @@ impl TaskTiming {
                 {
                     return false;
                 }
-                let statement_start = prefix.is_empty()
+                let words = sv_words(prefix);
+                let named_block = words.len() >= 2
+                    && words[words.len() - 2].2 == "begin"
+                    && after_trivia(&prefix[words[words.len() - 2].1..]).starts_with(':')
+                    && after_trivia(&prefix[words[words.len() - 1].1..]).is_empty();
+                let statement_start = named_block
+                    || prefix.is_empty()
                     || prefix.ends_with([';', ')', ':', '.'])
-                    || sv_words(prefix).last().is_some_and(|word| {
+                    || words.last().is_some_and(|word| {
                         matches!(word.2, "begin" | "end" | "else" | "forever" | "do")
                     });
                 (tail.starts_with('(') || (tail.starts_with(';') && statement_start))
