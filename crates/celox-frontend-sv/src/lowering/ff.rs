@@ -3491,6 +3491,17 @@ pub(super) fn fixed_runtime_write_times(
         active.remove(name);
         pure
     }
+    fn branch_without_suspension_or_exit(stmts: &[sv::ir::Stmt]) -> bool {
+        let mut safe = true;
+        for stmt in stmts {
+            stmt.walk(&mut |stmt| {
+                safe &= !matches!(stmt, sv::ir::Stmt::Delay(_) | sv::ir::Stmt::Wait(_) | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::Return(_) | sv::ir::Stmt::Break | sv::ir::Stmt::Continue);
+                safe &= !matches!(stmt,sv::ir::Stmt::SystemTask {name,..} if matches!(name.as_str(),"$finish"|"$fatal"));
+            });
+        }
+        safe
+    }
     use sv::ir::{LoopKind, Stmt};
     let (stmts, recurring) = match stmts {
         [
@@ -3553,6 +3564,17 @@ pub(super) fn fixed_runtime_write_times(
                     phase = 0;
                 }
                 0
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } if branch_without_suspension_or_exit(then_body)
+                && branch_without_suspension_or_exit(else_body) =>
+            {
+                runtime_watched_write_count(then_body, pm, expr, nonblocking).max(
+                    runtime_watched_write_count(else_body, pm, expr, nonblocking),
+                )
             }
             Stmt::If { .. }
             | Stmt::Case { .. }

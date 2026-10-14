@@ -2367,3 +2367,20 @@ fn folded_initial_values_are_not_runtime_cross_instance_pulses() {
     sim.run_until(1).unwrap();
     assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
 }
+
+#[test]
+fn conditional_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(input bit sel,output bit[1:0]q);initial begin #1;if(sel)q[0]=1;else q[0]=0;end initial begin #2;q[1]=1;end endmodule module Top(input bit sel,output bit[7:0]seen);wire[1:0]q;Child u(.sel(sel),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    for sel in [0u8, 1] {
+        let mut sim = simulation(source);
+        let signal = sim.signal("sel");
+        sim.modify(|io| io.set(signal, sel)).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), sel.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (sel + 1).into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
