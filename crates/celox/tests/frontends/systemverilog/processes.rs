@@ -2486,3 +2486,25 @@ fn mixed_reset_polarities_through_aliases_are_rejected() {
         build_error(role_conflict).contains("mixed clock/reset-edge polarities through aliases")
     );
 }
+
+#[test]
+fn untimed_task_writes_preserve_distinct_activation_times() {
+    for body in [
+        "task automatic noop();endtask initial begin #1;noop();q[0]=1;end initial begin #2;noop();q[1]=1;end",
+        "task automatic drive(output bit x);x=1;endtask initial begin #1;drive(q[0]);end initial begin #2;drive(q[1]);end",
+    ] {
+        let source = format!(
+            "module Child(output bit[1:0]q);{body} endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    }
+}
+#[test]
+fn timed_task_branches_do_not_claim_an_earlier_write_wave() {
+    let source = "module Child(input bit sel,output bit[1:0]q);task automatic delayed();#5;q[0]=1;endtask initial begin #1;if(sel)delayed();end initial begin #6;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.sel(1'b1),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    assert!(build_error(source).contains("multiple blocking writes"));
+}
