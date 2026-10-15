@@ -1,14 +1,14 @@
 # yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
-# In-place validation: changing parallelism/batching requires batch-PR support
-# in the Conventional Commit and release-impact checks first.
+# Keep ordinary PR checks focused; validate combined trees on queue draft PRs.
 merge_queue:
-  max_parallel_checks: 1
+  max_parallel_checks: 5
   queued_label: queued
   dequeued_label: dequeued
 
 queue_rules:
   - name: default
-    batch_size: 1
+    batch_size: 5
+    batch_max_wait_time: 0 seconds
     max_checks_retries: 0
     checks_timeout: 3 hours
     merge_method: merge
@@ -18,6 +18,9 @@ queue_rules:
       body: empty
       trailers: []
     branch_protection_injection_mode: queue
+    merge_conditions:
+      - check-success = Queue validation
+      - check-success = Conventional Commit title
     queue_conditions:
       - base ~= ^(master|develop)$
       - -draft
