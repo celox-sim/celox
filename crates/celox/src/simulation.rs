@@ -5931,3 +5931,110 @@ mod sampled_host_review {
         );
     }
 }
+
+#[cfg(test)]
+mod zero_release_review {
+    use super::*;
+
+    // Veryl reset.assert(0) deliberately holds for one cycle. Exercise the
+    // lower-level kernel contract by reporting a zero-count release from
+    // an actual compiled kernel, then delegate the rest to the real backend.
+    struct ZeroRelease<'a, B: SimBackend> {
+        sim: &'a mut Simulator<B>,
+        controls: Vec<(SignalRef, SignalRef, SignalRef)>,
+    }
+    impl<B: SimBackend> SimulationExecutor for ZeroRelease<'_, B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_only_ff_at(self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::apply_ff_at(self.sim, event)
+        }
+        fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::run_process(self.sim, index, time)?;
+            let (status, delay, release) = self.controls[index];
+            if self.sim.backend.get_as::<u8>(status)
+                == celox_design::ProcessStatus::WaitClock.code()
+                && self.sim.backend.get_as::<u32>(release) != 0
+            {
+                self.sim.backend.set(delay, 0u64);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn zero_count_releases_capture_edges_before_the_continuation_restores_them() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let rst = sim.signal("rst");
+            sim.modify(|io| io.set(rst, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            let mut state = simulation_state(&sim);
+            let controls = sim
+                .program
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|slots| {
+                    (
+                        sim.backend.resolve_signal(&slots.status),
+                        sim.backend.resolve_signal(&slots.delay),
+                        sim.backend.resolve_signal(&slots.release),
+                    )
+                })
+                .collect();
+            let mut executor = ZeroRelease {
+                sim: &mut sim,
+                controls,
+            };
+            while state.next_event_time().is_some_and(|time| time <= 10) {
+                state.step(&mut executor).unwrap();
+            }
+            let count = sim.signal("count");
+            assert_eq!(sim.get(count), 1u8.into());
+            assert_eq!(sim.get(rst), 0u8.into());
+        }
+        let code = r#"
+        module Counter(clk: input clock, count: output logic<8>) {
+            always_ff(clk) { count += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen #(period: 10);
+            inst rst: $tb::reset_gen(clk);
+            var gate: logic;
+            let released: '_ clock = ~rst & gate;
+            var count: logic<8>;
+            inst dut: Counter(clk: released, count);
+            initial { gate = 1; rst.assert(1); gate = 0; clk.next(1); }
+        }"#;
+        macro_rules! build {
+            ($method:ident) => {
+                check(
+                    Simulator::builder(code, "Top")
+                        .testbench_kernels(true)
+                        .reset_type(crate::ResetType::AsyncHigh)
+                        .$method()
+                        .unwrap(),
+                );
+            };
+        }
+        build!(build_interpreter);
+        build!(build_cranelift);
+        build!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        build!(build_native);
+    }
+}

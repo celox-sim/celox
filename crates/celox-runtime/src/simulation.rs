@@ -1555,10 +1555,28 @@ impl<B: SimBackend> SimulationState<B> {
                                 // count documents.
                                 if let Some(release) = release {
                                     let release = refs.releases[release].clone();
+                                    let before_release = self
+                                        .topo_signals
+                                        .iter()
+                                        .map(|(signal, _, _)| {
+                                            sample_event_signal(executor.backend(), *signal)
+                                        })
+                                        .collect::<Vec<_>>();
                                     executor
                                         .backend_mut()
                                         .set_wide(release.signal, release.value.into());
                                     executor.eval_comb()?;
+                                    self.record_process_settle_edges(
+                                        executor.backend(),
+                                        &before_release,
+                                        &BitSet::new(),
+                                    );
+                                    self.sample_waiting_events(executor, current_time)?;
+                                    *comb_current = true;
+                                    if executor.finish_requested(current_time) {
+                                        self.finished = true;
+                                        return Ok(true);
+                                    }
                                 }
                                 any_ran = true;
                                 count_delta_pass(delta_rounds)?;
