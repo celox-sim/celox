@@ -9,6 +9,7 @@ import {
 } from "vite";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars, SIDECAR_DIR } from "./sidecar.js";
+import { withSidecarLock } from "./sidecar-lock.js";
 import {
 	loadTestbenchComponentModule,
 	normalizeTestbenchComponentPath,
@@ -124,26 +125,29 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Watch events can detect edits that preserve both mtime and size.
 			// Keep fingerprint checks for generator-owned lockfile notifications.
 			if (file !== projectFile("Veryl.lock")) cache.invalidate();
-			const pendingLockfileWrite = cache.hasPendingLockfileWrite;
-			const data = cache.get();
-			if (
-				file === projectFile("Veryl.lock") &&
-				(data === generatedData ||
-					(pendingLockfileWrite && isDeepStrictEqual(data, generatedData)))
-			) {
-				// Preserve the conservative cache refresh without publishing a
-				// second update for equivalent output from a generation-time write.
-				generatedData = data;
-				return false;
-			}
-			if (data !== generatedData) {
-				const nextPaths = generateSidecars(data, projectRoot);
-				const retained = new Set(nextPaths);
-				cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
-				sidecarPaths = nextPaths;
-				generatedData = data;
-			}
-			return { componentChanged };
+			return withSidecarLock(projectRoot, () => {
+				const pendingLockfileWrite = cache.hasPendingLockfileWrite;
+				const data = cache.get();
+				if (
+					file === projectFile("Veryl.lock") &&
+					(data === generatedData ||
+						(pendingLockfileWrite && isDeepStrictEqual(data, generatedData)))
+				) {
+					// Preserve the conservative cache refresh without publishing a
+					// second update for equivalent output from a generation-time write.
+					generatedData = data;
+					return false;
+				}
+				if (data !== generatedData) {
+					const nextPaths = generateSidecars(data, projectRoot, {
+						removeOrphans: false,
+					});
+					cleanSidecars(sidecarPaths, nextPaths);
+					sidecarPaths = nextPaths;
+					generatedData = data;
+				}
+				return { componentChanged };
+			});
 		};
 		// Share one queue across raw watcher and HMR events. A failed edit must
 		// still allow the next edit to regenerate and recover.
@@ -286,12 +290,13 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			}
 			cache = new GenTsCache(projectRoot, componentManifests);
 			// Run generator and create type sidecars
-			const data = cache.get();
-			const nextPaths = generateSidecars(data, projectRoot);
-			const retained = new Set(nextPaths);
-			cleanSidecars(sidecarPaths.filter((path) => !retained.has(path)));
-			sidecarPaths = nextPaths;
-			generatedData = data;
+			await withSidecarLock(projectRoot, () => {
+				const data = cache.get();
+				const nextPaths = generateSidecars(data, projectRoot);
+				cleanSidecars(sidecarPaths, nextPaths);
+				sidecarPaths = nextPaths;
+				generatedData = data;
+			});
 			if (viteConfig.command === "build" && this.meta.watchMode) {
 				const inputs = [
 					...cache.sourceFiles,

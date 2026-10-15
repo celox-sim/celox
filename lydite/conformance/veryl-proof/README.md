@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**721 actual passes / 745** and 24 recorded exceptions. The raw test executable
+**722 actual passes / 746** and 24 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 721 passes comprise 710 observation-checked cases, three smoke-only cases and
+The 722 passes comprise 711 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.

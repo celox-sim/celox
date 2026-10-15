@@ -140,6 +140,95 @@ pub(super) fn emit_sparse_chunk_copy(
     Ok(())
 }
 
+/// Static shape of one sparse region's dirty-word walk.
+pub(super) struct SparseDirtyWords {
+    pub(super) src_offset: i32,
+    pub(super) dst_offset: i32,
+    pub(super) byte_size: usize,
+    pub(super) dirty_words_offset: i32,
+    pub(super) chunk_count: usize,
+    pub(super) last_chunk: usize,
+    pub(super) last_len: usize,
+    pub(super) plane_count: usize,
+}
+
+/// Take and clear the dirty word indexed by RDX, copy its chunks to stable
+/// storage, and continue at `summary_next`. Uses RDI, RSI, R8 and R9.
+pub(super) fn emit_sparse_dirty_word(
+    asm: &mut CodeAssembler,
+    dirty: &SparseDirtyWords,
+    summary_next: CodeLabel,
+) -> Result<(), IcedError> {
+    let &SparseDirtyWords {
+        src_offset,
+        dst_offset,
+        byte_size,
+        dirty_words_offset,
+        chunk_count,
+        last_chunk,
+        last_len,
+        plane_count,
+    } = dirty;
+    asm.mov(rdi, rdx)?;
+    asm.shl(rdi, 3)?;
+    asm.mov(
+        r8,
+        qword_ptr(mem_operand_indexed(
+            BaseReg::SimState,
+            dirty_words_offset,
+            rdi,
+            1,
+        )),
+    )?;
+    asm.mov(
+        qword_ptr(mem_operand_indexed(
+            BaseReg::SimState,
+            dirty_words_offset,
+            rdi,
+            1,
+        )),
+        0i32,
+    )?;
+
+    let mut dirty_loop = asm.create_label();
+    let mut dirty_next = asm.create_label();
+    asm.set_label(&mut dirty_loop)?;
+    asm.test(r8, r8)?;
+    asm.je(summary_next)?;
+    asm.bsf(r9, r8)?;
+    asm.btr(r8, r9)?;
+    asm.mov(rdi, rdx)?;
+    asm.shl(rdi, 6)?;
+    asm.add(rdi, r9)?;
+    asm.cmp(rdi, chunk_count as i32)?;
+    asm.jae(dirty_next)?;
+    asm.shl(rdi, 3)?;
+
+    if last_len == 8 {
+        for plane in 0..plane_count {
+            let delta = (plane * byte_size) as i32;
+            emit_sparse_chunk_copy(asm, src_offset + delta, dst_offset + delta, rdi, 8)?;
+        }
+    } else {
+        let mut full = asm.create_label();
+        asm.cmp(rdi, (last_chunk * 8) as i32)?;
+        asm.jne(full)?;
+        for plane in 0..plane_count {
+            let delta = (plane * byte_size) as i32;
+            emit_sparse_chunk_copy(asm, src_offset + delta, dst_offset + delta, rdi, last_len)?;
+        }
+        asm.jmp(dirty_next)?;
+        asm.set_label(&mut full)?;
+        for plane in 0..plane_count {
+            let delta = (plane * byte_size) as i32;
+            emit_sparse_chunk_copy(asm, src_offset + delta, dst_offset + delta, rdi, 8)?;
+        }
+    }
+    asm.set_label(&mut dirty_next)?;
+    asm.jmp(dirty_loop)?;
+    Ok(())
+}
+
 fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedError> {
     let mut tail = asm.create_label();
     let mut below_four = asm.create_label();

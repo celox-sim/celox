@@ -367,6 +367,102 @@ module Top (
   (assert_eq q_hi 0xaabbccdd "high word was not committed")
   (assert_eq q_dynamic 0xaabbccdd "dynamic high read was not invalidated"))
 
+(case test_sparse_commit_reaches_every_summary_word
+  (source "test.veryl" #"
+module Bank (
+    clk  : input  clock,
+    wen  : input  logic,
+    a0   : input  logic<15>,
+    d0   : input  logic<64>,
+    a1   : input  logic<15>,
+    d1   : input  logic<64>,
+    probe: input  logic<15>,
+    q    : output logic<64>,
+    o_sampled: output logic<64>,
+) {
+    // 22528 64-bit elements: six sparse summary words, the last partly used.
+    var mem    : logic<64> [22528];
+    var sampled: logic<64>;
+    always_ff (clk) {
+        if wen {
+            mem[a0] = d0;
+            mem[a1] = d1;
+        }
+    }
+    // Another evaluation reads the memory, so its commit is a unit of its own.
+    always_ff (clk) {
+        sampled = mem[probe];
+    }
+    assign q = mem[probe];
+    assign o_sampled = sampled;
+}
+
+module Top (
+    clk  : input  clock,
+    wen  : input  logic,
+    a0   : input  logic<15>,
+    d0   : input  logic<64>,
+    a1   : input  logic<15>,
+    d1   : input  logic<64>,
+    probe: input  logic<15>,
+    q    : output logic<64>,
+    r    : output logic<64>,
+    s    : output logic<64>,
+) {
+    // Two independent banks let a partitioned kernel use two lanes.
+    inst u0: Bank (clk, wen, a0, d0, a1, d1, probe, q, o_sampled: s);
+    inst u1: Bank (clk, wen, a0: a1, d0: d1, a1: a0, d1: d0, probe, q: r, o_sampled: _);
+}
+"#)
+  (top Top)
+  (modify
+    (set wen 1)
+    (set a0 3)
+    (set d0 0x1111)
+    (set a1 12295)
+    (set d1 0x3333))
+  (tick clk)
+  (modify
+    (set a0 16389)
+    (set d0 0x4444)
+    (set a1 22527)
+    (set d1 0x5555))
+  (tick clk)
+  (modify
+    (set wen 0)
+    (set probe 3))
+  (assert_eq q 0x1111 "first summary word")
+  (assert_eq r 0x1111 "first summary word of the second bank")
+  (modify (set probe 12295))
+  (assert_eq q 0x3333 "last summary word of a group")
+  (assert_eq r 0x3333 "last summary word of a group in the second bank")
+  (modify (set probe 16389))
+  (assert_eq q 0x4444 "summary word after the groups")
+  (assert_eq r 0x4444 "summary word after the groups in the second bank")
+  (modify (set probe 22527))
+  (assert_eq q 0x5555 "final element")
+  (assert_eq r 0x5555 "final element of the second bank")
+  (modify
+    (set wen 1)
+    (set a0 16389)
+    (set d0 0x6666)
+    (set a1 4)
+    (set d1 0x7777))
+  (tick clk)
+  (modify
+    (set wen 0)
+    (set probe 16389))
+  (assert_eq q 0x6666 "rewrite after the groups")
+  (assert_eq r 0x6666 "rewrite after the groups in the second bank")
+  (modify (set probe 4))
+  (tick clk)
+  (assert_eq s 0x7777 "a registered read samples the committed element")
+  (assert_eq q 0x7777 "rewrite in the first group")
+  (assert_eq r 0x7777 "rewrite in the first group of the second bank")
+  (modify (set probe 3))
+  (assert_eq q 0x1111 "neighbouring element was preserved")
+  (assert_eq r 0x1111 "neighbouring element of the second bank was preserved"))
+
 (case test_wide_dynamic_ff_checkpoint_round_trip
   (source "test.veryl" #"
 module Top (

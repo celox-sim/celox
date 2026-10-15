@@ -16,6 +16,12 @@ test('separates producer blocking from ready-tail and resolves working storage',
  assert.equal(r.blocked_ns,15);assert.equal(r.ready_tail_ns,5);assert.equal(r.producer_work_ns,20);
  assert.equal(r.conflicts[0].signals[0].name,'dut.control');assert.equal(r.conflicts[0].signals[0].region,'working_offset');
 });
+test('StateBits conflicts resolve to the signal holding those bits',()=>{
+ const es=fixture(),h=es.find(x=>x.event==='hazard');
+ h.producer=h.consumer='Exact(MemoryLocation { object: StateBits, offset: 1603, byte_len: 2 })';
+ const r=explainWaits(es).rows[0];
+ assert.equal(r.conflicts[0].signals[0].name,'dut.control');assert.equal(r.conflicts[0].signals[0].region,'working_offset');
+});
 test('keeps already-ready waits distinct and never assigns conflicts from another scope',()=>{
  const es=fixture();es.find(x=>x.event==='task_wait').start_ns=31;
  es.find(x=>x.event==='hazard').scopes=[{id:'other'}];
