@@ -1299,3 +1299,28 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(run_until 0)(assert_eq seen 0)(run_to_finish)(expect_output ""))
+
+
+(case constant_continuous_function_edges_match_staged_startup
+ (source "constant-continuous-clocks.sv" #"
+ module Top(output bit net_seen,assign_seen);
+ function automatic bit high_value();return 1;endfunction
+ wire net_clock=high_value();
+ wire assign_clock;assign assign_clock=high_value();
+ always_ff @(posedge net_clock)net_seen=1;
+ always_ff @(posedge assign_clock)assign_seen=1;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(run_until 0)(assert_eq net_seen 1)(assert_eq assign_seen 1)(run_to_finish))
+
+(case escaped_initializer_function_effects_finish_during_initialization
+ (source "escaped-initializer-effect.sv" #"
+ module Top(output wire seen);
+ function automatic bit \stop_now ();$finish;return 1;endfunction
+ bit saved=\stop_now ();
+ assign seen=saved;
+ initial $fatal(1,"initial ran after escaped initializer finish");
+ endmodule
+ "#)
+ (top Top)(run_to_finish)(assert_eq seen 0)(expect_output ""))
