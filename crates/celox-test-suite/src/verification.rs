@@ -555,6 +555,16 @@ impl Backend for ObservedBackend {
             .take_output()
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
+    fn run_until(&mut self, time: u64) -> Result<()> {
+        self.backend
+            .run_until(time)
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
+    fn run_to_finish(&mut self) -> Result<()> {
+        self.backend
+            .run_to_finish()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
 }
 
 /// How a runner builds a case for a tool: a design for the process
@@ -606,7 +616,24 @@ fn run_script(
     match backend.run_testbench() {
         Ok(()) => {
             let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
-            match crate::script::sv::check_output(&log) {
+            // The simulators' `$finish` notices name the staged source files.
+            let sources: Vec<String> = std::fs::read_dir(directory)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .map(|entry| {
+                            entry
+                                .path()
+                                .canonicalize()
+                                .unwrap_or_else(|_| entry.path())
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .filter(|name| name.ends_with(".sv") || name.ends_with(".v"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match crate::script::sv::check_output(&log, &sources) {
                 Ok(()) => ("passed", "execute", String::new()),
                 Err(detail) => ("mismatch", "execute", detail),
             }

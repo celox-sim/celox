@@ -128,6 +128,8 @@ mod suite;
 mod synthesizable;
 #[path = "frontends/systemverilog/system_functions.rs"]
 mod system_functions;
+#[path = "frontends/systemverilog/timing.rs"]
+mod timing;
 #[path = "frontends/systemverilog/types.rs"]
 mod types;
 
@@ -212,4 +214,57 @@ fn simulates_systemverilog_always_ff() {
     sim.modify(|io| io.set(rst_n, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
+}
+
+sv_backends! {
+ fn multiple_import_items_preserve_untimed_edges(sim) { @case "timing::multiple_import_items_preserve_untimed_edges"; }
+ fn escaped_timed_tasks_do_not_replay_setup_edges(sim) { @case "timing::escaped_timed_tasks_do_not_replay_setup_edges"; }
+ fn control_names_do_not_rewrite_the_dut_type(sim) { @case "timing::control_names_do_not_rewrite_the_dut_type"; }
+}
+
+sv_backends! {
+ fn attributes_preserve_single_generate_arms(sim) { @case "timing::attributes_preserve_single_generate_arms"; }
+ fn adapter_defines_preserve_line_macros(sim) { @case "timing::adapter_defines_preserve_line_macros"; }
+ fn callable_timing_keeps_generate_scope(sim) { @case "timing::callable_timing_keeps_generate_scope"; }
+ fn single_item_generate_imports_do_not_leak(sim) { @case "timing::single_item_generate_imports_do_not_leak"; }
+ fn exported_untimed_tasks_keep_setup_edges(sim) { @case "timing::exported_untimed_tasks_keep_setup_edges"; }
+ fn qualified_unit_tasks_keep_setup_edges(sim) { @case "timing::qualified_unit_tasks_keep_setup_edges"; }
+}
+
+sv_backends! {
+ fn timed_file_macros_keep_each_source_path(sim) { @case "timing::timed_file_macros_keep_each_source_path"; }
+ fn escaped_identifiers_do_not_collide_with_control_names(sim) { @case "timing::escaped_identifiers_do_not_collide_with_control_names"; }
+}
+
+sv_backends! {
+ fn function_return_bounds_do_not_shadow_local_calls(sim) { @case "timing::function_return_bounds_do_not_shadow_local_calls"; }
+ fn control_shaped_display_is_design_output(sim) { @case "timing::control_shaped_display_is_design_output"; }
+}
+
+sv_backends! {
+ fn staged_ff_edge_can_finish_without_scheduled_work(sim) { @case "timing::staged_ff_edge_can_finish_without_scheduled_work"; }
+ fn coalesced_setup_writes_do_not_invent_ff_edges(sim) { @case "timing::coalesced_setup_writes_do_not_invent_ff_edges"; }
+}
+
+sv_backends! {
+ fn computed_edge_always_processes_arm_after_setup(sim) { @case "timing::computed_edge_always_processes_arm_after_setup"; }
+ fn non_ff_multiple_edge_always_processes_arm_after_setup(sim) { @case "timing::non_ff_multiple_edge_always_processes_arm_after_setup"; }
+}
+
+sv_backends! {
+ fn timed_calls_after_forever_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_forever_do_not_replay_setup_edges"; }
+ fn parenthesized_ff_event_leaves_preserve_setup_edges(sim) { @case "timing::parenthesized_ff_event_leaves_preserve_setup_edges"; }
+}
+sv_backends! {
+ fn named_arguments_do_not_invent_timed_calls(sim) { @case "timing::named_arguments_do_not_invent_timed_calls"; }
+}
+sv_backends! {
+ fn timed_calls_after_do_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_do_do_not_replay_setup_edges"; }
+}
+sv_backends! {
+ fn timed_calls_after_named_blocks_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_named_blocks_do_not_replay_setup_edges"; }
+}
+sv_backends! {
+ fn timed_calls_after_endcase_do_not_replay_setup_edges(sim) { @case "timing::timed_calls_after_endcase_do_not_replay_setup_edges"; }
+ fn inactive_time_directives_do_not_change_scheduler_units(sim) { @case "timing::inactive_time_directives_do_not_change_scheduler_units"; }
 }

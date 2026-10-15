@@ -1,0 +1,33 @@
+{
+  "suite": "sv",
+  "suite_version": "0.10.1",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "include_ignored": false,
+  "schema_version": 3,
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "timing::qualified_unit_tasks_keep_setup_edges",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 0,
+    "mismatch": 0,
+    "emission_error": 0,
+    "compile_error": 1,
+    "runtime_error": 0,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "note": "Focused pre-exclusion result for the new qualified compilation-unit task case. IEEE 1800-2023 3.12.1 permits $unit:: qualification. Celox and Verilator pass the unchanged case; Icarus 13.0 rejects the qualified call."
+}

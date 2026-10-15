@@ -789,6 +789,7 @@ dependencies = [
  "num-traits",
  "serde_json",
  "sha2 0.11.0",
+ "sv-parser",
  "veryl-analyzer",
  "veryl-emitter",
  "veryl-metadata",

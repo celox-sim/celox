@@ -2441,6 +2441,14 @@ fn generate_scope_head(name: &str) -> Option<&str> {
     Some(&name[..end])
 }
 
+/// Source ranges of generate scopes, including single-item bodies.
+/// Offsets refer to the parsed, preprocessed source text.
+pub fn generate_scope_ranges(tree: &SyntaxTree) -> Vec<(usize, usize)> {
+    tree.into_iter()
+        .flat_map(imports::generate_blocks)
+        .collect()
+}
+
 /// Source offsets of always constructs whose controls have the supported FF
 /// shape. Adapter callable analysis separately excludes timed task calls.
 pub fn ff_always_offsets(syntax_tree: &SyntaxTree) -> Vec<usize> {
@@ -2464,4 +2472,162 @@ pub fn ff_always_offsets(syntax_tree: &SyntaxTree) -> Vec<usize> {
                 })
         })
         .collect()
+}
+
+/// Actual call identifiers, excluding named argument labels and declarations.
+/// Bare identifiers in expressions are not call sites; bare statement calls are.
+pub fn procedural_call_sites(tree: &SyntaxTree) -> Vec<(usize, String)> {
+    let mut sites = Vec::new();
+    for node in tree {
+        let identifier = match node {
+            RefNode::TfCall(call) if call.nodes.2.is_some() => {
+                Some(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))
+            }
+            RefNode::SubroutineCallStatement(
+                sv_parser::SubroutineCallStatement::SubroutineCall(statement),
+            ) => match &statement.0 {
+                sv_parser::SubroutineCall::TfCall(call) => {
+                    Some(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))
+                }
+                _ => None,
+            },
+            RefNode::MethodCallBodyUser(call) => Some(RefNode::MethodIdentifier(&call.nodes.0)),
+            _ => None,
+        };
+        if let Some(identifier) = identifier {
+            let name = identifier
+                .into_iter()
+                .filter_map(|node| match node {
+                    RefNode::SimpleIdentifier(id) => tree
+                        .get_str(&id.nodes.0)
+                        .map(|text| (id.nodes.0.offset, text.trim().to_owned())),
+                    RefNode::EscapedIdentifier(id) => tree
+                        .get_str(&id.nodes.0)
+                        .map(|text| (id.nodes.0.offset, text.trim().to_owned())),
+                    _ => None,
+                })
+                .last();
+            if let Some(name) = name {
+                sites.push(name);
+            }
+        }
+    }
+    sites.sort_unstable();
+    sites.dedup();
+    sites
+}
+
+/// Parsed import/export clauses, keyed by the declaration keyword offset.
+/// A missing package/member denotes a wildcard; comments never become items.
+pub fn package_import_export_clauses(
+    tree: &SyntaxTree,
+) -> std::collections::BTreeMap<usize, Vec<(Option<String>, Option<String>)>> {
+    let mut clauses = std::collections::BTreeMap::new();
+    for node in tree {
+        let (offset, declaration) = match node {
+            RefNode::PackageImportDeclaration(item) => (
+                item.nodes.0.nodes.0.offset,
+                RefNode::PackageImportDeclaration(item),
+            ),
+            RefNode::PackageExportDeclaration(sv_parser::PackageExportDeclaration::Item(item)) => (
+                item.nodes.0.nodes.0.offset,
+                RefNode::PackageExportDeclarationItem(item),
+            ),
+            RefNode::PackageExportDeclaration(sv_parser::PackageExportDeclaration::Asterisk(
+                item,
+            )) => {
+                clauses.insert(item.nodes.0.nodes.0.offset, vec![(None, None)]);
+                continue;
+            }
+            _ => continue,
+        };
+        let items = declaration
+            .into_iter()
+            .filter_map(|node| match node {
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
+                    Some((
+                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
+                    ))
+                }
+                RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => Some((
+                    identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
+                    None,
+                )),
+                _ => None,
+            })
+            .collect();
+        clauses.insert(offset, items);
+    }
+    clauses
+}
+
+/// Instance bindings retain their declared type across parameter assignments.
+pub fn instance_type_sites(tree: &SyntaxTree) -> Vec<(usize, String, String)> {
+    let mut sites = Vec::new();
+    let mut inherited = None;
+    for node in tree {
+        if matches!(node, RefNode::ModuleDeclarationAnsi(_)) {
+            inherited = None;
+        }
+        if let RefNode::AnsiPortDeclarationNet(port) = node.clone() {
+            if let Some(header) = &port.nodes.0 {
+                inherited = match header {
+                    sv_parser::NetPortHeaderOrInterfacePortHeader::InterfacePortHeader(header) => {
+                        match &**header {
+                            sv_parser::InterfacePortHeader::Identifier(header) => {
+                                identifier_text(RefNode::InterfaceIdentifier(&header.nodes.0), tree)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+            }
+            if let Some(module) = inherited.clone()
+                && let Some(identifier) =
+                    identifier_text(RefNode::PortIdentifier(&port.nodes.1), tree)
+                && let Some(offset) =
+                    RefNode::PortIdentifier(&port.nodes.1)
+                        .into_iter()
+                        .find_map(|node| {
+                            if let RefNode::Locate(loc) = node {
+                                Some(loc.offset)
+                            } else {
+                                None
+                            }
+                        })
+            {
+                sites.push((offset, identifier, module));
+            }
+        } else if matches!(node, RefNode::AnsiPortDeclarationVariable(_)) {
+            inherited = None;
+        }
+
+        let RefNode::ModuleInstantiation(instance) = node else {
+            continue;
+        };
+        let Some(module) = identifier_text(RefNode::ModuleIdentifier(&instance.nodes.0), tree)
+        else {
+            continue;
+        };
+        for child in RefNode::ModuleInstantiation(instance) {
+            if let RefNode::NameOfInstance(name) = child {
+                let node = RefNode::InstanceIdentifier(&name.nodes.0);
+                let Some(identifier) = identifier_text(node.clone(), tree) else {
+                    continue;
+                };
+                if let Some(offset) = node.into_iter().find_map(|node| {
+                    if let RefNode::Locate(loc) = node {
+                        Some(loc.offset)
+                    } else {
+                        None
+                    }
+                }) {
+                    sites.push((offset, identifier, module.clone()));
+                }
+            }
+        }
+    }
+    sites
 }

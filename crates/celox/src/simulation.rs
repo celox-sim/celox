@@ -356,6 +356,9 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.check_vcd_rewind(record.time)?;
         let parts = self.simulator.resolve_schedule(record)?;
         self.simulator.load_state(file)?;
+        // V1 recorded Boolean (known) baselines. Masks of the restored
+        // current values may belong to a still-pending write and cannot be
+        // substituted for those historical baselines.
         self.state.import_schedule(parts);
         self.pending_host_work = false;
         Ok(())
@@ -451,6 +454,39 @@ impl<B: SimBackend> Simulation<B> {
         value
     }
 
+    /// Returns the value and unknown-bit mask of a signal.
+    pub fn get_four_state(
+        &mut self,
+        signal: SignalRef,
+    ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        let was_dirty = self.simulator.dirty;
+        let value = if self.state.is_finished() {
+            self.simulator.backend.get_four_state(signal)
+        } else {
+            self.simulator.get_four_state(signal)
+        };
+        self.synchronize_runtime_finish(was_dirty);
+        value
+    }
+
+    /// Sets a signal to a known value. The write takes effect at the current
+    /// time: processes waiting for it resume when the simulation next runs.
+    pub fn set_wide(&mut self, signal: SignalRef, value: num_bigint::BigUint) {
+        self.simulator.set_wide(signal, value);
+        self.synchronize_host_write();
+    }
+
+    /// Sets a signal's value and unknown-bit mask, like [`Self::set_wide`].
+    pub fn set_four_state(
+        &mut self,
+        signal: SignalRef,
+        value: num_bigint::BigUint,
+        mask: num_bigint::BigUint,
+    ) {
+        self.simulator.set_four_state(signal, value, mask);
+        self.synchronize_host_write();
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
@@ -465,11 +501,29 @@ impl<B: SimBackend> Simulation<B> {
         result
     }
 
+    fn validate_event_time(&self, time: u64) -> Result<(), RuntimeErrorCode> {
+        if time < self.state.time() {
+            return Err(RuntimeErrorCode::Runtime {
+                message: format!(
+                    "cannot schedule an event in the past: {time} before {}",
+                    self.state.time()
+                ),
+                signals: Vec::new(),
+            });
+        }
+        Ok(())
+    }
+
     /// Register a clock signal and its period, enqueuing the first edge.
     /// Odd periods alternate floor/ceil half periods. Periods below two
     /// time units use a two-unit period so both phases advance time.
-    /// `initial_delay` specifies when the first rising edge occurs.
+    /// `initial_delay` specifies when the first rising edge occurs. Past
+    /// timestamps are ignored by this compatibility API; use
+    /// [`Self::try_add_clock_by_id`] for an error result.
     pub fn add_clock(&mut self, port: &str, period: u64, initial_delay: u64) {
+        if self.validate_event_time(initial_delay).is_err() {
+            return;
+        }
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
@@ -480,6 +534,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Schedule a one-shot event at a specific time.
     /// The signal must be registered as an event (clock or async reset) in the backend.
     pub fn schedule(&mut self, port: &str, time: u64, value: u64) -> Result<(), RuntimeErrorCode> {
+        self.validate_event_time(time)?;
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
@@ -500,11 +555,79 @@ impl<B: SimBackend> Simulation<B> {
     /// instead: the call then returns the current time without advancing,
     /// so what the process did is observable at its own time.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         self.settle_host_writes()?;
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         if self.state.poll_waiting(&mut self.simulator)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
+        }
+        if self.state.has_unsettled_edges(&self.simulator.backend) {
+            let time = self.state.time();
+            let active = self
+                .state
+                .has_unsettled_active_edges(&self.simulator.backend);
+            let queued = self.state.next_event_time() == Some(time);
+            if queued {
+                self.state.step(&mut self.simulator)?;
+            } else {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
+            if self.state.is_finished() {
+                return Ok(None);
+            }
+            if active || queued {
+                return Ok(Some(time));
+            }
         }
         self.state.step(&mut self.simulator)
+    }
+
+    /// Settle the combinational logic after host writes and resume the
+    /// processes they woke at the current time, with the rounds that
+    /// follow, as [`Self::step`] does before advancing. Time does not
+    /// advance.
+    pub fn settle(&mut self) -> Result<(), RuntimeErrorCode> {
+        // A lazy output read can settle the host write and leave only its
+        // finish event pending. Synchronize termination before the clean path.
+        if self.simulator.has_pending_runtime_finish() {
+            self.state.finish();
+        }
+        if self.state.is_finished() {
+            return Ok(());
+        }
+        let time = self.state.time();
+        if self.simulator.dirty
+            || !self.simulator.backend.get_triggered_bits().is_empty()
+            || self.state.has_unsettled_edges(&self.simulator.backend)
+            || self
+                .state
+                .next_event_time()
+                .is_some_and(|next| next <= time)
+        {
+            self.settle_host_writes()?;
+            if self.state.is_finished() {
+                return Ok(());
+            }
+            let mut drained = false;
+            while self
+                .state
+                .next_event_time()
+                .is_some_and(|next| next <= time)
+            {
+                self.state.step(&mut self.simulator)?;
+                drained = true;
+            }
+            if !drained {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
+        } else {
+            self.state.poll_waiting(&mut self.simulator)?;
+        }
+        Ok(())
     }
 
     /// Settle the combinational logic a host write left dirty, so a process
@@ -538,12 +661,36 @@ impl<B: SimBackend> Simulation<B> {
     /// Run one step at or before `limit`, including processes a host write
     /// woke at the current time. Leave a later event queued.
     pub fn step_until(&mut self, limit: u64) -> Result<Option<u64>, RuntimeErrorCode> {
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         if self.state.time() > limit {
             return Ok(None);
         }
         self.settle_host_writes()?;
+        if self.state.is_finished() {
+            return Ok(None);
+        }
         if self.state.poll_waiting(&mut self.simulator)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
+        }
+        if self.state.has_unsettled_edges(&self.simulator.backend) {
+            let time = self.state.time();
+            let active = self
+                .state
+                .has_unsettled_active_edges(&self.simulator.backend);
+            let queued = self.state.next_event_time() == Some(time);
+            if queued {
+                self.state.step(&mut self.simulator)?;
+            } else {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
+            if self.state.is_finished() {
+                return Ok(None);
+            }
+            if active || queued {
+                return Ok(Some(time));
+            }
         }
         if self
             .state
@@ -559,11 +706,25 @@ impl<B: SimBackend> Simulation<B> {
     /// Advance time and run until `end_time` (inclusive). As for
     /// [`Self::step`], processes that a host write woke resume first.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
+        if self.state.is_finished() {
+            return Ok(());
+        }
         if self.state.time() > end_time {
             return Ok(());
         }
         self.settle_host_writes()?;
         self.state.poll_waiting(&mut self.simulator)?;
+        if self.state.has_unsettled_edges(&self.simulator.backend) {
+            let time = self.state.time();
+            if self.state.next_event_time() == Some(time) {
+                self.state.step(&mut self.simulator)?;
+            } else {
+                self.state.settle_at(&mut self.simulator, time)?;
+            }
+        }
+        if self.state.is_finished() {
+            return Ok(());
+        }
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
@@ -699,13 +860,15 @@ impl<B: SimBackend> Simulation<B> {
     /// # Errors
     ///
     /// Returns [`RuntimeErrorCode::NotAnEvent`] if `event_id` is unknown or
-    /// does not resolve to an event (clock or asynchronous reset).
+    /// does not resolve to an event (clock or asynchronous reset), or a runtime
+    /// error if the initial edge would precede the current time.
     pub fn try_add_clock_by_id(
         &mut self,
         event_id: u32,
         period: u64,
         initial_delay: u64,
     ) -> Result<(), RuntimeErrorCode> {
+        self.validate_event_time(initial_delay)?;
         let addr = self
             .simulator
             .backend
@@ -734,6 +897,7 @@ impl<B: SimBackend> Simulation<B> {
         time: u64,
         value: u64,
     ) -> Result<(), RuntimeErrorCode> {
+        self.validate_event_time(time)?;
         let addr = self
             .simulator
             .backend
@@ -1536,6 +1700,34 @@ mod finish_and_cotrigger_tests {
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
+mod idle_settle_tests {
+    use super::*;
+    #[test]
+    fn settled_reads_do_not_repeat_comb_side_effects() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let a = sim.signal("a");
+            sim.set_wide(a, 1u8.into());
+            sim.run_until(0).unwrap();
+            assert!(sim.drain_runtime_events().iter().any(
+                |e| matches!(e,crate::RuntimeEvent::Display { message } if message.as_slice()==b"x")
+            ));
+            sim.settle().unwrap();
+            sim.settle().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert!(sim.drain_runtime_events().is_empty());
+        }
+        let source = "module Top(input bit a,output bit q);always @* begin q=a;if(a)$display(\"x\");end endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("settle.sv"))], "Top");
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
 mod active_comb_nba_tests {
     use super::*;
     #[test]
@@ -1629,6 +1821,33 @@ mod direct_finish_tests {
         let source = "module Top(input bit clk,go,output bit q);always_comb if(go)$finish;always @(posedge clk)q<=1;endmodule";
         let builder =
             || Simulator::from_sv_sources(vec![(source, std::path::Path::new("finish.sv"))], "Top");
+        check(Simulation::new(builder().build_interpreter().unwrap()));
+        check(Simulation::new(builder().build_cranelift().unwrap()));
+        check(Simulation::new(builder().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(builder().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod current_time_settle_tests {
+    use super::*;
+    #[test]
+    fn settle_consumes_current_time_clock_events() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 0, 1).unwrap();
+            sim.settle().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.time(), 0);
+            assert_eq!(sim.next_event_time(), None);
+            sim.settle().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let source =
+            "module Top(input bit clk,output bit[7:0]q);always @(posedge clk)q<=q+1;endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("settle.sv"))], "Top");
         check(Simulation::new(builder().build_interpreter().unwrap()));
         check(Simulation::new(builder().build_cranelift().unwrap()));
         check(Simulation::new(builder().build_wasm().unwrap()));
@@ -1751,6 +1970,157 @@ mod scheduled_pulse_tests {
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
+mod lazy_host_clock_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, mask: u8) {
+        let clk = sim.signal("clk");
+        let q = sim.signal("q");
+        sim.set_four_state(clk, 1u8.into(), 0u8.into());
+        sim.settle().unwrap();
+        assert_eq!(sim.get(q), 1u8.into());
+        sim.set_four_state(clk, 0u8.into(), mask.into());
+        let _ = sim.get(q);
+        sim.settle().unwrap();
+        sim.set_four_state(clk, 1u8.into(), 0u8.into());
+        let _ = sim.get(q);
+        sim.settle().unwrap();
+        assert_eq!(sim.get(q), 2u8.into(), "inactive mask {mask}");
+    }
+    #[test]
+    fn lazy_reads_do_not_hide_inactive_clock_transitions() {
+        let source =
+            "module Top(input logic clk,output int q);always @(posedge clk)q<=q+1;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("lazy-clock.sv"))], "Top")
+                .four_state(true)
+        };
+        for mask in [0, 1] {
+            check(Simulation::new(build().build_interpreter().unwrap()), mask);
+            check(Simulation::new(build().build_cranelift().unwrap()), mask);
+            check(Simulation::new(build().build_wasm().unwrap()), mask);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), mask);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod legacy_clock_state_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>, known: u8) {
+        let clk = source.signal("clk");
+        source.set_four_state(clk, 1u8.into(), 0u8.into());
+        source.settle().unwrap();
+        source.set_four_state(clk, known.into(), 1u8.into());
+        source.settle().unwrap();
+        let file = source.save_state().unwrap();
+        let unknown_bytes = 4 + file
+            .schedule
+            .as_ref()
+            .unwrap()
+            .unknown_events
+            .iter()
+            .flatten()
+            .map(|name| 4 + name.len())
+            .sum::<usize>();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes.truncate(bytes.len() - unknown_bytes);
+        let legacy = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+        target.load_state(&legacy).unwrap();
+        let q = target.signal("q");
+        let before = target.get(q);
+        let clk = target.signal("clk");
+        target.set_four_state(clk, known.into(), 0u8.into());
+        target.settle().unwrap();
+        assert_eq!(target.get(q), before);
+    }
+    #[test]
+    fn legacy_files_keep_known_boolean_clock_baselines() {
+        for (edge, known) in [("posedge", 1u8), ("negedge", 0u8)] {
+            let source = format!(
+                "module Top(input logic clk,output int q);always @({edge} clk)q<=q+1;endmodule"
+            );
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("legacy-clock.sv"))],
+                    "Top",
+                )
+                .four_state(true)
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                Simulation::new(build().build_interpreter().unwrap()),
+                known,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                Simulation::new(build().build_cranelift().unwrap()),
+                known,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                Simulation::new(build().build_wasm().unwrap()),
+                known,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                Simulation::new(build().build_native().unwrap()),
+                known,
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod staged_edge_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, mut restored: Simulation<B>) {
+        let a = sim.signal("a");
+        let qa = sim.signal("qa");
+        let qb = sim.signal("qb");
+        sim.set_wide(a, 1u8.into());
+        let mut file = sim.save_state().unwrap();
+        file.schedule.as_mut().unwrap().unknown_events = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+        restored.load_state(&file).unwrap();
+        restored.settle().unwrap();
+        assert_eq!(restored.get(qa), 1u8.into());
+        sim.schedule("b", 0, 1).unwrap();
+        sim.settle().unwrap();
+        assert_eq!(sim.get(qa), 1u8.into());
+        assert_eq!(sim.get(qb), 1u8.into());
+    }
+    #[test]
+    fn host_edges_join_current_time_events_and_survive_legacy_state_files() {
+        let source = "module Top(input bit a,b,output bit[7:0]qa,qb);always @(posedge a)qa<=qb+1;always @(posedge b)qb<=qa+1;endmodule";
+        let build =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("staged.sv"))], "Top");
+        check(
+            Simulation::new(build().build_interpreter().unwrap()),
+            Simulation::new(build().build_interpreter().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_cranelift().unwrap()),
+            Simulation::new(build().build_cranelift().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_wasm().unwrap()),
+            Simulation::new(build().build_wasm().unwrap()),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulation::new(build().build_native().unwrap()),
+            Simulation::new(build().build_native().unwrap()),
+        );
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
 mod finished_host_write_review_tests {
     use super::*;
     fn check<B: SimBackend>(mut sim: Simulation<B>, operation: &str) {
@@ -1787,6 +2157,93 @@ mod finished_host_write_review_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), operation);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod public_host_edge_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, operation: &str) {
+        let clk = sim.signal("clk");
+        let q = sim.signal("q");
+        sim.set_wide(clk, 1u8.into());
+        match operation {
+            "step" => {
+                sim.step().unwrap();
+            }
+            "step_until" => {
+                sim.step_until(0).unwrap();
+            }
+            _ => sim.run_until(0).unwrap(),
+        };
+        assert_eq!(sim.get(q), 1u8.into());
+        assert_eq!(sim.time(), 0);
+        sim.run_until(10).unwrap();
+        assert!(sim.schedule("clk", 5, 0).is_err());
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 10);
+    }
+    #[test]
+    fn public_runs_settle_host_edges_and_reject_past_schedules() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        for operation in ["step", "step_until", "run_until"] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("host-edge.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                operation,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                operation,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), operation);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), operation);
+        }
+    }
+    #[test]
+    fn legacy_pending_known_to_unknown_edges_keep_their_known_baseline() {
+        let source = "module Top(input logic clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("legacy-pending.sv"))],
+                "Top",
+            )
+            .four_state(true)
+        };
+        fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>) {
+            source.set_four_state(source.signal("clk"), 0u8.into(), 1u8.into());
+            let mut file = source.save_state().unwrap();
+            file.schedule.as_mut().unwrap().unknown_events = None;
+            let mut bytes = Vec::new();
+            file.write_to(&mut bytes).unwrap();
+            let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+            target.load_state(&file).unwrap();
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 1u8.into());
+        }
+        check(
+            Simulation::new(build().build_interpreter().unwrap()),
+            Simulation::new(build().build_interpreter().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_cranelift().unwrap()),
+            Simulation::new(build().build_cranelift().unwrap()),
+        );
+        check(
+            Simulation::new(build().build_wasm().unwrap()),
+            Simulation::new(build().build_wasm().unwrap()),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulation::new(build().build_native().unwrap()),
+            Simulation::new(build().build_native().unwrap()),
+        );
     }
 }
 
@@ -1852,6 +2309,45 @@ mod scheduled_derived_concat_review_tests {
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
+mod past_by_id_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(10).unwrap();
+        let clk = sim.signal("clk");
+        let id = sim
+            .simulator
+            .backend
+            .id_to_addr_slice()
+            .iter()
+            .position(|addr| sim.simulator.backend.resolve_signal(addr) == clk)
+            .unwrap() as u32;
+        assert!(sim.schedule_by_id(id, 5, 1).is_err());
+        assert!(sim.try_add_clock_by_id(id, 4, 5).is_err());
+        sim.add_clock("clk", 4, 5);
+        sim.add_clock_by_id(id, 4, 5);
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 10);
+        assert_eq!(sim.next_event_time(), None);
+        sim.schedule_by_id(id, 10, 1).unwrap();
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 10);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    #[test]
+    fn by_id_schedules_and_clock_registration_cannot_rewind_time() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("past-id.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
 mod finish_during_round_review_tests {
     use super::*;
     use std::path::Path;
@@ -1900,6 +2396,63 @@ mod finish_during_round_review_tests {
         nba_finish(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         nba_finish(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod inactive_host_transition_review_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulation<B>, method: &str, future: bool) {
+        let clk = sim.signal("clk");
+        sim.set_wide(clk, 1u8.into());
+        sim.run_until(0).unwrap();
+        sim.set_wide(clk, 0u8.into());
+        if future {
+            sim.schedule("clk", 5, 1).unwrap();
+        }
+        if method == "step" {
+            assert_eq!(sim.step().unwrap(), future.then_some(5));
+        } else {
+            assert_eq!(sim.step_until(4).unwrap(), None);
+            if future {
+                assert_eq!(sim.step_until(5).unwrap(), Some(5));
+            }
+        }
+    }
+    #[test]
+    fn inactive_host_edges_do_not_fabricate_steps() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=1;endmodule";
+        for method in ["step", "step_until"] {
+            for future in [false, true] {
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(source, std::path::Path::new("inactive-host.sv"))],
+                        "Top",
+                    )
+                };
+                check(
+                    Simulation::new(build().build_interpreter().unwrap()),
+                    method,
+                    future,
+                );
+                check(
+                    Simulation::new(build().build_cranelift().unwrap()),
+                    method,
+                    future,
+                );
+                check(
+                    Simulation::new(build().build_wasm().unwrap()),
+                    method,
+                    future,
+                );
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(
+                    Simulation::new(build().build_native().unwrap()),
+                    method,
+                    future,
+                );
+            }
+        }
     }
 }
 
@@ -1997,6 +2550,120 @@ mod queued_derived_ff_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_edge_review_tests {
+    use super::*;
+    #[test]
+    fn host_finish_and_edge_do_not_report_a_step() {
+        let source = "module Top(input bit a,output bit q);always_comb if(a)$finish;always @(posedge a)q<=1;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>, bounded: bool) {
+            sim.run_until(0).unwrap();
+            assert!(!sim.is_finished());
+            sim.set_wide(sim.signal("a"), 1u8.into());
+            let result = if bounded {
+                sim.step_until(0)
+            } else {
+                sim.step()
+            };
+            assert_eq!(result.unwrap(), None);
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            assert_eq!(sim.time(), 0);
+        }
+        for bounded in [false, true] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("host-finish-edge.sv"))],
+                    "Top",
+                )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                bounded,
+            );
+            check(Simulation::new(build().build_cranelift().unwrap()), bounded);
+            check(Simulation::new(build().build_wasm().unwrap()), bounded);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), bounded);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod cross_mode_clock_baseline_review_tests {
+    use super::*;
+    #[test]
+    fn unknown_clock_baselines_coerce_with_loaded_state() {
+        let source =
+            "module Top(input logic clk,output bit[7:0]q);always @(negedge clk)q<=q+1;endmodule";
+        fn check<B: SimBackend>(mut source: Simulation<B>, mut target: Simulation<B>, payload: u8) {
+            let clk = source.signal("clk");
+            source
+                .modify(|io| io.set_four_state(clk, payload.into(), 1u8.into()))
+                .unwrap();
+            source.run_until(0).unwrap();
+            assert_eq!(source.get(source.signal("q")), 0u8.into());
+            let file = source.save_state().unwrap();
+            target.load_state(&file).unwrap();
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 0u8.into());
+            let clk = target.signal("clk");
+            target.set_wide(clk, 1u8.into());
+            target.settle().unwrap();
+            target.set_wide(clk, 0u8.into());
+            target.settle().unwrap();
+            assert_eq!(target.get(target.signal("q")), 1u8.into());
+        }
+        let bit_source = source.replace("input logic clk", "input bit clk");
+        for (payload, target_four_state, target_bit) in [
+            (0, false, false),
+            (1, false, false),
+            (0, true, true),
+            (1, true, true),
+            (0, true, false),
+            (1, true, false),
+        ] {
+            let build = |four_state, bit| {
+                let code = if bit { bit_source.as_str() } else { source };
+                Simulator::from_sv_sources(
+                    vec![(code, std::path::Path::new("baseline-coercion.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            check(
+                Simulation::new(build(true, false).build_interpreter().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_interpreter()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_cranelift().unwrap()),
+                Simulation::new(
+                    build(target_four_state, target_bit)
+                        .build_cranelift()
+                        .unwrap(),
+                ),
+                payload,
+            );
+            check(
+                Simulation::new(build(true, false).build_wasm().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_wasm().unwrap()),
+                payload,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build(true, false).build_native().unwrap()),
+                Simulation::new(build(target_four_state, target_bit).build_native().unwrap()),
+                payload,
+            );
+        }
     }
 }
 
@@ -2193,6 +2860,36 @@ mod active_feedback_review_tests {
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
+mod lazy_finish_settle_review {
+    use super::*;
+    #[test]
+    fn settle_recognizes_finish_after_lazy_reads() {
+        let source = "module Top(input bit go,output bit y);always_comb begin y=go;if(go)$finish;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let y = sim.signal("y");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            assert_eq!(sim.get(y), 1u8.into());
+            sim.settle().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.step().unwrap(), None);
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("lazy-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
 mod post_nba_retrigger_review_tests {
     use super::*;
     #[test]
@@ -2213,6 +2910,77 @@ mod post_nba_retrigger_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod other_domain_host_step_review {
+    use super::*;
+    #[test]
+    fn any_change_runtime_domains_report_host_falls_at_current_time() {
+        let source = "module Top(input bit clk,output bit[7:0]count);always @(posedge clk)count<=count+1;endmodule";
+        fn check<B: SimBackend>(simulator: Simulator<B>, bounded: bool) {
+            // The compiled event entry is the FF operation. Its edge policy
+            // comes from runtime metadata; exercise an any-change domain here.
+            let signal = simulator.signal("clk");
+            let address = simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let event = simulator.backend.resolve_event(&address);
+            let mut kinds = vec![None; simulator.backend.num_events()];
+            kinds[event.id()] = Some(celox_design::DomainKind::Other);
+            let mut info = vec![
+                EventInfo {
+                    canonical_id: usize::MAX,
+                    is_cascaded: false,
+                    eval_ff_event: None,
+                    eval_only_event: None,
+                    apply_event: None
+                };
+                simulator.backend.num_events()
+            ];
+            info[event.id()] = EventInfo {
+                canonical_id: event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&address),
+                apply_event: simulator.backend.resolve_apply_event(&address),
+            };
+            let state = SimulationState::new(
+                &simulator.backend,
+                vec![(signal, event.id(), event.id())],
+                kinds,
+                info,
+                Vec::new(),
+            );
+            let mut sim = Simulation {
+                simulator,
+                state,
+                pending_host_work: false,
+            };
+            sim.set_wide(signal, 1u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+            sim.set_wide(signal, 0u8.into());
+            let time = if bounded {
+                sim.step_until(0).unwrap()
+            } else {
+                sim.step().unwrap()
+            };
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(time, Some(0));
+        }
+        for bounded in [false, true] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("any-change-operation.sv"))],
+                    "Top",
+                )
+            };
+            check(build().build_interpreter().unwrap(), bounded);
+            check(build().build_cranelift().unwrap(), bounded);
+            check(build().build_wasm().unwrap(), bounded);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), bounded);
+        }
     }
 }
 
@@ -2278,6 +3046,9 @@ mod additional_host_edge_reviews {
                 "get" => {
                     assert_eq!(sim.get(y), 1u8.into());
                 }
+                "get_four_state" => {
+                    assert_eq!(sim.get_four_state(y), (1u8.into(), 0u8.into()));
+                }
                 "drain" => {
                     assert!(
                         sim.drain_runtime_events()
@@ -2299,7 +3070,7 @@ mod additional_host_edge_reviews {
             sim.drain_runtime_events();
             assert_eq!(sim.simulator.backend.get(y), 1u8.into());
         }
-        for op in ["get", "drain", "modify"] {
+        for op in ["get", "get_four_state", "drain", "modify"] {
             let build = || {
                 Simulator::from_sv_sources(
                     vec![(source, std::path::Path::new("facade-finish.sv"))],
@@ -2312,6 +3083,37 @@ mod additional_host_edge_reviews {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), op);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_queued_settle_review {
+    use super::*;
+    #[test]
+    fn host_finish_prevents_a_queued_current_time_edge() {
+        let source = "module Top(input bit go,clk,output bit q);always @(posedge clk)q<=1;always_comb if(go)$finish;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.schedule("clk", 0, 1).unwrap();
+            sim.set_wide(go, 1u8.into());
+            sim.settle().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(q), 0u8.into());
+            assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("queued-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
 
@@ -2412,6 +3214,74 @@ mod lazy_read_and_ff_edges_review {
     }
 }
 
+#[cfg(all(test, feature = "systemverilog"))]
+mod loaded_schedule_and_finish_review {
+    use super::*;
+    #[test]
+    fn ff_finish_keeps_later_queued_event_unapplied() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)begin q=1;$finish;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 0).unwrap();
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set(clk, 1u8)).unwrap();
+            sim.run_until(2).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.time(), 0);
+            assert_eq!(sim.get(clk), 1u8.into());
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("queued-after-finish.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn state_load_rejects_past_events_atomically() {
+        let source = "module Top(input bit clk,output bit q);always @(posedge clk)q<=!q;endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(5).unwrap();
+            sim.schedule("clk", 6, 1).unwrap();
+            let file = sim.save_state().unwrap();
+            for periodic in [false, true] {
+                let mut corrupt = file.clone();
+                let record = corrupt.schedule.as_mut().unwrap();
+                if periodic {
+                    let mut e = record.events[0].clone();
+                    e.time = 4;
+                    record.periodic.push((e, 1));
+                } else {
+                    record.events[0].time = 4;
+                }
+                let before = sim.save_state().unwrap();
+                assert!(sim.load_state(&corrupt).is_err());
+                assert_eq!(sim.save_state().unwrap(), before);
+                assert_eq!(sim.time(), 5);
+            }
+            sim.load_state(&file).unwrap();
+            sim.run_until(6).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("past-loaded-event.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
 #[cfg(all(test, feature = "systemverilog"))]
 mod implicit_host_edge_review {
     use super::*;
@@ -2694,6 +3564,93 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod mixed_other_domain_host_review {
+    use super::*;
+    #[test]
+    fn any_change_host_falls_join_current_time_batches() {
+        let source = "module Top(input bit clk,queued,output bit[7:0]count,queued_count);always @(posedge clk)count<=count+1;always @(posedge queued)queued_count<=queued_count+1;endmodule";
+        fn check<B: SimBackend>(simulator: Simulator<B>, mode: u8) {
+            // The compiled event entry is the FF operation. Its edge policy
+            // comes from runtime metadata; exercise an any-change domain here.
+            let signal = simulator.signal("clk");
+            let address = simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let event = simulator.backend.resolve_event(&address);
+            let mut kinds = vec![None; simulator.backend.num_events()];
+            kinds[event.id()] = Some(celox_design::DomainKind::Other);
+            let queued_address = simulator.program.get_addr(&[], &["queued"]).unwrap();
+            let queued_event = simulator.backend.resolve_event(&queued_address);
+            let queued_signal = simulator.signal("queued");
+            kinds[queued_event.id()] = Some(celox_design::DomainKind::ClockPosedge);
+            let mut info = vec![
+                EventInfo {
+                    canonical_id: usize::MAX,
+                    is_cascaded: false,
+                    eval_ff_event: None,
+                    eval_only_event: None,
+                    apply_event: None
+                };
+                simulator.backend.num_events()
+            ];
+            info[event.id()] = EventInfo {
+                canonical_id: event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&address),
+                apply_event: simulator.backend.resolve_apply_event(&address),
+            };
+            info[queued_event.id()] = EventInfo {
+                canonical_id: queued_event.id(),
+                is_cascaded: false,
+                eval_ff_event: Some(queued_event),
+                eval_only_event: simulator.backend.resolve_eval_only_event(&queued_address),
+                apply_event: simulator.backend.resolve_apply_event(&queued_address),
+            };
+            let state = SimulationState::new(
+                &simulator.backend,
+                vec![
+                    (signal, event.id(), event.id()),
+                    (queued_signal, queued_event.id(), queued_event.id()),
+                ],
+                kinds,
+                info,
+                Vec::new(),
+            );
+            let mut sim = Simulation {
+                simulator,
+                state,
+                pending_host_work: false,
+            };
+            sim.set_wide(signal, 1u8.into());
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("count")), 1u8.into());
+            sim.set_wide(signal, 0u8.into());
+            sim.schedule("queued", 0, 1).unwrap();
+            let time = match mode {
+                0 => sim.step().unwrap(),
+                1 => sim.step_until(0).unwrap(),
+                _ => sim.state.step(&mut sim.simulator).unwrap(),
+            };
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(time, Some(0));
+            assert_eq!(sim.get(sim.signal("queued_count")), 1u8.into());
+        }
+        for mode in [0, 1, 2] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source, std::path::Path::new("any-change-operation.sv"))],
+                    "Top",
+                )
+            };
+            check(build().build_interpreter().unwrap(), mode);
+            check(build().build_cranelift().unwrap(), mode);
+            check(build().build_wasm().unwrap(), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), mode);
+        }
     }
 }
 
@@ -3761,6 +4718,56 @@ mod sampled_host_review {
 }
 
 #[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_step_review {
+    use super::*;
+
+    #[test]
+    fn host_dispatch_reports_finished_without_returning_a_time() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let initial = sim.checkpoint().unwrap();
+            let clk = sim.signal("clk");
+            for bounded in [false, true] {
+                sim.restore(&initial).unwrap();
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                let result = if bounded {
+                    sim.step_until(10)
+                } else {
+                    sim.step()
+                };
+                assert_eq!(result.unwrap(), None);
+                assert!(sim.is_finished());
+                assert_eq!(sim.time(), 0);
+                assert_eq!(sim.step().unwrap(), None);
+            }
+        }
+        for body in [
+            "initial @(posedge clk)$finish;",
+            "always @(posedge clk)$finish;",
+        ] {
+            let source = format!("module Top(input bit clk);{body} endmodule");
+            macro_rules! build {
+                ($method:ident) => {
+                    check(Simulation::new(
+                        Simulator::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("host-finish.sv"))],
+                            "Top",
+                        )
+                        .$method()
+                        .unwrap(),
+                    ));
+                };
+            }
+            build!(build_interpreter);
+            build!(build_cranelift);
+            build!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            build!(build_native);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
 mod round57_review_tests {
     use super::*;
     fn check_backends(
@@ -4213,6 +5220,47 @@ mod round62_review_tests {
             );
             backends!(&source, check);
         }
+    }
+    #[test]
+    fn direct_host_setters_expose_pending_process_work() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clean = sim.checkpoint().unwrap();
+            let go = sim.signal("go");
+            for active_drain in [false, true] {
+                for four in [false, true] {
+                    for observe in 0..3 {
+                        sim.restore(&clean).unwrap();
+                        sim.eval_comb().unwrap();
+                        let _drain = active_drain
+                            .then(|| sim.simulator.runtime_event_drain())
+                            .flatten();
+                        if four {
+                            sim.set_four_state(go, 1u8.into(), 0u8.into());
+                        } else {
+                            sim.set_wide(go, 1u8.into());
+                        }
+                        match observe {
+                            1 => {
+                                sim.get(go);
+                            }
+                            2 => {
+                                sim.eval_comb().unwrap();
+                            }
+                            _ => {}
+                        }
+                        assert_eq!(sim.next_event_time(), Some(0));
+                        assert_eq!(sim.step().unwrap(), Some(0));
+                        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+                        assert_eq!(sim.next_event_time(), None);
+                    }
+                }
+            }
+        }
+        backends!(
+            "module Top(input bit go,output bit q);initial begin @(posedge go);q=1;end endmodule",
+            check
+        );
     }
 }
 

@@ -1,6 +1,6 @@
 //! Script interpreter over the backend-independent [`Simulator`].
 
-use super::ast::{Actual, Expr, Op, ScriptCase, Sequence, Stmt, StmtKind, Value};
+use super::ast::{Actual, Expr, Op, RUN_UNTIL_LIMIT, ScriptCase, Sequence, Stmt, StmtKind, Value};
 use super::sexpr::Pos;
 use crate::{Signal, SignalPath, Simulator};
 use num_bigint::{BigInt, BigUint, Sign};
@@ -497,6 +497,20 @@ impl Interpreter<'_> {
             StmtKind::RunTestbench => {
                 if let Err(error) = self.sim.run_testbench() {
                     panic!("run_testbench: {error}");
+                }
+            }
+            StmtKind::RunUntil(time) => {
+                let time = self.known(time, pos, "time")?;
+                let Some(time) = time.to_u64().filter(|time| *time <= RUN_UNTIL_LIMIT) else {
+                    return fail(pos, format!("time {time} is out of range"));
+                };
+                if let Err(error) = self.sim.run_until(time) {
+                    panic!("run_until {time}: {error}");
+                }
+            }
+            StmtKind::RunToFinish => {
+                if let Err(error) = self.sim.run_to_finish() {
+                    panic!("run_to_finish: {error}");
                 }
             }
             StmtKind::ExpectOutput(expected) => {

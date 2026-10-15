@@ -511,6 +511,25 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
+    /// Whether a clock/reset differs from the last settled scheduler state.
+    /// Host reads may have already cleared backend trigger bits.
+    pub fn has_unsettled_edges(&self, backend: &B) -> bool {
+        self.topo_signals.iter().any(|(signal, id, _)| {
+            *id != usize::MAX
+                && (
+                    self.last_clock_values.contains(*id),
+                    self.unknown_clock_values.contains(*id),
+                ) != sample_event_signal(backend, *signal)
+        })
+    }
+
+    /// Whether a pending transition activates its clock/reset domain.
+    pub fn has_unsettled_active_edges(&self, backend: &B) -> bool {
+        self.topo_signals
+            .iter()
+            .any(|(_, id, _)| *id != usize::MAX && self.stable_edge_triggered(backend, *id))
+    }
+
     /// Whether any process is suspended on an event or a condition.
     pub fn has_waiting_processes(&self) -> bool {
         !self.waiting.is_empty()
@@ -528,8 +547,6 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         let time = self.scheduler.time;
-        // A due clock belongs to the same batch; consume its periodic marker
-        // through step before processing captured host edges or continuations.
         if self
             .scheduler
             .next_event_time()
@@ -809,6 +826,14 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let mut scheduled_edges: BitSet = host_edges.keys().copied().collect();
         let mut early_settle_edges = BitSet::with_capacity(num_events);
+        // Pending host writes share this round with current-time scheduled
+        // edges. Record their net transitions before scheduled values replace
+        // them and before clearing the backend's transient trigger hints.
+        for (_, id, _) in &self.topo_signals {
+            if *id != usize::MAX && self.stable_edge_triggered(executor.backend(), *id) {
+                scheduled_edges.insert(*id);
+            }
+        }
         // Early settling can expose a derived edge that a later source store
         // or awakened process restores. Capture every update we settle early.
         let capture_batch_edges = events_to_process.len() > 1 || !host_edges.is_empty();
