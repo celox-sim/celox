@@ -7039,3 +7039,94 @@ mod host_finish_step_review {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod round57_review_tests {
+    use super::*;
+    fn check_backends(
+        source: &str,
+        check: impl Fn(&mut dyn FnMut(u64) -> Result<Vec<u64>, String>),
+    ) {
+        fn run<B: SimBackend>(
+            mut sim: Simulation<B>,
+            check: &impl Fn(&mut dyn FnMut(u64) -> Result<Vec<u64>, String>),
+        ) {
+            let q = sim.signal("q");
+            let mut advance = |time| {
+                sim.run_until(time).map_err(|e| e.to_string())?;
+                Ok(vec![
+                    sim.get(q).to_u64_digits().first().copied().unwrap_or(0),
+                ])
+            };
+            check(&mut advance);
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("review57.sv"))], "Top")
+        };
+        run(
+            Simulation::new(build().build_interpreter().unwrap()),
+            &check,
+        );
+        run(Simulation::new(build().build_cranelift().unwrap()), &check);
+        run(Simulation::new(build().build_wasm().unwrap()), &check);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        run(Simulation::new(build().build_native().unwrap()), &check);
+    }
+    #[test]
+    fn repeated_active_edges_share_one_nba_batch() {
+        for (assignment, expected) in [("<=", 1), ("=", 2)] {
+            let source = format!(
+                "module Top(output bit[7:0]q);bit d;initial begin #1;d=1;d=0;d=1;end always @(posedge d) q {assignment} q+1;endmodule"
+            );
+            check_backends(&source, |advance| {
+                assert_eq!(advance(1).unwrap(), vec![expected]);
+            });
+        }
+    }
+    #[test]
+    fn false_wait_retains_earlier_write_times() {
+        let source = "module Child(output bit[1:0]v);initial begin #1;v[0]=1;wait(0);end initial begin #2;v[1]=1;end endmodule module Top(output bit[7:0]q);wire[1:0]v;Child c(.v(v));initial forever begin @(v[0]^v[1]);q++;end endmodule";
+        check_backends(source, |advance| {
+            assert_eq!(advance(1).unwrap(), vec![1]);
+            assert_eq!(advance(2).unwrap(), vec![2]);
+        });
+    }
+    #[test]
+    fn always_with_only_timed_task_call_runs() {
+        let source = "module Top(output bit q);task tick;#1;q=~q;endtask always tick();endmodule";
+        check_backends(source, |advance| {
+            assert_eq!(advance(1).unwrap(), vec![1]);
+            assert_eq!(advance(2).unwrap(), vec![0]);
+            assert_eq!(advance(3).unwrap(), vec![1]);
+        });
+    }
+}
+
+#[cfg(all(test, feature = "host-runtime"))]
+mod round57_sdk_tests {
+    use super::*;
+    use celox_frontend_sdk::{Constant, ModuleBuilder, Statement};
+    #[test]
+    fn sdk_zero_delay_forever_exhausts_time_slot_budget() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let error = sim.run_until(0).unwrap_err().to_string();
+            assert!(error.contains("process delta limit exceeded"), "{error}");
+            assert_eq!(sim.time(), 0);
+        }
+        let build = || {
+            let mut module = ModuleBuilder::new("Top").unwrap();
+            let zero = module.constant(Constant::two_state(0u8, 1).unwrap());
+            module
+                .process(vec![Statement::Forever {
+                    body: vec![Statement::Delay { amount: zero }],
+                }])
+                .unwrap();
+            Simulator::from_frontend(module.finish())
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}

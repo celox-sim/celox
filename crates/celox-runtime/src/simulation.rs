@@ -881,6 +881,7 @@ impl<B: SimBackend> SimulationState<B> {
                 next_val: 1,
             });
         }
+        let mut delta_rounds = 0;
         let result = self.step_round(
             executor,
             current_time,
@@ -888,9 +889,10 @@ impl<B: SimBackend> SimulationState<B> {
             generated_events,
             ready,
             true,
+            &mut delta_rounds,
         );
         self.finish_clock_round(current_time, rising, &falling, result)?;
-        self.run_remaining_rounds(executor, current_time, limit)?;
+        self.run_remaining_rounds(executor, current_time, limit, &mut delta_rounds)?;
         executor.finish_timed_step(self.scheduler.time);
         // Fused ticks may have moved the time on.
         Ok(Some(self.scheduler.time))
@@ -909,6 +911,7 @@ impl<B: SimBackend> SimulationState<B> {
         executor: &mut E,
         current_time: u64,
         limit: u64,
+        delta_rounds: &mut usize,
     ) -> Result<(), SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -940,7 +943,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             let fired = !due.is_empty() || !falling.is_empty();
             if fired {
-                self.fire_edges(executor, current_time, &due, &falling)?;
+                self.fire_edges(executor, current_time, &due, &falling, delta_rounds)?;
             }
             let mut events = Vec::new();
             let ready = self.take_ready_processes(executor, current_time, &mut events);
@@ -955,7 +958,15 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 break;
             }
-            let result = self.step_round(executor, current_time, events, Vec::new(), ready, false);
+            let result = self.step_round(
+                executor,
+                current_time,
+                events,
+                Vec::new(),
+                ready,
+                false,
+                delta_rounds,
+            );
             let progressed = result.as_ref().is_ok_and(|ran| *ran);
             self.finish_clock_round(current_time, Vec::new(), &[], result)?;
             if !progressed && !fired {
@@ -975,6 +986,7 @@ impl<B: SimBackend> SimulationState<B> {
         time: u64,
         due: &[usize],
         falling: &[usize],
+        delta_rounds: &mut usize,
     ) -> Result<(), SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -1020,7 +1032,15 @@ impl<B: SimBackend> SimulationState<B> {
                 .expect("a normalizing clock")
                 .falling_edge = Some(time);
         }
-        let result = self.step_round(executor, time, events, Vec::new(), Vec::new(), true);
+        let result = self.step_round(
+            executor,
+            time,
+            events,
+            Vec::new(),
+            Vec::new(),
+            true,
+            delta_rounds,
+        );
         self.finish_clock_round(time, rising, &falling, result)
     }
 
@@ -1320,13 +1340,22 @@ impl<B: SimBackend> SimulationState<B> {
         self.sample_waiting_events(executor, time)?;
         let mut events = Vec::new();
         let ready = self.take_ready_processes(executor, time, &mut events);
-        let result = self.step_round(executor, time, events, Vec::new(), ready, false);
+        let mut delta_rounds = 0;
+        let result = self.step_round(
+            executor,
+            time,
+            events,
+            Vec::new(),
+            ready,
+            false,
+            &mut delta_rounds,
+        );
         let progressed = result.as_ref().is_ok_and(|ran| *ran);
         self.finish_clock_round(time, Vec::new(), &[], result)?;
         if !progressed {
             return Ok(false);
         }
-        self.run_remaining_rounds(executor, time, limit)?;
+        self.run_remaining_rounds(executor, time, limit, &mut delta_rounds)?;
         executor.finish_timed_step(self.scheduler.time);
         Ok(true)
     }
@@ -1824,11 +1853,20 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let mut events = Vec::new();
         let ready = self.take_ready_processes(executor, time, &mut events);
-        let result = self.step_round(executor, time, events, Vec::new(), ready, true);
+        let mut delta_rounds = 0;
+        let result = self.step_round(
+            executor,
+            time,
+            events,
+            Vec::new(),
+            ready,
+            true,
+            &mut delta_rounds,
+        );
         self.finish_clock_round(time, Vec::new(), &[], result)?;
         // A process the settled state woke may wait for zero time: the
         // rounds of this time are drained, as `step` drains them.
-        self.run_remaining_rounds(executor, time, time)?;
+        self.run_remaining_rounds(executor, time, time, &mut delta_rounds)?;
         executor.finish_timed_step(time);
         Ok(Some(time))
     }
@@ -1837,6 +1875,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// processes, and settle the edges they cause. Without `settle_idle`,
     /// a round with no event in which no process ran is skipped, and
     /// `false` is returned.
+    #[allow(clippy::too_many_arguments)]
     fn step_round<E>(
         &mut self,
         executor: &mut E,
@@ -1845,6 +1884,7 @@ impl<B: SimBackend> SimulationState<B> {
         mut generated_events: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
         settle_idle: bool,
+        delta_rounds: &mut usize,
     ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -1855,7 +1895,6 @@ impl<B: SimBackend> SimulationState<B> {
         self.round_triggered_domains.make_empty();
         self.round_evaluated = false;
         self.round_new_rising.make_empty();
-        let mut delta_rounds = 0usize;
 
         // Keep periodic provenance private so the public SimEvent shape stays
         // stable. Consume matching sidecar counts before fallible work so an
@@ -2001,7 +2040,7 @@ impl<B: SimBackend> SimulationState<B> {
                 current_time,
                 ready_processes,
                 &mut comb_current,
-                &mut delta_rounds,
+                delta_rounds,
             )?;
             if self.finished && self.finish_round {
                 return Ok(true);
@@ -2184,12 +2223,14 @@ impl<B: SimBackend> SimulationState<B> {
 
         // Share the time-slot budget with active waiter feedback passes.
         let mut comb_already_done = false;
+        // Accumulate publications across every occurrence in this active
+        // batch. Replayed evaluations must still read pre-NBA state.
+        let mut newly_triggered = Vec::new();
         loop {
             let mut any_new_outer_loop_trigger = false;
-            let mut newly_triggered = Vec::new();
 
             loop {
-                count_delta_pass(&mut delta_rounds)?;
+                count_delta_pass(delta_rounds)?;
                 let marked_bits = executor.backend().get_triggered_bits();
                 executor.backend_mut().clear_triggered_bits();
 
@@ -2303,7 +2344,7 @@ impl<B: SimBackend> SimulationState<B> {
                     current_time,
                     Vec::new(),
                     &mut comb_current,
-                    &mut delta_rounds,
+                    delta_rounds,
                 )?;
                 if !active_ran {
                     // Drain active combinational effects of blocking FF stores
@@ -2338,7 +2379,7 @@ impl<B: SimBackend> SimulationState<B> {
                         current_time,
                         Vec::new(),
                         &mut comb_current,
-                        &mut delta_rounds,
+                        delta_rounds,
                     )?;
                 }
                 if self.finished && self.finish_round {
@@ -2389,7 +2430,7 @@ impl<B: SimBackend> SimulationState<B> {
                         current_time,
                         ready,
                         &mut comb_current,
-                        &mut delta_rounds,
+                        delta_rounds,
                     )?
                 };
                 if progressed {
@@ -2432,43 +2473,45 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
 
-            if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
+            {
                 let replay = edge_replays
                     .iter()
                     .filter_map(|(&id, &count)| (count > 0).then_some(id))
                     .collect::<Vec<_>>();
-                if replay.is_empty() {
-                    break;
-                }
-                // Completed source domains must not be rediscovered from
-                // their old baseline while an occurrence is replayed.
-                for (signal, id, _) in &self.topo_signals {
-                    if *id == usize::MAX
-                        || !triggered_domains.contains(self.event_info[*id].canonical_id)
-                    {
-                        continue;
+                if !replay.is_empty() {
+                    // Completed source domains must not be rediscovered from
+                    // their old baseline while an occurrence is replayed.
+                    for (signal, id, _) in &self.topo_signals {
+                        if *id == usize::MAX
+                            || !triggered_domains.contains(self.event_info[*id].canonical_id)
+                        {
+                            continue;
+                        }
+                        let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+                        if value {
+                            self.last_clock_values.insert(*id);
+                        } else {
+                            self.last_clock_values.remove(*id);
+                        }
+                        if unknown {
+                            self.unknown_clock_values.insert(*id);
+                        } else {
+                            self.unknown_clock_values.remove(*id);
+                        }
                     }
-                    let (value, unknown) = sample_event_signal(executor.backend(), *signal);
-                    if value {
-                        self.last_clock_values.insert(*id);
-                    } else {
-                        self.last_clock_values.remove(*id);
+                    discovered_in_this_step.make_empty();
+                    triggered_domains.make_empty();
+                    executor.backend_mut().clear_triggered_bits();
+                    for id in replay {
+                        *edge_replays.get_mut(&id).unwrap() -= 1;
+                        recorded_edges.insert(id);
+                        executor.backend_mut().mark_triggered_bit(id);
                     }
-                    if unknown {
-                        self.unknown_clock_values.insert(*id);
-                    } else {
-                        self.unknown_clock_values.remove(*id);
-                    }
+                    continue;
                 }
-                discovered_in_this_step.make_empty();
-                triggered_domains.make_empty();
-                executor.backend_mut().clear_triggered_bits();
-                for id in replay {
-                    *edge_replays.get_mut(&id).unwrap() -= 1;
-                    recorded_edges.insert(id);
-                    executor.backend_mut().mark_triggered_bit(id);
-                }
-                continue;
+            }
+            if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
+                break;
             }
 
             // Publish all simultaneous NBA updates before polling waiters.
@@ -2495,6 +2538,7 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
+            newly_triggered.clear();
 
             if comb_already_done {
                 comb_already_done = false;
@@ -2517,7 +2561,7 @@ impl<B: SimBackend> SimulationState<B> {
                     current_time,
                     Vec::new(),
                     &mut comb_current,
-                    &mut delta_rounds,
+                    delta_rounds,
                 )?;
                 if self.finished && self.finish_round {
                     return Ok(true);
