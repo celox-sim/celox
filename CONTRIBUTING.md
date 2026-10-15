@@ -99,6 +99,19 @@ See GitHub's [advanced setup migration instructions](https://docs.github.com/en/
 
 ### Product checks
 
+Rust caches in `ci.yml` are restored on every branch but saved only on the
+default branch. A PR's merge-ref cache cannot be restored by another PR, so
+saving one copy per PR consumes the shared cache quota without warming other
+queues. `rust-cache.yml` builds the Rust Tests targets on master after toolchain,
+manifest, or CI-cache setup changes, or on manual dispatch. It uses the same job
+ID, toolchain, environment and CI features as Rust Tests, skips the build on an
+exact cache hit, and does not execute tests. The normal daily master CI warms
+the other job caches. Caches remain dependency-only; workspace binaries are not
+added to the quota. Toolchain changes and cold caches still require compilation.
+Mergify-only configuration edits run script validation, not product compilation;
+mixed Rust changes and unknown paths retain their existing coverage.
+
+
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust

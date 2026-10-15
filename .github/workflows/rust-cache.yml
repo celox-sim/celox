@@ -1,0 +1,52 @@
+name: Warm Rust dependency cache
+
+# PR merge-ref caches cannot be reused by other PRs. Populate the default
+# branch cache once per toolchain/dependency key, without running tests twice.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/rust-cache.yml"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-dependency-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Same job ID, runner, toolchain and environment as CI's Rust Tests cache.
+  rust-tests:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Populate Rust Tests dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+      - name: Install cargo-nextest
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.144
+      - name: Build test targets to populate dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: >-
+          cargo nextest list --locked --workspace --message-format json
+          --features celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus
+          > /dev/null
