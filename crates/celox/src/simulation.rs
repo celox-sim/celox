@@ -5250,3 +5250,83 @@ mod cross_depth_write_review {
         }
     }
 }
+
+#[cfg(test)]
+mod transient_clock_activation_review {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let host = m.internal("host", bit).unwrap();
+        let word = ValueType::bits(32).unwrap();
+        let rises = m.internal("rises", word).unwrap();
+        let falls = m.internal("falls", word).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let source = m.output("source", bit).unwrap();
+        let sampled = m.output("sampled", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(source).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let old = m.read(source).unwrap();
+        let target = m.whole(sampled).unwrap();
+        m.register(target, old, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let high = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let low = m.constant(Constant::two_state(0u8, 1).unwrap());
+        let target = m.whole(host).unwrap();
+        let edge = m.constant(Constant::two_state(1u8, 32).unwrap());
+        m.process(vec![
+            Statement::Assign {
+                target,
+                value: high,
+            },
+            Statement::Assign { target, value: low },
+            Statement::Assign {
+                target: m.whole(rises).unwrap(),
+                value: edge,
+            },
+            Statement::Assign {
+                target: m.whole(falls).unwrap(),
+                value: edge,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let signal = sim.signal("host");
+        let rises = sim.signal("rises");
+        let falls = sim.signal("falls");
+        sim.state = sim
+            .state
+            .with_process_event_counters(vec![(signal, rises, falls)]);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("source")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn transient_process_edges_share_pre_edge_state_with_first_clock_wait() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
