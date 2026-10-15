@@ -1872,6 +1872,11 @@ impl<B: SimBackend> SimulationState<B> {
             generated_events.clear();
         }
 
+        let mut edge_replays = std::collections::BTreeMap::new();
+        self.add_process_edge_replays(executor.backend(), &counter_values, &mut edge_replays);
+        let process_recorded_edges =
+            self.process_counter_edges(executor.backend(), &counter_values);
+
         // Ready processes can activate a clock at this timestamp. Join
         // its first rise with existing events and reset assertions before
         // any coincident domain publishes its FF updates. An isolated
@@ -1879,13 +1884,16 @@ impl<B: SimBackend> SimulationState<B> {
         let reset_edge_due = self.clock_waits.values().any(|wait| {
             wait.release.is_some() && self.tick_clocks[&wait.clock].next_edge == current_time
         });
+
         if !self.finished
             && !self.tick_budget_spent()
             && (reset_edge_due
                 || !scheduled_edges.is_empty()
                 || !events_to_process.is_empty()
                 || !process_driven.is_empty()
-                || !generated_events.is_empty())
+                || !generated_events.is_empty()
+                || !process_recorded_edges.is_empty()
+                || !executor.backend().get_triggered_bits().is_empty())
         {
             for (id, clock) in &self.tick_clocks {
                 if clock.next_edge == current_time
@@ -1934,9 +1942,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         // Counter-recorded kernel edges survive later blocking stores that
         // restored the signal before the kernel returned.
-        let mut edge_replays = std::collections::BTreeMap::new();
-        self.add_process_edge_replays(executor.backend(), &counter_values, &mut edge_replays);
-        let mut recorded_edges = self.process_counter_edges(executor.backend(), &counter_values);
+        let mut recorded_edges = process_recorded_edges;
         recorded_edges.union_with(&scheduled_edges);
         let mut scheduled_trigger_ids = recorded_edges.clone();
         // An external drive may already have been combinationally evaluated
