@@ -3817,6 +3817,164 @@ mod wait_and_finish_review {
     }
 
     #[test]
+    fn constant_case_preserves_only_the_selected_branch_times() {
+        // These exercise Celox's conservative cross-instance write guard:
+        // separated writes must compile; coincident writes must still fail.
+        for four_state in [false, true] {
+            for control in [
+                "case(1'b1) 1'b1: SELECTED default: SKIPPED endcase",
+                "case(1) 1: SELECTED 1: SKIPPED endcase",
+                "case(2) 1: SKIPPED default: SELECTED endcase",
+                "case(2) 0,2: SELECTED default: SKIPPED endcase",
+                "case(128'h80000000000000000000000000000000) 128'h80000000000000000000000000000000: SELECTED default: SKIPPED endcase",
+                "case(2'bx1) 2'bx1: SELECTED default: SKIPPED endcase",
+                "casez(2'b10) 2'b1?: SELECTED default: SKIPPED endcase",
+                "casex(2'b00) 2'bx0: SELECTED default: SKIPPED endcase",
+                "case(3) inside [2:4]: SELECTED default: SKIPPED endcase",
+                "case(2) 1: SKIPPED endcase SELECTED",
+            ] {
+                for skipped in ["#5;", "begin #7;q[0]=0;end", "skipped();"] {
+                    let control = control
+                        .replace("SELECTED", "q[0]=1;")
+                        .replace("SKIPPED", skipped);
+                    let source = format!(
+                        "module Child(output bit[1:0]q);task skipped;#7;q[0]=0;endtask initial begin #1;{control} end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+                    );
+                    fn check<B: SimBackend>(
+                        mut sim: Simulation<B>,
+                        control: &str,
+                        four_state: bool,
+                    ) {
+                        sim.run_until(1).unwrap();
+                        assert_eq!(
+                            sim.get(sim.signal("seen")),
+                            1u8.into(),
+                            "{control}, four_state={four_state}"
+                        );
+                        sim.run_until(2).unwrap();
+                        assert_eq!(
+                            sim.get(sim.signal("seen")),
+                            2u8.into(),
+                            "{control}, four_state={four_state}"
+                        );
+                    }
+                    macro_rules! build {
+                        ($method:ident) => {
+                            check(
+                                Simulation::new(
+                                    Simulator::from_sv_sources(
+                                        vec![(
+                                            source.as_str(),
+                                            std::path::Path::new("constant-case.sv"),
+                                        )],
+                                        "Top",
+                                    )
+                                    .four_state(four_state)
+                                    .$method()
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "control={control}, four_state={four_state}: {error:?}"
+                                        )
+                                    }),
+                                ),
+                                &control,
+                                four_state,
+                            );
+                        };
+                    }
+                    build!(build_interpreter);
+                    build!(build_cranelift);
+                    build!(build_wasm);
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    build!(build_native);
+                    let coincident = source.replace("#2;q[1]", "#1;q[1]");
+                    assert!(
+                        Simulator::from_sv_sources(
+                            vec![(
+                                coincident.as_str(),
+                                std::path::Path::new("coincident-case.sv")
+                            )],
+                            "Top"
+                        )
+                        .four_state(four_state)
+                        .build_interpreter()
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_constant_case_delays_advance_the_fixed_time() {
+        let source = "module Child(output bit[1:0]q);initial begin #1;case(1) 1: begin #2;q[0]=1;end default: #7;endcase end initial begin #4;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+            sim.run_until(3).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(4).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        macro_rules! build {
+            ($method:ident) => {
+                check(Simulation::new(
+                    Simulator::from_sv_sources(
+                        vec![(source, std::path::Path::new("selected-case-delay.sv"))],
+                        "Top",
+                    )
+                    .$method()
+                    .unwrap(),
+                ));
+            };
+        }
+        build!(build_interpreter);
+        build!(build_cranelift);
+        build!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        build!(build_native);
+        let coincident = source.replace("#4;q[1]", "#3;q[1]");
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(
+                    coincident.as_str(),
+                    std::path::Path::new("coincident-selected-case.sv")
+                )],
+                "Top"
+            )
+            .build_interpreter()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dynamic_case_choices_keep_conservative_write_times() {
+        for control in [
+            "case(select) 1: q[0]=1; default: #5; endcase",
+            "case(1) select: q[0]=1; default: #5; endcase",
+            "case(choose()) 1: q[0]=1; default: #5; endcase",
+            "case(1) choose(): q[0]=1; default: #5; endcase",
+        ] {
+            let source = format!(
+                "module Child(input bit select,output bit[1:0]q);function bit choose();q[0]=0;return 1;endfunction initial begin #1;{control} end initial begin #2;q[1]=1;end endmodule module Top(input bit select);wire[1:0]q;Child child(.select(select),.q(q));initial forever @(q[0]^q[1]);endmodule"
+            );
+            let result = Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("dynamic-case.sv"))],
+                "Top",
+            )
+            .build_interpreter();
+            let error = match result {
+                Ok(_) => panic!("must preserve unknown/effectful case choices: {control}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("multiple blocking writes"),
+                "{control}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn selected_constant_if_delays_advance_the_fixed_time() {
         let source = "module Child(output bit[1:0]q);initial begin #1;if(1)begin #2;q[0]=1;end else #7;end initial begin #4;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
