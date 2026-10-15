@@ -29,6 +29,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: write
           permission-workflows: write
 
       - uses: actions/checkout@v7
@@ -153,7 +154,6 @@ jobs:
             )"
           fi
 
-          gh pr merge "$sync_pr" \
+          gh pr edit "$sync_pr" \
             --repo "$GITHUB_REPOSITORY" \
-            --auto \
-            --merge
+            --add-label merge-ready
