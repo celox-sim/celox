@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod compiled;
+pub mod equivalence;
 mod guard;
 
 type Addr = (u64, u64, u64);
