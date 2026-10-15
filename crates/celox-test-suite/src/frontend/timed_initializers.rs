@@ -186,6 +186,7 @@ fn elaboration_constant(
     end: usize,
     expression: &str,
     seeds: &[String],
+    packages: Option<&celox_sv_analyzer::Packages>,
 ) -> bool {
     let mut suffix = start;
     let (name, guard) = loop {
@@ -214,11 +215,12 @@ fn elaboration_constant(
     } else {
         format!("{}{probe}{}", &source[..start], &source[start..])
     };
-    celox_sv_analyzer::analyze_source(&candidate, Path::new("timed.sv")).is_ok_and(|ir| {
+    let path = Path::new("timed.sv");
+    let probe_is_constant = |ir: &celox_sv_analyzer::ir::Ir| {
         // Inspect the probe's resolved calls in its declaring module and
         // generate scope. A constant evaluator may ignore side effects;
         // effectful bodies or omitted defaults still require staged execution.
-        let effects = effectful_functions(&ir);
+        let effects = effectful_functions(ir);
         ir.modules().iter().any(|module| {
             let effectful = effects.iter().any(|(owner, name)| {
                 owner == module.name() && name.rsplit('.').next() == Some(function.as_str())
@@ -229,12 +231,32 @@ fn elaboration_constant(
                         && signal.r#type().resolved_width() == Some(1)
                 })
         })
-    })
+    };
+    if let Some(packages) = packages {
+        // Reuse all preprocessed compilation units' packages. Analyzing only
+        // this file mistakes external constant calls for dynamic values and
+        // moves their initialization across the FF listener baseline.
+        celox_sv_analyzer::source_module_interfaces(&candidate, path).is_ok_and(|modules| {
+            modules.keys().any(|module| {
+                celox_sv_analyzer::analyze_source_module_with_packages(
+                    &candidate,
+                    path,
+                    module,
+                    &Default::default(),
+                    packages,
+                )
+                .is_ok_and(|ir| probe_is_constant(&ir))
+            })
+        })
+    } else {
+        celox_sv_analyzer::analyze_source(&candidate, path).is_ok_and(|ir| probe_is_constant(&ir))
+    }
 }
 
 pub(super) fn rewrites(
     source: &str,
     names: &TimedNames,
+    packages: Option<&celox_sv_analyzer::Packages>,
 ) -> Result<BTreeMap<usize, (usize, String)>> {
     let mut result = BTreeMap::new();
     // Recursive statement rewrites do not contain module declarations.
@@ -367,7 +389,9 @@ pub(super) fn rewrites(
                 .collect::<Vec<_>>();
             // Keep constant initialization before FF listeners are armed;
             // moving an already-high clock into setup would invent an edge.
-            if literal_expression || elaboration_constant(source, start, end, expression, &seeds) {
+            if literal_expression
+                || elaboration_constant(source, start, end, expression, &seeds, packages)
+            {
                 let scope = *scopes
                     .last()
                     .ok_or("constant initializer outside module scope")?;

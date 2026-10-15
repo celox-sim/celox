@@ -434,6 +434,14 @@ impl<B: SimBackend> Simulation<B> {
         }
     }
 
+    // A write itself can settle eagerly while a RuntimeEventDrain is active.
+    // In that case publish its edges even if the simulator was clean before
+    // the write; otherwise retain the notification until the next settle.
+    fn synchronize_host_write(&mut self) {
+        self.pending_host_work = true;
+        self.synchronize_runtime_finish(true);
+    }
+
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
         let was_dirty = self.simulator.dirty;
@@ -465,6 +473,7 @@ impl<B: SimBackend> Simulation<B> {
     /// time: processes waiting for it resume when the simulation next runs.
     pub fn set_wide(&mut self, signal: SignalRef, value: num_bigint::BigUint) {
         self.simulator.set_wide(signal, value);
+        self.synchronize_host_write();
     }
 
     /// Sets a signal's value and unknown-bit mask, like [`Self::set_wide`].
@@ -475,6 +484,7 @@ impl<B: SimBackend> Simulation<B> {
         mask: num_bigint::BigUint,
     ) {
         self.simulator.set_four_state(signal, value, mask);
+        self.synchronize_host_write();
     }
 
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
@@ -5149,5 +5159,46 @@ mod round62_review_tests {
             }
             backends!(&source, arm);
         }
+    }
+    #[test]
+    fn direct_host_setters_expose_pending_process_work() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clean = sim.checkpoint().unwrap();
+            let go = sim.signal("go");
+            for active_drain in [false, true] {
+                for four in [false, true] {
+                    for observe in 0..3 {
+                        sim.restore(&clean).unwrap();
+                        sim.eval_comb().unwrap();
+                        let _drain = active_drain
+                            .then(|| sim.simulator.runtime_event_drain())
+                            .flatten();
+                        if four {
+                            sim.set_four_state(go, 1u8.into(), 0u8.into());
+                        } else {
+                            sim.set_wide(go, 1u8.into());
+                        }
+                        match observe {
+                            1 => {
+                                sim.get(go);
+                            }
+                            2 => {
+                                sim.eval_comb().unwrap();
+                            }
+                            _ => {}
+                        }
+                        assert_eq!(sim.next_event_time(), Some(0));
+                        assert_eq!(sim.step().unwrap(), Some(0));
+                        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+                        assert_eq!(sim.next_event_time(), None);
+                    }
+                }
+            }
+        }
+        backends!(
+            "module Top(input bit go,output bit q);initial begin @(posedge go);q=1;end endmodule",
+            check
+        );
     }
 }
