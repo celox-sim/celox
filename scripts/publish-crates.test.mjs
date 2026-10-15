@@ -27,8 +27,9 @@ exit "\${CURL_EXIT:-0}"
     cargo: `#!/usr/bin/env bash
 echo "$*" >> cargo.log
 if [[ "$1" == package ]]; then
-  mkdir -p target/package/celox-test-suite-0.8.0
-  touch target/package/celox-test-suite-0.8.0/Cargo.toml
+  crate="\${@: -1}"
+  mkdir -p "target/package/$crate-0.8.0"
+  touch "target/package/$crate-0.8.0/Cargo.toml"
 elif [[ "$1" == publish ]]; then
   echo 'the remote server responded with an error (status 403 Forbidden): Trusted Publishing tokens do not support creating new crates. Publish the crate manually, first'
   exit 1
@@ -100,4 +101,30 @@ test("new-crate rejection is not retried after successful preflight", async (t) 
   const calls = await readFile(join(result.root, "cargo.log"), "utf8");
   assert.equal(calls.split("\n").filter((line) => line.startsWith("publish ")).length, 1);
   assert.match(calls, /check --locked --all-targets/);
+});
+
+test("publication order includes every public crate after its workspace dependencies", async () => {
+  const cwd = new URL("../", import.meta.url);
+  const { stdout: list } = await exec("bash", ["scripts/publish-crates.sh", "list"], { cwd });
+  const order = list.trim().split("\n");
+  assert.equal(new Set(order).size, order.length, "duplicate publication entry");
+  const { stdout } = await exec("cargo", [
+    "metadata", "--no-deps", "--locked", "--format-version", "1",
+  ], { cwd, maxBuffer: 10 * 1024 * 1024 });
+  const metadata = JSON.parse(stdout);
+  const packages = new Map(metadata.packages.map((pkg) => [pkg.name, pkg]));
+  const publicPackages = metadata.packages.filter(
+    (pkg) => pkg.publish === null || pkg.publish.includes("crates-io"),
+  );
+  assert.deepEqual([...order].sort(), publicPackages.map((pkg) => pkg.name).sort());
+  for (const [index, name] of order.entries()) {
+    for (const dependency of packages.get(name).dependencies) {
+      if (!dependency.path) continue;
+      const dependencyIndex = order.indexOf(dependency.name);
+      assert.ok(
+        dependencyIndex >= 0 && dependencyIndex < index,
+        `${name} must be published after ${dependency.name} (${dependency.kind ?? "normal"} dependency)`,
+      );
+    }
+  }
 });

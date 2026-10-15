@@ -553,6 +553,11 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	nextEventTime(): number | null {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return null;
+		this.settleSharedWrites();
+		if (this.needsHostPoll() && this._handle.hasPendingHostWork?.()) {
+			return this._handle.time();
+		}
 		return this._handle.nextEventTime();
 	}
 

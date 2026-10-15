@@ -101,7 +101,7 @@ pub(super) fn gated_rhs(
 
 // Icarus evaluates function operands in a continuous ternary eagerly. Use
 // a procedural gate and retain the original net driver (and its delays and
-// strengths). The temporary has the destination's packed assignment width.
+// strengths). Named destinations retain their declared assignment type.
 pub(super) fn gated_continuous(
     source: &str,
     start: usize,
@@ -129,7 +129,14 @@ pub(super) fn gated_continuous(
                 let left = source[lhs_start..at].trim();
                 lhs_name = Some(if net_declaration {
                     // Net declaration assignments name an entire net.
-                    sv_words(left).last()?.2.to_owned()
+                    tasks
+                        .driver_types
+                        .get(source)
+                        .into_iter()
+                        .flatten()
+                        .find(|(offset, _, _, _)| lhs_start <= *offset && *offset < at)
+                        .map(|(_, id, _, _)| id.clone())
+                        .or_else(|| sv_words(left).last().map(|word| word.2.to_owned()))?
                 } else {
                     // Skip optional drive strength and delay controls.
                     let mut begin = trivia(left, 0);
@@ -161,8 +168,9 @@ pub(super) fn gated_continuous(
                             }
                             suffix += 1;
                         };
+                        let declaration = tasks.driver_declaration(source, start, &lhs, &name);
                         drivers.push_str(&format!(
-                            "reg [$bits({lhs} )-1:0] {name};\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package
+                            "{declaration}\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package
                         ));
                         output.push_str(&source[previous..begin]);
                         output.push_str(&format!(" {name}"));
@@ -584,6 +592,7 @@ pub(super) struct TaskTiming {
     pub(super) ports: BTreeMap<String, Vec<String>>,
     pub(super) inputs: BTreeMap<String, std::collections::BTreeSet<String>>,
     values: BTreeMap<String, Vec<(usize, String)>>,
+    driver_types: BTreeMap<String, Vec<(usize, String, String, String)>>,
     units: BTreeMap<String, usize>,
     import_clauses: BTreeMap<String, BTreeMap<usize, Vec<(Option<String>, Option<String>)>>>,
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
@@ -666,6 +675,33 @@ fn lexical_scope_at(source: &str, at: usize, generates: &[(usize, usize)]) -> Ve
 }
 
 impl TaskTiming {
+    fn driver_declaration(&self, source: &str, at: usize, lhs: &str, name: &str) -> String {
+        let scope = self.lexical_scope(source, at);
+        let declaration = self
+            .driver_types
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter(|(offset, id, _, _)| {
+                id.trim().trim_start_matches('\\') == lhs.trim().trim_start_matches('\\')
+                    && scope.starts_with(&self.lexical_scope(source, *offset))
+            })
+            .max_by_key(|(offset, _, _, _)| self.lexical_scope(source, *offset).len());
+        if let Some((_, _, datatype, dimensions)) = declaration {
+            let datatype = datatype.trim();
+            let implicit = datatype.is_empty()
+                || datatype.starts_with('[')
+                || datatype.starts_with("signed")
+                || datatype.starts_with("unsigned");
+            return format!(
+                "{}{datatype} {name} {dimensions};",
+                if implicit { "logic " } else { "" }
+            );
+        }
+        // Part-selects and concatenations have their packed assignment type.
+        format!("reg [$bits({lhs} )-1:0] {name};")
+    }
+
     fn lexical_scope(&self, source: &str, at: usize) -> Vec<usize> {
         lexical_scope_at(
             source,
@@ -837,6 +873,138 @@ impl TaskTiming {
                     })
                     .map_or(offset, |(_, origin)| origin)
                 };
+                let mut driver_types = Vec::new();
+                let mut inherited_port_type = None;
+                let text = |node| {
+                    timed_initializers::span(&tree, node)
+                        .map(|(a, b)| source[a..b].to_owned())
+                        .unwrap_or_default()
+                };
+                let identifier = |offset| {
+                    sv_words(&source[offset..])
+                        .first()
+                        .map(|word| word.2.to_owned())
+                        .unwrap_or_default()
+                };
+                for node in &tree {
+                    use sv_parser::RefNode;
+                    match node {
+                        RefNode::NetDeclaration(sv_parser::NetDeclaration::NetType(n)) => {
+                            let datatype = text(RefNode::DataTypeOrImplicit(&n.nodes.3));
+                            for declaration in n.nodes.5.nodes.0.contents() {
+                                if let Some((offset, _)) = timed_initializers::span(
+                                    &tree,
+                                    RefNode::NetIdentifier(&declaration.nodes.0),
+                                ) {
+                                    let id = identifier(offset);
+                                    let dimensions = declaration
+                                        .nodes
+                                        .1
+                                        .iter()
+                                        .map(|d| text(RefNode::UnpackedDimension(d)))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    driver_types.push((offset, id, datatype.clone(), dimensions));
+                                }
+                            }
+                        }
+                        RefNode::ModuleDeclaration(_) | RefNode::InterfaceDeclaration(_) => {
+                            inherited_port_type = None;
+                        }
+                        RefNode::AnsiPortDeclarationNet(n) => {
+                            if let Some(header) = &n.nodes.0 {
+                                inherited_port_type=match header {
+                                    sv_parser::NetPortHeaderOrInterfacePortHeader::NetPortHeader(header) => match &header.nodes.1 {
+                                        sv_parser::NetPortType::DataType(port) => Some(text(RefNode::DataTypeOrImplicit(&port.nodes.1))),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                            }
+                            if let (Some(datatype), Some((offset, _))) = (
+                                &inherited_port_type,
+                                timed_initializers::span(
+                                    &tree,
+                                    RefNode::PortIdentifier(&n.nodes.1),
+                                ),
+                            ) {
+                                let dimensions = n
+                                    .nodes
+                                    .2
+                                    .iter()
+                                    .map(|d| text(RefNode::UnpackedDimension(d)))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                driver_types.push((
+                                    offset,
+                                    identifier(offset),
+                                    datatype.clone(),
+                                    dimensions,
+                                ));
+                            }
+                        }
+                        RefNode::AnsiPortDeclarationVariable(n) => {
+                            if let Some(header) = &n.nodes.0 {
+                                inherited_port_type = Some(
+                                    text(RefNode::VarDataType(&header.nodes.1.nodes.0))
+                                        .trim_start_matches("var ")
+                                        .to_owned(),
+                                );
+                            }
+                            if let (Some(datatype), Some((offset, _))) = (
+                                &inherited_port_type,
+                                timed_initializers::span(
+                                    &tree,
+                                    RefNode::PortIdentifier(&n.nodes.1),
+                                ),
+                            ) {
+                                let dimensions = n
+                                    .nodes
+                                    .2
+                                    .iter()
+                                    .map(|d| text(RefNode::VariableDimension(d)))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                driver_types.push((
+                                    offset,
+                                    identifier(offset),
+                                    datatype.clone(),
+                                    dimensions,
+                                ));
+                            }
+                        }
+                        RefNode::DataDeclaration(sv_parser::DataDeclaration::Variable(n)) => {
+                            let datatype = text(RefNode::DataTypeOrImplicit(&n.nodes.3));
+                            for declaration in n.nodes.4.nodes.0.contents() {
+                                if let sv_parser::VariableDeclAssignment::Variable(declaration) =
+                                    declaration
+                                {
+                                    if let Some((offset, _)) = timed_initializers::span(
+                                        &tree,
+                                        RefNode::VariableIdentifier(&declaration.nodes.0),
+                                    ) {
+                                        let id = identifier(offset);
+                                        let dimensions = declaration
+                                            .nodes
+                                            .1
+                                            .iter()
+                                            .map(|d| text(RefNode::VariableDimension(d)))
+                                            .collect::<Vec<_>>()
+                                            .join(" ");
+                                        driver_types.push((
+                                            offset,
+                                            id,
+                                            datatype.clone(),
+                                            dimensions,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                result.driver_types.insert(source.clone(), driver_types);
                 let mut values = Vec::new();
                 for node in &tree {
                     use sv_parser::RefNode;

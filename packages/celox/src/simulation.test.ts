@@ -1001,3 +1001,19 @@ for (const pending of [false, true]) {
 		sim.dispose();
 	});
 }
+
+test("nextEventTime probes a host wake without executing or consuming its budget", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	handle.hasPendingHostWork = vi.fn(() => true);
+	sim.dut.d = 1n;
+	expect(sim.nextEventTime()).toBe(0);
+	expect(sim.nextEventTime()).toBe(0);
+	expect(handle.step).not.toHaveBeenCalled();
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.dispose();
+});

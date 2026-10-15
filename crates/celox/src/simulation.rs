@@ -6679,6 +6679,56 @@ mod round57_review_tests {
         run(Simulation::new(build().build_native().unwrap()), &check);
     }
     #[test]
+    fn round60_static_if_excludes_unreachable_comb_pulses() {
+        let exact = "module Top(output bit q);logic v;always_comb if(1'b1)v=0;else begin v=0;v=1;end initial @(v)q=1;endmodule";
+        check_backends(exact, |advance| {
+            advance(0).unwrap();
+        });
+        for condition in ["1'b1", "2'b10", "1'b0"] {
+            let (then_body, else_body) = if condition == "1'b0" {
+                ("v=0;v=1;", "v=go;")
+            } else {
+                ("v=go;", "v=0;v=1;")
+            };
+            let source = format!(
+                "module Top(output bit[7:0]q);bit go,v;always_comb if({condition})begin {then_body} end else begin {else_body} end initial forever begin @(v);q++;end initial begin #1;go=1;end endmodule"
+            );
+            check_backends(&source, |advance| assert_eq!(advance(1).unwrap(), vec![1]));
+        }
+        for condition in ["go", "1'b1"] {
+            let source = format!(
+                "module Top(input bit go,output bit q);bit v;always_comb if({condition})begin v=0;v=1;end else v=go;initial @(v)q=1;endmodule"
+            );
+            assert!(
+                Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("pulse.sv"))],
+                    "Top"
+                )
+                .build_interpreter()
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn round60_static_case_excludes_unreachable_child_ff_pulses() {
+        for (kind, selector, label) in [
+            ("case", "2'd1", "2'd1"),
+            ("casez", "2'bz1", "2'b01"),
+            ("casex", "2'bx1", "2'b01"),
+        ] {
+            let source = format!(
+                "module Child(input bit clk,output bit v);always @(posedge clk) {kind}({selector}) {label}:v<=~v;default:begin v<=0;v<=1;end endcase endmodule module Top(output bit[7:0]q);bit clk;wire v;Child c(clk,v);initial forever begin @(v);q++;end initial begin #1;clk=1;end endmodule"
+            );
+            check_backends(&source, |advance| assert_eq!(advance(1).unwrap(), vec![1]));
+        }
+        let source = "module Child(input bit clk,sel,output bit v);always @(posedge clk) case(sel) 0:v<=~v;default:begin v<=0;v<=1;end endcase endmodule module Top(input bit clk,sel,output bit q);wire v;Child c(clk,sel,v);initial @(v)q=1;endmodule";
+        assert!(
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("pulse.sv"))], "Top")
+                .build_interpreter()
+                .is_err()
+        );
+    }
+    #[test]
     fn repeated_active_edges_share_one_nba_batch() {
         for (assignment, expected) in [("<=", 1), ("=", 2)] {
             let source = format!(

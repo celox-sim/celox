@@ -16,6 +16,7 @@ fi
 # Dependency order matters: crates.io only accepts dependencies that have
 # already been published. Keep each adapter after the crates it links.
 crates=(
+  celox-sv-analyzer
   celox-test-suite
   celox-analysis
   celox-backend-common
@@ -23,7 +24,6 @@ crates=(
   celox-frontend-sdk
   celox-macros
   celox-ts-gen
-  celox-sv-analyzer
   celox-testbench
   celox-sir
   celox-state-layout
