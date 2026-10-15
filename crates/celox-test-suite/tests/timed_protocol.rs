@@ -162,3 +162,35 @@ fn callable_instance_connections_wait_for_staged_inputs() {
     celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn dynamic_const_initializers_are_rejected_before_tool_invocation() {
+    let text = r##"(group protocol (category sequential))
+      (case dynamic_const (source "const.sv" #"module Top(input bit a,output wire seen);const bit saved=a;assign seen=saved;initial #2 $finish;endmodule"#)
+        (top Top)(set a 1)(run_until 0)(assert_eq seen 1))"##;
+    let case = load_group("const.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/const-initializer-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .err()
+            .expect("dynamic const reached Icarus compilation");
+    assert!(
+        icarus.is::<celox_test_suite::script::sv::Unsupported>(),
+        "{icarus}"
+    );
+    let verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .err()
+    .expect("dynamic const reached Verilator compilation");
+    assert!(
+        verilator.is::<celox_test_suite::script::sv::Unsupported>(),
+        "{verilator}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
