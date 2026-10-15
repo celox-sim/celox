@@ -951,3 +951,33 @@ for (const method of ["step", "runUntil", "waitUntil"] as const) {
 		sim.dispose();
 	});
 }
+
+for (const target of [0, 10]) {
+	test(`an unsatisfied host wait consumes no budget at target ${target}`, () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		handle.hasPendingHostWork = vi.fn(() => false);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		sim.runUntil(target, { maxSteps: 0 });
+		expect(handle.hasPendingHostWork).toHaveBeenCalledOnce();
+		expect(handle.stepUntil).not.toHaveBeenCalled();
+		expect(sim.time()).toBe(target);
+		sim.dispose();
+	});
+}
+
+test("a satisfied host wait requires budget before its continuation", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	handle.hasPendingHostWork = vi.fn(() => true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});

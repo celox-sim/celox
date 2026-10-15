@@ -3676,27 +3676,36 @@ pub(super) fn fixed_runtime_write_times(
     let mut phase = 0u64;
     let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
     for stmt in stmts {
-        // A false while condition does not execute its body, including any
-        // suspensions or calls in that body. Keep the current time and phase.
+        // Zero-trip loops preserve the current time and phase even when
+        // their skipped bodies contain suspensions or impure calls.
         if let Stmt::Loop {
-            kind: LoopKind::While,
+            kind,
             init,
-            condition: Some(condition),
+            condition,
             step,
             ..
         } = stmt
             && init.is_empty()
             && step.is_empty()
-            && !expr_calls(condition, &|_| true)
-            && known_loop_value(
-                condition,
-                pm.variables,
-                pm.name_to_id,
-                pm.constants,
-                pm.parameter_types,
-            ) == Some(0)
         {
-            continue;
+            let zero_trip = match (kind, condition) {
+                (LoopKind::While, Some(condition)) => Some((condition, false)),
+                (LoopKind::Repeat(count), _) => Some((count, true)),
+                _ => None,
+            };
+            if let Some((condition, repeat)) = zero_trip
+                && !expr_calls(condition, &|_| true)
+                && known_loop_value(
+                    condition,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                )
+                .is_some_and(|value| value == 0 || (repeat && value < 0))
+            {
+                continue;
+            }
         }
 
         let mut calls = Vec::new();

@@ -139,7 +139,7 @@ impl ProcessKernelBuilder {
     pub fn begin_wait(&mut self) -> Result<(), ProcessKernelError> {
         self.begin_event_wait()?;
         // Sampling a queued drive must not evaluate or release a level wait.
-        let sample = self.sampling_request();
+        let sample = self.sampling_request(Some(1));
         let pending = self.builder.new_block();
         let normal = self.builder.new_block();
         self.builder.seal_block(SIRTerminator::Branch {
@@ -183,9 +183,23 @@ impl ProcessKernelBuilder {
         self.builder.switch_to_block(pending);
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
+        // Readiness probes evaluate a wait's predicate without allowing its
+        // continuation to execute. Queued-drive sampling uses the same hold
+        // for event waits; begin_wait skips level predicates in that mode.
+        let sample = self.sampling_request(None);
+        let sampled = self.builder.new_block();
+        let normal = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: sample,
+            true_block: (sampled, Vec::new()),
+            false_block: (normal, Vec::new()),
+        });
+        self.builder.switch_to_block(sampled);
+        self.end(ProcessStatus::Ready);
+        self.builder.switch_to_block(normal);
     }
 
-    fn sampling_request(&mut self) -> RegisterId {
+    fn sampling_request(&mut self, mode: Option<u8>) -> RegisterId {
         // Delay is unused while waiting. The runtime supplies a transient
         // sampling flag and clears it before ordinary process execution.
         let request = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
@@ -195,12 +209,22 @@ impl ProcessKernelBuilder {
             SIROffset::Static(0),
             PROCESS_DELAY_WIDTH,
         ));
-        let zero = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
-        self.builder
-            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let expected = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder.emit(SIRInstruction::Imm(
+            expected,
+            SIRValue::new(mode.unwrap_or(0)),
+        ));
         let flag = self.builder.alloc_bit(1, false);
-        self.builder
-            .emit(SIRInstruction::Binary(flag, request, BinaryOp::Ne, zero));
+        self.builder.emit(SIRInstruction::Binary(
+            flag,
+            request,
+            if mode.is_some() {
+                BinaryOp::Eq
+            } else {
+                BinaryOp::Ne
+            },
+            expected,
+        ));
         flag
     }
 
@@ -234,17 +258,6 @@ impl ProcessKernelBuilder {
             ready,
         ));
         self.wake_if(occurred);
-        let sample = self.sampling_request();
-        let sampled = self.builder.new_block();
-        let normal = self.builder.new_block();
-        self.builder.seal_block(SIRTerminator::Branch {
-            cond: sample,
-            true_block: (sampled, Vec::new()),
-            false_block: (normal, Vec::new()),
-        });
-        self.builder.switch_to_block(sampled);
-        self.end(ProcessStatus::Ready);
-        self.builder.switch_to_block(normal);
     }
 
     /// End the simulation. No block is open afterwards.

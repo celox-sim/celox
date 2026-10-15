@@ -1888,6 +1888,17 @@ impl NativeSimulationHandle {
         Ok(sim.has_waiting_processes())
     }
 
+    /// Probe current-time work without executing suspended continuations.
+    #[napi]
+    pub fn has_pending_host_work(&mut self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.has_pending_host_work()
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
     /// Run one step without consuming events after `end_time`.
     #[napi]
     pub fn step_until(&mut self, end_time: f64) -> Result<Option<f64>> {
