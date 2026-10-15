@@ -1157,3 +1157,7 @@ endmodule"#)
 (case blocking_ff_woken_waiters_sample_before_continuations
  (source "blocking-ff-waiter-sampling.sv" #"module Child(input bit clk,output bit go);always_ff @(posedge clk)go=1;endmodule module Top(output bit a,b);bit clk;bit enable=1;wire go;Child child(.clk(clk),.go(go));initial begin #1;clk=1;end initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq a 1)(assert_eq b 1))
+
+(case direct_blocking_ff_woken_waiters_sample_before_continuations
+ (source "direct-blocking-ff-waiter-sampling.sv" #"module Top(output bit a,b);bit clk;bit enable=1;bit go;always_ff @(posedge clk)go=1;initial begin #1;clk=1;end initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule"#)
+ (top Top)(run_until 1)(assert_eq a 1)(assert_eq b 1))

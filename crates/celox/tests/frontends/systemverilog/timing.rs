@@ -236,3 +236,7 @@ sv_backends! {
 sv_backends! { fn blocking_ff_woken_waiters_sample_before_continuations(sim) {
     @case "timing::blocking_ff_woken_waiters_sample_before_continuations";
 } }
+
+sv_backends! { fn direct_blocking_ff_woken_waiters_sample_before_continuations(sim) {
+    @case "timing::direct_blocking_ff_woken_waiters_sample_before_continuations";
+} }
