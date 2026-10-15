@@ -319,7 +319,7 @@ pub struct SimulationState<B: SimBackend> {
     round_new_rising: BitSet,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
-    pending_host_edges: BitSet,
+    pending_host_edges: BTreeMap<usize, u64>,
     settled_process_edges: BTreeMap<usize, u64>,
     /// Events whose signal was x or z when edge detection last sampled it:
     /// a change to a known value is an edge (IEEE 1800-2023 9.4.2).
@@ -351,6 +351,7 @@ pub struct SimulationState<B: SimBackend> {
     /// At zero, pending falling edges and releases still complete, but no
     /// edge fires and no process resumes from a clock wait.
     tick_budget: Option<u64>,
+    sampled_ready: BTreeSet<usize>,
     inactive: BTreeSet<usize>,
     /// A process requested the end of the simulation.
     finished: bool,
@@ -398,7 +399,7 @@ fn clock_overflow(clock: usize) -> SimulatorErrorCode {
 impl<B: SimBackend> SimulationState<B> {
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
-        self.pending_host_edges.make_empty();
+        self.pending_host_edges.clear();
         self.settled_process_edges.clear();
         self.sample_event_values(backend);
     }
@@ -435,7 +436,7 @@ impl<B: SimBackend> SimulationState<B> {
                 || info.apply_event.is_some())
                 && self.stable_edge_triggered(backend, *id)
             {
-                self.pending_host_edges.insert(*id);
+                *self.pending_host_edges.entry(*id).or_default() += 1;
             }
         }
         self.sample_event_values(backend);
@@ -515,7 +516,7 @@ impl<B: SimBackend> SimulationState<B> {
             scheduler: Scheduler::new(),
             periodic_events: FxHashMap::default(),
             last_clock_values,
-            pending_host_edges: BitSet::new(),
+            pending_host_edges: BTreeMap::new(),
             settled_process_edges: BTreeMap::new(),
             unknown_clock_values,
             topo_signals,
@@ -537,6 +538,7 @@ impl<B: SimBackend> SimulationState<B> {
             pending_releases: BTreeMap::new(),
             ticks: 0,
             tick_budget: None,
+            sampled_ready: BTreeSet::new(),
             inactive: BTreeSet::new(),
             finished: false,
             settle_before_processes: false,
@@ -674,6 +676,11 @@ impl<B: SimBackend> SimulationState<B> {
             let result = executor.run_process(process, time);
             executor.backend_mut().set(refs.delay, delay);
             result?;
+            if ProcessStatus::from_code(executor.backend().get_as(refs.status))
+                == Some(ProcessStatus::Ready)
+            {
+                self.sampled_ready.insert(process);
+            }
         }
         Ok(())
     }
@@ -1429,6 +1436,7 @@ impl<B: SimBackend> SimulationState<B> {
                         .backend_mut()
                         .set(self.processes[process].delay, 0u64);
                     executor.run_process(process, current_time)?;
+                    self.sampled_ready.remove(&process);
                     if !executor.process_is_clean(process) {
                         *comb_current = false;
                     }
@@ -1773,7 +1781,14 @@ impl<B: SimBackend> SimulationState<B> {
         );
 
         let num_events = executor.backend().num_events();
-        let mut scheduled_edges = std::mem::take(&mut self.pending_host_edges);
+        let host_edges = std::mem::take(&mut self.pending_host_edges);
+        let mut host_replays = BTreeMap::<usize, u64>::new();
+        for (&id, &count) in &host_edges {
+            let canonical = self.event_info[id].canonical_id;
+            let replays = host_replays.entry(canonical).or_default();
+            *replays = (*replays).max(count.saturating_sub(1));
+        }
+        let mut scheduled_edges: BitSet = host_edges.keys().copied().collect();
         let mut early_settle_edges = BitSet::with_capacity(num_events);
         // Pending host writes share this round with current-time scheduled
         // edges. Record their net transitions before scheduled values replace
@@ -1904,7 +1919,7 @@ impl<B: SimBackend> SimulationState<B> {
             generated_events.clear();
         }
 
-        let mut edge_replays = std::collections::BTreeMap::new();
+        let mut edge_replays = host_replays;
         self.add_process_edge_replays(executor.backend(), &counter_values, &mut edge_replays);
         let process_recorded_edges =
             self.process_counter_edges(executor.backend(), &counter_values);
@@ -2478,7 +2493,10 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        if !self.pending_host_edges.is_empty() || !self.settled_process_edges.is_empty() {
+        if !self.pending_host_edges.is_empty()
+            || !self.settled_process_edges.is_empty()
+            || !self.sampled_ready.is_empty()
+        {
             return Some(self.scheduler.time);
         }
         let process = if self.inactive.is_empty() {
@@ -2535,6 +2553,7 @@ impl<B: SimBackend> SimulationState<B> {
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
             tick_budget: self.tick_budget,
+            sampled_ready: self.sampled_ready.clone(),
             inactive: self.inactive.clone(),
             scheduled_clock_drives: self.scheduled_clock_drives.clone(),
             scheduled_clock_time: self.scheduled_clock_time,
@@ -2600,6 +2619,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.pending_releases.clone_from(&snapshot.pending_releases);
         self.ticks = snapshot.ticks;
         self.tick_budget = snapshot.tick_budget;
+        self.sampled_ready.clone_from(&snapshot.sampled_ready);
         self.inactive.clone_from(&snapshot.inactive);
         self.scheduled_clock_drives
             .clone_from(&snapshot.scheduled_clock_drives);
@@ -2622,6 +2642,7 @@ pub struct ScheduleParts<B: SimBackend> {
     pub periodic: Vec<(SimEvent<B>, u64)>,
     /// Events whose signal was high when edge detection last sampled it.
     pub high_events: Vec<B::Event>,
+    /// Captured host edges; repeated handles retain repeated occurrences.
     pub captured_edges: Vec<B::Event>,
     /// Unpublished FF occurrences sampled during process-internal settling.
     pub settled_process_edges: Vec<(B::Event, u64)>,
@@ -2689,7 +2710,7 @@ impl<B: SimBackend> SimulationState<B> {
             captured_edges: self
                 .pending_host_edges
                 .iter()
-                .map(|id| events[id])
+                .flat_map(|(&id, &count)| std::iter::repeat_n(events[id], count as usize))
                 .collect(),
             unknown_events: self
                 .unknown_clock_values
@@ -2702,7 +2723,13 @@ impl<B: SimBackend> SimulationState<B> {
                     .iter()
                     .map(|&Reverse((time, process))| (process, time))
                     .collect::<Vec<_>>();
+                wakeups.extend(
+                    self.sampled_ready
+                        .iter()
+                        .map(|&process| (process, self.scheduler.time)),
+                );
                 wakeups.sort_unstable();
+                wakeups.dedup();
                 wakeups
             },
             budget_blocked_processes: self.budget_blocked_processes.iter().copied().collect(),
@@ -2773,11 +2800,11 @@ impl<B: SimBackend> SimulationState<B> {
             .into_iter()
             .map(|(event, count)| (event.id(), count))
             .collect();
-        self.pending_host_edges = parts
-            .captured_edges
-            .into_iter()
-            .map(|event| event.id())
-            .collect();
+        self.pending_host_edges.clear();
+        for event in parts.captured_edges {
+            *self.pending_host_edges.entry(event.id()).or_default() += 1;
+        }
+        self.sampled_ready.clear();
         self.process_wakeups = parts
             .process_wakeups
             .into_iter()
@@ -2837,7 +2864,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     event_queue: std::collections::BinaryHeap<SimEvent<B>>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
-    pending_host_edges: BitSet,
+    pending_host_edges: BTreeMap<usize, u64>,
     settled_process_edges: BTreeMap<usize, u64>,
     unknown_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
@@ -2849,6 +2876,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     pending_releases: BTreeMap<usize, usize>,
     ticks: u64,
     tick_budget: Option<u64>,
+    sampled_ready: BTreeSet<usize>,
     inactive: BTreeSet<usize>,
     scheduled_clock_drives: BitSet,
     scheduled_clock_time: u64,
@@ -2875,6 +2903,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             pending_releases: self.pending_releases.clone(),
             ticks: self.ticks,
             tick_budget: self.tick_budget,
+            sampled_ready: self.sampled_ready.clone(),
             inactive: self.inactive.clone(),
             scheduled_clock_drives: self.scheduled_clock_drives.clone(),
             scheduled_clock_time: self.scheduled_clock_time,

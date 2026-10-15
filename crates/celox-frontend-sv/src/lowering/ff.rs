@@ -2562,7 +2562,36 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
-                let value = self.eval(count, Some((64, signed)))?;
+                let mut arena = SLTNodeArena::new();
+                let node = self.expr_slt(count, None, &mut arena)?;
+                let negative = if signed {
+                    let original = self.lower_slt(&arena, node)?;
+                    let zero = self.b.alloc_bit(self.b.register(&original).width(), true);
+                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                    let negative = self.b.alloc_bit(1, false);
+                    self.b.emit(SIRInstruction::Binary(
+                        negative,
+                        original,
+                        BinaryOp::LtS,
+                        zero,
+                    ));
+                    Some(negative)
+                } else {
+                    None
+                };
+                let node =
+                    coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
+                let value = self.lower_slt(&arena, node)?;
+                let value = if let Some(negative) = negative {
+                    let zero = self.b.alloc_bit(64, false);
+                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                    let clamped = self.b.alloc_bit(64, false);
+                    self.b
+                        .emit(SIRInstruction::Mux(clamped, negative, zero, value));
+                    clamped
+                } else {
+                    value
+                };
                 self.store(id, SIROffset::Static(0), 64, value)?;
                 Some(name)
             }

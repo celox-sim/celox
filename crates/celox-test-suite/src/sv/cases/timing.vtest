@@ -1077,3 +1077,24 @@ endmodule"#)
 (case nba_woken_waiters_sample_before_continuations
  (source "nba-waiter-sampling.sv" #"module Child(input bit clk,output bit go);always_ff @(posedge clk)go<=1;endmodule module Top(output bit a,b);bit clk;bit enable=1;wire go;Child child(.clk(clk),.go(go));initial begin #1;clk=1;end initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq a 1)(assert_eq b 1))
+
+(case negative_repeat_counts_do_not_run_the_body
+  (source "negative_repeat_counts.sv" #"
+    module Top(input integer n, output bit [7:0] dynamic_count, literal_count,
+               zero_count, positive_count);
+      initial begin
+        #1;
+        repeat(n) begin #1; dynamic_count++; end
+        repeat(-1) begin #1; literal_count++; end
+        repeat(0) begin #1; zero_count++; end
+        repeat(2) begin #1; positive_count++; end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (set n 0xfffffffe)
+  (run_until 4)
+  (assert_eq dynamic_count 0)
+  (assert_eq literal_count 0)
+  (assert_eq zero_count 0)
+  (assert_eq positive_count 2))
