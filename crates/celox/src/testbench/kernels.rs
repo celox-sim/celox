@@ -125,6 +125,21 @@ fn run<B: SimBackend>(
     let test_name = root_testbench_name(sim);
     let use_4state = sim.backend.layout().four_state;
     let seed = execution_random_seed(testbench.configured_random_seed());
+    // A run starts every process at its beginning, whatever an earlier run
+    // of the same simulator left in the control slots, and every process
+    // clock low, as the bytecode testbench does: the first `clk.next()`
+    // then counts a real rising edge.
+    for slots in &sim.program.runtime_schema.processes.clone() {
+        for slot in slots.iter() {
+            let signal = sim.backend.resolve_signal(slot);
+            sim.backend.set_wide(signal, BigUint::ZERO);
+        }
+        for clock in &slots.clocks {
+            let signal = sim.backend.resolve_signal(&clock.signal);
+            sim.backend.set_wide(signal, BigUint::ZERO);
+            sim.dirty = true;
+        }
+    }
     let initial_writes = match sim.components.initialize(
         testbench.components(),
         testbench.component_bindings(),
@@ -150,21 +165,6 @@ fn run<B: SimBackend>(
         files: crate::HashMap::default(),
         base: testbench.component_file_base().map(|base| base.to_owned()),
     });
-    // A run starts every process at its beginning, whatever an earlier run
-    // of the same simulator left in the control slots, and every process
-    // clock low, as the bytecode testbench does: the first `clk.next()`
-    // then counts a real rising edge.
-    for slots in &sim.program.runtime_schema.processes.clone() {
-        for slot in slots.iter() {
-            let signal = sim.backend.resolve_signal(slot);
-            sim.backend.set_wide(signal, BigUint::ZERO);
-        }
-        for clock in &slots.clocks {
-            let signal = sim.backend.resolve_signal(&clock.signal);
-            sim.backend.set_wide(signal, BigUint::ZERO);
-            sim.dirty = true;
-        }
-    }
     sim.testbench_events.clear();
     sim.reset_runtime_finish(false);
 

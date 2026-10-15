@@ -406,6 +406,32 @@ static CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     on_finish: hook,
 };
 
+unsafe extern "C" fn clock_init_from_clock(state: *mut c_void, ctx: *mut sys::VrlCtx) -> i32 {
+    let state = unsafe { &mut *state.cast::<ClockState>() };
+    let api = unsafe { &*state.api };
+    let clock = unsafe { (api.port_index)(ctx, sys::VrlStr::from_str("clk"), sys::VRL_DIR_CLOCK) };
+    if clock < 0 {
+        return 1;
+    }
+    let mut value = 0;
+    let mut mask = 0;
+    unsafe { (api.read_input)(ctx, clock as u32, &mut value, &mut mask) };
+    unsafe { (api.write_output)(ctx, state.output, &value, &mask) };
+    0
+}
+
+static INIT_CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_clock,
+    destroy: destroy_clock,
+    on_init: clock_init_from_clock,
+    on_reset: hook,
+    on_clock: hook,
+    call_method: clock_call_method,
+    on_finish: hook,
+};
+
 static INIT_INPUT_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     abi_version: sys::VRL_COMPONENT_ABI_VERSION,
     kind: sys::VRL_KIND_CLOCKED,
@@ -759,6 +785,7 @@ fn register_component() {
         celox::register_static_component("celox_param", &COMPONENT);
         celox::register_static_component("celox_clocked", &CLOCK_COMPONENT);
         celox::register_static_component("celox_init_input", &INIT_INPUT_COMPONENT);
+        celox::register_static_component("celox_init_clock", &INIT_CLOCK_COMPONENT);
         celox::register_static_component("celox_wide_clocked", &WIDE_CLOCK_COMPONENT);
         celox::register_static_component("celox_modport", &MODPORT_COMPONENT);
         celox::register_static_component("celox_bad_clock", &BAD_CLOCK_COMPONENT);
@@ -829,6 +856,14 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                         {"name":"q","dir":"output"}
                     ],
                     "params": [{"name":"STEP","type":"value"}]
+                },
+                "celox_init_clock": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"},
+                        {"name":"d","dir":"input"},
+                        {"name":"q","dir":"output"}
+                    ]
                 },
                 "celox_init_input": {
                     "kind": "clocked",
@@ -1046,6 +1081,47 @@ fn connected_clocked_component_stages_inputs_and_applies_outputs() {
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
         TestResult::Pass
     );
+}
+
+#[test]
+fn repeated_kernel_runs_stage_low_clocks_before_component_init() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            var q: logic<8>;
+            inst probe: $comp::celox_init_clock(clk, d: 8'h0, q);
+            inst finisher: $comp::celox_finisher(clk);
+            initial {
+                $assert(q == 0, "on_init must observe a low generated clock: %h", q);
+                clk.next(10);
+                $assert(0, "component must finish on the first rising edge");
+            }
+        }
+    "#;
+    macro_rules! check {
+        ($method:ident) => {{
+            let (_dir, metadata) = component_metadata();
+            let mut sim = Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(true)
+                .$method()
+                .unwrap();
+            let compiled = celox::testbench::compile_initial_testbench(&sim).unwrap();
+            for run in 0..3 {
+                assert_eq!(
+                    celox::testbench::run_compiled_testbench(&mut sim, &compiled),
+                    TestResult::Pass,
+                    "run {run}"
+                );
+            }
+        }};
+    }
+    check!(build_interpreter);
+    check!(build_cranelift);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
 }
 
 #[test]
