@@ -255,3 +255,7 @@ sv_backends! { fn variable_initializer_dependencies_and_automatic_locals_preserv
 sv_backends! { fn variable_initializer_finish_prevents_procedural_start(sim) {
     @case "timing::variable_initializer_finish_prevents_procedural_start";
 } }
+
+sv_backends! { fn escaped_continuous_destinations_preserve_identifier_terminators(sim) {
+    @case "timing::escaped_continuous_destinations_preserve_identifier_terminators";
+} }

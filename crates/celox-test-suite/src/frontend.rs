@@ -298,7 +298,7 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             word,
             "assign" | "wire" | "tri" | "tri0" | "tri1" | "wand" | "wor" | "triand" | "trior"
         ) && let Some((body_end, replacement)) =
-            timed_ff::gated_continuous(source, start, end, names)
+            timed_ff::gated_continuous(source, start, end, names, tasks)
         {
             output.push_str(&source[previous..start]);
             output.push_str(&timed_ff::in_macro(source, start, replacement));

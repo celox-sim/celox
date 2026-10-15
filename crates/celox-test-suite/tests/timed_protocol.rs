@@ -73,3 +73,46 @@ fn qualified_ff_if_actions_are_not_truncated_during_staging() {
     celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires Icarus, Verilator and a C++ compiler"]
+fn bare_continuous_function_calls_observe_staged_inputs() {
+    // Exercise the adapter directly: Celox currently rejects bare function
+    // values in continuous assignments, while the adapter normalizes them
+    // to explicit calls for the external simulators.
+    let text = r##"(group protocol (category sequential))
+      (case bare (source "bare.sv" #"
+        module Top(input bit[7:0] go,output wire[7:0] y,z,output wire ready);
+          function automatic bit[7:0] checked;
+            if(!go)$fatal(1,"bare function ran before setup");
+            return go;
+          endfunction
+          assign y=checked;
+          wire[7:0] other=checked;
+          assign z=other;
+          wire constant_ready=1;
+          assign ready=constant_ready;
+          initial begin #2;$finish;end
+        endmodule
+      "#) (top Top)(set go 1)(run_until 0)(assert_eq y 1)(assert_eq z 1)(assert_eq ready 1)
+      (set go 2)(run_until 1)(assert_eq y 2)(assert_eq z 2))"##;
+    let case = load_group("bare.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/bare-continuous-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .unwrap();
+    icarus.run_testbench().unwrap();
+    let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .unwrap();
+    verilator.run_testbench().unwrap();
+    let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
+    celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

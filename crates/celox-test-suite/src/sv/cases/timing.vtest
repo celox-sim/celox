@@ -1212,3 +1212,22 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(run_to_finish)(assert_eq seen 0)(expect_output ""))
+
+
+(case escaped_continuous_destinations_preserve_identifier_terminators
+ (source "escaped-continuous-function.sv" #"
+ module Top(input bit go,output wire y,z);
+ wire \out ;
+ wire \other = checked(go);
+ function automatic bit checked(input bit value);
+   if(!value)$fatal(1,"escaped function ran before setup");
+   return value;
+ endfunction
+ assign \out =checked(go);
+ assign y=\out ;
+ assign z=\other ;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(set go 1)(run_until 0)(assert_eq y 1)(assert_eq z 1)
+ (run_to_finish)(expect_output ""))
