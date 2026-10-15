@@ -2675,8 +2675,8 @@ pub(super) fn loop_trip_cap(
     use sv::ir::LoopKind;
     match kind {
         LoopKind::Repeat(count) => eval.value(count).unwrap_or(2).clamp(0, 2) as usize,
-        LoopKind::While if condition.and_then(|expr| eval.value(expr)) == Some(0) => 0,
-        LoopKind::DoWhile if condition.and_then(|expr| eval.value(expr)) == Some(0) => 1,
+        LoopKind::While if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
+        LoopKind::DoWhile if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 1,
         // A constant false entry test needs no canonical induction/step.
         LoopKind::For if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
         LoopKind::For => eval.for_cap(init, condition, step, body).unwrap_or(2),

@@ -456,6 +456,10 @@ impl<B: SimBackend> Simulation<B> {
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
+        if self.state.is_finished() {
+            self.simulator.modify_without_evaluation(f);
+            return Ok(());
+        }
         let result = self.simulator.modify(f);
         self.synchronize_host_write();
         result
@@ -4209,5 +4213,164 @@ mod round62_review_tests {
             );
             backends!(&source, check);
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod pr1158_merge_regressions {
+    use super::*;
+    macro_rules! backends {
+        ($source:expr, $check:ident) => {{
+            for four_state in [false, true] {
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![($source, std::path::Path::new("merge-regression.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                };
+                $check(Simulation::new(build().build_interpreter().unwrap()));
+                $check(Simulation::new(build().build_cranelift().unwrap()));
+                $check(Simulation::new(build().build_wasm().unwrap()));
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                $check(Simulation::new(build().build_native().unwrap()));
+            }
+        }};
+    }
+    #[test]
+    fn masked_false_while_preserves_separate_write_times() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        for condition in ["4'bx000", "4'bz000", "4'b000x"] {
+            let source = format!(
+                "module Child(output bit[1:0]q);initial begin #1;while({condition})#5;q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn selected_break_skips_step_hierarchy_reads() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        }
+        for body in [
+            "break;",
+            "if(1)break;",
+            "case(1)1:break;default:continue;endcase",
+        ] {
+            let source = format!(
+                "module Child(input bit a,output bit q);int i;always_comb begin q=0;for(i=0;i<1;i=a)begin {body} end end endmodule module Top(output bit[7:0]seen);bit a;wire q;Child c(a,q);initial begin #1;a=1;a=0;end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn distinct_captured_ff_sources_each_execute_the_body() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clk_addr = sim.simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let rst_addr = sim.simulator.program.get_addr(&[], &["rst"]).unwrap();
+            assert_ne!(
+                sim.simulator.program.design.events.canonical(clk_addr),
+                sim.simulator.program.design.events.canonical(rst_addr)
+            );
+            for name in ["clk", "rst"] {
+                let signal = sim.signal(name);
+                sim.modify(|io| io.set(signal, 1u8)).unwrap();
+                sim.eval_comb().unwrap();
+            }
+            let saved = sim.save_state().unwrap();
+            let checkpoint = sim.checkpoint().unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+            assert_eq!(sim.next_event_time(), None);
+            sim.restore(&checkpoint).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+            sim.load_state(&saved).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+        }
+        backends!(
+            "module Top(input bit clk,rst,output bit[7:0]q);always_ff @(posedge clk or posedge rst)if(rst)q=q+1;else q=q+1;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn finished_modify_keeps_outputs_and_diagnostics_frozen_with_drain() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert!(sim.is_finished());
+            let mut drain = sim.simulator.runtime_event_drain();
+            if let Some(drain) = &mut drain {
+                drain.drain();
+            } else {
+                sim.drain_runtime_events();
+            }
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            assert_eq!(sim.step().unwrap(), None);
+            let events = if let Some(drain) = &mut drain {
+                drain.drain()
+            } else {
+                sim.drain_runtime_events()
+            };
+            assert!(
+                events.is_empty(),
+                "new diagnostics after finish: {events:?}"
+            );
+            // Explicit evaluation remains an opt-in low-level operation.
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        backends!(
+            r#"module Top(input bit a,output bit q);always_comb begin q=a;if(a)$display("late");end initial $finish;endmodule"#,
+            check
+        );
+    }
+    #[test]
+    fn physical_clock_aliases_do_not_duplicate_host_occurrences() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clk_addr = sim.simulator.program.get_addr(&[], &["clk"]).unwrap();
+            let mirror_addr = sim.simulator.program.get_addr(&[], &["mirror"]).unwrap();
+            assert_eq!(
+                sim.simulator.program.design.events.canonical(clk_addr),
+                sim.simulator.program.design.events.canonical(mirror_addr)
+            );
+            let clk = sim.signal("clk");
+            for value in [1u8, 0, 1] {
+                sim.modify(|io| io.set(clk, value)).unwrap();
+                sim.eval_comb().unwrap();
+            }
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("direct")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("aliased")), 2u8.into());
+        }
+        backends!(
+            "module Child(input bit clk,output bit[7:0]q);always @(posedge clk)q=q+1;endmodule module Top(input bit clk,output wire[7:0]direct,aliased);wire mirror=clk;Child a(clk,direct);Child b(mirror,aliased);endmodule",
+            check
+        );
+    }
+    #[test]
+    fn masked_known_one_while_retains_executed_body_delay() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(3).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        backends!(
+            "module Child(output bit[1:0]q);initial begin #1;while(4'bx001)begin #1;q[0]=1;break;end end initial begin #3;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule",
+            check
+        );
     }
 }

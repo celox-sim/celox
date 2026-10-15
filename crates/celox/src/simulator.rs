@@ -1189,15 +1189,24 @@ mod host {
         where
             F: FnOnce(&mut IOContext<B>),
         {
+            self.modify_without_evaluation(f);
+            if self.runtime_event_drain_active.load(Ordering::Acquire) {
+                self.eval_comb_for_runtime_event_drain()?;
+            }
+            Ok(())
+        }
+
+        // Used by a finished Simulation: retain host stores without
+        // implicitly advancing terminal outputs or generating diagnostics.
+        pub(crate) fn modify_without_evaluation<F>(&mut self, f: F)
+        where
+            F: FnOnce(&mut IOContext<B>),
+        {
             let mut ctx = IOContext {
                 backend: &mut self.backend,
             };
             f(&mut ctx);
             self.dirty = true;
-            if self.runtime_event_drain_active.load(Ordering::Acquire) {
-                self.eval_comb_for_runtime_event_drain()?;
-            }
-            Ok(())
         }
 
         pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {

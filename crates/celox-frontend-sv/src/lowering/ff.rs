@@ -3626,7 +3626,10 @@ pub(super) fn walk_reachable<'a>(
                     );
                     if trips != 0 {
                         walk_reachable(body, pm, visit);
-                        walk_reachable(step, pm, visit);
+                        let flow = runtime_body_flow(body, pm);
+                        if flow.fallthrough || flow.continues {
+                            walk_reachable(step, pm, visit);
+                        }
                     }
                 }
                 _ => {}
@@ -3638,29 +3641,68 @@ pub(super) fn walk_reachable<'a>(
     }
 }
 
-fn runtime_stmt_may_fall_through(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> bool {
-    if let Some(branch) = selected_branch(stmt, pm) {
-        return branch
-            .iter()
-            .all(|stmt| runtime_stmt_may_fall_through(stmt, pm));
+// Flow out of the current sequence. A continue reaches this loop's step;
+// a break/return does not. Nested loops consume their own continue targets.
+#[derive(Clone, Copy)]
+struct RuntimeFlow {
+    fallthrough: bool,
+    continues: bool,
+}
+impl RuntimeFlow {
+    fn choice(self, other: Self) -> Self {
+        Self {
+            fallthrough: self.fallthrough || other.fallthrough,
+            continues: self.continues || other.continues,
+        }
     }
-    let body_falls = |body: &[sv::ir::Stmt]| {
-        body.iter()
-            .all(|stmt| runtime_stmt_may_fall_through(stmt, pm))
+}
+fn runtime_body_flow(body: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> RuntimeFlow {
+    let mut flow = RuntimeFlow {
+        fallthrough: true,
+        continues: false,
     };
+    for stmt in body {
+        if !flow.fallthrough {
+            break;
+        }
+        let next = runtime_stmt_flow(stmt, pm);
+        flow.fallthrough = next.fallthrough;
+        flow.continues |= next.continues;
+    }
+    flow
+}
+fn runtime_stmt_flow(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> RuntimeFlow {
+    if let Some(branch) = selected_branch(stmt, pm) {
+        return runtime_body_flow(branch, pm);
+    }
     match stmt {
         sv::ir::Stmt::If {
             then_body,
             else_body,
             ..
-        } => body_falls(then_body) || body_falls(else_body),
-        sv::ir::Stmt::Case { items, default, .. } => {
-            default.as_ref().is_none_or(|body| body_falls(body))
-                || items.iter().any(|item| body_falls(&item.body))
+        } => runtime_body_flow(then_body, pm).choice(runtime_body_flow(else_body, pm)),
+        sv::ir::Stmt::Case { items, default, .. } => items.iter().fold(
+            runtime_body_flow(default.as_deref().unwrap_or_default(), pm),
+            |flow, item| flow.choice(runtime_body_flow(&item.body, pm)),
+        ),
+        sv::ir::Stmt::Continue => RuntimeFlow {
+            fallthrough: false,
+            continues: true,
+        },
+        sv::ir::Stmt::Wait(condition) if known_condition(condition, pm) == Some(false) => {
+            RuntimeFlow {
+                fallthrough: false,
+                continues: false,
+            }
         }
-        sv::ir::Stmt::Wait(condition) if known_condition(condition, pm) == Some(false) => false,
-        _ => stmt_may_fall_through(stmt),
+        _ => RuntimeFlow {
+            fallthrough: stmt_may_fall_through(stmt),
+            continues: false,
+        },
     }
+}
+fn runtime_stmt_may_fall_through(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> bool {
+    runtime_stmt_flow(stmt, pm).fallthrough
 }
 
 /// Exact times for a straight-line initial activation with constant delays.
@@ -3996,21 +4038,21 @@ pub(super) fn fixed_runtime_write_times(
             && step.is_empty()
         {
             let zero_trip = match (kind, condition) {
-                (LoopKind::While, Some(condition)) => Some((condition, false)),
-                (LoopKind::Repeat(count), _) => Some((count, true)),
-                _ => None,
+                (LoopKind::While, Some(condition)) => known_condition(condition, pm) == Some(false),
+                (LoopKind::Repeat(count), _) => {
+                    !expr_calls(count, &|_| true)
+                        && known_loop_value(
+                            count,
+                            pm.variables,
+                            pm.name_to_id,
+                            pm.constants,
+                            pm.parameter_types,
+                        )
+                        .is_some_and(|value| value <= 0)
+                }
+                _ => false,
             };
-            if let Some((condition, repeat)) = zero_trip
-                && !expr_calls(condition, &|_| true)
-                && known_loop_value(
-                    condition,
-                    pm.variables,
-                    pm.name_to_id,
-                    pm.constants,
-                    pm.parameter_types,
-                )
-                .is_some_and(|value| value == 0 || (repeat && value < 0))
-            {
+            if zero_trip {
                 continue;
             }
         }
@@ -4099,13 +4141,7 @@ pub(super) fn fixed_runtime_write_times(
                 body,
             } if init.is_empty()
                 && step.is_empty()
-                && known_loop_value(
-                    condition,
-                    pm.variables,
-                    pm.name_to_id,
-                    pm.constants,
-                    pm.parameter_types,
-                ) == Some(0)
+                && known_condition(condition, pm) == Some(false)
                 && branch_without_suspension_or_exit(body, pm) =>
             {
                 runtime_watched_write_count(body, pm, expr, nonblocking)
@@ -4145,15 +4181,7 @@ pub(super) fn fixed_runtime_write_times(
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
             Stmt::Wait(condition) if statically_true_wait(condition, pm) => 0,
-            Stmt::Wait(condition)
-                if known_loop_value(
-                    condition,
-                    pm.variables,
-                    pm.name_to_id,
-                    pm.constants,
-                    pm.parameter_types,
-                ) == Some(0) =>
-            {
+            Stmt::Wait(condition) if known_condition(condition, pm) == Some(false) => {
                 recurring = false;
                 break;
             }

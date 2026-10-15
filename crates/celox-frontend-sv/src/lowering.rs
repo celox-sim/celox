@@ -7754,6 +7754,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loop_step_dependencies_distinguish_continue_from_break_and_return() {
+        use sv::ir::{Expr, LValue, LoopKind, Stmt};
+        let ir = sv::analyze_source_module_with_parameter_overrides(
+            "module Top(input bit a,choose,output bit q);int i;endmodule",
+            std::path::Path::new("step-dependencies.sv"),
+            "Top",
+            &Default::default(),
+        )
+        .unwrap();
+        for four_state in [false, true] {
+            let mut module =
+                lower_module(&ir.modules()[0], four_state, true, false, false).unwrap();
+            let pm = procedural::ProcModule::new(
+                &module.source,
+                &mut module.variables,
+                &mut module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+                four_state,
+            );
+            let branch = |condition: &str, then_body: Vec<Stmt>, else_body: Vec<Stmt>| Stmt::If {
+                condition: Expr::Ident(condition.into()),
+                then_body,
+                else_body,
+            };
+            for (body, reads_step) in [
+                (vec![Stmt::Break], false),
+                (vec![Stmt::Return(None)], false),
+                (vec![Stmt::Continue], true),
+                (vec![], true),
+                (
+                    vec![branch(
+                        "choose",
+                        vec![Stmt::Break],
+                        vec![Stmt::Return(None)],
+                    )],
+                    false,
+                ),
+                (
+                    vec![branch("choose", vec![Stmt::Break], vec![Stmt::Continue])],
+                    true,
+                ),
+                (
+                    vec![
+                        Stmt::Loop {
+                            kind: LoopKind::Repeat(Expr::Literal("1".into())),
+                            init: vec![],
+                            condition: None,
+                            body: vec![Stmt::Continue],
+                            step: vec![],
+                        },
+                        Stmt::Break,
+                    ],
+                    false,
+                ),
+                (
+                    vec![Stmt::If {
+                        condition: Expr::Literal("1'b1".into()),
+                        then_body: vec![Stmt::Break],
+                        else_body: vec![Stmt::Continue],
+                    }],
+                    false,
+                ),
+            ] {
+                let statements = [Stmt::Loop {
+                    kind: LoopKind::For,
+                    init: vec![],
+                    condition: Some(Expr::Literal("1'b1".into())),
+                    body,
+                    step: vec![Stmt::Assign {
+                        lhs: LValue::Ident("i".into()),
+                        rhs: Expr::Ident("a".into()),
+                        nonblocking: false,
+                    }],
+                }];
+                let mut reads = HashSet::default();
+                ff::walk_reachable(&statements, &pm, &mut |stmt| {
+                    procedural::stmt_reads(stmt, &mut reads)
+                });
+                assert_eq!(reads.contains("a"), reads_step, "{statements:?}");
+            }
+        }
+    }
+
+    #[test]
     fn round62_runtime_loop_summary_stops_after_selected_exit() {
         use sv::ir::{Expr, LValue, LoopKind, Stmt};
         let ir = sv::analyze_source_module_with_parameter_overrides(
