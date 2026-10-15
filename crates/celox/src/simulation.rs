@@ -5193,3 +5193,60 @@ mod active_settle_review {
         check(Simulation::new(build().build_native().unwrap()), &path);
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod cross_depth_write_review {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn coincident_writers_at_different_dependency_depths_are_rejected() {
+        let source = "module Direct(output bit q);initial begin #1;q=1;end endmodule module Leaf(output bit q);initial begin #1;q=1;end endmodule module Wrapper(output bit q);Leaf leaf(.q(q));endmodule module Top(output bit[7:0]seen);wire a,b;Direct direct(.q(a));Wrapper nested(.q(b));initial forever begin @(a^b);seen=seen+1;end endmodule";
+        let error =
+            match Simulator::from_sv_sources(vec![(source, Path::new("depth-writes.sv"))], "Top")
+                .build_interpreter()
+            {
+                Ok(_) => panic!("different-depth coincident writers unexpectedly compiled"),
+                Err(error) => error.to_string(),
+            };
+        assert!(error.contains("multiple blocking writes"), "{error}");
+        let distinct = source.replace(
+            "module Leaf(output bit q);initial begin #1;",
+            "module Leaf(output bit q);initial begin #2;",
+        );
+        fn check<B: SimBackend>(mut sim: Simulation<B>, first: u8, second: u8) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), first.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), second.into());
+        }
+        // Repeated reads of one nested writer do not duplicate its writes;
+        // the simultaneous direct writer is irrelevant to this expression.
+        let single = source.replace("@(a^b)", "@(b|b)");
+        for (code, first, second) in [(distinct.as_str(), 1, 2), (single.as_str(), 1, 1)] {
+            let build =
+                || Simulator::from_sv_sources(vec![(code, Path::new("depth-writes.sv"))], "Top");
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                first,
+                second,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                first,
+                second,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                first,
+                second,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                first,
+                second,
+            );
+        }
+    }
+}
