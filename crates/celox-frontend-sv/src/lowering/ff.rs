@@ -3724,6 +3724,25 @@ pub(super) fn fixed_runtime_write_times(
                     .unwrap_or(0)
             }
             Stmt::Loop {
+                kind: LoopKind::DoWhile,
+                init,
+                condition: Some(condition),
+                step,
+                body,
+            } if init.is_empty()
+                && step.is_empty()
+                && known_loop_value(
+                    condition,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                ) == Some(0)
+                && branch_without_suspension_or_exit(body, pm) =>
+            {
+                runtime_watched_write_count(body, pm, expr, nonblocking)
+            }
+            Stmt::Loop {
                 kind: LoopKind::Repeat(count),
                 init,
                 body,

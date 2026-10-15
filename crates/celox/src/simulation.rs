@@ -3671,3 +3671,116 @@ mod cross_depth_write_review {
         }
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod wait_and_finish_review {
+    use super::*;
+    #[test]
+    fn one_pass_do_while_preserves_fixed_write_times() {
+        let source = "module Child(output bit[1:0]q);initial begin #1;do q[0]=1;while(0);end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("do-while.sv"))], "Top")
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+        let coincident = source.replace("#2;q[1]", "#1;q[1]");
+        assert!(
+            Simulator::from_sv_sources(
+                vec![(&coincident, std::path::Path::new("coincident.sv"))],
+                "Top"
+            )
+            .build_interpreter()
+            .is_err()
+        );
+    }
+    struct DefaultFinish<B: SimBackend> {
+        sim: Simulator<B>,
+        combs: usize,
+    }
+    impl<B: SimBackend> SimulationExecutor for DefaultFinish<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            self.combs += 1;
+            self.sim.eval_comb_checked()
+        }
+        fn eval_apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.sim.eval_comb_apply_ff_at_checked(e)
+        }
+        fn eval_only_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.sim.eval_only_ff_at_checked(e)
+        }
+        fn apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.sim.apply_ff_at_checked(e)
+        }
+    }
+    #[test]
+    fn finish_status_stops_executors_without_a_finish_event_hook() {
+        let source = "module Top(input bit clk,output bit q,dummy);assign q=clk;initial $finish;always @(posedge clk)dummy<=1;endmodule";
+        fn check<B: SimBackend>(sim: Simulator<B>) {
+            let mut state = simulation_state(&sim);
+            state.schedule(sim.event("clk"), sim.signal("clk"), 0, 1);
+            let mut executor = DefaultFinish { sim, combs: 0 };
+            assert_eq!(state.step(&mut executor).unwrap(), Some(0));
+            assert!(state.is_finished());
+            assert_eq!(executor.combs, 0);
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("dummy")),
+                0
+            );
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("default-finish.sv"))],
+                "Top",
+            )
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod level_wait_scheduling_review {
+    use super::*;
+    #[test]
+    fn level_waiters_run_before_an_inactive_clear() {
+        let source = "module Top(output bit a,b);bit go;initial begin wait(go);a=1;end initial begin wait(go);b=1;end initial begin #1;go=1;#0;go=0;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(source, std::path::Path::new("stable-wait.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+}
