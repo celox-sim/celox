@@ -207,3 +207,9 @@ sv_backends! { fn untimed_task_copyback_preserves_distinct_activation_times(sim)
 sv_backends! { fn statically_satisfied_waits_preserve_distinct_activation_times(sim) { @case "timing::statically_satisfied_waits_preserve_distinct_activation_times"; } }
 sv_backends! { fn nba_woken_waiters_sample_before_continuations(sim) { @case "timing::nba_woken_waiters_sample_before_continuations"; } }
 sv_backends! { fn staged_always_comb_side_effects_wait_for_setup(sim) { @case "timing::staged_always_comb_side_effects_wait_for_setup"; } }
+
+sv_backends! {
+    fn negative_repeat_counts_do_not_run_the_body(sim) {
+        @case "timing::negative_repeat_counts_do_not_run_the_body";
+    }
+}
