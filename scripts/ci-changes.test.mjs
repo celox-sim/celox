@@ -140,6 +140,7 @@ test("full validation overrides even an empty valid diff", () => {
     ),
     {
       ...all,
+      queue: true,
       heliodor_arm64: true,
       release: false,
       // The whole Rust workspace, with no package scope or filter.
@@ -188,7 +189,7 @@ function runClassifier(
         const [name, value] = line.split("=");
         return [name, value === "true"];
       })
-      .filter(([name]) => !name.startsWith("rust_")),
+      .filter(([name]) => !name.startsWith("rust_") && name !== "queue"),
   );
 }
 
@@ -453,7 +454,7 @@ test("generic Rust changes do not schedule ARM64 Heliodor on pull requests", () 
   );
 });
 
-test("in-place master PRs run release gates even with an unknown diff", () => {
+test("queue drafts on master run release gates even with an unknown diff", () => {
   for (const files of [[".release-please-manifest.json"], null]) {
     assert.equal(
       isReleaseMergeGroup({
@@ -476,8 +477,13 @@ test("in-place master PRs run release gates even with an unknown diff", () => {
     runClassifier("", "", {
       GITHUB_EVENT_NAME: "pull_request",
       MERGE_GROUP_BASE_REF: "refs/heads/master",
-      MERGIFY_INPLACE: "true",
+      QUEUE_VALIDATION: "true",
     }),
     { ...all, heliodor_arm64: true, release: true },
   );
+});
+
+test("version-only Release Please PRs defer product tests to queue validation", () => {
+  assert.deepEqual(classifyFiles(releasePullRequestFiles, { releasePlease: true }), none);
+  assert.equal(classifyFiles([...releasePullRequestFiles, "crates/celox/src/lib.rs"], { releasePlease: true }).rust, true);
 });

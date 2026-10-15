@@ -26,6 +26,18 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
+// Version-only release PRs defer product validation to the queue draft.
+const RELEASE_PLEASE_FILES = new Set([
+  ".release-please-manifest.json",
+  "CHANGELOG.md",
+  "Cargo.lock",
+  "Cargo.toml",
+  "VERSION",
+  "crates/celox-napi/package.json",
+  "packages/celox/package.json",
+  "packages/vite-plugin/package.json",
+]);
+
 // These crates are consumers or test infrastructure, not runtime/build
 // dependencies of celox-napi. ci-changes.test.mjs checks the workspace graph
 // so adding a dependency cannot silently make this exclusion unsafe.
@@ -102,7 +114,7 @@ export function isReleaseMergeGroup({ event, baseRef, files }) {
   );
 }
 
-export function classifyFiles(files) {
+export function classifyFiles(files, { releasePlease = false } = {}) {
   const affected = {
     docs: false,
     javascript: false,
@@ -113,6 +125,14 @@ export function classifyFiles(files) {
   };
 
   const normalizedFiles = files.map((path) => path.replace(/^\.\//, ""));
+
+  if (
+    releasePlease &&
+    normalizedFiles.length > 0 &&
+    normalizedFiles.every((path) => RELEASE_PLEASE_FILES.has(path))
+  ) {
+    return affected;
+  }
 
   for (const path of normalizedFiles) {
     if (
@@ -239,7 +259,9 @@ if (
   const files = scheduledFull
     ? null
     : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  const release = isReleaseMergeGroup({
+  const queue = process.env.QUEUE_VALIDATION === "true" ||
+    (process.env.QUEUE_VALIDATION !== "false" && process.env.GITHUB_EVENT_NAME !== "pull_request");
+  const release = queue && isReleaseMergeGroup({
     event: process.env.GITHUB_EVENT_NAME,
     baseRef: process.env.MERGE_GROUP_BASE_REF,
     files,
@@ -248,15 +270,16 @@ if (
     files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
-          ...classifyFiles(files),
+          ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
   writeOutputs({
+    queue,
     ...affected,
     release,
     ...rustScopeOutputs(
       process.env.GITHUB_EVENT_NAME === "pull_request" &&
-        process.env.MERGIFY_INPLACE !== "true" &&
+        !queue &&
         !release &&
         affected.rust
         ? files
@@ -265,7 +288,7 @@ if (
   });
 }
 
-// In-place queue validation, legacy merge groups, releases and daily runs keep
+// Queue drafts, legacy merge groups, releases and daily runs keep
 // the whole workspace. The scope helper remains available outside queue CI.
 function rustScopeOutputs(files) {
   let scope = { full: true };
