@@ -84,6 +84,8 @@ same coverage on its next push. Unrelated paths may still skip jobs.
 - Add `merge-ready` to request automatic queueing, or comment `@mergifyio queue`
   for an ordinary PR. A failed queue entry receives `dequeued`; investigate it,
   remove that label, and request queueing again. There is no automatic retry loop.
+- To cancel an automatic merge request, remove `merge-ready`, then comment
+  `@mergifyio dequeue`. Removing the label alone does not remove a queued PR.
 - The release PR requires `merge-ready` from the weekly release workflow and
   must not carry `release:hold`. Dependency rolls and lane synchronization use
   the same queue request label.
