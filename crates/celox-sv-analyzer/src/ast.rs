@@ -575,6 +575,13 @@ impl Module {
             );
         }
 
+        let mut _timed_tasks = validation::install_timed_tasks(
+            node.clone(),
+            syntax_tree,
+            &imported,
+            &const_env,
+            &type_aliases,
+        )?;
         match reject_silently_ignored_constructs(
             node.clone(),
             syntax_tree,
@@ -634,6 +641,15 @@ impl Module {
                     &const_env,
                     &type_aliases,
                 )?;
+                // Rebuild classification after resolving type-dependent constants.
+                drop(_timed_tasks);
+                _timed_tasks = validation::install_timed_tasks(
+                    node.clone(),
+                    syntax_tree,
+                    &imported,
+                    &const_env,
+                    &type_aliases,
+                )?;
                 reject_silently_ignored_constructs(
                     node.clone(),
                     syntax_tree,
@@ -645,16 +661,6 @@ impl Module {
             }
             Err(error) => return Err(error),
         }
-        // The constants are known: the generate items are elaborated, and
-        // the `always` constructs calling a timed task are classified as
-        // processes from here on.
-        let _timed_tasks = validation::install_timed_tasks(
-            node.clone(),
-            syntax_tree,
-            &imported,
-            &const_env,
-            &type_aliases,
-        )?;
         let ports = ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {

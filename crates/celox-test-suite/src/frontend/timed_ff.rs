@@ -79,6 +79,7 @@ pub(super) fn gated_continuous(
     start: usize,
     end: usize,
     names: &TimedNames,
+    tasks: &TaskTiming,
 ) -> Option<(usize, String)> {
     let net_declaration = &source[start..end] != "assign";
     let mut at = end;
@@ -123,9 +124,23 @@ pub(super) fn gated_continuous(
             b',' | b';' if depth == 0 => {
                 if let Some(begin) = rhs.take() {
                     let expression = &source[begin..at];
-                    let calls = sv_words(expression)
-                        .into_iter()
-                        .any(|(_, end, _)| after_trivia(&expression[end..]).starts_with('('));
+                    let mut calls = false;
+                    let mut bare_calls = Vec::new();
+                    for (offset, end, word) in sv_words(expression) {
+                        if after_trivia(&expression[end..]).starts_with('(') {
+                            calls = true;
+                        } else if tasks.resolve(source, begin + offset, word).is_some() {
+                            calls = true;
+                            bare_calls.push(end);
+                        }
+                    }
+                    // Both external tools require parentheses for a resolved
+                    // zero-argument function in an expression. Normalize only
+                    // callable identifiers; ordinary variable drivers stay live.
+                    let mut expression = expression.to_owned();
+                    for end in bare_calls.into_iter().rev() {
+                        expression.insert_str(end, " ()");
+                    }
                     if calls {
                         let lhs = lhs_name.take()?;
                         let mut suffix = at;
@@ -137,7 +152,7 @@ pub(super) fn gated_continuous(
                             suffix += 1;
                         };
                         drivers.push_str(&format!(
-                            "reg [$bits({lhs})-1:0] {name};\nalways @* begin if ({}::started) {name} = {expression}; end\n", names.package
+                            "reg [$bits({lhs} )-1:0] {name};\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package
                         ));
                         output.push_str(&source[previous..begin]);
                         output.push_str(&format!(" {name}"));

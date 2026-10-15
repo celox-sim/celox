@@ -33,6 +33,9 @@ function alive(name: string, directory: string): boolean {
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		// Windows may deny access while another owner removes its claim.
+		// Keep waiting until its disappearance is observable.
+		if (deletePending(error)) return true;
 		throw error;
 	}
 	if (Date.now() - updated > leaseDuration) return false;
@@ -48,15 +51,28 @@ function alive(name: string, directory: string): boolean {
 	}
 }
 
-function ticket(dir: string): number | undefined {
-	try {
-		const number = Number(readFileSync(join(dir, "ticket"), "utf8"));
-		if (!Number.isSafeInteger(number) || number < 1)
-			throw new Error(`Invalid declaration-generation ticket: ${dir}`);
-		return number;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return undefined;
+function deletePending(error: unknown): boolean {
+	return (
+		process.platform === "win32" &&
+		(error as NodeJS.ErrnoException).code === "EPERM"
+	);
+}
+
+async function ticket(dir: string): Promise<number | undefined> {
+	const deadline = Date.now() + 120_000;
+	for (;;) {
+		try {
+			const number = Number(readFileSync(join(dir, "ticket"), "utf8"));
+			if (!Number.isSafeInteger(number) || number < 1)
+				throw new Error(`Invalid declaration-generation ticket: ${dir}`);
+			return number;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			if (!deletePending(error) || Date.now() >= deadline) throw error;
+			// Do not treat an unreadable published ticket as zero while
+			// choosing our priority: that could overtake its current owner.
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
 	}
 }
 
@@ -103,7 +119,7 @@ export async function withSidecarLock<T>(
 		let largest = 0;
 		for (const name of claims()) {
 			if (alive(name, directory))
-				largest = Math.max(largest, ticket(join(directory, name)) ?? 0);
+				largest = Math.max(largest, (await ticket(join(directory, name))) ?? 0);
 		}
 		const number = largest + 1;
 		// Publish the completed ticket atomically. Its absence means that this
@@ -122,7 +138,7 @@ export async function withSidecarLock<T>(
 					rmSync(other, { recursive: true, force: true });
 					continue;
 				}
-				const priority = ticket(other);
+				const priority = await ticket(other);
 				if (
 					priority === undefined ||
 					priority < number ||

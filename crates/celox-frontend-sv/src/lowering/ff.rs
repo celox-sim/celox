@@ -4041,6 +4041,18 @@ pub(super) fn fixed_runtime_write_times(
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)
             }
             Stmt::Wait(condition) if statically_true_wait(condition, pm) => 0,
+            Stmt::Wait(condition)
+                if known_loop_value(
+                    condition,
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                ) == Some(0) =>
+            {
+                recurring = false;
+                break;
+            }
             Stmt::If { .. }
             | Stmt::Case { .. }
             | Stmt::Loop { .. }
