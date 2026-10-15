@@ -18,7 +18,7 @@ function job(name) {
 test("the required gate rejects failures and only accepts explicitly optional skips", () => {
   const gate = job("rust");
   assert.match(gate, /name: Rust Test & NAPI Build/);
-  assert.match(gate, /if: always\(\)/);
+  assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
     /needs: \[changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
@@ -161,7 +161,7 @@ test("scheduled and manual validation run all paths and external suites", () => 
   assert.match(external, /needs: changes\n/);
   assert.match(
     external,
-    /if: always\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| needs\.changes\.outputs\.release == 'true'\)/,
+    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| needs\.changes\.outputs\.release == 'true'\)/,
   );
   assert.match(
     job("changes"),
@@ -273,7 +273,7 @@ test("platform jobs are deferred to queue validation", () => {
     "js-windows",
   ];
   for (const name of platform) {
-    assert.match(job(name), /\n    if: always\(\) && needs\.changes\.outputs\.queue != 'false' && \(/, name);
+    assert.match(job(name), /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false' && \(/, name);
   }
   // Linux jobs still give pull requests their feedback.
   for (const name of [
@@ -304,7 +304,7 @@ test("full runs on long-lived branches report every job's result", () => {
   assert.deepEqual([...needs].sort(), [...jobs].sort());
   assert.match(
     report,
-    /if: always\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
+    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
   );
   assert.match(report, /issues: write/);
   assert.match(report, /NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
@@ -313,7 +313,7 @@ test("full runs on long-lived branches report every job's result", () => {
 
 test("queue validation rejects missing coverage, producer failures and detection failure", () => {
   const gate = job("queue-validation");
-  assert.match(gate, /if: always\(\) && needs\.changes\.outputs\.queue != 'false'/);
+  assert.match(gate, /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false'/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
   const needs = Object.fromEntries(["lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
   needs.changes = { result: "success", outputs: { queue: "true", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };

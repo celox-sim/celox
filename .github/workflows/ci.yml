@@ -67,7 +67,7 @@ jobs:
   docs:
     name: Docs Build
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.docs == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -88,7 +88,7 @@ jobs:
   lint:
     name: Lint & Format
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true') }}
     runs-on: ubuntu-latest
     env:
       VERYL_LANE: ${{ (github.ref_name == 'develop' || github.base_ref == 'develop' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'detect' || 'stable' }}
@@ -176,7 +176,7 @@ jobs:
   rust-tests:
     name: Rust Tests
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -268,7 +268,7 @@ jobs:
     needs: changes
     # Scheduled and manual runs compare even when change detection fails. A
     # merge group that cuts a release also compares before it can merge.
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -355,7 +355,7 @@ jobs:
   sv-tests:
     name: sv-tests conformance
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -394,7 +394,7 @@ jobs:
   napi-linux:
     name: NAPI Build (Linux x64)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -436,7 +436,7 @@ jobs:
   napi-wasm:
     name: NAPI WASM Build & Test
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -492,7 +492,7 @@ jobs:
   rust:
     name: Rust Test & NAPI Build
     needs: [changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
@@ -536,7 +536,7 @@ jobs:
     name: ARM64 Backend Test
     needs: changes
     # Full platform checks run once in the queue, not on every PR push.
-    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -573,7 +573,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -609,7 +609,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -650,7 +650,7 @@ jobs:
   js-ubuntu:
     name: JS Test (Ubuntu)
     needs: [changes, napi-linux]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -696,7 +696,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -728,7 +728,7 @@ jobs:
   playground-browser:
     name: Playground Browser Test
     needs: [changes, napi-wasm]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -771,7 +771,7 @@ jobs:
   queue-validation:
     name: Queue validation
     needs: [changes, lint, rust, napi-windows, napi-linux-arm64, js-ubuntu, js-windows, playground-browser, docs]
-    if: always() && needs.changes.outputs.queue != 'false'
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' }}
     runs-on: ubuntu-latest
     env:
       NEEDS: ${{ toJSON(needs) }}
@@ -820,7 +820,7 @@ jobs:
         js-windows,
         playground-browser,
       ]
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop')
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
