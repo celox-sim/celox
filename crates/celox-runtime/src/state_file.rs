@@ -146,7 +146,7 @@ impl StateFile {
         } else if self
             .schedule
             .as_ref()
-            .is_some_and(|s| s.unknown_events.is_none())
+            .is_none_or(|s| s.unknown_events.is_none())
         {
             1
         } else {
@@ -545,6 +545,16 @@ mod tests {
                 unknown_events: Some(vec!["clk".into()]),
             }),
         }
+    }
+
+    #[test]
+    fn untimed_states_keep_the_version_one_encoding() {
+        let mut file = sample();
+        file.schedule = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(&bytes[8..10], &1u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 
     #[test]

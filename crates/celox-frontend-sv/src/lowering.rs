@@ -7754,6 +7754,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeat_and_delay_proofs_follow_executable_state_mode() {
+        use sv::ir::{Expr, LValue, Stmt};
+        let ir = sv::analyze_source_module_with_parameter_overrides(
+            "module Top(output bit q);endmodule",
+            std::path::Path::new("control-values.sv"),
+            "Top",
+            &Default::default(),
+        )
+        .unwrap();
+        for four_state in [false, true] {
+            let mut module =
+                lower_module(&ir.modules()[0], four_state, true, false, false).unwrap();
+            let pm = procedural::ProcModule::new(
+                &module.source,
+                &mut module.variables,
+                &mut module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+                four_state,
+            );
+            let count = Expr::Binary {
+                left: Box::new(Expr::Literal("4'bx001".into())),
+                op: sv::ir::BinaryOp::EqCase,
+                right: Box::new(Expr::Literal("4'b0001".into())),
+            };
+            let eval = procedural::LoopConstContext::new(
+                pm.variables,
+                pm.name_to_id,
+                pm.constants,
+                pm.parameter_types,
+                four_state,
+            );
+            assert_eq!(eval.repeat_count(&count), Some(i128::from(!four_state)));
+            let times = ff::fixed_runtime_write_times(
+                &[
+                    Stmt::Delay(count),
+                    Stmt::Assign {
+                        lhs: LValue::Ident("q".into()),
+                        rhs: Expr::Literal("1".into()),
+                        nonblocking: false,
+                    },
+                ],
+                &pm,
+                &Expr::Ident("q".into()),
+                false,
+            )
+            .unwrap();
+            let expected = if four_state { (0, 1) } else { (1, 0) };
+            assert_eq!(times.times.into_keys().collect::<Vec<_>>(), vec![expected]);
+        }
+    }
+
+    #[test]
     fn loop_step_dependencies_distinguish_continue_from_break_and_return() {
         use sv::ir::{Expr, LValue, LoopKind, Stmt};
         let ir = sv::analyze_source_module_with_parameter_overrides(

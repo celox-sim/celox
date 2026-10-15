@@ -1995,64 +1995,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(amount);
                 // IEEE 1800-2023 9.4.1: any unknown bit makes the whole
                 // delay zero; negative delays retain the unsigned time value.
-                let mut arena = SLTNodeArena::new();
-                let constant_unknown = !self.m.calls(amount)
-                    && lower_expr_with_context(
-                        amount,
-                        self.m.variables,
-                        self.m.name_to_id,
-                        self.m.constants,
-                        self.m.parameter_types,
-                        &mut arena,
-                        Some(PROCESS_DELAY_WIDTH),
-                        Some(signed),
-                    )
-                    .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node))
-                    .is_some_and(|(_, mask, _)| !mask.is_zero());
-                let delay = if constant_unknown {
+                let delay = if self.constant_unknown(amount, Some((PROCESS_DELAY_WIDTH, signed))) {
                     let zero = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
                     self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                     zero
                 } else {
                     self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?
                 };
-                let amount = if matches!(self.b.register(&delay), RegisterType::Logic { .. }) {
-                    let known = self.b.alloc_bit(1, false);
-                    let reduced = self.b.alloc_logic(1);
-                    self.b
-                        .emit(SIRInstruction::Unary(reduced, UnaryOp::Xor, delay));
-                    let zero = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-                    // A reduction containing X/Z is unequal to both known bits.
-                    let is_zero = self.b.alloc_bit(1, false);
-                    let is_one = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Binary(
-                        is_zero,
-                        reduced,
-                        BinaryOp::EqCase,
-                        zero,
-                    ));
-                    let one = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-                    self.b.emit(SIRInstruction::Binary(
-                        is_one,
-                        reduced,
-                        BinaryOp::EqCase,
-                        one,
-                    ));
-                    self.b
-                        .emit(SIRInstruction::Binary(known, is_zero, BinaryOp::Or, is_one));
-                    let value = self.two_state(delay);
-                    let no_delay = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
-                    self.b
-                        .emit(SIRInstruction::Imm(no_delay, SIRValue::new(0u8)));
-                    let amount = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
-                    self.b
-                        .emit(SIRInstruction::Mux(amount, known, value, no_delay));
-                    amount
-                } else {
-                    delay
-                };
+                let amount = self.zero_if_unknown(delay, delay);
                 self.with_kernel(|kernel| kernel.inactive_delay(amount))
                     .map_err(kernel_error)?;
                 Ok(true)
@@ -2098,6 +2048,63 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             Err(unsupported(format!("{construct} outside a process")))
         }
+    }
+
+    /// Inspect constants before two-state lowering can discard their masks.
+    fn constant_unknown(&self, expr: &sv::ir::Expr, context: Option<(usize, bool)>) -> bool {
+        let mut arena = SLTNodeArena::new();
+        !self.m.calls(expr)
+            && lower_expr_with_context(
+                expr,
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+                &mut arena,
+                context.map(|(width, _)| width),
+                context.map(|(_, signed)| signed),
+            )
+            .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node))
+            .is_some_and(|(_, mask, _)| !mask.is_zero())
+    }
+
+    /// Counts and delays become entirely zero if any source bit is X/Z.
+    /// Inspect the source before a count is narrowed into its hidden counter.
+    fn zero_if_unknown(&mut self, value: RegisterId, source: RegisterId) -> RegisterId {
+        if !matches!(self.b.register(&source), RegisterType::Logic { .. }) {
+            return value;
+        }
+        let reduced = self.b.alloc_logic(1);
+        self.b
+            .emit(SIRInstruction::Unary(reduced, UnaryOp::Xor, source));
+        let zero = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let is_zero = self.b.alloc_bit(1, false);
+        let is_one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Binary(
+            is_zero,
+            reduced,
+            BinaryOp::EqCase,
+            zero,
+        ));
+        self.b.emit(SIRInstruction::Binary(
+            is_one,
+            reduced,
+            BinaryOp::EqCase,
+            one,
+        ));
+        let known = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(known, is_zero, BinaryOp::Or, is_one));
+        let width = self.b.register(&value).width();
+        let value = self.two_state(value);
+        let zero = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let result = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Mux(result, known, value, zero));
+        result
     }
 
     /// `value` as a two-state register; unknown bits become zero.
@@ -2570,35 +2577,43 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
-                let mut arena = SLTNodeArena::new();
-                let node = self.expr_slt(count, None, &mut arena)?;
-                let negative = if signed {
-                    let original = self.lower_slt(&arena, node)?;
-                    let zero = self.b.alloc_bit(self.b.register(&original).width(), true);
-                    self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-                    let negative = self.b.alloc_bit(1, false);
-                    self.b.emit(SIRInstruction::Binary(
-                        negative,
-                        original,
-                        BinaryOp::LtS,
-                        zero,
-                    ));
-                    Some(negative)
-                } else {
-                    None
-                };
-                let node =
-                    coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
-                let value = self.lower_slt(&arena, node)?;
-                let value = if let Some(negative) = negative {
+                // IEEE 1800-2023 12.7.2, including literal masks in two-state mode.
+                let value = if self.constant_unknown(count, None) {
                     let zero = self.b.alloc_bit(64, false);
                     self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-                    let clamped = self.b.alloc_bit(64, false);
-                    self.b
-                        .emit(SIRInstruction::Mux(clamped, negative, zero, value));
-                    clamped
+                    zero
                 } else {
-                    value
+                    let mut arena = SLTNodeArena::new();
+                    let node = self.expr_slt(count, None, &mut arena)?;
+                    let original = self.lower_slt(&arena, node)?;
+                    let negative = if signed {
+                        let zero = self.b.alloc_bit(self.b.register(&original).width(), true);
+                        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                        let negative = self.b.alloc_bit(1, false);
+                        self.b.emit(SIRInstruction::Binary(
+                            negative,
+                            original,
+                            BinaryOp::LtS,
+                            zero,
+                        ));
+                        Some(negative)
+                    } else {
+                        None
+                    };
+                    let node =
+                        coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
+                    let value = self.lower_slt(&arena, node)?;
+                    let value = self.zero_if_unknown(value, original);
+                    if let Some(negative) = negative {
+                        let zero = self.b.alloc_bit(64, false);
+                        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+                        let clamped = self.b.alloc_bit(64, false);
+                        self.b
+                            .emit(SIRInstruction::Mux(clamped, negative, zero, value));
+                        clamped
+                    } else {
+                        value
+                    }
                 };
                 self.store(id, SIROffset::Static(0), 64, value)?;
                 Some(name)
@@ -3519,6 +3534,60 @@ pub(super) struct FixedWriteTimes {
     pub period: Option<u64>,
 }
 
+fn known_repeat_count(count: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<i128> {
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .repeat_count(count)
+}
+
+/// Match executable delay context, including X/Z-to-zero and unsigned time conversion.
+fn constant_process_delay(expr: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<u64> {
+    if expr_calls(expr, &|_| true) {
+        return None;
+    }
+    let signed =
+        sv_expr_is_signed_with_parameters(expr, pm.variables, pm.name_to_id, pm.parameter_types);
+    let mut arena = SLTNodeArena::new();
+    let (node, _) = lower_expr_with_context(
+        expr,
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        &mut arena,
+        Some(PROCESS_DELAY_WIDTH),
+        Some(signed),
+    )?;
+    if !slt_const4(&arena, &mut ConstCache::default(), node)?
+        .1
+        .is_zero()
+    {
+        return Some(0);
+    }
+    let (node, _) = lower_expr_with_context(
+        &expr_for_state_mode(expr, pm.four_state),
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        &mut arena,
+        Some(PROCESS_DELAY_WIDTH),
+        Some(signed),
+    )?;
+    let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed).ok()?;
+    let (value, mask, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+    if mask.is_zero() {
+        value.to_u64()
+    } else {
+        Some(0)
+    }
+}
+
 fn known_condition(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<bool> {
     LoopConstContext::new(
         pm.variables,
@@ -3993,14 +4062,7 @@ pub(super) fn fixed_runtime_write_times(
                     .is_none_or(|condition| known_condition(condition, pm) == Some(true)),
                 LoopKind::Repeat(count) => {
                     !expr_calls(count, &|_| true)
-                        && known_loop_value(
-                            count,
-                            pm.variables,
-                            pm.name_to_id,
-                            pm.constants,
-                            pm.parameter_types,
-                        )
-                        .is_some_and(|count| count > 0)
+                        && known_repeat_count(count, pm).is_some_and(|count| count > 0)
                 }
             };
             if entered && let Some(body) = single_pass_body(body, pm) {
@@ -4041,14 +4103,7 @@ pub(super) fn fixed_runtime_write_times(
                 (LoopKind::While, Some(condition)) => known_condition(condition, pm) == Some(false),
                 (LoopKind::Repeat(count), _) => {
                     !expr_calls(count, &|_| true)
-                        && known_loop_value(
-                            count,
-                            pm.variables,
-                            pm.name_to_id,
-                            pm.constants,
-                            pm.parameter_types,
-                        )
-                        .is_some_and(|value| value <= 0)
+                        && known_repeat_count(count, pm).is_some_and(|value| value <= 0)
                 }
                 _ => false,
             };
@@ -4087,14 +4142,7 @@ pub(super) fn fixed_runtime_write_times(
                 watched_readmem_count(pm, expr, name, args)
             }
             Stmt::Delay(delay) => {
-                let delay = u64::try_from(known_loop_value(
-                    delay,
-                    pm.variables,
-                    pm.name_to_id,
-                    pm.constants,
-                    pm.parameter_types,
-                )?)
-                .ok()?;
+                let delay = constant_process_delay(delay, pm)?;
                 if delay == 0 {
                     phase = phase.checked_add(1)?;
                 } else {
@@ -4154,14 +4202,7 @@ pub(super) fn fixed_runtime_write_times(
                 ..
             } if init.is_empty()
                 && step.is_empty()
-                && known_loop_value(
-                    count,
-                    pm.variables,
-                    pm.name_to_id,
-                    pm.constants,
-                    pm.parameter_types,
-                )
-                .is_some_and(|count| count >= 0)
+                && known_repeat_count(count, pm).is_some_and(|count| count >= 0)
                 && branch_without_suspension_or_exit(body, pm) =>
             {
                 runtime_watched_write_count(std::slice::from_ref(stmt), pm, expr, nonblocking)

@@ -94,6 +94,10 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
 }
 
 sv_backends! {
+    fn repeat_signed_counts_with_unknown_bits_skip_the_body(sim) {
+        @case "procedural::repeat_signed_counts_with_unknown_bits_skip_the_body";
+    }
+
     fn nested_block_local_declarations_shadow_ports(sim) {
         @case "synthesizable::nested_block_locals_shadow_ports";
     }

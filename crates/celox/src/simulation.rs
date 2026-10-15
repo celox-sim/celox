@@ -4453,6 +4453,54 @@ mod pr1158_merge_regressions {
         backends!(SOURCE, check);
     }
     #[test]
+    fn unknown_repeat_counts_skip_initial_bodies_and_preserve_effects() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let n = sim.signal("n");
+            let four_state = sim.simulator.backend.layout().four_state;
+            sim.modify(|io| io.set_four_state(n, 1u8.into(), num_bigint::BigUint::from(1u8) << 67))
+                .unwrap();
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("dynamic")), u8::from(!four_state).into());
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("calls")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("known")), 2u8.into());
+        }
+        backends!(
+            "module Top(input logic[67:0]n,output bit[7:0]q,calls,known,dynamic);function logic[3:0] count();calls++;return 4'd1;endfunction initial begin repeat(4'bx001)q++;repeat(4'bz001)q++;repeat(count())q++;repeat(2)known++;repeat(n)dynamic++;end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn unknown_delays_preserve_fixed_hierarchy_write_times() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        for delay in ["4'bx001", "4'bz001", "(4'bx001 + 1)", "32'sd0", "4'd0"] {
+            let source = format!(
+                "module Child(output bit[1:0]q);initial begin #1;#({delay});q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn unknown_repeat_counts_preserve_fixed_hierarchy_write_times() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        for count in ["4'bx001", "4'bz001", "(4'bx001 + 1)", "-1", "0"] {
+            let source = format!(
+                "module Child(output bit[1:0]q);initial begin #1;repeat({count})begin #5;q[0]=0;end q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
     fn physical_clock_aliases_do_not_duplicate_host_occurrences() {
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
             sim.run_until(0).unwrap();

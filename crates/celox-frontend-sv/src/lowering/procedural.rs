@@ -2555,6 +2555,38 @@ impl<'a> LoopConstContext<'a> {
         known_loop_value(expr, self.variables, self.ids, self.constants, self.types)
     }
 
+    /// Repeat uses zero for any unknown bit, before two-state conversion.
+    pub(super) fn repeat_count(&self, expr: &sv::ir::Expr) -> Option<i128> {
+        if expr_calls(expr, &|_| true) {
+            return None;
+        }
+        let mut arena = SLTNodeArena::new();
+        let (node, _) = lower_expr_with_context(
+            expr,
+            self.variables,
+            self.ids,
+            self.constants,
+            self.types,
+            &mut arena,
+            None,
+            None,
+        )?;
+        let (_, mask, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+        if !mask.is_zero() {
+            return Some(0);
+        }
+        // Known comparisons can differ after the executable two-state rewrite.
+        let node = self.lower(expr, None, &mut arena)?;
+        let (value, mask, width) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+        if !mask.is_zero()
+            || (node_is_signed(&arena, node) && value.bit(width.saturating_sub(1) as u64))
+        {
+            Some(0)
+        } else {
+            value.to_i128()
+        }
+    }
+
     pub(super) fn truth(&self, expr: &sv::ir::Expr) -> Option<bool> {
         let mut arena = SLTNodeArena::new();
         let node = self.lower(expr, None, &mut arena)?;
@@ -2674,7 +2706,7 @@ pub(super) fn loop_trip_cap(
 ) -> usize {
     use sv::ir::LoopKind;
     match kind {
-        LoopKind::Repeat(count) => eval.value(count).unwrap_or(2).clamp(0, 2) as usize,
+        LoopKind::Repeat(count) => eval.repeat_count(count).unwrap_or(2).clamp(0, 2) as usize,
         LoopKind::While if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
         LoopKind::DoWhile if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 1,
         // A constant false entry test needs no canonical induction/step.
