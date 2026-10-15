@@ -48,6 +48,47 @@ export async function validateBatch(
     batch.base.ref === repo.default_branch
       ? await loadPolicy(repository, sha)
       : null;
+  if (options) {
+    const basePolicy = await loadPolicy(repository, batch.base.sha);
+    if (JSON.stringify(basePolicy) !== JSON.stringify(options)) {
+      // A speculative batch can include earlier batches. If policy changes,
+      // revalidate their still-open PRs too, under the combined tree's policy.
+      const commits = new Set();
+      let seen = 0;
+      for (let page = 1; ; page++) {
+        const comparison = await api(
+          `/repos/${repository}/compare/${batch.base.sha}...${sha}?per_page=100&page=${page}`,
+        );
+        if (
+          !Number.isSafeInteger(comparison.total_commits) ||
+          comparison.total_commits > 10000 ||
+          !Array.isArray(comparison.commits)
+        ) {
+          throw new Error("Cannot enumerate the speculative batch commits");
+        }
+        for (const commit of comparison.commits) commits.add(commit.sha);
+        seen += comparison.commits.length;
+        if (seen >= comparison.total_commits) break;
+        if (!comparison.commits.length)
+          throw new Error("Incomplete batch commit pagination");
+      }
+      for (let page = 1; ; page++) {
+        const pulls = await api(
+          `/repos/${repository}/pulls?state=open&base=${encodeURIComponent(batch.base.ref)}&per_page=100&page=${page}`,
+        );
+        for (const pull of pulls) {
+          if (
+            pull.number !== number &&
+            !pull.draft &&
+            commits.has(pull.head.sha) &&
+            !numbers.includes(pull.number)
+          )
+            numbers.push(pull.number);
+        }
+        if (pulls.length < 100) break;
+      }
+    }
+  }
   for (const sourceNumber of numbers) {
     if (sourceNumber === number) throw new Error("Batch cannot contain itself");
     const source = await api(`/repos/${repository}/pulls/${sourceNumber}`);

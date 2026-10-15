@@ -6,6 +6,7 @@ import {
 } from "./check-mergify-batch.mjs";
 
 const sha = "a".repeat(40);
+const baseSha = "c".repeat(40);
 const sourceSha = "b".repeat(40);
 const metadata = { pull_requests: [{ number: 12 }, { number: 13 }] };
 function fixture() {
@@ -16,7 +17,7 @@ function fixture() {
       sha,
       ref: "mergify/merge-queue/master/pr-12",
     },
-    base: { ref: "master" },
+    base: { ref: "master", sha: baseSha },
     draft: true,
   };
   const source = {
@@ -40,7 +41,7 @@ function fixture() {
   ];
   const policy = async (repo, ref) => {
     assert.equal(repo, "o/r");
-    assert.equal(ref, sha);
+    assert.ok([sha, baseSha].includes(ref));
     return { preMajor: false, bumpPatchForMinorPreMajor: false };
   };
   return { batch, source, calls, api, input, commits, policy };
@@ -141,5 +142,41 @@ test("develop batches still validate titles without applying master release poli
       () => assert.fail(),
     ),
     [12, 13],
+  );
+});
+
+test("policy changes revalidate preceding speculative PRs missing from this batch's metadata", async () => {
+  const f = fixture();
+  const predecessorSha = "d".repeat(40);
+  const api = async (path) => {
+    if (path.includes(`/compare/${baseSha}...`))
+      return { total_commits: 1, commits: [{ sha: predecessorSha }] };
+    if (path.includes("/pulls?"))
+      return [{ number: 11, draft: false, head: { sha: predecessorSha } }];
+    if (path.endsWith("/pulls/11"))
+      return { ...f.source, head: { sha: predecessorSha } };
+    if (path.includes(`/compare/${predecessorSha}...`))
+      return { status: "ahead" };
+    return f.api(path);
+  };
+  await assert.rejects(
+    validateBatch(
+      f.input,
+      api,
+      async (repo, number) =>
+        number === 11
+          ? [
+              {
+                sha: predecessorSha,
+                message: "feat: originally accepted as a pre-major patch",
+              },
+            ]
+          : f.commits(),
+      async (repo, ref) => ({
+        preMajor: ref === baseSha,
+        bumpPatchForMinorPreMajor: true,
+      }),
+    ),
+    /#11:.*exceeds/,
   );
 });
