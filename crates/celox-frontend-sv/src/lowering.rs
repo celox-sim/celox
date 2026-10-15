@@ -2779,15 +2779,13 @@ fn validate_cross_instance_event_pulses(
             procedural::procedural_write_counts(
                 body,
                 &pm.subroutines,
-                &|expr| {
-                    procedural::known_loop_value(
-                        expr,
-                        pm.variables,
-                        pm.name_to_id,
-                        pm.constants,
-                        pm.parameter_types,
-                    )
-                },
+                &procedural::LoopConstContext::new(
+                    pm.variables,
+                    pm.name_to_id,
+                    pm.constants,
+                    pm.parameter_types,
+                    pm.four_state,
+                ),
                 &|expr| {
                     procedural::expr_is_two_state(
                         expr,
