@@ -37,8 +37,6 @@ pub(super) struct ProcModule<'a> {
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
     capture_counter: u64,
-    /// Initialization RNG for the static processes of this module instance.
-    random_seed: u32,
     /// Runtime event sites (`$display`, assertions, ...) of the module, by
     /// local site number.
     pub runtime_event_sites: Vec<RuntimeEventSite>,
@@ -139,11 +137,187 @@ impl<'a> ProcModule<'a> {
             created: Vec::new(),
             temp_counter: 0,
             capture_counter: 0,
-            random_seed: 0x4d59_5df4,
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
         }
+    }
+
+    /// Whether a process calls the random function, including through user
+    /// subroutines and omitted argument defaults.
+    pub fn uses_random(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((name, args)) = calls.pop() {
+            if name == "$urandom" {
+                return true;
+            }
+            if let Some(subroutine) = self.subroutine(&name) {
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Syntactic implicit sensitivity, including branches that constant folding
+    /// will remove. `always @*` sees arguments; `always_comb` also sees bodies.
+    pub fn implicit_reads(
+        &self,
+        body: &[sv::ir::Stmt],
+        include_functions: bool,
+    ) -> HashSet<VarAtomBase<SourceVarId>> {
+        fn expression(
+            m: &ProcModule<'_>,
+            expr: &sv::ir::Expr,
+            include_functions: bool,
+            visited: &mut HashSet<String>,
+            reads: &mut HashSet<VarAtomBase<SourceVarId>>,
+        ) {
+            let mut exprs = Vec::new();
+            use sv::ir::Expr;
+            match expr {
+                Expr::Call { name, args, .. } => {
+                    exprs.extend(args.iter().flatten().cloned());
+                    if let Some(subroutine) = m.subroutine(name) {
+                        for (i, param) in subroutine.params.iter().enumerate() {
+                            if args.get(i).and_then(Option::as_ref).is_none() {
+                                exprs.extend(param.default.clone());
+                            }
+                        }
+                        if include_functions && visited.insert(name.clone()) {
+                            statements(m, &subroutine.body, true, visited, reads);
+                            statements(m, &subroutine.sensitivity_body, true, visited, reads);
+                        }
+                    }
+                }
+                Expr::Select {
+                    expr: base,
+                    msb,
+                    lsb,
+                    ..
+                } => {
+                    let selected = sv::typecheck::eval_const_expr_with_types(
+                        msb,
+                        m.constants,
+                        m.parameter_types,
+                    )
+                    .zip(sv::typecheck::eval_const_expr_with_types(
+                        lsb,
+                        m.constants,
+                        m.parameter_types,
+                    ))
+                    .and_then(|(msb, lsb)| {
+                        packed_expr_select_offsets(base, msb, lsb, m.variables, m.name_to_id)
+                    });
+                    if let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
+                        && let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id))
+                    {
+                        reads.insert(VarAtomBase::new(id, lsb.min(msb), lsb.max(msb)));
+                    } else {
+                        // A dynamic select's longest static prefix is its base.
+                        exprs.push((**base).clone());
+                    }
+                    exprs.extend(expr_from_const_expr(msb));
+                    exprs.extend(expr_from_const_expr(lsb));
+                }
+                Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                    exprs.push((**expr).clone())
+                }
+                Expr::Binary { left, right, .. } => {
+                    exprs.push((**left).clone());
+                    exprs.push((**right).clone());
+                }
+                Expr::Mux {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    exprs.extend([
+                        (**condition).clone(),
+                        (**then_expr).clone(),
+                        (**else_expr).clone(),
+                    ]);
+                }
+                Expr::Concat(parts) => exprs.extend(parts.iter().cloned()),
+                Expr::RepeatConcat { count, parts } => {
+                    exprs.extend(expr_from_const_expr(count));
+                    exprs.extend(parts.iter().cloned());
+                }
+                Expr::Inside { expr, items } => {
+                    exprs.push((**expr).clone());
+                    for item in items {
+                        exprs.extend(item.exprs().into_iter().cloned());
+                    }
+                }
+                Expr::Ident(name) => {
+                    if let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id)) {
+                        reads.insert(VarAtomBase::new(id, 0, m.var(id).width - 1));
+                    }
+                }
+                Expr::Literal(_) => {}
+            }
+            for expr in exprs {
+                expression(m, &expr, include_functions, visited, reads);
+            }
+        }
+        fn statements(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            include_functions: bool,
+            visited: &mut HashSet<String>,
+            reads: &mut HashSet<VarAtomBase<SourceVarId>>,
+        ) {
+            let mut exprs = Vec::new();
+            let mut positions = Vec::new();
+            for stmt in body {
+                let _ = stmt.clone().map(
+                    &mut |expr| {
+                        exprs.push(expr);
+                    },
+                    &mut |lhs| {
+                        if let sv::ir::LValue::Select { msb, lsb, .. } = lhs {
+                            positions.extend(expr_from_const_expr(&msb));
+                            positions.extend(expr_from_const_expr(&lsb));
+                        }
+                    },
+                );
+                // A call statement carries its callee outside the expression visitor.
+                stmt.walk(&mut |stmt| {
+                    if let sv::ir::Stmt::Call {
+                        name,
+                        args,
+                        arg_order,
+                    } = stmt
+                    {
+                        exprs.push(sv::ir::Expr::Call {
+                            name: name.clone(),
+                            args: args.clone(),
+                            arg_order: arg_order.clone(),
+                        });
+                    }
+                });
+            }
+            for expr in exprs.into_iter().chain(positions) {
+                expression(m, &expr, include_functions, visited, reads);
+            }
+        }
+        let mut reads = HashSet::default();
+        statements(
+            self,
+            body,
+            include_functions,
+            &mut HashSet::default(),
+            &mut reads,
+        );
+        reads
     }
 
     /// The words `$readmemh`/`$readmemb` (IEEE 1800-2023 21.4) write, with
@@ -342,14 +516,6 @@ impl<'a> ProcModule<'a> {
 
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
-    }
-
-    pub fn next_random_seed(&mut self) -> u32 {
-        self.random_seed = self
-            .random_seed
-            .wrapping_mul(1_664_525)
-            .wrapping_add(1_013_904_223);
-        self.random_seed
     }
 
     pub fn is_callee(&self, name: &str) -> bool {

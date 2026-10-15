@@ -784,6 +784,29 @@
         "observed_version": "Verilator 5.052",
         "reason": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved."
       }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved.",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_select_keeps_distinct_source_calls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_statement_order",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved."
+      }
     }
   ]
 }

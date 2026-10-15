@@ -195,6 +195,7 @@ impl ArrayParameter<'_> {
             patterns::expr_from_pattern(&self.pattern.nodes.1, &shape, tree, dims)
         }?;
         Ok(InitialProcess {
+            creation_order: 0,
             condition: None,
             body: vec![Stmt::Assign {
                 lhs: LValue::Ident(name),

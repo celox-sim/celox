@@ -3466,7 +3466,10 @@ impl<'p, 'a> Comb<'p, 'a> {
 }
 
 /// `atoms` without the bits in `written`.
-fn subtract_written_sensitivity(atoms: Sources, written: &[VarAtomBase<SourceVarId>]) -> Sources {
+pub(super) fn subtract_written_sensitivity(
+    atoms: Sources,
+    written: &[VarAtomBase<SourceVarId>],
+) -> Sources {
     let mut result = Sources::default();
     for atom in atoms {
         let mut ranges = vec![(atom.access.lsb, atom.access.msb)];

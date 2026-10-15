@@ -2526,3 +2526,73 @@ endmodule
     (tick clk)
     (assert_eq ok 1)
     (assert_eq width 32)))
+
+; IEEE 1800-2023 9.2.2.2, 18.13.1: legal in combinational procedures;
+; subroutine calls use the same process stream and retain statement order.
+(case urandom_comb_executes_in_statement_order
+  (source "urandom_comb.sv" #"
+    module Top(input logic enabled, input int seed, count, output logic ok);
+      function automatic int unsigned draw(); return $urandom(); endfunction
+      always_comb begin
+        int unsigned first, second, actual;
+        int working_seed;
+        logic skipped;
+        working_seed = seed;
+        first = $urandom(working_seed);
+        second = draw();
+        working_seed = seed;
+        actual = $urandom(working_seed);
+        skipped = 0 && $urandom;
+        skipped = 1 || $urandom;
+        actual = enabled ? draw() : 0;
+        ok = !enabled || actual == second;
+        for (int i = 0; i < count; i++) begin
+          working_seed = seed;
+          first = $urandom(working_seed);
+          second = draw();
+          working_seed = seed;
+          first = $urandom(working_seed);
+          actual = draw();
+          ok &= actual == second;
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 1) (set seed 17) (set count 3))
+  (assert_eq ok 1)
+  (eval)
+  (assert_eq ok 1)
+  (modify (set seed 23) (set count 5))
+  (assert_eq ok 1)
+  (modify (set enabled 0))
+  (assert_eq ok 1))
+
+(case urandom_select_keeps_distinct_source_calls
+  (source "urandom_select_calls.sv" #"
+    module Top(input logic clk, enabled, output logic ff_ok, comb_ok);
+      function automatic logic check_calls();
+        int seed;
+        int unsigned ignored, a, b, third, actual;
+        logic [31:0] selected;
+        seed = 17;
+        ignored = $urandom(seed); a = $urandom; b = $urandom; third = $urandom;
+        seed = 17;
+        ignored = $urandom(seed);
+        selected = 0;
+        selected[($urandom() + $urandom()) & 31] = 1'b1;
+        actual = $urandom;
+        return actual == third && selected == (32'b1 << ((a + b) & 31));
+      endfunction
+      always_ff @(posedge clk) if (enabled) ff_ok <= check_calls();
+      always_comb comb_ok = enabled ? check_calls() : 1;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 1))
+  (tick clk)
+  (assert_eq ff_ok 1)
+  (assert_eq comb_ok 1)
+  (tick clk)
+  (assert_eq ff_ok 1)
+  (assert_eq comb_ok 1))

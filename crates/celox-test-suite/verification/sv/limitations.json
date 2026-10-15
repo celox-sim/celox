@@ -1313,7 +1313,8 @@
     "reason": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved.",
     "cases": {
       "verilator": [
-        "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once"
+        "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once",
+        "system_functions::urandom_select_keeps_distinct_source_calls"
       ]
     }
   },

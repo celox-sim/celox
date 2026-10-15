@@ -69,6 +69,17 @@
         "stronger_than_sv": false,
         "tag_reasons": {},
         "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_select_keeps_distinct_source_calls at 2594:3: assert_eq ff_ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_select_keeps_distinct_source_calls",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
       }
     ],
     "icarus": [
@@ -111,5 +122,13 @@
   "tool_versions": {
     "verilator": "Verilator 5.052 2026-09-05 rev v5.052",
     "icarus": "Icarus Verilog version 13.0 (stable) (v13_0)"
+  },
+  "distinct_index_calls_observation": {
+    "case": "system_functions::urandom_select_keeps_distinct_source_calls",
+    "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "icarus_result": "passed (Icarus 13.0)",
+    "generated_cpp": "a = VL_RANDOM_I(); b = VL_RANDOM_I(); ignored = VL_URANDOM_SEEDED_II(0x00000011U); third = VL_RANDOM_I(); selected |= 1U << ((VL_RANDOM_I() + VL_RANDOM_I()) & 31); actual = VL_RANDOM_I();",
+    "source_order": "seed = 17; ignored = $urandom(seed); a = $urandom; b = $urandom; third = $urandom; seed = 17; ignored = $urandom(seed); selected = 0; selected[($urandom() + $urandom()) & 31] = 1; actual = $urandom;",
+    "finding": "The generated code removes/reorders seeded calls before reference draws. The two calls in the select remain distinct; the mismatch is the existing seeded-statement-order disagreement. Original assertions are retained."
   }
 }

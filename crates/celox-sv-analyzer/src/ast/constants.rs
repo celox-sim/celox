@@ -164,6 +164,10 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
+    let mut sensitivity_body = process.sensitivity_body;
+    for stmt in &mut sensitivity_body {
+        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+    }
     let condition = process
         .condition
         .map(|condition| substitute_const_expr_constants(condition, const_env));
@@ -172,9 +176,13 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         for stmt in &mut body {
             procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
-        return CombProcess::procedural(process.kind, condition, body);
+        return CombProcess {
+            creation_order: process.creation_order,
+            sensitivity_body,
+            ..CombProcess::procedural(process.kind, condition, body)
+        };
     }
-    CombProcess::new(
+    let mut result = CombProcess::new(
         process.kind,
         condition,
         process
@@ -188,7 +196,10 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
                 )
             })
             .collect(),
-    )
+    );
+    result.creation_order = process.creation_order;
+    result.sensitivity_body = sensitivity_body;
+    result
 }
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
