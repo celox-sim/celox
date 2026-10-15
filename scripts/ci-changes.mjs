@@ -200,7 +200,7 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
       continue;
     }
 
-    if (startsWithAny(path, ["scripts/"])) {
+    if (path === ".mergify.yml" || startsWithAny(path, ["scripts/"])) {
       affected.scripts = true;
       continue;
     }
