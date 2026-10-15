@@ -3304,7 +3304,7 @@ pub(super) fn runtime_watched_write_count(
     fn target(pm: &ProcModule<'_>, expr: &sv::ir::Expr, lhs: &sv::ir::LValue) -> WritePhases {
         WritePhases::writes(usize::from(watched_lvalue_affects(pm, expr, lhs)))
     }
-    fn exits_loop(body: &[sv::ir::Stmt]) -> bool {
+    fn exits_loop(body: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> bool {
         for stmt in body {
             let exits = match stmt {
                 sv::ir::Stmt::Break | sv::ir::Stmt::Return(_) => true,
@@ -3312,11 +3312,17 @@ pub(super) fn runtime_watched_write_count(
                     then_body,
                     else_body,
                     ..
-                } => exits_loop(then_body) && exits_loop(else_body),
-                sv::ir::Stmt::Case { items, default, .. } => {
-                    default.as_ref().is_some_and(|body| exits_loop(body))
-                        && items.iter().all(|item| exits_loop(&item.body))
-                }
+                } => selected_branch(stmt, pm).map_or_else(
+                    || exits_loop(then_body, pm) && exits_loop(else_body, pm),
+                    |selected| exits_loop(selected, pm),
+                ),
+                sv::ir::Stmt::Case { items, default, .. } => selected_branch(stmt, pm).map_or_else(
+                    || {
+                        default.as_ref().is_some_and(|body| exits_loop(body, pm))
+                            && items.iter().all(|item| exits_loop(&item.body, pm))
+                    },
+                    |selected| exits_loop(selected, pm),
+                ),
                 _ => false,
             };
             if exits {
@@ -3406,9 +3412,9 @@ pub(super) fn runtime_watched_write_count(
                         else_body,
                     } => {
                         let branches =
-                            match eval(pm, condition) {
+                            match known_condition(condition, pm) {
                                 Some(value) => body(
-                                    if value != 0 { then_body } else { else_body },
+                                    if value { then_body } else { else_body },
                                     pm,
                                     expr,
                                     active,
@@ -3450,7 +3456,7 @@ pub(super) fn runtime_watched_write_count(
                         body: stmts,
                         step,
                     } => {
-                        let exits = exits_loop(stmts);
+                        let exits = exits_loop(stmts, pm);
                         let trips = loop_trip_cap(
                             kind,
                             init,
@@ -3495,7 +3501,7 @@ pub(super) fn runtime_watched_write_count(
                 };
             result = result.then(next);
             if !stmt_may_fall_through(stmt)
-                || matches!(stmt,Stmt::Wait(condition) if eval(pm,condition)==Some(0))
+                || matches!(stmt,Stmt::Wait(condition) if known_condition(condition,pm)==Some(false))
             {
                 break;
             }
@@ -3541,6 +3547,26 @@ fn selected_case_body<'a>(
     Some(default.unwrap_or_default())
 }
 
+fn selected_branch<'a>(stmt: &'a sv::ir::Stmt, pm: &ProcModule<'_>) -> Option<&'a [sv::ir::Stmt]> {
+    match stmt {
+        sv::ir::Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => Some(if known_condition(condition, pm)? {
+            then_body
+        } else {
+            else_body
+        }),
+        sv::ir::Stmt::Case {
+            kind,
+            selector,
+            items,
+            default,
+        } => selected_case_body(*kind, selector, items, default.as_deref(), pm),
+        _ => None,
+    }
+}
 /// Exact times for a straight-line initial activation with constant delays.
 /// Other control flow retains the conservative activation summary above.
 pub(super) fn fixed_runtime_write_times(
@@ -3549,29 +3575,6 @@ pub(super) fn fixed_runtime_write_times(
     expr: &sv::ir::Expr,
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
-    fn selected_branch<'a>(
-        stmt: &'a sv::ir::Stmt,
-        pm: &ProcModule<'_>,
-    ) -> Option<&'a [sv::ir::Stmt]> {
-        match stmt {
-            sv::ir::Stmt::If {
-                condition,
-                then_body,
-                else_body,
-            } => Some(if known_condition(condition, pm)? {
-                then_body
-            } else {
-                else_body
-            }),
-            sv::ir::Stmt::Case {
-                kind,
-                selector,
-                items,
-                default,
-            } => selected_case_body(*kind, selector, items, default.as_deref(), pm),
-            _ => None,
-        }
-    }
     fn jumps_current_loop(stmt: &sv::ir::Stmt) -> bool {
         use sv::ir::Stmt;
         match stmt {

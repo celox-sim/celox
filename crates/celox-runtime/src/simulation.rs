@@ -322,7 +322,7 @@ pub struct SimulationState<B: SimBackend> {
     round_triggered_domains: BitSet,
     scheduled_clock_drives: BitSet,
     scheduled_clock_time: u64,
-    round_evaluated: bool,
+    round_triggers_discovered: bool,
     round_new_rising: BitSet,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
@@ -584,7 +584,7 @@ impl<B: SimBackend> SimulationState<B> {
             round_triggered_domains: BitSet::new(),
             scheduled_clock_drives: BitSet::new(),
             scheduled_clock_time: 0,
-            round_evaluated: false,
+            round_triggers_discovered: false,
             round_new_rising: BitSet::new(),
             finish_round: false,
         }
@@ -1066,7 +1066,7 @@ impl<B: SimBackend> SimulationState<B> {
             .collect();
         self.credit_rising_edges(time, committed)?;
         if result.is_ok()
-            || (self.round_evaluated
+            || (self.round_triggers_discovered
                 && self
                     .round_triggered_domains
                     .is_subset(&self.round_published_domains))
@@ -1524,10 +1524,15 @@ impl<B: SimBackend> SimulationState<B> {
             if pass.is_empty() {
                 return Ok(progressed);
             }
-            count_delta_pass(delta_rounds)?;
+            if let Err(error) = count_delta_pass(delta_rounds) {
+                for process in pass {
+                    self.process_wakeups.push(Reverse((current_time, process)));
+                }
+                return Err(error);
+            }
             let mut any_ran = false;
-            for process in pass.drain(..) {
-                // A settle resumes the same process at once.
+            let mut remaining = std::mem::take(&mut pass).into_iter();
+            while let Some(process) = remaining.next() {
                 loop {
                     let before = self
                         .process_event_counters
@@ -1692,7 +1697,13 @@ impl<B: SimBackend> SimulationState<B> {
                                     }
                                 }
                                 any_ran = true;
-                                count_delta_pass(delta_rounds)?;
+                                if let Err(error) = count_delta_pass(delta_rounds) {
+                                    self.process_wakeups.push(Reverse((current_time, process)));
+                                    for process in remaining {
+                                        self.process_wakeups.push(Reverse((current_time, process)));
+                                    }
+                                    return Err(error);
+                                }
                                 continue;
                             } else {
                                 let id = clock.event.id();
@@ -1893,7 +1904,7 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.time = current_time;
         self.round_published_domains.make_empty();
         self.round_triggered_domains.make_empty();
-        self.round_evaluated = false;
+        self.round_triggers_discovered = false;
         self.round_new_rising.make_empty();
 
         // Keep periodic provenance private so the public SimEvent shape stays
@@ -2189,7 +2200,6 @@ impl<B: SimBackend> SimulationState<B> {
         if !comb_current {
             executor.eval_comb()?;
         }
-        self.round_evaluated = true;
         if executor.finish_requested(current_time) {
             self.finished = true;
             return Ok(true);
@@ -2231,8 +2241,23 @@ impl<B: SimBackend> SimulationState<B> {
             let mut any_new_outer_loop_trigger = false;
 
             loop {
-                count_delta_pass(delta_rounds)?;
                 let marked_bits = executor.backend().get_triggered_bits();
+                // Discover the complete batch before any fallible sampling or FF
+                // execution can interrupt it. An empty set before discovery is
+                // not evidence that a generated falling edge was published.
+                for id in marked_bits.iter() {
+                    let info = self.event_info[id];
+                    if !discovered_in_this_step.contains(id)
+                        && !triggered_domains.contains(info.canonical_id)
+                        && (!info.is_cascaded
+                            || recorded_edges.contains(id)
+                            || self.stable_edge_triggered(executor.backend(), id))
+                    {
+                        self.round_triggered_domains.insert(info.canonical_id);
+                    }
+                }
+                self.round_triggers_discovered = true;
+                count_delta_pass(delta_rounds)?;
                 executor.backend_mut().clear_triggered_bits();
 
                 let mut can_use_eval_apply = self.processes.is_empty()

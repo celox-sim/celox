@@ -7078,6 +7078,68 @@ mod round57_review_tests {
         run(Simulation::new(build().build_native().unwrap()), &check);
     }
     #[test]
+    fn round61_constant_exits_and_four_state_truth_preserve_single_child_writes() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        for four_state in [false, true] {
+            for action in [
+                "repeat(2) begin v=~v;if(1'b1)break;end",
+                "repeat(2) begin v=~v;case(1)1:break;default:;endcase end",
+                "if(4'bx001)v=~v;else begin v=0;v=1;end",
+                "if(4'bz001)v=~v;else begin v=0;v=1;end",
+                "if(4'b000x)begin v=0;v=1;end else v=~v;",
+            ] {
+                let source = format!(
+                    "module Child(input bit clk,output bit v);always @(posedge clk) begin {action} end endmodule module Top(output bit[7:0]q);bit clk;wire v;Child c(clk,v);initial forever begin @(v);q++;end initial begin #1;clk=1;end endmodule"
+                );
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(&source, std::path::Path::new("truth-exit.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                };
+                check(Simulation::new(build().build_interpreter().unwrap()));
+                check(Simulation::new(build().build_cranelift().unwrap()));
+                check(Simulation::new(build().build_wasm().unwrap()));
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(Simulation::new(build().build_native().unwrap()));
+            }
+        }
+    }
+    #[test]
+    fn round61_unknown_or_unreachable_loop_exits_keep_pulse_guard() {
+        for action in [
+            "repeat(2)begin v=~v;if(0)break;end",
+            "repeat(2)begin v=~v;if(select)break;end",
+            "repeat(2)begin v=~v;case(0)1:break;default:;endcase end",
+            "repeat(2)begin v=~v;case(select)1:break;default:;endcase end",
+            "repeat(2)begin v=~v;repeat(1)break;end",
+        ] {
+            let source = format!(
+                "module Child(input bit clk,select,output bit v);always @(posedge clk)begin {action} end endmodule module Top(input bit clk,select,output bit[7:0]q);wire v;Child c(clk,select,v);initial forever begin @(v);q++;end endmodule"
+            );
+            for four_state in [false, true] {
+                let error = match Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("loop-exit-guard.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .build_interpreter()
+                {
+                    Ok(_) => panic!("multiple writes must remain rejected"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("multiple blocking writes"),
+                    "{action}: {error}"
+                );
+            }
+        }
+    }
+    #[test]
     fn round60_static_if_excludes_unreachable_comb_pulses() {
         let exact = "module Top(output bit q);logic v;always_comb if(1'b1)v=0;else begin v=0;v=1;end initial @(v)q=1;endmodule";
         check_backends(exact, |advance| {
@@ -7194,6 +7256,9 @@ mod clean_waiter_settle_review {
     use celox_sir::{SIRInstruction, SIROffset, SIRValue};
 
     fn program() -> crate::ir::LaidOutProgram {
+        program_with_sampling_waiter(false)
+    }
+    fn program_with_sampling_waiter(extra: bool) -> crate::ir::LaidOutProgram {
         let mut m = ModuleBuilder::new("Top").unwrap();
         let bit = ValueType::bits(1).unwrap();
         let word = ValueType::bits(8).unwrap();
@@ -7217,6 +7282,37 @@ mod clean_waiter_settle_review {
             },
         ])
         .unwrap();
+        let noise = if extra {
+            let noise = m.input("noise", bit).unwrap();
+            let echo = m.output("noise_seen", bit).unwrap();
+            let value = m.read(noise).unwrap();
+            m.assign(m.whole(echo).unwrap(), value).unwrap();
+            let falls = m.output("falls", word).unwrap();
+            let old = m.read(falls).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+            let next = m.binary(BinaryOp::Add, old, one, word).unwrap();
+            let fallclk = m.internal("fallclk", bit).unwrap();
+            let clk_value = m.read(clk).unwrap();
+            let go_value = m.read(go).unwrap();
+            let low = m
+                .unary(crate::frontend_sdk::UnaryOp::BitNot, clk_value, bit)
+                .unwrap();
+            let active_low = m.binary(BinaryOp::And, low, go_value, bit).unwrap();
+            m.assign(m.whole(fallclk).unwrap(), active_low).unwrap();
+            m.register(
+                m.whole(falls).unwrap(),
+                next,
+                fallclk,
+                Edge::Posedge,
+                None,
+                None,
+            )
+            .unwrap();
+            m.process(vec![Statement::Finish]).unwrap();
+            Some(noise)
+        } else {
+            None
+        };
         let (mut program, _) = crate::compile_frontend_to_sir(
             &m.finish(),
             &[],
@@ -7240,7 +7336,7 @@ mod clean_waiter_settle_review {
                 })
                 .unwrap()
         };
-        let go = address(go.index());
+        let go = address(noise.unwrap_or(go).index());
         let done = address(done.index());
         let mut addresses = Vec::new();
         let mut intern = |address| {
@@ -7253,7 +7349,10 @@ mod clean_waiter_settle_review {
             };
             crate::ir::SourceVarId(index as u32)
         };
-        let slots = program.runtime_schema.processes[0].clone().map(&mut intern);
+        let index = usize::from(extra);
+        let slots = program.runtime_schema.processes[index]
+            .clone()
+            .map(&mut intern);
         let go = intern(go);
         let done = intern(done);
         let stable = |var_id| celox_design::RegionedVarAddrBase {
@@ -7272,25 +7371,27 @@ mod clean_waiter_settle_review {
             1,
         ));
         kernel.wake_if(condition);
-        let count = kernel.builder().alloc_bit(64, false);
-        kernel
-            .builder()
-            .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
-        kernel.wait_clock(0, count, None).unwrap();
-        let one = kernel.builder().alloc_bit(1, false);
-        kernel
-            .builder()
-            .emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
-        kernel.builder().emit(SIRInstruction::Store(
-            stable(done),
-            SIROffset::Static(0),
-            1,
-            one,
-            Vec::new(),
-            Vec::new(),
-        ));
+        if !extra {
+            let count = kernel.builder().alloc_bit(64, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
+            kernel.wait_clock(0, count, None).unwrap();
+            let one = kernel.builder().alloc_bit(1, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+            kernel.builder().emit(SIRInstruction::Store(
+                stable(done),
+                SIROffset::Static(0),
+                1,
+                one,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
         kernel.finish();
-        program.sir.processes[0] = kernel.build().into_map_addr(&mut |addr| {
+        program.sir.processes[index] = kernel.build().into_map_addr(&mut |addr| {
             let address = addresses[addr.var_id.0 as usize];
             crate::ir::RegionedAbsoluteAddr {
                 region: addr.region,
@@ -7299,6 +7400,152 @@ mod clean_waiter_settle_review {
             }
         });
         program.into_laid_out(false)
+    }
+    struct SamplingFailure<B: SimBackend> {
+        sim: Simulator<B>,
+        fail: bool,
+        low_samples: usize,
+    }
+    impl<B: SimBackend> SimulationExecutor for SamplingFailure<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(&mut self.sim, e)
+        }
+        fn eval_only_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_only_ff_at(&mut self.sim, e)
+        }
+        fn apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::apply_ff_at(&mut self.sim, e)
+        }
+        fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+            let slots = &self.sim.program.runtime_schema.processes[index];
+            let mode = self
+                .sim
+                .backend
+                .get_as::<u64>(self.sim.backend.resolve_signal(&slots.delay));
+            let clk = self.sim.backend.get_as::<u8>(self.sim.signal("clk"));
+            if self.fail && index == 1 && mode == 1 && clk == 0 {
+                self.low_samples += 1;
+                // Skip sampling during scheduled-value application, then fail
+                // the post-settle sample before the falling-edge FF is run.
+                if self.low_samples == 2 {
+                    return Err(RuntimeErrorCode::Runtime {
+                        message: "injected wait sampling failure".into(),
+                        signals: Vec::new(),
+                    });
+                }
+            }
+            SimulationExecutor::run_process(&mut self.sim, index, time)
+        }
+    }
+    #[test]
+    fn round61_failed_wait_sampling_retains_unpublished_generated_fall() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            sim.apply_initial_values();
+            let go = sim.signal("go");
+            sim.set_wide(go, 1u8.into());
+            let mut state = simulation_state(&sim);
+            let mut executor = SamplingFailure {
+                sim,
+                fail: false,
+                low_samples: 0,
+            };
+            assert_eq!(state.step_until(&mut executor, 0).unwrap(), Some(0));
+            executor.fail = true;
+            let error = state.step_until(&mut executor, 2).unwrap_err().to_string();
+            assert!(error.contains("injected wait sampling failure"), "{error}");
+            assert_eq!(executor.low_samples, 2);
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("falls")),
+                0
+            );
+            let schedule = state.export_schedule(executor.backend());
+            assert_eq!(schedule.process_clocks[0].falling_edge, Some(2));
+            assert_eq!(state.next_event_time(), Some(2));
+            executor.fail = false;
+            assert_eq!(state.step_until(&mut executor, 2).unwrap(), Some(2));
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("falls")),
+                1
+            );
+        }
+        let program = program_with_sampling_waiter(true);
+        let options = crate::SimulatorOptions {
+            emit_triggers: true,
+            ..Default::default()
+        };
+        macro_rules! run {
+            ($backend:expr) => {
+                check(Simulator::with_backend_and_program(
+                    $backend.unwrap(),
+                    program.runtime().clone(),
+                    Vec::new(),
+                ));
+            };
+        }
+        run!(crate::backend::InterpBackend::new(&program, &options));
+        run!(crate::backend::JitBackend::new(&program, &options, None));
+        run!(crate::backend::wasm_runtime::WasmBackend::new(
+            &program, &options
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        run!(crate::backend::native::NativeBackend::new(
+            &program, &options
+        ));
+    }
+    #[test]
+    fn round61_zero_count_delta_errors_remain_retryable() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            for _ in 0..2 {
+                let error = sim.step().unwrap_err().to_string();
+                assert!(error.contains("delta limit"), "{error}");
+                assert_eq!(sim.next_event_time(), Some(0));
+                let saved = sim.checkpoint().unwrap();
+                sim.restore(&saved).unwrap();
+                let error = sim.run_until(0).unwrap_err().to_string();
+                assert!(error.contains("delta limit"), "{error}");
+                assert_eq!(sim.time(), 0);
+                assert_eq!(sim.ticks(), 0);
+            }
+        }
+        let build = || {
+            let mut m = ModuleBuilder::new("Top").unwrap();
+            let clk = m.input("clk", ValueType::bits(1).unwrap()).unwrap();
+            let q = m.output("q", ValueType::bits(8).unwrap()).unwrap();
+            let value = m.read(q).unwrap();
+            m.register(m.whole(q).unwrap(), value, clk, Edge::Posedge, None, None)
+                .unwrap();
+            m.clock_period(clk, 4).unwrap();
+            let zero = m.constant(Constant::two_state(0u8, 64).unwrap());
+            m.process(vec![Statement::Forever {
+                body: vec![Statement::ClockCycles {
+                    clock: clk,
+                    count: zero,
+                }],
+            }])
+            .unwrap();
+            Simulator::from_frontend(m.finish())
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
     fn check<B: SimBackend>(mut simulator: Simulator<B>) {
         simulator.apply_initial_values();
