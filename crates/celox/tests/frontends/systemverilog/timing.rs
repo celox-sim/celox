@@ -295,3 +295,15 @@ sv_backends! { fn constant_continuous_function_edges_match_staged_startup(sim) {
 sv_backends! { fn escaped_initializer_function_effects_finish_during_initialization(sim) {
     @case "timing::escaped_initializer_function_effects_finish_during_initialization";
 } }
+
+sv_backends! { fn constant_comb_if_discards_unreachable_pulse_branch(sim) {
+    @case "timing::constant_comb_if_discards_unreachable_pulse_branch";
+} }
+
+sv_backends! { fn constant_child_ff_case_discards_unreachable_pulse_arm(sim) {
+    @case "timing::constant_child_ff_case_discards_unreachable_pulse_arm";
+} }
+
+sv_backends! { fn typed_continuous_enum_drivers_preserve_assignment_types(sim) {
+    @case "timing::typed_continuous_enum_drivers_preserve_assignment_types";
+} }
