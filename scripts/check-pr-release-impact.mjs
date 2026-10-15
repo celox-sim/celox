@@ -218,7 +218,7 @@ export function releaseImpactErrors(title, commits, options) {
   });
 }
 
-async function githubJson(path) {
+export async function githubJson(path) {
   const apiUrl = process.env.GITHUB_API_URL ?? "https://api.github.com";
   const response = await fetch(`${apiUrl}${path}`, {
     headers: {
@@ -258,7 +258,7 @@ async function githubGraphql(query, variables) {
   return payload.data;
 }
 
-async function loadPullRequestCommits(repository, number) {
+export async function loadPullRequestCommits(repository, number) {
   const pullRequest = await githubJson(`/repos/${repository}/pulls/${number}`);
   // BEGIN_COMMIT_OVERRIDE does not apply to plain merges. The companion
   // repository-settings check enforces that this repository stays merge-only.
