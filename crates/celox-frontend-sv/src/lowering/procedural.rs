@@ -2677,6 +2677,8 @@ pub(super) fn loop_trip_cap(
         LoopKind::Repeat(count) => eval.value(count).unwrap_or(2).clamp(0, 2) as usize,
         LoopKind::While if condition.and_then(|expr| eval.value(expr)) == Some(0) => 0,
         LoopKind::DoWhile if condition.and_then(|expr| eval.value(expr)) == Some(0) => 1,
+        // A constant false entry test needs no canonical induction/step.
+        LoopKind::For if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
         LoopKind::For => eval.for_cap(init, condition, step, body).unwrap_or(2),
         _ => 2,
     }
@@ -2789,25 +2791,27 @@ pub(super) fn procedural_write_counts(
                     );
                     let trips = loop_trip_cap(kind, init, condition.as_ref(), step, body, eval);
                     call_evaluations = loop_condition_eval_cap(kind, trips);
-                    for (name, count) in counts(
-                        body,
-                        subroutines,
-                        visiting,
-                        eval,
-                        two_state,
-                        include_nonblocking,
-                    )
-                    .into_iter()
-                    .chain(counts(
-                        step,
-                        subroutines,
-                        visiting,
-                        eval,
-                        two_state,
-                        include_nonblocking,
-                    )) {
-                        let entry = next.entry(name).or_default();
-                        *entry = (*entry + count * trips).min(2);
+                    if trips != 0 {
+                        for (name, count) in counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        )
+                        .into_iter()
+                        .chain(counts(
+                            step,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        )) {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry + count * trips).min(2);
+                        }
                     }
                 }
                 _ => {}

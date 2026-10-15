@@ -325,3 +325,7 @@ sv_backends! {fn selected_child_dependency_ignores_unreachable_reads(sim) { @cas
 sv_backends! {fn selected_child_loop_exit_ignores_unreachable_suffix(sim) { @case "timing::selected_child_loop_exit_ignores_unreachable_suffix"; } }
 
 sv_backends! {fn finite_process_loop_preserves_continuation_values(sim) { @case "timing::finite_process_loop_preserves_continuation_values"; } }
+
+sv_backends! {fn zero_trip_child_dependencies_ignore_body_and_step(sim) { @case "timing::zero_trip_child_dependencies_ignore_body_and_step"; } }
+
+sv_backends! {fn cross_file_package_initializers_keep_static_clock_baseline(sim) { @case "timing::cross_file_package_initializers_keep_static_clock_baseline"; } }

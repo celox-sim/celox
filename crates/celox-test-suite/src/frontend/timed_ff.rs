@@ -588,6 +588,7 @@ type CallableKey = (String, Option<usize>, Vec<usize>, String);
 
 #[derive(Default)]
 pub(super) struct TaskTiming {
+    pub(super) packages: Option<celox_sv_analyzer::Packages>,
     tasks: BTreeMap<CallableKey, bool>,
     pub(super) ports: BTreeMap<String, Vec<String>>,
     pub(super) inputs: BTreeMap<String, std::collections::BTreeSet<String>>,
@@ -922,6 +923,7 @@ impl TaskTiming {
                     }
                 }
             }
+            result.packages = Some(packages);
         }
         let mut records = Vec::new();
         for (index, source) in sources.iter().enumerate() {
