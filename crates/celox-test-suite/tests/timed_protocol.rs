@@ -302,3 +302,55 @@ endmodule"#)
     assert!(verilator.run_testbench().is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires Icarus, Verilator and a C++ compiler"]
+fn callable_input_connections_preserve_package_enum_type() {
+    let text = r##"(group protocol(category sequential))
+    (case typed_port(source "typed_port.sv" #"
+    package P;typedef enum logic[1:0]{LOW=0,HIGH=2} level_t;endpackage
+    module Child(input P::level_t mode,output wire q);assign q=(mode==P::HIGH);endmodule
+    module Top(input bit go,output wire a,b);
+    function automatic P::level_t checked();if(!go)$fatal(1,"called before setup");return P::HIGH;endfunction
+    Child first(.mode(checked()),.q(a));Child second(checked(),b);
+    initial #2 $finish;endmodule"#)(top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1))"##;
+    let case = load_group("typed_port.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/typed-port-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .unwrap();
+    icarus.run_testbench().unwrap();
+    let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .unwrap();
+    verilator.run_testbench().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires Verilator and a C++ compiler; Icarus rejects unpacked function return values"]
+fn callable_input_connections_preserve_unpacked_typedef_shape() {
+    let text = r##"(group protocol(category sequential))
+    (case typed_array_port(source "typed_array_port.sv" #"
+    package P;typedef logic[3:0] pair_t[2];endpackage
+    module Child(input P::pair_t mode,output wire[7:0]q);assign q={mode[0],mode[1]};endmodule
+    module Top(input bit[3:0]go,output wire[7:0]q);
+    function automatic P::pair_t checked();P::pair_t result;if(!go)$fatal(1,"called before setup");result[0]=go;result[1]=go+1;return result;endfunction
+    Child first(.mode(checked()),.q(q));initial #2 $finish;endmodule"#)
+    (top Top)(set go 2)(run_until 0)(assert_eq q 35)(set go 3)(run_until 1)(assert_eq q 52))"##;
+    let case = load_group("typed_array_port.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/typed-array-port-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut verilator =
+        celox_test_suite::verilator::Verilator::build_script(&frontend, case, &root).unwrap();
+    verilator.run_testbench().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
