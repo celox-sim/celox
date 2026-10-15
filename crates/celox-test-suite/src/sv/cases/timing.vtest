@@ -1098,3 +1098,22 @@ endmodule"#)
   (assert_eq literal_count 0)
   (assert_eq zero_count 0)
   (assert_eq positive_count 2))
+
+(case staged_wildcard_side_effects_wait_for_setup
+ (source "staged-wildcard-effects.sv" #"
+ module Top(input bit[1:0]go,output bit[1:0]a,b);
+ wire ready=1'b1;
+ always @* begin
+   a=ready?go:0;
+   if(ready&&!go)begin $display("early star");$fatal(1,"early star");end
+ end
+ always @(*) begin
+   b=ready?go:0;
+   if(ready&&!go)begin $display("early parens");$fatal(1,"early parens");end
+ end
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1)
+ (set go 2)(run_until 1)(assert_eq a 2)(assert_eq b 2)
+ (run_to_finish)(expect_output ""))

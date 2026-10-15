@@ -281,12 +281,17 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             previous = body_end;
             continue;
         }
-        if word == "always_comb" {
-            let body_end =
-                timed_ff::statement_end(source, end).ok_or("unterminated always_comb statement")?;
-            let body = timed_content(&source[end..body_end], names, tasks)?;
+        let wildcard_body = (word == "always")
+            .then(|| timed_ff::wildcard_body(source, end, tasks))
+            .flatten();
+        if word == "always_comb" || wildcard_body.is_some() {
+            let body_start = wildcard_body.unwrap_or(end);
+            let body_end = timed_ff::statement_end(source, body_start)
+                .ok_or("unterminated combinational statement")?;
+            let body = timed_content(&source[body_start..body_end], names, tasks)?;
             let replacement = format!(
-                "always_comb begin if ({}::started) begin {body} end end",
+                "{} begin if ({}::started) begin {body} end end",
+                &source[start..body_start],
                 names.package
             );
             output.push_str(&source[previous..start]);
@@ -312,7 +317,6 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
         }
         let replacement = match word {
             "initial" => format!("initial wait ({}::started)", names.package),
-            "always" if timed_ff::wildcard_control(source, end, tasks) => continue,
             "always" => {
                 format!("always wait ({}::started)", names.package)
             }
