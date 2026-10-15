@@ -1117,3 +1117,39 @@ endmodule"#)
  (top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1)
  (set go 2)(run_until 1)(assert_eq a 2)(assert_eq b 2)
  (run_to_finish)(expect_output ""))
+
+(case staged_continuous_side_effects_wait_for_setup
+ (source "staged-continuous-effects.sv" #"
+ module Top(input bit[7:0]go,output wire[7:0]a,b);
+ function automatic bit[7:0]checked(input bit[7:0]value);
+   if(value==0)begin $display("early continuous");$fatal(1,"early continuous");end
+   return value;
+ endfunction
+ assign a=checked(go);
+ wire[7:0]other=checked(go);
+ assign b=other;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1)
+ (set go 2)(run_until 1)(assert_eq a 2)(assert_eq b 2)
+ (run_to_finish)(expect_output ""))
+
+(case continuous_call_drivers_preserve_assignment_context
+ (source "continuous-driver-context.sv" #"
+ module Top(input bit[7:0]go,output wire[7:0]a,b,c,output wire ready);
+ function automatic bit[1:0]checked(input bit[7:0]value);
+   if(value==0)$fatal(1,"early driver");
+   return value;
+ endfunction
+ if(1) assign a=checked(go)+2'd3,c=checked({go[7:4],go[3:0]});
+ wire[7:0]x=checked(go),y=checked(go);
+ assign b=x+y;
+ wire constant_ready=1;
+ assign ready=constant_ready;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(set go 1)(run_until 0)(assert_eq a 4)(assert_eq b 2)(assert_eq c 1)(assert_eq ready 1)
+ (set go 2)(run_until 1)(assert_eq a 5)(assert_eq b 4)(assert_eq c 2)
+ (run_to_finish)(expect_output ""))

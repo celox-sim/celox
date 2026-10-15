@@ -71,6 +71,103 @@ fn parens(source: &str, begin: usize) -> Option<usize> {
     }
     None
 }
+// Icarus evaluates function operands in a continuous ternary eagerly. Use
+// a procedural gate and retain the original net driver (and its delays and
+// strengths). The temporary has the destination's packed assignment width.
+pub(super) fn gated_continuous(
+    source: &str,
+    start: usize,
+    end: usize,
+    names: &TimedNames,
+) -> Option<(usize, String)> {
+    let net_declaration = &source[start..end] != "assign";
+    let mut at = end;
+    let mut depth = 0usize;
+    let mut lhs_start = end;
+    let mut lhs_name = None;
+    let mut rhs = None;
+    let mut previous = start;
+    let mut output = String::new();
+    let mut drivers = String::new();
+    while at < source.len() {
+        if skip_token(source, &mut at) {
+            continue;
+        }
+        match source.as_bytes()[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
+            b'=' if depth == 0 && rhs.is_none() => {
+                let left = source[lhs_start..at].trim();
+                lhs_name = Some(if net_declaration {
+                    // Net declaration assignments name an entire net.
+                    sv_words(left).last()?.2.to_owned()
+                } else {
+                    // Skip optional drive strength and delay controls.
+                    let mut begin = trivia(left, 0);
+                    if left.as_bytes().get(begin) == Some(&b'(') {
+                        begin = trivia(left, parens(left, begin)?);
+                    }
+                    if left.as_bytes().get(begin) == Some(&b'#') {
+                        begin = trivia(left, begin + 1);
+                        begin = if left.as_bytes().get(begin) == Some(&b'(') {
+                            trivia(left, parens(left, begin)?)
+                        } else {
+                            let tail = &left[begin..];
+                            begin + tail.find(char::is_whitespace)?
+                        };
+                    }
+                    left[begin..].trim().to_owned()
+                });
+                rhs = Some(at + 1);
+            }
+            b',' | b';' if depth == 0 => {
+                if let Some(begin) = rhs.take() {
+                    let expression = &source[begin..at];
+                    let calls = sv_words(expression)
+                        .into_iter()
+                        .any(|(_, end, _)| after_trivia(&expression[end..]).starts_with('('));
+                    if calls {
+                        let lhs = lhs_name.take()?;
+                        let mut suffix = at;
+                        let name = loop {
+                            let name = format!("{}_driver_{suffix}", names.package);
+                            if !sv_words(source).iter().any(|(_, _, word)| *word == name) {
+                                break name;
+                            }
+                            suffix += 1;
+                        };
+                        drivers.push_str(&format!(
+                            "reg [$bits({lhs})-1:0] {name};\nalways @* begin if ({}::started) {name} = {expression}; end\n", names.package
+                        ));
+                        output.push_str(&source[previous..begin]);
+                        output.push_str(&format!(" {name}"));
+                        previous = at;
+                    }
+                }
+                lhs_start = at + 1;
+                if source.as_bytes()[at] == b';' {
+                    if previous == start {
+                        return None;
+                    }
+                    output.push_str(&source[previous..=at]);
+                    let replacement = format!("{drivers}{output}");
+                    return Some((
+                        at + 1,
+                        if single_generate_body(source, start) {
+                            format!("begin\n{replacement}\nend")
+                        } else {
+                            replacement
+                        },
+                    ));
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 pub(super) fn statement_end(source: &str, at: usize) -> Option<usize> {
     let at = trivia(source, at);
     if source[at..].starts_with("(*") {
