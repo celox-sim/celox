@@ -82,7 +82,9 @@ fn bare_continuous_function_calls_observe_staged_inputs() {
     // to explicit calls for the external simulators.
     let text = r##"(group protocol (category sequential))
       (case bare (source "bare.sv" #"
+        package bare_shadow_pkg; function automatic bit constant_ready; return 0; endfunction endpackage
         module Top(input bit[7:0] go,output wire[7:0] y,z,output wire ready);
+          import bare_shadow_pkg::*;
           function automatic bit[7:0] checked;
             if(!go)$fatal(1,"bare function ran before setup");
             return go;
