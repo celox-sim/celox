@@ -3745,6 +3745,166 @@ mod wait_and_finish_review {
         );
     }
     #[test]
+    fn wrapping_for_loops_cannot_hide_cross_instance_pulses() {
+        for (header, stop) in [
+            ("bit[1:0]i=3;i<4;i++", "i==0"),
+            ("bit[7:0]i=0;i<2'd3+2'd1;i++", "i==1"),
+            ("bit signed[2:0]i=3;i<=3;i++", "i<0"),
+            ("bit signed[2:0]i=-4;i>=-4;i--", "i>0"),
+            ("bit[1:0]i=4;i<2;i++", "i==1"),
+            ("bit signed[1:0]i=-1;i>32'd1;i--", "i==-2"),
+        ] {
+            let source = format!(
+                "module Child(output bit q,output int unsigned iterations);initial begin #1;for({header})begin q=~q;iterations++;if({stop})break;end end endmodule module Top(output bit[7:0]seen,output int unsigned iterations);wire q;Child child(.q(q),.iterations(iterations));initial forever begin @(q);seen++;end endmodule"
+            );
+            for four_state in [false, true] {
+                let result = Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("wrapped-pulse.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .build_interpreter();
+                let error = match result {
+                    Ok(_) => panic!("accepted hidden pulse: {header}, four_state={four_state}"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("multiple blocking writes"),
+                    "{header}: {error}"
+                );
+            }
+            // Execute the same loop without the unsupported cross-instance
+            // observer, proving two real writes rather than an estimated cap.
+            let source = source.replace("initial forever begin @(q);seen++;end", "");
+            fn check<B: SimBackend>(mut sim: Simulation<B>) {
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("iterations")), 2u32.into());
+                assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            }
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("wrapped-execution.sv"),
+                    )],
+                    "Top",
+                )
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()));
+            check(Simulation::new(build().build_cranelift().unwrap()));
+            check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()));
+        }
+    }
+
+    #[test]
+    fn typed_for_trip_counts_preserve_zero_and_single_iteration_observers() {
+        for four_state in [false, true] {
+            for (header, iterations) in [
+                ("bit[1:0]i=2;i<3;i++", 1u32),
+                ("bit[7:0]i=3;i<2'd3+2'd1;i++", 1),
+                ("bit[1:0]i=2'bx0;i<1;i++", 1),
+                ("bit[1:0]i=1;i<2;i<<=1", 1),
+                ("bit signed[2:0]i=-2;i<-1;i++", 1),
+                ("bit signed[2:0]i=2;i>1;i--", 1),
+                ("bit signed[1:0]i=-1;i<32'd1;i++", 0),
+                ("bit[7:0]i=2'd3+2'd1;i<1;i++", 0),
+                (
+                    "bit[127:0]i='1;i>=128'hffffffffffffffffffffffffffffffff;i--",
+                    1,
+                ),
+            ] {
+                let source = format!(
+                    "module Child(output bit q,output int unsigned iterations);initial begin #1;for({header})begin q=~q;iterations++;end end endmodule module Top(output bit[7:0]seen,output int unsigned iterations);wire q;Child child(.q(q),.iterations(iterations));initial forever begin @(q);seen++;end endmodule"
+                );
+                fn check<B: SimBackend>(mut sim: Simulation<B>, iterations: u32, header: &str) {
+                    sim.run_until(2).unwrap();
+                    assert_eq!(
+                        sim.get(sim.signal("iterations")),
+                        iterations.into(),
+                        "{header}"
+                    );
+                    assert_eq!(sim.get(sim.signal("seen")), iterations.into(), "{header}");
+                }
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(
+                            source.as_str(),
+                            std::path::Path::new("typed-trip-control.sv"),
+                        )],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                };
+                check(
+                    Simulation::new(build().build_interpreter().unwrap()),
+                    iterations,
+                    header,
+                );
+                check(
+                    Simulation::new(build().build_cranelift().unwrap()),
+                    iterations,
+                    header,
+                );
+                check(
+                    Simulation::new(build().build_wasm().unwrap()),
+                    iterations,
+                    header,
+                );
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(
+                    Simulation::new(build().build_native().unwrap()),
+                    iterations,
+                    header,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn loop_body_mutations_prevent_single_trip_proofs() {
+        for mutation in ["i=-1;", "reset_i(i);"] {
+            let source = format!(
+                "module Child(output bit q,output int unsigned iterations);task reset_i(inout int i);i=-1;endtask initial begin #1;for(int i=0;i<1;i++)begin q=~q;iterations++;{mutation} if(iterations==2)break;end end endmodule module Top(output int unsigned iterations);wire q;Child child(.q(q),.iterations(iterations));initial forever @(q);endmodule"
+            );
+            let result = Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("mutated-trip.sv"))],
+                "Top",
+            )
+            .build_interpreter();
+            let error = match result {
+                Ok(_) => panic!("accepted repeated loop body: {mutation}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("multiple blocking writes"),
+                "{mutation}: {error}"
+            );
+            let source = source.replace("initial forever @(q);", "");
+            fn check<B: SimBackend>(mut sim: Simulation<B>) {
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("iterations")), 2u32.into());
+                assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            }
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(
+                        source.as_str(),
+                        std::path::Path::new("mutated-trip-execution.sv"),
+                    )],
+                    "Top",
+                )
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()));
+            check(Simulation::new(build().build_cranelift().unwrap()));
+            check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()));
+        }
+    }
+
+    #[test]
     fn zero_trip_for_proofs_respect_initializer_width_and_comparison_sign() {
         for declaration_and_loop in [
             "bit i;initial begin #1;for(i=2;i<1;i++)#5;q[0]=1;end",

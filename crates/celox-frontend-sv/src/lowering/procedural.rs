@@ -178,9 +178,13 @@ impl<'a> ProcModule<'a> {
                 procedural_write_counts(
                     process.body(),
                     &subroutines,
-                    &|expr| {
-                        known_loop_value(expr, variables, name_to_id, constants, parameter_types)
-                    },
+                    &LoopConstContext::new(
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        four_state,
+                    ),
                     &|expr| expr_is_two_state(expr, variables, name_to_id, &subroutines),
                     true,
                 )
@@ -2521,54 +2525,152 @@ pub(super) fn known_loop_value(
     value.to_i128()
 }
 
+/// Constant evaluation with the declaration types used by executable lowering.
+pub(super) struct LoopConstContext<'a> {
+    variables: &'a HashMap<SourceVarId, SvVariable>,
+    ids: &'a HashMap<String, SourceVarId>,
+    constants: &'a HashMap<String, i128>,
+    types: &'a HashMap<String, (usize, bool)>,
+    four_state: bool,
+}
+
+impl<'a> LoopConstContext<'a> {
+    pub fn new(
+        variables: &'a HashMap<SourceVarId, SvVariable>,
+        ids: &'a HashMap<String, SourceVarId>,
+        constants: &'a HashMap<String, i128>,
+        types: &'a HashMap<String, (usize, bool)>,
+        four_state: bool,
+    ) -> Self {
+        Self {
+            variables,
+            ids,
+            constants,
+            types,
+            four_state,
+        }
+    }
+
+    fn value(&self, expr: &sv::ir::Expr) -> Option<i128> {
+        known_loop_value(expr, self.variables, self.ids, self.constants, self.types)
+    }
+
+    fn lower(
+        &self,
+        expr: &sv::ir::Expr,
+        width: Option<usize>,
+        arena: &mut SLTNodeArena<SourceVarId>,
+    ) -> Option<celox_slt::NodeId> {
+        if expr_calls(expr, &|_| true) {
+            return None;
+        }
+        let signed = width
+            .map(|_| sv_expr_is_signed_with_parameters(expr, self.variables, self.ids, self.types));
+        lower_expr_with_context(
+            &expr_for_state_mode(expr, self.four_state),
+            self.variables,
+            self.ids,
+            self.constants,
+            self.types,
+            arena,
+            width,
+            signed,
+        )
+        .map(|(node, _)| node)
+    }
+
+    fn for_cap(
+        &self,
+        init: &[sv::ir::Stmt],
+        condition: Option<&sv::ir::Expr>,
+        step: &[sv::ir::Stmt],
+        body: &[sv::ir::Stmt],
+    ) -> Option<usize> {
+        let loop_ = canonical_for_loop(init, condition, step)?;
+        let variable = self.variables.get(self.ids.get(&loop_.var)?)?;
+        let width = variable.width;
+        if width == 0 {
+            return None;
+        }
+        let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let assigned = |expr: &sv::ir::Expr| {
+            let mut arena = SLTNodeArena::new();
+            let node = self.lower(expr, Some(width), &mut arena)?;
+            let (value, unknown, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+            let unknown = unknown & &mask;
+            if variable.is_4state && !unknown.is_zero() {
+                return None;
+            }
+            Some((value & &mask) & (&mask ^ unknown))
+        };
+        let holds = |value: &BigUint| {
+            let expr = sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Literal(typed_literal(
+                    value,
+                    width,
+                    variable.signed,
+                ))),
+                op: loop_.compare,
+                right: Box::new(loop_.end.clone()),
+            };
+            let mut arena = SLTNodeArena::new();
+            let node = self.lower(&expr, None, &mut arena)?;
+            let truth = slt_truth(&mut arena, node).ok()?;
+            slt_bool(&arena, &mut ConstCache::default(), truth)
+        };
+        let start = assigned(&loop_.start)?;
+        if !holds(&start)? {
+            return Some(0);
+        }
+        // Header-only simulation cannot prove a single trip if the body
+        // changes the induction variable, directly or through a call.
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt_calls(stmt, &mut calls);
+        }
+        if written.contains(&loop_.var) || !calls.is_empty() {
+            return Some(2);
+        }
+        let [
+            sv::ir::Stmt::Assign {
+                rhs: sv::ir::Expr::Binary { op, right, .. },
+                ..
+            },
+        ] = step
+        else {
+            return None;
+        };
+        let step = sv::ir::Expr::Binary {
+            left: Box::new(sv::ir::Expr::Literal(typed_literal(
+                &start,
+                width,
+                variable.signed,
+            ))),
+            op: *op,
+            right: right.clone(),
+        };
+        let next = assigned(&step)?;
+        Some(if holds(&next)? { 2 } else { 1 })
+    }
+}
+
 /// Maximum relevant iterations, capped at two for hidden-pulse analysis.
 pub(super) fn loop_trip_cap(
     kind: &sv::ir::LoopKind<sv::ir::Expr>,
     init: &[sv::ir::Stmt],
     condition: Option<&sv::ir::Expr>,
     step: &[sv::ir::Stmt],
-    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+    body: &[sv::ir::Stmt],
+    eval: &LoopConstContext<'_>,
 ) -> usize {
     use sv::ir::LoopKind;
     match kind {
-        LoopKind::Repeat(count) => eval(count).unwrap_or(2).clamp(0, 2) as usize,
-        LoopKind::While if condition.and_then(eval) == Some(0) => 0,
-        LoopKind::DoWhile if condition.and_then(eval) == Some(0) => 1,
-        LoopKind::For => {
-            let Some(loop_) = canonical_for_loop(init, condition, step) else {
-                return 2;
-            };
-            let Some(start) = eval(&loop_.start) else {
-                return 2;
-            };
-            let Some(end) = eval(&loop_.end) else {
-                return 2;
-            };
-            let holds = |value| match loop_.compare {
-                sv::ir::BinaryOp::Lt => value < end,
-                sv::ir::BinaryOp::Le => value <= end,
-                sv::ir::BinaryOp::Gt => value > end,
-                sv::ir::BinaryOp::Ge => value >= end,
-                sv::ir::BinaryOp::Ne => value != end,
-                _ => true,
-            };
-            if !holds(start) {
-                return 0;
-            }
-            if loop_.step_op != celox_slt::SLTStepOp::Add {
-                return 2;
-            }
-            let next = if loop_.decreasing {
-                start.checked_sub(loop_.step as i128)
-            } else {
-                start.checked_add(loop_.step as i128)
-            };
-            if next.is_some_and(|value| !holds(value)) {
-                1
-            } else {
-                2
-            }
-        }
+        LoopKind::Repeat(count) => eval.value(count).unwrap_or(2).clamp(0, 2) as usize,
+        LoopKind::While if condition.and_then(|expr| eval.value(expr)) == Some(0) => 0,
+        LoopKind::DoWhile if condition.and_then(|expr| eval.value(expr)) == Some(0) => 1,
+        LoopKind::For => eval.for_cap(init, condition, step, body).unwrap_or(2),
         _ => 2,
     }
 }
@@ -2591,7 +2693,7 @@ pub(super) fn loop_condition_eval_cap(
 pub(super) fn procedural_write_counts(
     stmts: &[sv::ir::Stmt],
     subroutines: &HashMap<String, sv::ir::Subroutine>,
-    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+    eval: &LoopConstContext<'_>,
     two_state: &dyn Fn(&sv::ir::Expr) -> bool,
     include_nonblocking: bool,
 ) -> HashMap<String, usize> {
@@ -2599,7 +2701,7 @@ pub(super) fn procedural_write_counts(
         stmts: &[sv::ir::Stmt],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
-        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        eval: &LoopConstContext<'_>,
         two_state: &dyn Fn(&sv::ir::Expr) -> bool,
         include_nonblocking: bool,
     ) -> HashMap<String, usize> {
@@ -2679,7 +2781,7 @@ pub(super) fn procedural_write_counts(
                         two_state,
                         include_nonblocking,
                     );
-                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, eval);
+                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, body, eval);
                     call_evaluations = loop_condition_eval_cap(kind, trips);
                     for (name, count) in counts(
                         body,
@@ -2704,7 +2806,7 @@ pub(super) fn procedural_write_counts(
                 }
                 _ => {}
             }
-            let effects = stmt_call_effects(stmt, eval, two_state);
+            let effects = stmt_call_effects(stmt, &|expr| eval.value(expr), two_state);
             let combine = |mut left: HashMap<String, usize>,
                            right: HashMap<String, usize>,
                            exclusive: bool| {
@@ -2752,7 +2854,7 @@ pub(super) fn procedural_write_counts(
         args: &[Option<sv::ir::Expr>],
         subroutines: &HashMap<String, sv::ir::Subroutine>,
         visiting: &mut HashSet<String>,
-        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        eval: &LoopConstContext<'_>,
         two_state: &dyn Fn(&sv::ir::Expr) -> bool,
         include_nonblocking: bool,
     ) -> HashMap<String, usize> {
