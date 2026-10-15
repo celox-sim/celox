@@ -171,7 +171,7 @@ test("scheduled and manual validation run all paths and external suites", () => 
     job("changes"),
     /MERGE_GROUP_BASE_REF: .*github\.event\.merge_group\.base_ref.*github\.base_ref/,
   );
-  assert.doesNotMatch(job("changes"), /RELEASE_PLEASE_PR:/);
+  assert.match(job("changes"), /RELEASE_PLEASE_PR: .*github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);

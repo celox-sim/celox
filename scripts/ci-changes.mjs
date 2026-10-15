@@ -26,6 +26,18 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
+// Version-only release PRs defer product validation to the queue draft.
+const RELEASE_PLEASE_FILES = new Set([
+  ".release-please-manifest.json",
+  "CHANGELOG.md",
+  "Cargo.lock",
+  "Cargo.toml",
+  "VERSION",
+  "crates/celox-napi/package.json",
+  "packages/celox/package.json",
+  "packages/vite-plugin/package.json",
+]);
+
 // These crates are consumers or test infrastructure, not runtime/build
 // dependencies of celox-napi. ci-changes.test.mjs checks the workspace graph
 // so adding a dependency cannot silently make this exclusion unsafe.
@@ -102,7 +114,7 @@ export function isReleaseMergeGroup({ event, baseRef, files }) {
   );
 }
 
-export function classifyFiles(files) {
+export function classifyFiles(files, { releasePlease = false } = {}) {
   const affected = {
     docs: false,
     javascript: false,
@@ -113,6 +125,14 @@ export function classifyFiles(files) {
   };
 
   const normalizedFiles = files.map((path) => path.replace(/^\.\//, ""));
+
+  if (
+    releasePlease &&
+    normalizedFiles.length > 0 &&
+    normalizedFiles.every((path) => RELEASE_PLEASE_FILES.has(path))
+  ) {
+    return affected;
+  }
 
   for (const path of normalizedFiles) {
     if (
@@ -250,7 +270,7 @@ if (
     files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
-          ...classifyFiles(files),
+          ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
   writeOutputs({
