@@ -1995,14 +1995,22 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(amount);
                 // IEEE 1800-2023 9.4.1: any unknown bit makes the whole
                 // delay zero; negative delays retain the unsigned time value.
-                let delay = if self.constant_unknown(amount, Some((PROCESS_DELAY_WIDTH, signed))) {
+                // Delay expressions are self-determined (11.6.1): preserve their
+                // original width until after checking the whole value.
+                let amount = if self.constant_unknown(amount) {
                     let zero = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
                     self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                     zero
                 } else {
-                    self.eval(amount, Some((PROCESS_DELAY_WIDTH, signed)))?
+                    let mut arena = SLTNodeArena::new();
+                    let node = self.expr_slt(amount, None, &mut arena)?;
+                    let original = self.lower_slt(&arena, node)?;
+                    let node =
+                        coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
+                            .map_err(slt_error)?;
+                    let delay = self.lower_slt(&arena, node)?;
+                    self.zero_if_unknown(delay, original)
                 };
-                let amount = self.zero_if_unknown(delay, delay);
                 self.with_kernel(|kernel| kernel.inactive_delay(amount))
                     .map_err(kernel_error)?;
                 Ok(true)
@@ -2051,7 +2059,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     /// Inspect constants before two-state lowering can discard their masks.
-    fn constant_unknown(&self, expr: &sv::ir::Expr, context: Option<(usize, bool)>) -> bool {
+    fn constant_unknown(&self, expr: &sv::ir::Expr) -> bool {
         let mut arena = SLTNodeArena::new();
         !self.m.calls(expr)
             && lower_expr_with_context(
@@ -2061,15 +2069,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.m.constants,
                 self.m.parameter_types,
                 &mut arena,
-                context.map(|(width, _)| width),
-                context.map(|(_, signed)| signed),
+                None,
+                None,
             )
             .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node))
             .is_some_and(|(_, mask, _)| !mask.is_zero())
     }
 
     /// Counts and delays become entirely zero if any source bit is X/Z.
-    /// Inspect the source before a count is narrowed into its hidden counter.
+    /// Inspect the source before conversion into a counter or time value.
     fn zero_if_unknown(&mut self, value: RegisterId, source: RegisterId) -> RegisterId {
         if !matches!(self.b.register(&source), RegisterType::Logic { .. }) {
             return value;
@@ -2578,7 +2586,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
                 // IEEE 1800-2023 12.7.2, including literal masks in two-state mode.
-                let value = if self.constant_unknown(count, None) {
+                let value = if self.constant_unknown(count) {
                     let zero = self.b.alloc_bit(64, false);
                     self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                     zero
@@ -3545,7 +3553,7 @@ fn known_repeat_count(count: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<i128>
     .repeat_count(count)
 }
 
-/// Match executable delay context, including X/Z-to-zero and unsigned time conversion.
+/// Match self-determined delay evaluation, X/Z-to-zero and unsigned time conversion.
 fn constant_process_delay(expr: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<u64> {
     if expr_calls(expr, &|_| true) {
         return None;
@@ -3560,8 +3568,8 @@ fn constant_process_delay(expr: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<u6
         pm.constants,
         pm.parameter_types,
         &mut arena,
-        Some(PROCESS_DELAY_WIDTH),
-        Some(signed),
+        None,
+        None,
     )?;
     if !slt_const4(&arena, &mut ConstCache::default(), node)?
         .1
@@ -3576,8 +3584,8 @@ fn constant_process_delay(expr: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<u6
         pm.constants,
         pm.parameter_types,
         &mut arena,
-        Some(PROCESS_DELAY_WIDTH),
-        Some(signed),
+        None,
+        None,
     )?;
     let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed).ok()?;
     let (value, mask, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;

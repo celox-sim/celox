@@ -619,8 +619,21 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Returns the time of the next scheduled event, if any.
+    ///
+    /// Pending host writes conservatively report the current time when event
+    /// domains or waiting processes may need work. This query does not settle
+    /// writes; a step consumes the notification even if no edge or waiter fires.
     pub fn next_event_time(&self) -> Option<u64> {
-        if self.pending_host_work && self.state.has_waiting_processes() && !self.state.is_finished()
+        if self.pending_host_work
+            && !self.state.is_finished()
+            && (self.state.has_waiting_processes()
+                || !self
+                    .simulator
+                    .program
+                    .design
+                    .events
+                    .ordered_events
+                    .is_empty())
         {
             Some(self.state.time())
         } else {
@@ -4478,7 +4491,14 @@ mod pr1158_merge_regressions {
             sim.run_until(2).unwrap();
             assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
         }
-        for delay in ["4'bx001", "4'bz001", "(4'bx001 + 1)", "32'sd0", "4'd0"] {
+        for delay in [
+            "4'bx001",
+            "4'bz001",
+            "(4'bx001 + 1)",
+            "32'sd0",
+            "4'd0",
+            "(4'hf + 4'h1)",
+        ] {
             let source = format!(
                 "module Child(output bit[1:0]q);initial begin #1;#({delay});q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule"
             );
@@ -4499,6 +4519,108 @@ mod pr1158_merge_regressions {
             );
             backends!(&source, check);
         }
+    }
+    #[test]
+    fn wide_dynamic_delays_check_unknown_bits_before_time_conversion() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, retained_mask: bool) {
+            use num_bigint::BigUint;
+            let initial = sim.checkpoint().unwrap();
+            let d = sim.signal("d");
+            let high = BigUint::from(1u8) << 79usize;
+            for (value, mask) in [
+                (BigUint::from(1u8), high.clone()),
+                (&high | BigUint::from(1u8), high.clone()),
+                (&high | BigUint::from(1u8), BigUint::default()),
+            ] {
+                sim.restore(&initial).unwrap();
+                sim.modify(|io| io.set_four_state(d, value, mask.clone()))
+                    .unwrap();
+                sim.run_until(0).unwrap();
+                let zero_delay = retained_mask
+                    && sim.simulator.backend.layout().four_state
+                    && mask != BigUint::default();
+                assert_eq!(sim.get(sim.signal("q")), u8::from(zero_delay).into());
+                assert_eq!(sim.get(sim.signal("calls")), 1u8.into());
+                assert_eq!(
+                    sim.next_event_time(),
+                    if zero_delay { None } else { Some(1) }
+                );
+                sim.run_until(1).unwrap();
+                assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+                assert_eq!(sim.get(sim.signal("calls")), 1u8.into());
+            }
+        }
+        fn check_original<B: SimBackend>(sim: Simulation<B>) {
+            check(sim, true);
+        }
+        fn check_cast<B: SimBackend>(sim: Simulation<B>) {
+            check(sim, false);
+        }
+        for body in [
+            "initial begin calls=1;#(d);q=1;end",
+            "function automatic logic[79:0] delay_value();calls++;return d;endfunction initial begin #(delay_value());q=1;end",
+        ] {
+            let source = format!(
+                "module Top(input logic[79:0]d,output bit q,output bit[7:0]calls);{body} endmodule"
+            );
+            backends!(&source, check_original);
+        }
+        backends!(
+            "module Top(input logic[79:0]d,output bit q,output bit[7:0]calls);initial begin calls=1;#(64'(d));q=1;end endmodule",
+            check_cast
+        );
+    }
+    #[test]
+    fn next_event_time_exposes_host_ff_edges_without_waiters() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert!(!sim.has_waiting_processes());
+            assert_eq!(sim.next_event_time(), None);
+            let clk = sim.signal("clk");
+            let q = sim.signal("q");
+            sim.modify(|io| io.set(clk, 1u8)).unwrap();
+            let pending = sim.checkpoint().unwrap();
+            for _ in 0..2 {
+                assert_eq!(sim.next_event_time(), Some(0));
+                assert_eq!(sim.simulator.backend.get(q), 0u8.into());
+            }
+            assert_eq!(sim.step_until(0).unwrap(), Some(0));
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.next_event_time(), None);
+            sim.restore(&pending).unwrap();
+            assert_eq!(sim.next_event_time(), Some(0));
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(q), 1u8.into());
+            assert_eq!(sim.next_event_time(), None);
+            // Conservatively polling a falling or unchanged clock must clear
+            // the notification without inventing a rising-edge execution.
+            for value in [0u8, 0] {
+                sim.modify(|io| io.set(clk, value)).unwrap();
+                assert_eq!(sim.next_event_time(), Some(0));
+                assert_eq!(sim.step().unwrap(), None);
+                assert_eq!(sim.next_event_time(), None);
+                assert_eq!(sim.get(q), 1u8.into());
+            }
+        }
+        backends!(
+            "module Top(input bit clk,output bit[7:0]q);always_ff @(posedge clk)q<=q+1;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn next_event_time_ignores_host_writes_without_domains_or_waiters() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            assert_eq!(sim.next_event_time(), None);
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.next_event_time(), None);
+        }
+        backends!(
+            "module Top(input bit a,output bit q);assign q=a;endmodule",
+            check
+        );
     }
     #[test]
     fn physical_clock_aliases_do_not_duplicate_host_occurrences() {
