@@ -16,6 +16,7 @@ pub(crate) mod lowering;
 pub mod module;
 mod portability_check;
 mod readmem;
+mod runtime_functions;
 mod schedule;
 mod source;
 mod testbench;
@@ -41,6 +42,7 @@ pub use interface_captures::lower_interface_captures;
 pub use lowering::types::{resolve_dims, resolve_total_width};
 pub use module::external_port_formal_names;
 pub use portability_check::{check_array_literal_side_effects, check_function_output_aliases};
+pub use runtime_functions::{RuntimeFunctions, preserve_terminating_function_calls};
 pub use schedule::schedule_symbolic_rtl;
 pub use source::{
     AbsoluteAddr, GlueAddr, GlueBlock, ModuleInitialMemoryValue, RegionedAbsoluteAddr,

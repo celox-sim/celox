@@ -1286,30 +1286,53 @@ fn initial_bound_finishes(statement: &ForStatement, module: &Module) -> bool {
     let Factor::FunctionCall(call) = factor.as_ref() else {
         return false;
     };
-    let body = module.functions.get(&call.id).and_then(|function| {
-        call.index
-            .as_deref()
-            .and_then(|index| function.get_function(index))
-            .or_else(|| function.get_function(&[]))
-    });
-    body.is_some_and(|body| {
-        for statement in &body.statements {
-            match statement {
-                Statement::SystemFunctionCall(call)
-                    if matches!(call.kind, SystemFunctionKind::Finish) =>
-                {
-                    return true;
-                }
-                Statement::Assign(_)
-                | Statement::Null
-                | Statement::FunctionCall(_)
-                | Statement::SystemFunctionCall(_)
-                | Statement::TbMethodCall(_) => {}
-                _ => return false,
-            }
+    fn expression_finishes(
+        expression: &Expression,
+        module: &Module,
+        active: &mut HashSet<VarId>,
+    ) -> bool {
+        matches!(expression, Expression::Term(factor) if matches!(factor.as_ref(), Factor::FunctionCall(call) if call_finishes(call, module, active)))
+    }
+    fn call_finishes(call: &FunctionCall, module: &Module, active: &mut HashSet<VarId>) -> bool {
+        if !active.insert(call.id) {
+            return false;
         }
-        false
-    })
+        let body = module.functions.get(&call.id).and_then(|function| {
+            call.index
+                .as_deref()
+                .and_then(|index| function.get_function(index))
+                .or_else(|| function.get_function(&[]))
+        });
+        let finishes = body.is_some_and(|body| {
+            for statement in &body.statements {
+                match statement {
+                    Statement::SystemFunctionCall(call)
+                        if matches!(call.kind, SystemFunctionKind::Finish) =>
+                    {
+                        return true;
+                    }
+                    Statement::Assign(assign) => {
+                        if expression_finishes(&assign.expr, module, active) {
+                            return true;
+                        }
+                    }
+                    Statement::FunctionCall(call) => {
+                        if call_finishes(call, module, active) {
+                            return true;
+                        }
+                    }
+                    Statement::Null
+                    | Statement::SystemFunctionCall(_)
+                    | Statement::TbMethodCall(_) => {}
+                    _ => return false,
+                }
+            }
+            false
+        });
+        active.remove(&call.id);
+        finishes
+    }
+    call_finishes(call, module, &mut HashSet::default())
 }
 
 fn check_for(

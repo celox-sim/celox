@@ -2043,7 +2043,16 @@ fn terminating_event_argument_skips_later_clock_argument() {
 #[test]
 fn terminating_for_start_skips_a_later_clock_bound() {
     let code = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var seed:u32;function stop()->u32{$finish();return seed;}function later()->u32{clk.next();return 2;}initial{for i in stop()..later(){$assert(0);}}}"#;
-    check_passes_on_every_backend(code);
+    for source in [
+        code.to_owned(),
+        code.replace("return seed", "return 0"),
+        code.replace(
+            "function stop()->u32{$finish();return seed;}",
+            "function inner()->u32{$finish();return 0;}function stop()->u32{return inner();}",
+        ),
+    ] {
+        check_passes_on_every_backend(&source);
+    }
 }
 #[test]
 fn zero_clock_count_keeps_helper_design_writes_dirty() {
@@ -2280,4 +2289,13 @@ fn reentrant_output_snapshots_keep_all_masks_and_return_across_waits() {
     check(build().build_wasm().unwrap());
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(build().build_native().unwrap());
+}
+
+#[test]
+fn runtime_case_exceptions_do_not_relax_rtl_case_conditions() {
+    let source = "#[test(Top)]module Top{var label:u32;var q:u32;always_comb{q=0;case 0{label:{q=1;}}}initial{$finish();}}";
+    let error = Simulator::builder(source, "Top")
+        .build_interpreter()
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("CaseCondition"), "{error}");
 }

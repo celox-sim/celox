@@ -398,18 +398,20 @@ fn analyze(
     let loop_sources =
         parser::loop_provenance::LoopSourceTable::collect(parsers.iter().map(|x| &x.veryl));
 
-    // Global post-pass1
+    let has_testbench = symbol_table::get_all()
+        .iter()
+        .any(|symbol| matches!(&symbol.kind, SymbolKind::Module(module) if module.test.is_some()));
+    let runtime_functions = if testbench_kernels && has_testbench {
+        celox_frontend_veryl::preserve_terminating_function_calls(parsers.iter().map(|x| &x.veryl))
+    } else {
+        Default::default()
+    };
+    // Resolve constant-function dependencies only after runtime termination
+    // has been classified, so transitive callers retain those effects too.
     errors.append(&mut Analyzer::analyze_post_pass1());
 
-    // Shared context for pass2
     let mut context = Context::default();
-    // The analyzer's constant evaluator does not retain testbench runtime
-    // effects. Keep calls in kernel testbench IR; SIR lowering can still fold
-    // their values after executing the process effects.
-    context.disalbe_const_opt = testbench_kernels
-        && symbol_table::get_all().iter().any(
-            |symbol| matches!(&symbol.kind, SymbolKind::Module(module) if module.test.is_some()),
-        );
+    context.disalbe_const_opt = testbench_kernels && has_testbench;
 
     let mut ir = Ir::default();
 
@@ -426,6 +428,7 @@ fn analyze(
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    errors.retain(|error| !runtime_functions.is_runtime_case_condition(error));
 
     // Veryl reports combinational loops before Celox can apply its path-level
     // false-loop and true-loop authorizations. When the caller supplied such
