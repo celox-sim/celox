@@ -536,7 +536,7 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         if self.state.poll_waiting(&mut self.simulator)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
         if self.state.has_unsettled_edges(&self.simulator.backend) {
             let time = self.state.time();
@@ -548,6 +548,9 @@ impl<B: SimBackend> Simulation<B> {
                 self.state.step(&mut self.simulator)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
+            }
+            if self.state.is_finished() {
+                return Ok(None);
             }
             if active || queued {
                 return Ok(Some(time));
@@ -634,7 +637,7 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         if self.state.poll_waiting(&mut self.simulator)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
         if self.state.has_unsettled_edges(&self.simulator.backend) {
             let time = self.state.time();
@@ -646,6 +649,9 @@ impl<B: SimBackend> Simulation<B> {
                 self.state.step(&mut self.simulator)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
+            }
+            if self.state.is_finished() {
+                return Ok(None);
             }
             if active || queued {
                 return Ok(Some(time));
@@ -3905,5 +3911,55 @@ mod sampled_host_review {
             "module Top(input bit go,output bit q);initial @(posedge go)q=1;endmodule",
             check_ready
         );
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_step_review {
+    use super::*;
+
+    #[test]
+    fn host_dispatch_reports_finished_without_returning_a_time() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let initial = sim.checkpoint().unwrap();
+            let clk = sim.signal("clk");
+            for bounded in [false, true] {
+                sim.restore(&initial).unwrap();
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                let result = if bounded {
+                    sim.step_until(10)
+                } else {
+                    sim.step()
+                };
+                assert_eq!(result.unwrap(), None);
+                assert!(sim.is_finished());
+                assert_eq!(sim.time(), 0);
+                assert_eq!(sim.step().unwrap(), None);
+            }
+        }
+        for body in [
+            "initial @(posedge clk)$finish;",
+            "always @(posedge clk)$finish;",
+        ] {
+            let source = format!("module Top(input bit clk);{body} endmodule");
+            macro_rules! build {
+                ($method:ident) => {
+                    check(Simulation::new(
+                        Simulator::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("host-finish.sv"))],
+                            "Top",
+                        )
+                        .$method()
+                        .unwrap(),
+                    ));
+                };
+            }
+            build!(build_interpreter);
+            build!(build_cranelift);
+            build!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            build!(build_native);
+        }
     }
 }
