@@ -749,10 +749,9 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
-        if self.scheduled_clock_time != current_time {
-            self.scheduled_clock_drives.make_empty();
-            self.scheduled_clock_time = current_time;
-        }
+        // A process owns its generated clock even before its first wait.
+        // Retain consumed scheduled-drive provenance across timestamps.
+        self.scheduled_clock_time = current_time;
         for event in &events_to_process {
             self.scheduled_clock_drives.insert(event.event_ref.id());
             if let Some(id) = self.signal_to_id.get(&event.signal) {
@@ -1140,8 +1139,7 @@ impl<B: SimBackend> SimulationState<B> {
                 signals: Vec::new(),
             });
         }
-        if (self.scheduled_clock_time == self.scheduler.time
-            && self.scheduled_clock_drives.contains(id))
+        if self.scheduled_clock_drives.contains(id)
             || self
                 .scheduler
                 .event_queue

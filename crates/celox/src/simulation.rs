@@ -2449,11 +2449,35 @@ mod clock_provenance_checkpoint_tests {
         .unwrap();
         m.finish()
     }
+    #[test]
+    fn earlier_scheduled_drives_conflict_with_delayed_clock_activation() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.schedule("clk", 0, 1).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            let error = sim.run_until(2).unwrap_err().to_string();
+            assert!(error.contains("already driven by schedule"), "{error}");
+            assert_eq!(sim.ticks(), 0);
+        }
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
     fn check<B: SimBackend>(mut sim: Simulation<B>) {
         sim.schedule("clk", 0, 1).unwrap();
         assert_eq!(sim.step().unwrap(), Some(0));
         let checkpoint = sim.checkpoint().unwrap();
-        sim.run_until(2).unwrap();
+        let error = sim.run_until(2).unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
         sim.restore(&checkpoint).unwrap();
         // Model a host waking the suspended process at the restored timestamp.
         let mut parts = sim.state.export_schedule(&sim.simulator.backend);
