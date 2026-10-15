@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
+};
 
 use bit_set::BitSet;
 use celox_design::{DomainKind, ProcessStatus};
@@ -10,12 +13,35 @@ use crate::{
     scheduler::{ClockDef, Scheduler, SimEvent},
 };
 
+/// Bound all active and inactive passes within one simulation time slot.
+const PROCESS_DELTA_LIMIT: usize = 100_000;
+
+fn count_delta_pass(rounds: &mut usize) -> Result<(), SimulatorErrorCode> {
+    *rounds += 1;
+    if *rounds > PROCESS_DELTA_LIMIT {
+        return Err(SimulatorErrorCode::Runtime {
+            message: "process delta limit exceeded without advancing time".to_owned(),
+            signals: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Backend execution hooks needed by the timed simulation engine.
 ///
 /// The facade implements this contract to retain policy such as runtime-event
 /// decoration and waveform capture outside the backend-independent scheduler.
 pub trait SimulationExecutor {
     type Backend: SimBackend;
+    fn finish_requested(&mut self, _time: u64) -> bool {
+        false
+    }
+
+    /// Whether individual scheduled writes have observable combinational
+    /// effects even without an event waiter.
+    fn scheduled_updates_need_settle(&self) -> bool {
+        false
+    }
 
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
@@ -127,46 +153,111 @@ pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
+    pending_host_edges: BTreeMap<usize, u64>,
+    unknown_clock_values: BitSet,
     topo_signals: Vec<(SignalRef, usize, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
     signal_to_id: FxHashMap<SignalRef, usize>,
     signal_index_by_id: Vec<usize>,
     processes: Vec<ProcessRefs>,
+    process_event_counters: Vec<(usize, SignalRef, SignalRef)>,
+    active_ff_domains: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    /// Processes suspended at an event or level wait, which their kernels
+    /// re-check whenever the state may have changed.
+    waiting: BTreeSet<usize>,
+    sampled_ready: BTreeSet<usize>,
+    inactive: BTreeSet<usize>,
     /// A process requested the end of the simulation.
     finished: bool,
+    finish_round: bool,
+}
+
+fn transition_edges(was: (bool, bool), is: (bool, bool)) -> (bool, bool) {
+    let (was_nonzero, was_unknown) = was;
+    let (is_nonzero, is_unknown) = is;
+    match (was_unknown, is_unknown) {
+        (true, true) => (false, false),
+        (true, false) => (is_nonzero, !is_nonzero),
+        (false, true) => (!was_nonzero, was_nonzero),
+        (false, false) => (!was_nonzero && is_nonzero, was_nonzero && !is_nonzero),
+    }
+}
+
+/// The event signal's least significant bit and its X/Z mask.
+fn sample_event_signal<B: SimBackend>(backend: &B, signal: SignalRef) -> (bool, bool) {
+    if backend.layout().four_state && signal.is_4state {
+        let (value, mask) = backend.get_four_state(signal);
+        (value.bit(0), mask.bit(0))
+    } else {
+        let value: u8 = backend.get_as(signal);
+        (value & 1 != 0, false)
+    }
 }
 
 impl<B: SimBackend> SimulationState<B> {
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
+        self.pending_host_edges.clear();
+        self.sample_event_values(backend);
+    }
+
+    fn sample_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();
+        self.unknown_clock_values.make_empty();
         for (signal, id, _) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = backend.get_as(*signal);
-            if value != 0 {
+            let (is_nonzero, is_unknown) = sample_event_signal(backend, *signal);
+            if is_nonzero {
                 self.last_clock_values.insert(*id);
             }
+            if is_unknown {
+                self.unknown_clock_values.insert(*id);
+            }
         }
+    }
+
+    /// Retain FF occurrences observed by a host evaluation until the scheduler runs.
+    pub fn capture_host_edges(&mut self, backend: &B) {
+        if self.finished {
+            return;
+        }
+        for (_, id, _) in &self.topo_signals {
+            if *id == usize::MAX {
+                continue;
+            }
+            let info = &self.event_info[*id];
+            if (info.eval_ff_event.is_some()
+                || info.eval_only_event.is_some()
+                || info.apply_event.is_some())
+                && self.stable_edge_triggered(backend, *id)
+            {
+                *self.pending_host_edges.entry(*id).or_default() += 1;
+            }
+        }
+        self.sample_event_values(backend);
     }
 
     fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
         let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
             return true;
         };
-        let was_nonzero = self.last_clock_values.contains(id);
-        let is_nonzero = backend.get_as::<u8>(*signal) != 0;
+        let was = (
+            self.last_clock_values.contains(id),
+            self.unknown_clock_values.contains(id),
+        );
+        let is = sample_event_signal(backend, *signal);
         match self.domain_kinds[id] {
-            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                !was_nonzero && is_nonzero
-            }
-            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                was_nonzero && !is_nonzero
-            }
-            _ => was_nonzero != is_nonzero,
+            Some(
+                DomainKind::ClockPosedge
+                | DomainKind::ResetAsyncHigh
+                | DomainKind::ClockNegedge
+                | DomainKind::ResetAsyncLow,
+            ) => self.edge_triggers(id, was, is),
+            _ => was != is,
         }
     }
 
@@ -176,17 +267,16 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let was_nonzero = self.last_clock_values.contains(*id);
-            let value: u8 = backend.get_as(*signal);
-            let is_nonzero = value != 0;
+            let was = (
+                self.last_clock_values.contains(*id),
+                self.unknown_clock_values.contains(*id),
+            );
+            let is = sample_event_signal(backend, *signal);
+            let (posedge, negedge) = transition_edges(was, is);
             let triggered = match self.domain_kinds[*id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => was_nonzero != is_nonzero,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+                _ => was != is,
             };
             if triggered {
                 backend.mark_triggered_bit(*id);
@@ -203,6 +293,7 @@ impl<B: SimBackend> SimulationState<B> {
         processes: Vec<ProcessRefs>,
     ) -> Self {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
+        let mut unknown_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
         let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
         for (index, (signal, id, _)) in topo_signals.iter().copied().enumerate() {
@@ -211,9 +302,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
             signal_to_id.insert(signal, id);
             signal_index_by_id[id] = index;
-            let value: u8 = backend.get_as(signal);
-            if value != 0 {
+            let (value, unknown) = sample_event_signal(backend, signal);
+            if value {
                 last_clock_values.insert(id);
+            }
+            if unknown {
+                unknown_clock_values.insert(id);
             }
         }
 
@@ -221,6 +315,8 @@ impl<B: SimBackend> SimulationState<B> {
             scheduler: Scheduler::new(),
             periodic_events: FxHashMap::default(),
             last_clock_values,
+            pending_host_edges: BTreeMap::new(),
+            unknown_clock_values,
             topo_signals,
             domain_kinds,
             event_info,
@@ -230,7 +326,13 @@ impl<B: SimBackend> SimulationState<B> {
                 .map(|process| Reverse((0, process)))
                 .collect(),
             processes,
+            process_event_counters: Vec::new(),
+            active_ff_domains: BitSet::new(),
+            waiting: BTreeSet::new(),
+            sampled_ready: BTreeSet::new(),
+            inactive: BTreeSet::new(),
             finished: false,
+            finish_round: false,
         }
     }
 
@@ -273,6 +375,79 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.push(event);
     }
 
+    /// Mark domains whose evaluation publishes blocking stores before NBA application.
+    pub fn with_active_ff_events(mut self, events: Vec<B::Event>) -> Self {
+        self.active_ff_domains = events
+            .into_iter()
+            .map(|event| self.event_info[event.id()].canonical_id)
+            .collect();
+        self
+    }
+
+    /// Attach exact kernel edge counters to their runtime event domains.
+    pub fn with_process_event_counters(
+        mut self,
+        counters: Vec<(SignalRef, SignalRef, SignalRef)>,
+    ) -> Self {
+        self.process_event_counters = counters
+            .into_iter()
+            .filter_map(|(signal, rises, falls)| {
+                self.signal_to_id.get(&signal).map(|id| (*id, rises, falls))
+            })
+            .collect();
+        self
+    }
+
+    /// Capture suspended event waits without executing their continuations.
+    pub fn sample_waiting_events<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.sample_waiting(executor, false)
+    }
+
+    /// Probe event and level waits without running their continuations.
+    /// Level conditions are re-evaluated on ordinary resumption.
+    pub fn probe_waiting<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.sample_waiting(executor, true)
+    }
+
+    fn sample_waiting<E>(&mut self, executor: &mut E, probe: bool) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.finished {
+            return Ok(());
+        }
+        for &process in &self.waiting {
+            let refs = self.processes[process];
+            let status = ProcessStatus::from_code(executor.backend().get_as(refs.status));
+            if !matches!(status, Some(ProcessStatus::Wait | ProcessStatus::Pending))
+                && !(probe && status == Some(ProcessStatus::Ready))
+            {
+                continue;
+            }
+            let delay = executor.backend().get_as::<u64>(refs.delay);
+            executor
+                .backend_mut()
+                .set(refs.delay, if probe { 2u64 } else { 1u64 });
+            let result = executor.run_process(process);
+            executor.backend_mut().set(refs.delay, delay);
+            result?;
+            if ProcessStatus::from_code(executor.backend().get_as(refs.status))
+                == Some(ProcessStatus::Ready)
+            {
+                self.sampled_ready.insert(process);
+            } else if probe {
+                self.sampled_ready.remove(&process);
+            }
+        }
+        Ok(())
+    }
+
     pub fn step<E>(&mut self, executor: &mut E) -> Result<Option<u64>, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
@@ -289,23 +464,106 @@ impl<B: SimBackend> SimulationState<B> {
             Vec::new()
         };
         let ready = self.take_ready_processes(current_time);
-        self.step_round(executor, current_time, events_to_process, ready)?;
-        // A process that waited for zero time resumes in a later round of
-        // this time, after the previous round's edges have been handled.
-        while !self.finished {
-            let ready = self.take_ready_processes(current_time);
-            if ready.is_empty() {
-                break;
-            }
-            self.step_round(executor, current_time, Vec::new(), ready)?;
-        }
+        let mut delta_rounds = 0;
+        self.step_round(
+            executor,
+            current_time,
+            events_to_process,
+            ready,
+            true,
+            &mut delta_rounds,
+        )?;
+        self.run_remaining_rounds(executor, current_time, &mut delta_rounds)?;
         executor.finish_timed_step(current_time);
         Ok(Some(current_time))
     }
 
+    /// Run the further rounds of `current_time`: a process that waited for
+    /// zero time resumes in a later round, after the previous round's edges
+    /// have been handled, and the settled state may wake a process waiting
+    /// for an event or a condition. A round in which no process ran changes
+    /// nothing and ends the time.
+    fn run_remaining_rounds<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        delta_rounds: &mut usize,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        while !self.finished {
+            let ready = self.take_ready_processes(current_time);
+            if ready.is_empty() && self.waiting.is_empty() {
+                break;
+            }
+            if !self.step_round(
+                executor,
+                current_time,
+                Vec::new(),
+                ready,
+                false,
+                delta_rounds,
+            )? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any process is suspended on an event or a condition.
+    pub fn has_waiting_processes(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    /// Resume the processes waiting for an event or a condition at the
+    /// current time, for state that was changed from outside the scheduler,
+    /// and settle what they drive. Returns whether a process ran; nothing
+    /// happens when none wakes.
+    pub fn poll_waiting<E>(&mut self, executor: &mut E) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.finished || (self.waiting.is_empty() && self.pending_host_edges.is_empty()) {
+            return Ok(false);
+        }
+        let time = self.scheduler.time;
+        // A due clock belongs to the same batch; consume its periodic marker
+        // through step before processing captured host edges or continuations.
+        if self
+            .scheduler
+            .next_event_time()
+            .is_some_and(|next| next <= time)
+            || self
+                .process_wakeups
+                .peek()
+                .is_some_and(|Reverse((next, _))| *next <= time)
+            || !self.inactive.is_empty()
+        {
+            return Ok(false);
+        }
+        self.sample_waiting_events(executor)?;
+        let mut delta_rounds = 0;
+        if !self.step_round(
+            executor,
+            time,
+            Vec::new(),
+            Vec::new(),
+            false,
+            &mut delta_rounds,
+        )? {
+            return Ok(false);
+        }
+        self.run_remaining_rounds(executor, time, &mut delta_rounds)?;
+        executor.finish_timed_step(time);
+        Ok(true)
+    }
+
     /// Remove the processes waiting for `time`, in declaration order.
     fn take_ready_processes(&mut self, time: u64) -> Vec<usize> {
-        let mut ready = Vec::new();
+        let mut ready = std::mem::take(&mut self.inactive)
+            .into_iter()
+            .collect::<Vec<_>>();
         while let Some(&Reverse((wakeup, process))) = self.process_wakeups.peek() {
             if wakeup != time {
                 break;
@@ -316,41 +574,147 @@ impl<B: SimBackend> SimulationState<B> {
         ready
     }
 
-    /// Run `ready` processes in order until each suspends or ends. A process
-    /// that waits for zero time is queued for the next round of this time.
+    /// Run `ready` processes, and the processes waiting for an event or a
+    /// condition, in declaration order until each suspends or ends. A
+    /// process another one wakes runs in a further pass of the same round,
+    /// before any register the round triggers updates. A process that waits
+    /// for zero time is queued for a later round; inactive-region delays
+    /// drain before pending register updates. Returns
+    /// whether any process ran a statement.
     fn run_processes<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         ready: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+        delta_rounds: &mut usize,
+    ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        for process in ready {
-            executor.run_process(process)?;
-            let refs = self.processes[process];
-            let status: u8 = executor.backend().get_as(refs.status);
-            match ProcessStatus::from_code(status) {
-                Some(ProcessStatus::Delay) => {
-                    let delay: u64 = executor.backend().get_as(refs.delay);
-                    let time = current_time.checked_add(delay).ok_or_else(|| {
-                        SimulatorErrorCode::Runtime {
-                            message: format!("process {process} delay overflows simulation time"),
-                            signals: Vec::new(),
-                        }
-                    })?;
-                    self.process_wakeups.push(Reverse((time, process)));
+        let mut progressed = false;
+        let mut pass = ready;
+        loop {
+            pass.extend(self.waiting.iter().copied());
+            pass.sort_unstable();
+            pass.dedup();
+            if pass.is_empty() {
+                return Ok(progressed);
+            }
+            if let Err(error) = count_delta_pass(delta_rounds) {
+                for process in pass {
+                    self.process_wakeups.push(Reverse((current_time, process)));
                 }
-                Some(ProcessStatus::Done) => {}
-                Some(ProcessStatus::Finish) => {
-                    self.finished = true;
+                return Err(error);
+            }
+            let mut any_ran = false;
+            let mut remaining = std::mem::take(&mut pass).into_iter();
+            while let Some(process) = remaining.next() {
+                loop {
+                    let before = self
+                        .process_event_counters
+                        .iter()
+                        .map(|(_, rises, falls)| {
+                            (
+                                executor.backend().get_as::<u32>(*rises),
+                                executor.backend().get_as::<u32>(*falls),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    // A previous delay amount is no longer live on resumption.
+                    executor
+                        .backend_mut()
+                        .set(self.processes[process].delay, 0u64);
+                    executor.run_process(process)?;
+                    self.sampled_ready.remove(&process);
+                    if executor.finish_requested(current_time) {
+                        self.finish_round = true;
+                        self.finished = true;
+                        return Ok(true);
+                    }
+                    for ((id, rises, falls), (old_rises, old_falls)) in
+                        self.process_event_counters.iter().zip(before)
+                    {
+                        let changed = match self.domain_kinds[*id] {
+                            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                                executor.backend().get_as::<u32>(*falls) != old_falls
+                            }
+                            _ => executor.backend().get_as::<u32>(*rises) != old_rises,
+                        };
+                        if changed {
+                            executor.backend_mut().mark_triggered_bit(*id);
+                        }
+                    }
+                    let refs = self.processes[process];
+                    let status: u8 = executor.backend().get_as(refs.status);
+                    match ProcessStatus::from_code(status) {
+                        Some(ProcessStatus::Yield) => {
+                            self.waiting.remove(&process);
+                            if let Err(error) = count_delta_pass(delta_rounds) {
+                                self.process_wakeups.push(Reverse((current_time, process)));
+                                for process in remaining {
+                                    self.process_wakeups.push(Reverse((current_time, process)));
+                                }
+                                return Err(error);
+                            }
+                            any_ran = true;
+                            continue;
+                        }
+                        Some(ProcessStatus::Delay | ProcessStatus::InactiveDelay) => {
+                            let delay: u64 = executor.backend().get_as(refs.delay);
+                            let time = current_time.checked_add(delay).ok_or_else(|| {
+                                SimulatorErrorCode::Runtime {
+                                    message: format!(
+                                        "process {process} delay overflows simulation time"
+                                    ),
+                                    signals: Vec::new(),
+                                }
+                            })?;
+                            self.waiting.remove(&process);
+                            if delay == 0
+                                && ProcessStatus::from_code(status)
+                                    == Some(ProcessStatus::InactiveDelay)
+                            {
+                                self.inactive.insert(process);
+                            } else {
+                                self.process_wakeups.push(Reverse((time, process)));
+                            }
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Done) => {
+                            self.waiting.remove(&process);
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Finish) => {
+                            self.finish_round = true;
+                            self.waiting.remove(&process);
+                            self.finished = true;
+                            return Ok(true);
+                        }
+                        Some(ProcessStatus::Wait) => {
+                            self.waiting.insert(process);
+                            any_ran = true;
+                        }
+                        // The kernel found its wait condition unmet and ran
+                        // nothing; it stays waiting.
+                        Some(ProcessStatus::Pending) => {}
+                        Some(ProcessStatus::Ready) | None => {
+                            return Err(SimulatorErrorCode::InternalError);
+                        }
+                    }
                     break;
                 }
-                None => return Err(SimulatorErrorCode::InternalError),
             }
+            if !any_ran {
+                return Ok(progressed);
+            }
+            progressed = true;
         }
-        Ok(())
+    }
+
+    /// Record a finish emitted by the host while settling current-time writes.
+    pub fn finish(&mut self) {
+        self.finish_round = true;
+        self.finished = true;
     }
 
     /// Whether a process requested the end of the simulation.
@@ -360,6 +724,8 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Settle externally driven state against the previous edge baseline even
     /// when no clock/reset signal is explicitly scheduled at this timestamp.
+    /// The events and process wakeups due before `time` are processed first,
+    /// at their own times, and the processes due at `time` run.
     pub fn settle_at<E>(
         &mut self,
         executor: &mut E,
@@ -368,20 +734,38 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.step_round(executor, time, Vec::new(), Vec::new())?;
+        while self.next_event_time().is_some_and(|next| next < time) {
+            self.step(executor)?;
+        }
+        if self.finished {
+            return Ok(None);
+        }
+        if self.scheduler.next_event_time() == Some(time) {
+            return self.step(executor);
+        }
+        let ready = self.take_ready_processes(time);
+        let mut delta_rounds = 0;
+        self.step_round(executor, time, Vec::new(), ready, true, &mut delta_rounds)?;
+        // A process the settled state woke may wait for zero time: the
+        // rounds of this time are drained, as `step` drains them.
+        self.run_remaining_rounds(executor, time, &mut delta_rounds)?;
         executor.finish_timed_step(time);
         Ok(Some(time))
     }
 
-    /// Apply `events_to_process`, run `ready_processes`, and settle the
-    /// edges they cause.
+    /// Apply `events_to_process`, run `ready_processes` and the waiting
+    /// processes, and settle the edges they cause. Without `settle_idle`,
+    /// a round with no event in which no process ran is skipped, and
+    /// `false` is returned.
     fn step_round<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         events_to_process: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+        settle_idle: bool,
+        delta_rounds: &mut usize,
+    ) -> Result<bool, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -416,68 +800,177 @@ impl<B: SimBackend> SimulationState<B> {
         );
 
         let num_events = executor.backend().num_events();
+        let host_edges = std::mem::take(&mut self.pending_host_edges);
+        let mut host_replays = BTreeMap::<usize, u64>::new();
+        for (&id, &count) in &host_edges {
+            let canonical = self.event_info[id].canonical_id;
+            let replays = host_replays.entry(canonical).or_default();
+            *replays = (*replays).max(count.saturating_sub(1));
+        }
+        let mut scheduled_edges: BitSet = host_edges.keys().copied().collect();
+        let mut early_settle_edges = BitSet::with_capacity(num_events);
+        // Early settling can expose a derived edge that a later source store
+        // or awakened process restores. Capture every update we settle early.
+        let capture_batch_edges = events_to_process.len() > 1 || !host_edges.is_empty();
+        let mut batch_edge_counts = BTreeMap::<usize, u64>::new();
         for event in &events_to_process {
+            let settle_update = capture_batch_edges
+                || !self.waiting.is_empty()
+                || executor.scheduled_updates_need_settle();
+            let domain_values: Vec<(bool, bool)> = if settle_update {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
+            let after = sample_event_signal(executor.backend(), event.signal);
+            let mut blocking_source = false;
+            if let Some(&id) = self.signal_to_id.get(&event.signal)
+                && self.edge_triggers(id, before, after)
+            {
+                scheduled_edges.insert(id);
+                blocking_source = self
+                    .active_ff_domains
+                    .contains(self.event_info[id].canonical_id);
+            }
+            if settle_update {
+                executor.eval_comb()?;
+                if executor.finish_requested(current_time) {
+                    self.finished = true;
+                    return Ok(true);
+                }
+            }
+            let mut seen = BitSet::with_capacity(num_events);
+            for ((signal, id, _), before) in self.topo_signals.iter().zip(domain_values) {
+                if *id != usize::MAX
+                    && self.edge_triggers(
+                        *id,
+                        before,
+                        sample_event_signal(executor.backend(), *signal),
+                    )
+                {
+                    let canonical = self.event_info[*id].canonical_id;
+                    let info = &self.event_info[canonical];
+                    if capture_batch_edges
+                        && (info.eval_ff_event.is_some()
+                            || info.eval_only_event.is_some()
+                            || info.apply_event.is_some())
+                        && seen.insert(canonical)
+                    {
+                        *batch_edge_counts.entry(canonical).or_default() += 1;
+                    }
+                    if capture_batch_edges || blocking_source {
+                        // Blocking source FF stores run in the active region
+                        // and can remove an edge already sampled by waiters.
+                        scheduled_edges.insert(*id);
+                    } else {
+                        early_settle_edges.insert(*id);
+                    }
+                }
+            }
+            self.sample_waiting_events(executor)?;
+        }
+        for (id, count) in batch_edge_counts {
+            // The first occurrence is already in scheduled_edges, unless a
+            // host edge occupies that slot. Aliases share one replay count.
+            let has_host_edge = host_replays.contains_key(&id);
+            *host_replays.entry(id).or_default() += count.saturating_sub(u64::from(!has_host_edge));
         }
 
         // Processes run after this time's scheduled values are applied and
         // see the state settled at the previous time. The event signals they
         // change are edges of this time, like scheduled events.
+        executor.backend_mut().clear_triggered_bits();
+        let counter_values = self.event_counter_values(executor.backend());
         let mut process_driven = Vec::new();
-        if !ready_processes.is_empty() {
-            let before: Vec<u8> = self
+        if !ready_processes.is_empty() || !self.waiting.is_empty() {
+            let before: Vec<(bool, bool)> = self
                 .topo_signals
                 .iter()
-                .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
                 .collect();
-            self.run_processes(executor, current_time, ready_processes)?;
+            let progressed =
+                self.run_processes(executor, current_time, ready_processes, delta_rounds)?;
+            if self.finished && self.finish_round {
+                return Ok(true);
+            }
+            if !progressed
+                && !settle_idle
+                && events_to_process.is_empty()
+                && scheduled_edges.is_empty()
+            {
+                return Ok(false);
+            }
             for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                 if *id == usize::MAX {
                     continue;
                 }
-                let value: u8 = executor.backend().get_as(*signal);
+                let value = sample_event_signal(executor.backend(), *signal);
                 if value != before {
-                    process_driven.push((*id, value != 0));
+                    process_driven.push((*id, value));
                 }
             }
         }
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
-        let mut scheduled_trigger_ids = BitSet::with_capacity(num_events);
+        // Counter-recorded kernel edges survive later blocking stores that
+        // restored the signal before the kernel returned.
+        let mut edge_replays = host_replays;
+        self.add_process_edge_replays(
+            executor.backend(),
+            &counter_values,
+            &mut edge_replays,
+            &scheduled_edges,
+        );
+        let mut recorded_edges = self.counter_edges(executor.backend(), &counter_values);
+        recorded_edges.union_with(&scheduled_edges);
+        let mut scheduled_trigger_ids = recorded_edges.clone();
         // An external drive may already have been combinationally evaluated
         // by a testbench read. Compare against our saved baseline even if that
         // evaluation's transient trigger bits have since been cleared.
         let mut track_stable_edges = events_to_process.is_empty();
-        executor.backend_mut().clear_triggered_bits();
-
         let scheduled = events_to_process
             .iter()
             .filter_map(|event| {
                 self.signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0))
+                    .map(|&id| (id, (event.next_val & 1 != 0, false)))
             })
             .chain(process_driven);
         for (id, is_nonzero) in scheduled {
             track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
-            if triggered {
+            let was_nonzero = (
+                self.last_clock_values.contains(id),
+                self.unknown_clock_values.contains(id),
+            );
+            if self.edge_triggers(id, was_nonzero, is_nonzero) {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
             }
         }
 
         executor.eval_comb()?;
+        if executor.finish_requested(current_time) {
+            self.finished = true;
+            return Ok(true);
+        }
+        // Capture every waiter before any continuation can remove a
+        // propagated edge produced by the active process writes.
+        self.sample_waiting_events(executor)?;
+        // Settle process writes before deciding whether they restored an
+        // early edge. Persistent edges follow the ordinary cascade after
+        // source FF publication; only vanished edges need explicit replay.
+        for id in early_settle_edges.iter() {
+            if !self.stable_edge_triggered(executor.backend(), id) {
+                recorded_edges.insert(id);
+                scheduled_trigger_ids.insert(id);
+            }
+        }
         if track_stable_edges {
             // Combinational settling before an active scheduled source domain
             // commits may expose transient derived-clock edges. In that case,
@@ -494,22 +987,28 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        // Share the time-slot budget with active waiter feedback passes.
         let mut comb_already_done = false;
+        // Accumulate publications across every occurrence in this active
+        // batch. Replayed evaluations must still read pre-NBA state.
+        let mut newly_triggered = Vec::new();
         loop {
             let mut any_new_outer_loop_trigger = false;
-            let mut newly_triggered = Vec::new();
 
             loop {
-                let mut any_new_sequential_trigger = false;
+                count_delta_pass(delta_rounds)?;
                 let marked_bits = executor.backend().get_triggered_bits();
                 executor.backend_mut().clear_triggered_bits();
 
-                let mut can_use_eval_apply =
-                    triggered_domains.is_empty() && marked_bits.count() == 1;
+                let mut can_use_eval_apply = self.processes.is_empty()
+                    && self.process_event_counters.is_empty()
+                    && triggered_domains.is_empty()
+                    && marked_bits.count() == 1;
                 if can_use_eval_apply {
                     let single_id = marked_bits.iter().next().expect("one marked trigger");
                     let info = self.event_info[single_id];
-                    can_use_eval_apply = !info.is_cascaded;
+                    can_use_eval_apply =
+                        !info.is_cascaded && !self.active_ff_domains.contains(info.canonical_id);
                     if can_use_eval_apply {
                         if let Some(event) = info.eval_ff_event {
                             discovered_in_this_step.insert(single_id);
@@ -519,6 +1018,10 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
+                            if executor.finish_requested(current_time) {
+                                self.finished = true;
+                                return Ok(true);
+                            }
                             if track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
                             }
@@ -528,7 +1031,10 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                 }
 
+                let mut ff_body_edges = BitSet::with_capacity(num_events);
                 for id in marked_bits.iter() {
+                    let recorded_edge = recorded_edges.contains(id);
+                    recorded_edges.remove(id);
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
@@ -538,15 +1044,18 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                     // Native trigger bits can be coarse hints raised by a
                     // working-region write before its commit. A derived clock
-                    // must have the requested stable edge before its FFs run.
-                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                    // must have a stable edge or a counter-recorded transition.
+                    if info.is_cascaded
+                        && !recorded_edge
+                        && !self.stable_edge_triggered(executor.backend(), id)
+                    {
                         continue;
                     }
                     discovered_in_this_step.insert(id);
                     triggered_domains.insert(info.canonical_id);
-                    any_new_sequential_trigger = true;
                     newly_triggered.push(info.canonical_id);
 
+                    let before = self.event_counter_values(executor.backend());
                     if let Some(event) = info.eval_only_event {
                         executor.stage_external_event(
                             info.eval_ff_event.unwrap_or(event),
@@ -561,17 +1070,208 @@ impl<B: SimBackend> SimulationState<B> {
                             "FF trigger discovered without a corresponding execution unit"
                         );
                     }
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
+                    let mut occupied = marked_bits.clone();
+                    occupied.union_with(&discovered_in_this_step);
+                    occupied.union_with(&ff_body_edges);
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &before,
+                        &mut edge_replays,
+                        &occupied,
+                    );
+                    ff_body_edges.union_with(&self.counter_edges(executor.backend(), &before));
                 }
 
-                if !any_new_sequential_trigger {
+                recorded_edges.union_with(&ff_body_edges);
+
+                // Working-region writes become visible only when this NBA
+                // batch is published; discover their cascade edges then.
+                executor.backend_mut().clear_triggered_bits();
+                for id in ff_body_edges.iter() {
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
+                // Inactive-region (#0) continuations run after the active
+                // FF evaluations and before the pending NBA publications.
+                // Drain active evaluations before promoting another inactive
+                // batch, including evaluations a combinational settle woke.
+                let inactive_counter_values = self.event_counter_values(executor.backend());
+                let mut inactive_samples = None;
+                let mut active_ran =
+                    self.run_processes(executor, current_time, Vec::new(), delta_rounds)?;
+                if !active_ran {
+                    // Drain active combinational effects of blocking FF stores
+                    // before either inactive continuations or NBA publication.
+                    if !self.inactive.is_empty()
+                        || !triggered_domains.is_disjoint(&self.active_ff_domains)
+                    {
+                        executor.eval_comb()?;
+                        if executor.finish_requested(current_time) {
+                            self.finished = true;
+                            return Ok(true);
+                        }
+                        // Latch every waiter before another active FF or
+                        // continuation can erase a propagated blocking edge.
+                        self.sample_waiting_events(executor)?;
+                        self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        for id in ff_body_edges.iter() {
+                            executor.backend_mut().mark_triggered_bit(id);
+                        }
+                        if executor
+                            .backend()
+                            .get_triggered_bits()
+                            .iter()
+                            .any(|id| !discovered_in_this_step.contains(id))
+                        {
+                            continue;
+                        }
+                        executor.backend_mut().clear_triggered_bits();
+                    }
+                    active_ran =
+                        self.run_processes(executor, current_time, Vec::new(), delta_rounds)?;
+                }
+                if self.finished && self.finish_round {
+                    return Ok(true);
+                }
+                let progressed = if active_ran {
+                    true
+                } else {
+                    let ready = std::mem::take(&mut self.inactive)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    if self.finished {
+                        break;
+                    }
+                    if ready.is_empty() {
+                        if !ff_body_edges.is_empty() {
+                            continue;
+                        }
+                        break;
+                    }
+                    // A new inactive batch may create a fresh occurrence of
+                    // a domain already evaluated in this time slot.
+                    let processed = discovered_in_this_step.clone();
+                    discovered_in_this_step.make_empty();
+                    triggered_domains.make_empty();
+                    let before = self
+                        .topo_signals
+                        .iter()
+                        .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
+                        .collect::<Vec<_>>();
+                    for ((_, id, _), value) in self.topo_signals.iter().zip(&before) {
+                        if *id != usize::MAX && processed.contains(*id) {
+                            if value.1 {
+                                self.unknown_clock_values.insert(*id);
+                            } else {
+                                self.unknown_clock_values.remove(*id);
+                            }
+                            if value.0 {
+                                self.last_clock_values.insert(*id);
+                            } else {
+                                self.last_clock_values.remove(*id);
+                            }
+                        }
+                    }
+                    inactive_samples = Some(before);
+                    self.run_processes(executor, current_time, ready, delta_rounds)?
+                };
+                if progressed {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &inactive_counter_values,
+                        &mut edge_replays,
+                        &BitSet::new(),
+                    );
+                    let mut driven =
+                        self.counter_edges(executor.backend(), &inactive_counter_values);
+                    recorded_edges.union_with(&driven);
+                    driven.union_with(&ff_body_edges);
+                    executor.eval_comb()?;
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
+                    if let Some(before) = inactive_samples {
+                        executor.backend_mut().clear_triggered_bits();
+                        for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
+                            if *id != usize::MAX
+                                && self.edge_triggers(
+                                    *id,
+                                    before,
+                                    sample_event_signal(executor.backend(), *signal),
+                                )
+                            {
+                                executor.backend_mut().mark_triggered_bit(*id);
+                            }
+                        }
+                    } else if track_stable_edges {
+                        self.replace_triggers_with_stable_edges(executor.backend_mut());
+                    }
+                    for id in driven.iter() {
+                        executor.backend_mut().mark_triggered_bit(id);
+                    }
+                } else {
                     break;
                 }
             }
 
+            {
+                let replay = edge_replays
+                    .iter()
+                    .filter_map(|(&id, &count)| (count > 0).then_some(id))
+                    .collect::<Vec<_>>();
+                if !replay.is_empty() {
+                    // Completed source domains must not be rediscovered from
+                    // their old baseline while an occurrence is replayed.
+                    for (signal, id, _) in &self.topo_signals {
+                        if *id == usize::MAX
+                            || !triggered_domains.contains(self.event_info[*id].canonical_id)
+                        {
+                            continue;
+                        }
+                        let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+                        if value {
+                            self.last_clock_values.insert(*id);
+                        } else {
+                            self.last_clock_values.remove(*id);
+                        }
+                        if unknown {
+                            self.unknown_clock_values.insert(*id);
+                        } else {
+                            self.unknown_clock_values.remove(*id);
+                        }
+                    }
+                    discovered_in_this_step.make_empty();
+                    triggered_domains.make_empty();
+                    executor.backend_mut().clear_triggered_bits();
+                    for id in replay {
+                        *edge_replays.get_mut(&id).unwrap() -= 1;
+                        recorded_edges.insert(id);
+                        executor.backend_mut().mark_triggered_bit(id);
+                    }
+                    continue;
+                }
+            }
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
                 break;
             }
 
+            // Publish all simultaneous NBA updates before polling waiters.
+            // Poll between outer cascade stages (IEEE 1800-2023 4.5), never
+            // between the domains evaluated in the same active region.
+            let polled = !self.waiting.is_empty() && !self.finished;
+            let before: Vec<(bool, bool)> = if polled {
+                self.topo_signals
+                    .iter()
+                    .map(|(signal, _, _)| sample_event_signal(executor.backend(), *signal))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut any_process_ran = false;
             for id in &newly_triggered {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
@@ -582,13 +1282,70 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
+            newly_triggered.clear();
 
             if comb_already_done {
                 comb_already_done = false;
             } else {
                 executor.eval_comb()?;
+                if executor.finish_requested(current_time) {
+                    self.finished = true;
+                    return Ok(true);
+                }
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
+            }
+
+            if polled {
+                self.sample_waiting_events(executor)?;
+                let counter_values = self.event_counter_values(executor.backend());
+                any_process_ran |=
+                    self.run_processes(executor, current_time, Vec::new(), delta_rounds)?;
+                if self.finished && self.finish_round {
+                    return Ok(true);
+                }
+                if any_process_ran {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &counter_values,
+                        &mut edge_replays,
+                        &BitSet::new(),
+                    );
+                    let mut driven = self.counter_edges(executor.backend(), &counter_values);
+                    recorded_edges.union_with(&driven);
+                    for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
+                        if *id == usize::MAX {
+                            continue;
+                        }
+                        let value = sample_event_signal(executor.backend(), *signal);
+                        if value != before && self.edge_triggers(*id, before, value) {
+                            driven.insert(*id);
+                            executor.backend_mut().mark_triggered_bit(*id);
+                        }
+                    }
+                    executor.eval_comb()?;
+                    if executor.finish_requested(current_time) {
+                        self.finished = true;
+                        return Ok(true);
+                    }
+                    // An NBA-woken process can create a new occurrence of an
+                    // already evaluated domain in the same time slot.
+                    recorded_edges.union_with(&driven);
+                    for id in driven.iter() {
+                        discovered_in_this_step.remove(id);
+                        triggered_domains.remove(self.event_info[id].canonical_id);
+                    }
+                    if track_stable_edges {
+                        if driven.is_empty() {
+                            self.replace_triggers_with_stable_edges(executor.backend_mut());
+                        } else {
+                            executor.backend_mut().clear_triggered_bits();
+                            for id in driven.iter() {
+                                executor.backend_mut().mark_triggered_bit(id);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -597,8 +1354,13 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = executor.backend().get_as(*signal);
-            if value != 0 {
+            let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+            if unknown {
+                self.unknown_clock_values.insert(*id);
+            } else {
+                self.unknown_clock_values.remove(*id);
+            }
+            if value {
                 self.last_clock_values.insert(*id);
             } else {
                 self.last_clock_values.remove(*id);
@@ -629,7 +1391,90 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    fn event_counter_values(&self, backend: &B) -> Vec<(u32, u32)> {
+        self.process_event_counters
+            .iter()
+            .map(|(_, rises, falls)| (backend.get_as(*rises), backend.get_as(*falls)))
+            .collect()
+    }
+
+    fn add_process_edge_replays(
+        &self,
+        backend: &B,
+        before: &[(u32, u32)],
+        replays: &mut BTreeMap<usize, u64>,
+        preceding_edges: &BitSet,
+    ) {
+        let mut counters = BTreeMap::new();
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let rise = backend.get_as::<u32>(*rises).wrapping_sub(*old_rises) as u64;
+            let fall = backend.get_as::<u32>(*falls).wrapping_sub(*old_falls) as u64;
+            let count = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => fall,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => rise,
+                _ => rise + fall,
+            };
+            let canonical = self.event_info[*id].canonical_id;
+            let Some(info) = self.event_info.get(canonical) else {
+                continue;
+            };
+            if info.eval_ff_event.is_none()
+                && info.eval_only_event.is_none()
+                && info.apply_event.is_none()
+            {
+                continue;
+            }
+            counters
+                .entry((canonical, *rises, *falls))
+                .and_modify(|n: &mut u64| *n = (*n).max(count))
+                .or_insert(count);
+        }
+        let mut totals = BTreeMap::<usize, u64>::new();
+        for ((id, _, _), count) in counters {
+            *totals.entry(id).or_default() += count;
+        }
+        for (id, count) in totals {
+            // One occurrence fits in the normal trigger set. If an earlier
+            // queued/host edge occupies it, replay the full process delta.
+            let occupied = preceding_edges
+                .iter()
+                .any(|edge| self.event_info[edge].canonical_id == id);
+            *replays.entry(id).or_default() += count.saturating_sub(u64::from(!occupied));
+        }
+    }
+
+    fn counter_edges(&self, backend: &B, before: &[(u32, u32)]) -> BitSet {
+        let mut edges = BitSet::with_capacity(backend.num_events());
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let changed = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    backend.get_as::<u32>(*falls) != *old_falls
+                }
+                _ => backend.get_as::<u32>(*rises) != *old_rises,
+            };
+            if changed {
+                edges.insert(*id);
+            }
+        }
+        edges
+    }
+
+    /// Whether a change of event signal `id` from `was_nonzero` to
+    /// `is_nonzero` is the edge its domain triggers on.
+    fn edge_triggers(&self, id: usize, was: (bool, bool), is: (bool, bool)) -> bool {
+        let (posedge, negedge) = transition_edges(was, is);
+        match self.domain_kinds[id] {
+            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => posedge,
+            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => negedge,
+            _ => posedge,
+        }
     }
 
     pub fn time(&self) -> u64 {
@@ -646,7 +1491,14 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);
+        if !self.pending_host_edges.is_empty() || !self.sampled_ready.is_empty() {
+            return Some(self.scheduler.time);
+        }
+        let process = if self.inactive.is_empty() {
+            self.process_wakeups.peek().map(|&Reverse((time, _))| time)
+        } else {
+            Some(self.scheduler.time)
+        };
         match (self.scheduler.next_event_time(), process) {
             (Some(event), Some(process)) => Some(event.min(process)),
             (event, process) => event.or(process),
@@ -672,7 +1524,12 @@ impl<B: SimBackend> SimulationState<B> {
             event_queue: self.scheduler.event_queue.clone(),
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
+            pending_host_edges: self.pending_host_edges.clone(),
+            unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            waiting: self.waiting.clone(),
+            sampled_ready: self.sampled_ready.clone(),
+            inactive: self.inactive.clone(),
             finished: self.finished,
         }
     }
@@ -705,7 +1562,14 @@ impl<B: SimBackend> SimulationState<B> {
         self.periodic_events.clone_from(&snapshot.periodic_events);
         self.last_clock_values
             .clone_from(&snapshot.last_clock_values);
+        self.pending_host_edges
+            .clone_from(&snapshot.pending_host_edges);
+        self.unknown_clock_values
+            .clone_from(&snapshot.unknown_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
+        self.waiting.clone_from(&snapshot.waiting);
+        self.sampled_ready.clone_from(&snapshot.sampled_ready);
+        self.inactive.clone_from(&snapshot.inactive);
         self.finished = snapshot.finished;
         Ok(())
     }
@@ -724,8 +1588,14 @@ pub struct ScheduleParts<B: SimBackend> {
     pub periodic: Vec<(SimEvent<B>, u64)>,
     /// Events whose signal was high when edge detection last sampled it.
     pub high_events: Vec<B::Event>,
+    /// Captured host edges; repeated handles retain repeated occurrences.
+    pub captured_edges: Vec<B::Event>,
+    pub unknown_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
+    /// Processes waiting for an event or a condition, in ascending order.
+    pub waiting_processes: Vec<usize>,
+    pub inactive_processes: Vec<usize>,
     /// A process requested the end of the simulation.
     pub finished: bool,
 }
@@ -760,15 +1630,33 @@ impl<B: SimBackend> SimulationState<B> {
                 })
                 .collect(),
             high_events: self.last_clock_values.iter().map(|id| events[id]).collect(),
+            captured_edges: self
+                .pending_host_edges
+                .iter()
+                .flat_map(|(&id, &count)| std::iter::repeat_n(events[id], count as usize))
+                .collect(),
+            unknown_events: self
+                .unknown_clock_values
+                .iter()
+                .map(|id| events[id])
+                .collect(),
             process_wakeups: {
                 let mut wakeups = self
                     .process_wakeups
                     .iter()
                     .map(|&Reverse((time, process))| (process, time))
                     .collect::<Vec<_>>();
+                wakeups.extend(
+                    self.sampled_ready
+                        .iter()
+                        .map(|&process| (process, self.scheduler.time)),
+                );
                 wakeups.sort_unstable();
+                wakeups.dedup();
                 wakeups
             },
+            waiting_processes: self.waiting.iter().copied().collect(),
+            inactive_processes: self.inactive.iter().copied().collect(),
             finished: self.finished,
         }
     }
@@ -795,11 +1683,22 @@ impl<B: SimBackend> SimulationState<B> {
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
         }
+        self.unknown_clock_values.make_empty();
+        for event in parts.unknown_events {
+            self.unknown_clock_values.insert(event.id());
+        }
+        self.pending_host_edges.clear();
+        for event in parts.captured_edges {
+            *self.pending_host_edges.entry(event.id()).or_default() += 1;
+        }
+        self.sampled_ready.clear();
         self.process_wakeups = parts
             .process_wakeups
             .into_iter()
             .map(|(process, time)| Reverse((time, process)))
             .collect();
+        self.waiting = parts.waiting_processes.into_iter().collect();
+        self.inactive = parts.inactive_processes.into_iter().collect();
         self.finished = parts.finished;
     }
 }
@@ -811,7 +1710,12 @@ pub struct SimulationSnapshot<B: SimBackend> {
     event_queue: std::collections::BinaryHeap<SimEvent<B>>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
+    pending_host_edges: BTreeMap<usize, u64>,
+    unknown_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    waiting: BTreeSet<usize>,
+    sampled_ready: BTreeSet<usize>,
+    inactive: BTreeSet<usize>,
     finished: bool,
 }
 
@@ -823,7 +1727,12 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             event_queue: self.event_queue.clone(),
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
+            pending_host_edges: self.pending_host_edges.clone(),
+            unknown_clock_values: self.unknown_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            waiting: self.waiting.clone(),
+            sampled_ready: self.sampled_ready.clone(),
+            inactive: self.inactive.clone(),
             finished: self.finished,
         }
     }

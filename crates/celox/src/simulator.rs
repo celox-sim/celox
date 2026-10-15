@@ -31,8 +31,8 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 #[cfg(feature = "host-runtime")]
 mod host {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use crate::backend::RuntimeEventBuffer;
     #[cfg(any(
@@ -104,6 +104,7 @@ mod host {
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
+        runtime_finish_state: Arc<Mutex<RuntimeFinishState>>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
         pub(super) comb_observer_initial_eval: bool,
@@ -161,7 +162,13 @@ mod host {
         sites: Vec<RuntimeEventSite>,
         read_seq: u64,
         shared_read_seq: Arc<AtomicU64>,
+        finish_state: Arc<Mutex<RuntimeFinishState>>,
         active: Arc<AtomicBool>,
+    }
+
+    #[derive(Default)]
+    struct RuntimeFinishState {
+        requested: bool,
     }
 
     impl RuntimeEventDrain {
@@ -170,6 +177,17 @@ mod host {
         }
 
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
+            if self
+                .sites
+                .iter()
+                .any(|site| matches!(site.kind, RuntimeEventKind::Finish))
+            {
+                let mut finish = self.finish_state.lock().unwrap();
+                finish.requested |= self.buffer.load_atomic_u64(
+                    celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET,
+                    Ordering::Acquire,
+                ) != 0;
+            }
             let events = drain_raw_runtime_events_from_buffer(
                 &self.buffer,
                 &self.layout,
@@ -667,6 +685,7 @@ mod host {
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
+                runtime_finish_state: Arc::new(Mutex::new(RuntimeFinishState::default())),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_initial_eval: true,
@@ -830,6 +849,14 @@ mod host {
             self.collect_formatted_runtime_events(ctx)
         }
 
+        pub(crate) fn drain_runtime_events_without_evaluation(&mut self) -> Vec<RuntimeEvent> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active"
+            );
+            self.collect_formatted_runtime_events(RuntimeFormatContext::default())
+        }
+
         pub(crate) fn drain_runtime_events_deferred_with_context(
             &mut self,
             ctx: RuntimeFormatContext<'_>,
@@ -897,6 +924,7 @@ mod host {
         }
 
         fn collect_backend_runtime_events(&mut self) -> Vec<RawRuntimeEvent> {
+            self.has_pending_runtime_finish();
             let layout = self.backend.layout();
             let mut read_seq = self.runtime_event_read_seq.load(Ordering::Acquire);
             if let Some(buffer) = self.backend.runtime_event_buffer() {
@@ -939,14 +967,60 @@ mod host {
             }
         }
 
+        pub(crate) fn has_pending_runtime_finish(&self) -> bool {
+            if !self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| matches!(site.kind, RuntimeEventKind::Finish))
+            {
+                return false;
+            }
+            let mut finish = self.runtime_finish_state.lock().unwrap();
+            if !finish.requested {
+                let offset = celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET;
+                finish.requested = if let Some(buffer) = self.backend.runtime_event_buffer() {
+                    buffer.load_atomic_u64(offset, Ordering::Acquire) != 0
+                } else {
+                    let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+                    assert!(offset + 8 <= size);
+                    unsafe { std::ptr::read_volatile(ptr.add(offset).cast::<u64>()) != 0 }
+                };
+            }
+            finish.requested
+        }
+
+        pub(super) fn reset_runtime_finish(&self, finished: bool) {
+            let mut finish = self.runtime_finish_state.lock().unwrap();
+            let offset = celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET;
+            if let Some(buffer) = self.backend.runtime_event_buffer() {
+                buffer.store_atomic_u64(offset, u64::from(finished), Ordering::Release);
+            } else {
+                let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+                assert!(offset + 8 <= size);
+                unsafe {
+                    std::ptr::write_volatile(
+                        ptr.add(offset).cast_mut().cast::<u64>(),
+                        u64::from(finished),
+                    );
+                }
+            }
+            finish.requested = finished;
+        }
+
         fn peek_backend_runtime_events_from(&self, read_seq: u64) -> Vec<RawRuntimeEvent> {
             let mut read_seq = read_seq;
+            self.read_backend_runtime_events(&mut read_seq)
+        }
+
+        fn read_backend_runtime_events(&self, read_seq: &mut u64) -> Vec<RawRuntimeEvent> {
             let layout = self.backend.layout();
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 collect_runtime_events(
                     layout,
                     &self.program.runtime_schema.runtime_event_sites,
-                    &mut read_seq,
+                    read_seq,
                     buffer.byte_size(),
                     |offset| buffer.read_u64(offset),
                     |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
@@ -959,7 +1033,7 @@ mod host {
                 collect_runtime_events(
                     layout,
                     &self.program.runtime_schema.runtime_event_sites,
-                    &mut read_seq,
+                    read_seq,
                     size,
                     read_u64,
                     read_u64,
@@ -978,6 +1052,7 @@ mod host {
                 sites: self.program.runtime_schema.runtime_event_sites.clone(),
                 read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
                 shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
+                finish_state: Arc::clone(&self.runtime_finish_state),
                 active: Arc::clone(&self.runtime_event_drain_active),
             })
         }
@@ -1016,6 +1091,13 @@ mod host {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
+            self.try_dump_without_evaluation(timestamp)
+        }
+
+        pub(crate) fn try_dump_without_evaluation(
+            &mut self,
+            timestamp: u64,
+        ) -> Result<(), DumpError> {
             let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer
@@ -1107,15 +1189,24 @@ mod host {
         where
             F: FnOnce(&mut IOContext<B>),
         {
+            self.modify_without_evaluation(f);
+            if self.runtime_event_drain_active.load(Ordering::Acquire) {
+                self.eval_comb_for_runtime_event_drain()?;
+            }
+            Ok(())
+        }
+
+        // Used by a finished Simulation: retain host stores without
+        // implicitly advancing terminal outputs or generating diagnostics.
+        pub(crate) fn modify_without_evaluation<F>(&mut self, f: F)
+        where
+            F: FnOnce(&mut IOContext<B>),
+        {
             let mut ctx = IOContext {
                 backend: &mut self.backend,
             };
             f(&mut ctx);
             self.dirty = true;
-            if self.runtime_event_drain_active.load(Ordering::Acquire) {
-                self.eval_comb_for_runtime_event_drain()?;
-            }
-            Ok(())
         }
 
         pub(super) fn settle_dirty_for_runtime_event_drain(&mut self) {

@@ -443,21 +443,37 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
-		// A skipped run must preserve pending input changes for lazy evaluation.
-		if (endTime < this._handle.time()) return;
+		if (this.stopFinishedRun()) return;
+		if (this._handle.time() > endTime) return;
+		const needsHostPoll = this.needsHostPoll();
+		this.settleSharedWrites();
+		if (this.isFinished()) {
+			this._state.pendingHostWrites = false;
+			return;
+		}
 		if (opts?.maxSteps == null) {
 			this._handle.runUntil(endTime);
+			this._state.pendingHostWrites = false;
 			this._state.dirty = false;
 			return;
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
-		if (this._handle.time() >= endTime) {
+		let pollHost =
+			needsHostPoll && (this._handle.hasPendingHostWork?.() ?? true);
+		const queued = this._handle.nextEventTime();
+		if (
+			this._handle.time() === endTime &&
+			!pollHost &&
+			(queued == null || queued > endTime)
+		) {
+			this._state.dirty = false;
 			return;
 		}
 		while (true) {
 			const nextEventTime = this._handle.nextEventTime();
-			if (nextEventTime == null || nextEventTime > endTime) break;
+			if (!pollHost && (nextEventTime == null || nextEventTime > endTime))
+				break;
 			if (steps >= max) {
 				throw new SimulationTimeoutError(
 					`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
@@ -465,7 +481,16 @@ export class Simulation<P = Record<string, unknown>> {
 					steps,
 				);
 			}
-			const t = this._handle.step();
+			if (pollHost && !this._handle.stepUntil) {
+				throw new Error(
+					"Native simulation handle lacks bounded host-wake stepping",
+				);
+			}
+			const t = this._handle.stepUntil
+				? this._handle.stepUntil(endTime)
+				: this._handle.step();
+			pollHost = false;
+			this._state.pendingHostWrites = false;
 			if (t == null) break;
 			this._state.dirty = false;
 			steps++;
@@ -474,6 +499,7 @@ export class Simulation<P = Record<string, unknown>> {
 		// processed, advance the clock exactly to endTime without consuming a
 		// later event, and perform the native path's final dump.
 		this._handle.runUntil(endTime);
+		this._state.pendingHostWrites = false;
 		this._state.dirty = false;
 	}
 
@@ -484,9 +510,34 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	step(): number | null {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return null;
+		this.settleSharedWrites();
 		const t = this._handle.step();
+		this._state.pendingHostWrites = false;
 		this._state.dirty = false;
 		return t;
+	}
+
+	private needsHostPoll(): boolean {
+		return (
+			(this._state.pendingHostWrites ?? this._state.dirty) &&
+			(this._handle.hasWaitingProcesses?.() ?? true)
+		);
+	}
+
+	private stopFinishedRun(): boolean {
+		if (!this.isFinished()) return false;
+		this._state.pendingHostWrites = false;
+		this._state.dirty = false;
+		return true;
+	}
+
+	private settleSharedWrites(): void {
+		if (this.stopFinishedRun()) return;
+		if (this._state.dirty) {
+			this._handle.evalComb();
+			this._state.dirty = false;
+		}
 	}
 
 	/** Current simulation time. */
@@ -502,6 +553,11 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	nextEventTime(): number | null {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return null;
+		this.settleSharedWrites();
+		if (this.needsHostPoll() && this._handle.hasPendingHostWork?.()) {
+			return this._handle.time();
+		}
 		return this._handle.nextEventTime();
 	}
 
@@ -522,20 +578,34 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	waitUntil(condition: () => boolean, opts?: { maxSteps?: number }): number {
 		this.ensureAlive();
+		if (this.stopFinishedRun()) return this._handle.time();
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {
+			this.settleSharedWrites();
+			if (condition()) break;
+			if (this.isFinished()) {
+				this._state.pendingHostWrites = false;
+				break;
+			}
+			const needsHostPoll = this.needsHostPoll();
+			const hostWork =
+				needsHostPoll && (this._handle.hasPendingHostWork?.() ?? true);
+			const queued = this._handle.nextEventTime();
+			if (needsHostPoll && !hostWork) {
+				this._state.pendingHostWrites = false;
+				if (queued == null) break;
+			}
 			// An exhausted queue is a normal completion, even when the budget is
 			// already spent. Preserve that behavior instead of reporting a timeout.
-			if (steps >= max && this._handle.nextEventTime() != null) {
+			if (steps >= max && (queued != null || hostWork)) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
 					this._handle.time(),
 					steps,
 				);
 			}
-			const t = this._handle.step();
-			this._state.dirty = false;
+			const t = this.step();
 			if (t == null) break;
 			steps++;
 		}
@@ -671,8 +741,7 @@ export class Simulation<P = Record<string, unknown>> {
 			);
 		}
 		if (this._state.dirty && sig.direction !== "input") {
-			this._handle.evalComb();
-			this._state.dirty = false;
+			this.settleSharedWrites();
 		}
 		const [value, mask] = readFourState(this._buffer, sig);
 		return { __fourState: true, value, mask };
@@ -712,6 +781,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.restore(checkpoint._native);
 		this.syncClocks();
 		this._state.dirty = false;
+		this._state.pendingHostWrites = true;
 	}
 
 	/**
@@ -757,6 +827,8 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.loadState(bytes);
 		this.syncClocks();
 		this._state.dirty = false;
+		// Loaded inputs may differ from the scheduler's last sampled state.
+		this._state.pendingHostWrites = true;
 	}
 
 	/** Release native resources. */

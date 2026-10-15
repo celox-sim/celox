@@ -1150,9 +1150,12 @@ fn finish_in_an_initial_block_ends_the_simulation() {
     assert!(sim.is_finished());
     assert_eq!(
         sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::Display {
-            message: b"before".to_vec(),
-        }],
+        vec![
+            celox::RuntimeEvent::Display {
+                message: b"before".to_vec()
+            },
+            celox::RuntimeEvent::Finish,
+        ],
     );
 }
 
@@ -1250,7 +1253,7 @@ fn rejects_nonblocking_assignments_in_initial_processes() {
         endmodule"#,
     );
     assert!(
-        error.contains("nonblocking assignment in an initial block that runs as a process"),
+        error.contains("nonblocking assignment in a process that runs with timing"),
         "{error}"
     );
 }

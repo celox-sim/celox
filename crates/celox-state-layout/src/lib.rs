@@ -28,7 +28,8 @@ pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
 /// Address of the table of extern function pointers called by `ExternCall`.
 pub const STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET: usize = 32;
 /// Runtime-event write sequence observed when a native tick batch starts.
-pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
+pub const RUNTIME_EVENT_FINISH_OFFSET: usize = 8;
+pub const RUNTIME_EVENT_HEADER_SIZE: usize = 16;
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
 pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
 pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
@@ -43,6 +44,7 @@ pub struct RuntimeEventArgLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeEventSiteLayout {
+    pub is_finish: bool,
     pub args: Vec<RuntimeEventArgLayout>,
     pub payload_words: usize,
 }
@@ -710,6 +712,7 @@ fn build_runtime_event_site_layouts(sites: &[RuntimeEventSite]) -> Vec<RuntimeEv
                 })
                 .collect();
             RuntimeEventSiteLayout {
+                is_finish: matches!(site.kind, celox_design::RuntimeEventKind::Finish),
                 args,
                 payload_words,
             }

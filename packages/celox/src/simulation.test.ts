@@ -66,6 +66,11 @@ function createMockNative(opts?: {
 			currentTime = endTime;
 		}),
 		step: vi.fn().mockImplementation(processNextEvent),
+		hasWaitingProcesses: vi.fn().mockReturnValue(false),
+		stepUntil: vi.fn().mockImplementation((endTime: number) => {
+			if (nextScheduledTime == null || nextScheduledTime > endTime) return null;
+			return handle.step();
+		}),
 		time: vi.fn().mockImplementation(() => currentTime),
 		nextEventTime: vi.fn().mockImplementation(() => nextScheduledTime),
 		evalComb: vi.fn().mockImplementation(() => {
@@ -592,7 +597,7 @@ describe("Simulation", () => {
 		sim.reset("rst");
 
 		expect(sim.dut.q).toBe(0n);
-		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(2);
 	});
 
 	test("reset: throws when no associatedClock and no duration", () => {
@@ -639,9 +644,9 @@ describe("Simulation", () => {
 
 		expect(() => sim.reset("rst")).toThrow("step failed");
 		expect(new DataView(mock.buffer).getUint8(0)).toBe(0);
-		expect(mock.handle.evalComb).not.toHaveBeenCalled();
-		void sim.dut.q;
 		expect(mock.handle.evalComb).toHaveBeenCalledTimes(1);
+		void sim.dut.q;
+		expect(mock.handle.evalComb).toHaveBeenCalledTimes(2);
 	});
 
 	test("reset: releases the signal when duration-based advancement fails", () => {
@@ -695,4 +700,320 @@ describe("Simulation", () => {
 			"tiered execution is not supported",
 		);
 	});
+});
+
+describe("shared writes before timed polling", () => {
+	test.each(["step", "runUntil", "waitUntil"])(
+		"%s settles derived values before polling",
+		(method) => {
+			const { create, handle, buffer } = createMockNative({
+				emptyEventQueue: true,
+			});
+			const sim = Simulation.create(TopModule, { __nativeCreate: create });
+			sim.dut.d = 7n;
+			const readDerived = () => {
+				expect(new DataView(buffer).getUint8(4)).toBe(7);
+				return null;
+			};
+			vi.mocked(handle.step).mockImplementation(readDerived);
+			vi.mocked(handle.runUntil).mockImplementation(readDerived);
+			if (method === "step") sim.step();
+			else if (method === "runUntil") sim.runUntil(1);
+			else sim.waitUntil(() => false);
+			expect(handle.evalComb).toHaveBeenCalledTimes(1);
+			sim.dispose();
+		},
+	);
+});
+
+describe("bounded host-wake steps", () => {
+	test("polls a waiter even when the target is the current time", () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		vi.mocked(handle.stepUntil!).mockReturnValueOnce(0);
+		sim.runUntil(0, { maxSteps: 1 });
+		expect(handle.stepUntil).toHaveBeenCalledWith(0);
+		sim.dispose();
+	});
+	test("charges the host wake before running the delays it schedules", () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		vi.mocked(handle.stepUntil!).mockImplementationOnce(() => {
+			vi.mocked(handle.nextEventTime).mockReturnValue(1);
+			return 0;
+		});
+		expect(() => sim.runUntil(10, { maxSteps: 1 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(handle.stepUntil).toHaveBeenCalledOnce();
+		expect(handle.runUntil).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+});
+
+test("bounded runUntil polls waiters after a lazy output read settled the input", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	void sim.dut.q;
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	vi.mocked(handle.stepUntil!).mockReturnValueOnce(0);
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledWith(0);
+	sim.dispose();
+});
+
+test("quiescent waiters do not consume a bounded host-write poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.runUntil(10, { maxSteps: 0 });
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.dispose();
+});
+
+test("a consumed host write does not keep charging a quiescent waiter", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.runUntil(0, { maxSteps: 1 });
+	vi.mocked(handle.stepUntil!).mockClear();
+	sim.runUntil(10, { maxSteps: 0 });
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.dispose();
+});
+
+test("saving settled inputs preserves the pending host poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	handle.saveState = vi.fn(() => new Uint8Array([1]));
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	sim.saveState();
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+test("loaded state requires a budgeted host poll", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	handle.loadState = vi.fn();
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.loadState(new Uint8Array([1]));
+	expect(() => sim.runUntil(10, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.runUntil).not.toHaveBeenCalled();
+	sim.runUntil(10, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+test("waitUntil charges a host wake even with an empty event queue", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	let awake = false;
+	vi.mocked(handle.step).mockImplementation(() => {
+		awake = true;
+		return 0;
+	});
+	expect(() => sim.waitUntil(() => awake, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(awake).toBe(false);
+	sim.waitUntil(() => awake, { maxSteps: 1 });
+	expect(awake).toBe(true);
+	sim.dispose();
+});
+
+test("a write without suspended processes does not consume a poll budget", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	sim.runUntil(10, { maxSteps: 0 });
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	expect(sim.time()).toBe(10);
+	sim.dispose();
+});
+
+test("restored checkpoints retain a budgeted host wake", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	handle.checkpoint = vi.fn(() => ({ stateSize: 64, time: 0 }));
+	handle.restore = vi.fn();
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	const checkpoint = sim.checkpoint();
+	sim.step();
+	sim.restore(checkpoint);
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(() => sim.waitUntil(() => false, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+test("bounded runs include queued events at the current target time", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.nextEventTime).mockReturnValue(0);
+	vi.mocked(handle.stepUntil!).mockImplementation(() => {
+		vi.mocked(handle.nextEventTime).mockReturnValue(null);
+		return 0;
+	});
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledWith(0);
+	sim.dispose();
+});
+
+test("past targets preserve pending host writes for a valid later run", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.runUntil(100);
+	vi.mocked(handle.runUntil).mockClear();
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	sim.dut.d = 1n;
+	sim.runUntil(60);
+	expect(handle.runUntil).not.toHaveBeenCalled();
+	expect(sim.time()).toBe(100);
+	expect(() => sim.runUntil(100, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.dispose();
+});
+
+for (const method of ["runUntil", "waitUntil"] as const) {
+	test(`${method} observes host-write finish before a zero step budget`, () => {
+		const { create, handle } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		handle.isFinished = vi.fn().mockReturnValue(false);
+		vi.mocked(handle.evalComb).mockImplementation(() => {
+			vi.mocked(handle.isFinished!).mockReturnValue(true);
+		});
+		sim.dut.d = 1n;
+		if (method === "runUntil") sim.runUntil(10, { maxSteps: 0 });
+		else expect(sim.waitUntil(() => false, { maxSteps: 0 })).toBe(0);
+		expect(sim.isFinished()).toBe(true);
+		expect(handle.stepUntil).not.toHaveBeenCalled();
+		expect(handle.step).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}
+
+for (const maxSteps of [0, 1]) {
+	test(`waitUntil rechecks settled combinational outputs with budget ${maxSteps}`, () => {
+		const { create, handle, buffer } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		// Read shared output storage directly so the predicate does not settle it.
+		expect(
+			sim.waitUntil(() => new DataView(buffer).getUint8(4) === 1, { maxSteps }),
+		).toBe(0);
+		expect(handle.step).not.toHaveBeenCalled();
+		expect(sim.nextEventTime()).toBe(5);
+		sim.dispose();
+	});
+}
+
+for (const method of ["step", "runUntil", "waitUntil"] as const) {
+	test(`${method} does not settle after finish`, () => {
+		const { create, handle } = createMockNative();
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		handle.isFinished = vi.fn().mockReturnValue(true);
+		sim.dut.d = 1n;
+		if (method === "step") expect(sim.step()).toBe(null);
+		else if (method === "runUntil") sim.runUntil(10);
+		else
+			sim.waitUntil(() => {
+				throw new Error("finished run evaluated its predicate");
+			});
+		expect(sim.dut.q).toBe(0n);
+		expect(handle.evalComb).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}
+
+for (const target of [0, 10]) {
+	test(`an unsatisfied host wait consumes no budget at target ${target}`, () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		handle.hasPendingHostWork = vi.fn(() => false);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		sim.runUntil(target, { maxSteps: 0 });
+		expect(handle.hasPendingHostWork).toHaveBeenCalledOnce();
+		expect(handle.stepUntil).not.toHaveBeenCalled();
+		expect(sim.time()).toBe(target);
+		sim.dispose();
+	});
+}
+
+test("a satisfied host wait requires budget before its continuation", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	handle.hasPendingHostWork = vi.fn(() => true);
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	sim.dut.d = 1n;
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	sim.runUntil(0, { maxSteps: 1 });
+	expect(handle.stepUntil).toHaveBeenCalledOnce();
+	sim.dispose();
+});
+
+for (const pending of [false, true]) {
+	test(`waitUntil probes host readiness before charging a zero budget (${pending})`, () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		handle.hasPendingHostWork = vi.fn(() => pending);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		if (pending) {
+			expect(() => sim.waitUntil(() => false, { maxSteps: 0 })).toThrow(
+				SimulationTimeoutError,
+			);
+		} else {
+			expect(sim.waitUntil(() => false, { maxSteps: 0 })).toBe(0);
+		}
+		expect(handle.hasPendingHostWork).toHaveBeenCalledOnce();
+		expect(handle.step).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}
+
+test("nextEventTime probes a host wake without executing or consuming its budget", () => {
+	const { create, handle } = createMockNative({ emptyEventQueue: true });
+	const sim = Simulation.create(TopModule, { __nativeCreate: create });
+	vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+	handle.hasPendingHostWork = vi.fn(() => true);
+	sim.dut.d = 1n;
+	expect(sim.nextEventTime()).toBe(0);
+	expect(sim.nextEventTime()).toBe(0);
+	expect(handle.step).not.toHaveBeenCalled();
+	expect(handle.stepUntil).not.toHaveBeenCalled();
+	expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+		SimulationTimeoutError,
+	);
+	sim.dispose();
 });

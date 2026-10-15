@@ -1,0 +1,2512 @@
+//! Procedural timing controls: `#delay`, `@(event)` and `wait (condition)`
+//! in `initial` blocks and `always` processes, compiled into resumable
+//! kernels and driven by the timed `Simulation`.
+
+use std::path::Path;
+
+use celox::{RuntimeEvent, Simulation, Simulator};
+
+fn simulation(source: &str) -> Simulation {
+    Simulation::from_sv_sources(vec![(source, Path::new("processes.sv"))], "Top")
+        .build()
+        .unwrap()
+}
+
+fn four_state_simulation(source: &str) -> Simulation {
+    Simulation::from_sv_sources(vec![(source, Path::new("processes.sv"))], "Top")
+        .four_state(true)
+        .build()
+        .unwrap()
+}
+
+fn build_error(source: &str) -> String {
+    match Simulator::from_sv_sources(vec![(source, Path::new("processes.sv"))], "Top")
+        .build_cranelift()
+    {
+        Ok(_) => panic!("design unexpectedly compiled:\n{source}"),
+        Err(error) => error
+            .to_string()
+            .split_whitespace()
+            .filter(|word| *word != "│")
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Run to the end and collect every display with the time it was printed at.
+fn displays(sim: &mut Simulation) -> Vec<(u64, String)> {
+    let mut lines = Vec::new();
+    while let Some(time) = sim.step().unwrap() {
+        for event in sim.drain_runtime_events() {
+            match event {
+                RuntimeEvent::Display { message } => {
+                    lines.push((time, String::from_utf8(message).expect("UTF-8 test output")))
+                }
+                RuntimeEvent::Write { message } => {
+                    lines.push((time, String::from_utf8(message).expect("UTF-8 test output")))
+                }
+                RuntimeEvent::Finish => {}
+                other => panic!("unexpected runtime event {other:?}"),
+            }
+        }
+        if sim.is_finished() {
+            break;
+        }
+    }
+    lines
+}
+
+fn lines(items: &[(u64, &str)]) -> Vec<(u64, String)> {
+    items
+        .iter()
+        .map(|(time, text)| (*time, text.to_string()))
+        .collect()
+}
+
+#[test]
+fn delays_resume_initial_blocks_at_later_times() {
+    let source = r#"
+        module Top(output logic [7:0] a);
+            parameter int GAP = 4;
+            logic [7:0] pause = 8'd3;
+            initial begin
+                a = 8'd1;
+                #10 a = 8'd2;
+                #GAP a = 8'd3;
+                #(pause) a = 8'd4;
+                #0 a = 8'd5;
+                #pause;
+                $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let a = sim.signal("a");
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(a), 1u8.into());
+    assert_eq!(sim.step().unwrap(), Some(10));
+    assert_eq!(sim.get(a), 2u8.into());
+    assert_eq!(sim.step().unwrap(), Some(14));
+    assert_eq!(sim.get(a), 3u8.into());
+    assert_eq!(sim.step().unwrap(), Some(17));
+    // The zero delay resumes at the same time.
+    assert_eq!(sim.get(a), 5u8.into());
+    assert!(!sim.is_finished());
+    assert_eq!(sim.step().unwrap(), Some(20));
+    assert!(sim.is_finished());
+    assert_eq!(sim.step().unwrap(), None);
+}
+
+#[test]
+fn always_with_a_delay_generates_a_clock() {
+    let source = r#"
+        module Top(output logic [7:0] count, output logic clk);
+            initial clk = 1'b0;
+            always #5 clk = ~clk;
+            always_ff @(posedge clk) count <= count + 8'd1;
+            initial count = 8'd0;
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let count = sim.signal("count");
+    let clk = sim.signal("clk");
+    sim.run_until(4).unwrap();
+    assert_eq!(sim.get(clk), 0u8.into());
+    assert_eq!(sim.get(count), 0u8.into());
+    // Rising edges at 5, 15, ..., 95.
+    sim.run_until(100).unwrap();
+    assert_eq!(sim.get(count), 10u8.into());
+    assert_eq!(sim.get(clk), 0u8.into());
+}
+
+#[test]
+fn edge_waits_resume_before_the_registers_of_that_edge_update() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            logic clk = 1'b0;
+            logic [7:0] d = 8'd0;
+            always #5 clk = ~clk;
+            always_ff @(posedge clk) q <= d;
+            initial begin
+                d = 8'd1;
+                @(posedge clk);
+                $display("first q=%0d", q);
+                #1 d = 8'd2;
+                @(posedge clk);
+                $display("second q=%0d", q);
+                @(negedge clk);
+                $display("negedge q=%0d", q);
+                repeat (2) @(posedge clk);
+                $display("repeat q=%0d", q);
+                $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    // A process woken by an edge runs in the active region, before the
+    // nonblocking updates of that edge (IEEE 1800-2023 4.4): it reads the
+    // old register value.
+    assert_eq!(
+        displays(&mut sim),
+        lines(&[
+            (5, "first q=0"),
+            (15, "second q=1"),
+            (20, "negedge q=2"),
+            (35, "repeat q=2"),
+        ])
+    );
+    assert_eq!(sim.time(), 35);
+}
+
+#[test]
+fn blocking_writes_of_a_woken_process_reach_the_registers_of_that_edge() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            logic clk = 1'b0;
+            logic [7:0] d = 8'd0;
+            always #5 clk = ~clk;
+            always_ff @(posedge clk) q <= d;
+            initial begin
+                @(posedge clk);
+                d = 8'd2;
+                @(posedge clk);
+                $display("q=%0d", q);
+                $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    // The order of a woken process and the registers of the same edge is a
+    // race in IEEE 1800-2023; Celox runs the process first, as Icarus
+    // Verilog does, so the registers sample its blocking writes.
+    assert_eq!(displays(&mut sim), lines(&[(15, "q=2")]));
+}
+
+#[test]
+fn edge_waits_see_scheduled_clocks() {
+    let source = r#"
+        module Top(input logic clk, output logic [7:0] edges, output logic [7:0] count);
+            always_ff @(posedge clk) count <= count + 8'd1;
+            initial count = 8'd0;
+            initial begin
+                edges = 8'd0;
+                forever begin
+                    @(posedge clk);
+                    edges = edges + 8'd1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let edges = sim.signal("edges");
+    let count = sim.signal("count");
+    sim.add_clock("clk", 10, 0);
+    sim.run_until(45).unwrap();
+    // Rising edges at 0, 10, 20, 30 and 40. The edge at time zero is
+    // applied before the process starts, so it is not one the process
+    // waited for.
+    assert_eq!(sim.get(edges), 4u8.into());
+    assert_eq!(sim.get(count), 5u8.into());
+}
+
+#[test]
+fn any_change_waits_wake_on_every_value_change() {
+    let source = r#"
+        module Top(output logic [7:0] data, output logic flag);
+            logic [7:0] other;
+            initial begin
+                data = 8'd0;
+                flag = 1'b0;
+                other = 8'd0;
+                #3 data = 8'd7;
+                #4 data = 8'd7;
+                #1 data = 8'd9;
+                #2 other = 8'd1;
+                #2 flag = 1'b1;
+                #1 $finish;
+            end
+            initial forever begin
+                @(data);
+                $display("data=%0d", data);
+            end
+            initial forever begin
+                @(other or flag);
+                $display("other=%0d flag=%0d", other, flag);
+            end
+            initial forever begin
+                @(flag, data);
+                $display("either");
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    assert_eq!(
+        displays(&mut sim),
+        lines(&[
+            (3, "data=7"),
+            (3, "either"),
+            (8, "data=9"),
+            (8, "either"),
+            (10, "other=1 flag=0"),
+            (12, "other=1 flag=1"),
+            (12, "either"),
+        ])
+    );
+}
+
+#[test]
+fn wait_statements_block_until_their_condition_holds() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic go = 1'b0;
+            logic [7:0] level = 8'd0;
+            initial begin
+                y = 8'd0;
+                #7 go = 1'b1;
+                #5 level = 8'd3;
+                #5 level = 8'd5;
+            end
+            initial begin
+                wait (go) $display("go");
+                wait (go);
+                $display("still go");
+                wait (level > 8'd4) y = level;
+                $display("level=%0d", level);
+                #1 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    assert_eq!(
+        displays(&mut sim),
+        lines(&[(7, "go"), (7, "still go"), (17, "level=5")])
+    );
+    assert_eq!(sim.get(y), 5u8.into());
+}
+
+#[test]
+fn level_sensitive_always_runs_as_a_process() {
+    let source = r#"
+        module Top(output logic [7:0] y, output logic [7:0] runs);
+            logic [7:0] a = 8'd0;
+            logic [7:0] b = 8'd0;
+            initial runs = 8'd0;
+            always @(a or b) begin
+                y = a + b;
+                runs = runs + 8'd1;
+            end
+            initial begin
+                #2 a = 8'd3;
+                #2 b = 8'd4;
+                #2 a = 8'd3;
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    let runs = sim.signal("runs");
+    sim.step().unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(y), 3u8.into());
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(y), 7u8.into());
+    sim.run_until(10).unwrap();
+    assert!(sim.is_finished());
+    // An unchanged value is not an event.
+    assert_eq!(sim.get(runs), 2u8.into());
+}
+
+#[test]
+fn processes_wake_each_other_at_the_same_time() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic start = 1'b0;
+            logic done = 1'b0;
+            initial begin
+                y = 8'd0;
+                #3 start = 1'b1;
+                @(posedge done);
+                $display("done at y=%0d", y);
+                $finish;
+            end
+            initial begin
+                @(posedge start);
+                y = 8'd1;
+                #0 y = 8'd2;
+                done = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    assert_eq!(displays(&mut sim), lines(&[(3, "done at y=2")]));
+}
+
+#[test]
+fn tasks_with_timing_controls_run_inline() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            task automatic pulse(input logic [7:0] value, input int cycles);
+                y = value;
+                repeat (cycles) @(posedge clk);
+                #1 y = 8'd0;
+            endtask
+            initial begin
+                y = 8'd0;
+                pulse(8'd7, 2);
+                $display("y=%0d", y);
+                pulse(8'd9, 1);
+                $display("y=%0d", y);
+                $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    sim.run_until(10).unwrap();
+    assert_eq!(sim.get(y), 7u8.into());
+    assert_eq!(displays(&mut sim), lines(&[(16, "y=0"), (26, "y=0")]));
+    assert_eq!(sim.time(), 26);
+}
+
+#[test]
+fn edge_waits_on_a_clock_the_testbench_drives() {
+    let source = r#"
+        module Top(input logic a, output logic [7:0] seen);
+            initial begin
+                seen = 8'd0;
+                forever begin
+                    @(posedge a);
+                    seen = seen + 8'd1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let a = sim.signal("a");
+    let seen = sim.signal("seen");
+    sim.step().unwrap();
+    // A host write wakes a waiting process when the simulation next runs.
+    for value in [1u8, 0, 1, 1, 0] {
+        sim.modify(|io| io.set(a, value)).unwrap();
+        sim.run_until(sim.time()).unwrap();
+    }
+    assert_eq!(sim.get(seen), 2u8.into());
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(seen), 2u8.into());
+    // The step the write wakes the process in reports the current time;
+    // nothing is scheduled after it.
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(seen), 3u8.into());
+    assert_eq!(sim.step().unwrap(), None);
+}
+
+#[test]
+fn four_state_edges_count_transitions_through_unknown() {
+    let source = r#"
+        module Top(output logic [7:0] pos, output logic [7:0] neg, output logic [7:0] any);
+            logic s;
+            initial begin
+                pos = 8'd0;
+                neg = 8'd0;
+                any = 8'd0;
+                s = 1'b0;
+                #1 s = 1'bx; // 0 -> x: posedge
+                #1 s = 1'b1; // x -> 1: posedge
+                #1 s = 1'bz; // 1 -> z: negedge
+                #1 s = 1'bx; // z -> x: no edge, a change
+                #1 s = 1'b0; // x -> 0: negedge
+                #1 s = 1'b1; // 0 -> 1: posedge
+                #1 s = 1'b0; // 1 -> 0: negedge
+                #1 $finish;
+            end
+            initial forever begin
+                @(posedge s);
+                pos = pos + 8'd1;
+            end
+            initial forever begin
+                @(negedge s);
+                neg = neg + 8'd1;
+            end
+            initial forever begin
+                @(s);
+                any = any + 8'd1;
+            end
+        endmodule
+    "#;
+    let mut sim = four_state_simulation(source);
+    let pos = sim.signal("pos");
+    let neg = sim.signal("neg");
+    let any = sim.signal("any");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(pos), 3u8.into());
+    assert_eq!(sim.get(neg), 3u8.into());
+    assert_eq!(sim.get(any), 7u8.into());
+}
+
+#[test]
+fn unknown_delays_and_conditions_count_as_zero_and_false() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic [7:0] amount = 8'bx;
+            logic flag = 1'bx;
+            initial begin
+                y = 8'd1;
+                #amount y = 8'd2;
+                wait (flag) y = 8'd3;
+                $finish;
+            end
+            initial #4 flag = 1'b1;
+        endmodule
+    "#;
+    let mut sim = four_state_simulation(source);
+    let y = sim.signal("y");
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(y), 2u8.into());
+    assert_eq!(sim.step().unwrap(), Some(4));
+    assert_eq!(sim.get(y), 3u8.into());
+    assert!(sim.is_finished());
+}
+
+#[test]
+fn checkpoints_restore_processes_waiting_for_events() {
+    let source = r#"
+        module Top(output logic [7:0] edges, output logic clk);
+            initial clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                edges = 8'd0;
+                forever begin
+                    @(posedge clk);
+                    edges = edges + 8'd1;
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let edges = sim.signal("edges");
+    sim.run_until(22).unwrap();
+    assert_eq!(sim.get(edges), 2u8.into());
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(52).unwrap();
+    assert_eq!(sim.get(edges), 5u8.into());
+    sim.restore(&checkpoint).unwrap();
+    assert_eq!(sim.time(), 22);
+    assert_eq!(sim.get(edges), 2u8.into());
+    sim.run_until(52).unwrap();
+    assert_eq!(sim.get(edges), 5u8.into());
+}
+
+#[test]
+fn finish_in_an_always_process_ends_the_simulation() {
+    let source = r#"
+        module Top(output logic [7:0] ticks);
+            initial ticks = 8'd0;
+            always begin
+                #3 ticks = ticks + 8'd1;
+                if (ticks == 8'd4) $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let ticks = sim.signal("ticks");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 12);
+    assert_eq!(sim.get(ticks), 4u8.into());
+}
+
+#[test]
+fn waiting_processes_do_not_keep_an_idle_simulation_running() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic never = 1'b0;
+            initial begin
+                y = 8'd1;
+                @(posedge never);
+                y = 8'd2;
+            end
+            initial #5 y = 8'd3;
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.step().unwrap(), Some(5));
+    assert_eq!(sim.get(y), 3u8.into());
+    assert_eq!(sim.next_event_time(), None);
+    assert_eq!(sim.step().unwrap(), None);
+    assert!(!sim.is_finished());
+}
+
+#[test]
+fn rejects_timing_controls_outside_processes() {
+    let error = build_error(
+        r#"module Top(input logic clk, input logic d, output logic q);
+            always_ff @(posedge clk) begin
+                q <= d;
+                #1 q <= ~d;
+            end
+        endmodule"#,
+    );
+    assert!(error.contains("delay outside a process"), "{error}");
+
+    let error = build_error(
+        r#"module Top(input logic a, output logic y);
+            always_comb begin
+                wait (a) y = a;
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("procedural timing control outside a process"),
+        "{error}"
+    );
+
+    let error = build_error(
+        r#"module Top(input logic a, output logic y);
+            always y = a;
+        endmodule"#,
+    );
+    assert!(
+        error.contains("always and always_latch processes"),
+        "{error}"
+    );
+
+    let error = build_error(
+        r#"module Top(input logic a, output logic y);
+            initial begin
+                @* y = a;
+            end
+        endmodule"#,
+    );
+    assert!(error.contains("`@*` in a process"), "{error}");
+
+    let error = build_error(
+        r#"module Top(input logic a, output logic y);
+            initial begin
+                @(posedge a iff y) y = a;
+            end
+        endmodule"#,
+    );
+    assert!(error.contains("iff-qualified event"), "{error}");
+
+    let error = build_error(
+        r#"module Top(input logic a, output logic y);
+            initial begin
+                #1.5 y = a;
+            end
+        endmodule"#,
+    );
+    assert!(error.contains("delay value"), "{error}");
+
+    let error = build_error(
+        r#"module Top(input logic clk, input logic a, output logic y);
+            always @(posedge clk) begin
+                y <= a;
+                #1;
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("nonblocking assignment in a process that runs with timing"),
+        "{error}"
+    );
+}
+
+/// IEEE 1800-2023 9.4.2: a waiter is woken by the first change, even when
+/// the writing process restores the value before it suspends.
+#[test]
+fn events_hidden_by_a_later_store_of_the_same_run_still_wake_waiters() {
+    let source = r#"
+        module Top(output logic [7:0] woken);
+            logic a = 1'b0;
+            logic b = 1'b0;
+            logic [7:0] c = 8'd0;
+            logic [7:0] arr [2];
+            function automatic logic id(input logic v);
+                return v;
+            endfunction
+            function automatic logic [7:0] plus_c(input logic [7:0] v);
+                logic [7:0] base;
+                base = c;
+                return base + v;
+            endfunction
+            function automatic logic [7:0] via_plus_c(input logic [7:0] v);
+                return plus_c(v);
+            endfunction
+            initial begin
+                woken = 8'd0;
+                arr[0] = 8'd0;
+                arr[1] = 8'd0;
+                #1 a = 1'b1;
+                a = 1'b0;
+                #1 b = 1'b1;
+                b = 1'b0;
+                b = 1'b1;
+                c = 8'd1;
+                c = 8'd0;
+                arr[0] = 8'd1;
+                arr[0] = 8'd0;
+                #1 $finish;
+            end
+            initial begin
+                @(a);
+                $display("a changed a=%0d", a);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(posedge a);
+                $display("a rose");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(negedge b);
+                $display("b fell b=%0d", b);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(a or b);
+                $display("a or b");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(a ^ 1'b0);
+                $display("a xor");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(negedge (b & 1'b1));
+                $display("b and fell");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(id(a));
+                $display("a through a function");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(via_plus_c(8'd3));
+                $display("c read by a function c=%0d", c);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(arr[0]);
+                $display("array element arr[0]=%0d", arr[0]);
+                woken = woken + 8'd1;
+            end
+        endmodule
+    "#;
+    for (four_state, mut sim) in [
+        (false, simulation(source)),
+        (true, four_state_simulation(source)),
+    ] {
+        let woken = sim.signal("woken");
+        assert_eq!(
+            displays(&mut sim),
+            lines(&[
+                (1, "a changed a=0"),
+                (1, "a rose"),
+                (1, "a or b"),
+                (1, "a xor"),
+                (1, "a through a function"),
+                (2, "b fell b=1"),
+                (2, "b and fell"),
+                (2, "c read by a function c=0"),
+                (2, "array element arr[0]=0"),
+            ]),
+            "four_state={four_state}"
+        );
+        assert_eq!(sim.get(woken), 9u8.into(), "four_state={four_state}");
+    }
+}
+
+/// A function an event expression calls may not have an effect besides its
+/// result: the expression is evaluated whenever an operand may have changed.
+#[test]
+fn rejects_event_expressions_calling_impure_functions() {
+    let error = build_error(
+        r#"module Top(output logic [7:0] count);
+            logic a = 1'b0;
+            function automatic logic observe(input logic v);
+                count = count + 8'd1;
+                return v;
+            endfunction
+            initial begin
+                count = 8'd0;
+                @(observe(a));
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression calling `observe`"),
+        "{error}"
+    );
+    let error = build_error(
+        r#"module Top(output logic [7:0] count);
+            logic a = 1'b0;
+            function automatic logic tally(input logic v, inout logic [7:0] n);
+                n = n + 8'd1;
+                return v;
+            endfunction
+            initial begin
+                count = 8'd0;
+                @(tally(a, count));
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression calling `tally`"),
+        "{error}"
+    );
+}
+
+/// A process waiting on an expression two cascaded registers change is
+/// woken between their updates: the expression changed, even though it has
+/// its old value again once the cascade has settled.
+#[test]
+fn events_between_cascaded_register_updates_wake_waiters() {
+    let source = r#"
+        module Top(input logic clk, output logic [7:0] woken, output logic q, output logic r);
+            initial begin
+                q = 1'b0;
+                r = 1'b0;
+            end
+            always_ff @(posedge clk) q <= 1'b1;
+            always_ff @(posedge q) r <= 1'b1;
+            initial begin
+                woken = 8'd0;
+                @(q ^ r);
+                $display("q=%0d r=%0d", q, r);
+                woken = woken + 8'd1;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (woken, q, r) = (sim.signal("woken"), sim.signal("q"), sim.signal("r"));
+    sim.add_clock("clk", 10, 5);
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(sim.get(r), 1u8.into());
+    assert_eq!(sim.get(woken), 1u8.into());
+    let displays: Vec<String> = sim
+        .drain_runtime_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::Display { message } => {
+                Some(String::from_utf8(message).expect("UTF-8 test output"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(displays, ["q=1 r=0"]);
+}
+
+/// Each process has its own activation of an `automatic` task that
+/// suspends, declared on the task or as the module's default lifetime.
+#[test]
+fn concurrent_activations_of_a_timed_task_keep_their_arguments() {
+    let source = r#"
+        module Top(output logic [7:0] o0, output logic [7:0] o1, output logic [7:0] sum);
+            task automatic put(input logic [7:0] value, input int index);
+                logic [7:0] doubled;
+                doubled = value + value;
+                #1;
+                if (index == 0) o0 = doubled;
+                else o1 = doubled;
+                sum = sum + value;
+            endtask
+            initial begin
+                sum = 8'd0;
+                o0 = 8'd0;
+                o1 = 8'd0;
+            end
+            initial put(8'd1, 0);
+            initial put(8'd2, 1);
+            initial begin
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    let module_default = source
+        .replace("module Top(", "module automatic Top(")
+        .replace("task automatic put(", "task put(");
+    for source in [source.to_string(), module_default] {
+        let mut sim = simulation(&source);
+        let (o0, o1, sum) = (sim.signal("o0"), sim.signal("o1"), sim.signal("sum"));
+        sim.run_until(5).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(o0), 2u8.into());
+        assert_eq!(sim.get(o1), 4u8.into());
+        assert_eq!(sim.get(sum), 3u8.into());
+    }
+
+    // A static task (the default) shares its formals and locals: both
+    // activations resume with the later caller's values (IEEE 1800-2023
+    // 13.3.1).
+    let static_task = source.replace("task automatic put(", "task put(");
+    let mut sim = simulation(&static_task);
+    let (o0, o1, sum) = (sim.signal("o0"), sim.signal("o1"), sim.signal("sum"));
+    sim.run_until(5).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(o0), 0u8.into());
+    assert_eq!(sim.get(o1), 4u8.into());
+    assert_eq!(sim.get(sum), 4u8.into());
+}
+
+/// A wait on a formal of an `automatic` task counts the events of this
+/// activation's formal only: another activation's argument does not wake it.
+#[test]
+fn waits_on_private_formals_see_only_their_activation() {
+    let source = r#"
+        module Top(output logic [7:0] woken);
+            task automatic watch(input logic value);
+                @(value);
+                woken = woken + 8'd1;
+            endtask
+            initial begin
+                woken = 8'd0;
+                watch(1'b0);
+            end
+            initial begin
+                #1 watch(1'b1);
+            end
+            initial begin
+                #3 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let woken = sim.signal("woken");
+    sim.run_until(5).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(woken), 0u8.into());
+}
+
+/// A task is timed for the `always` constructs of the scope that resolves
+/// its name: a task of another generate scope, or of an inactive branch,
+/// with the same name does not make an edge-sensitive `always` a process.
+#[test]
+fn timed_task_classification_follows_generate_scopes() {
+    let source = r#"
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                y = 8'd0;
+                z = 8'd0;
+            end
+            generate
+                if (1) begin : untimed
+                    task t(input logic [7:0] v);
+                        y <= v;
+                    endtask
+                    always @(posedge clk) t(y + 8'd1);
+                end
+                if (0) begin : inactive
+                    task t(input logic [7:0] v);
+                        #1 z = v;
+                    endtask
+                    always @(posedge clk) t(8'd99);
+                end
+                if (1) begin : timed
+                    task t(input logic [7:0] v);
+                        #1 z = v;
+                    endtask
+                    always @(posedge clk) t(z + 8'd1);
+                end
+            endgenerate
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (y, z) = (sim.signal("y"), sim.signal("z"));
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    assert_eq!(sim.get(z), 0u8.into());
+    sim.run_until(6).unwrap();
+    assert_eq!(sim.get(z), 1u8.into());
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+    assert_eq!(sim.get(z), 2u8.into());
+}
+
+/// A `static` local keeps its value between activations, also those of an
+/// automatic subroutine, and its initializer runs once, before time zero
+/// (IEEE 1800-2023 6.21).
+#[test]
+fn static_locals_keep_their_values_between_calls() {
+    let source = r#"
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            task count;
+                static logic [7:0] n = 8'd10;
+                #1 n = n + 8'd1;
+                $display("n=%0d", n);
+            endtask
+            task automatic tally;
+                static int calls = 0;
+                logic [7:0] fresh = 8'd0;
+                fresh = fresh + 8'd1;
+                calls = calls + 1;
+                #1 $display("calls=%0d fresh=%0d", calls, fresh);
+            endtask
+            task automatic bias(input logic [7:0] v, output logic [7:0] out);
+                static logic [7:0] b = 8'd3;
+                out = v + b;
+            endtask
+            always_comb bias(y, z);
+            initial begin
+                y = 8'd0;
+                count();
+                count();
+                tally();
+                y = 8'd4;
+            end
+            initial tally();
+            initial begin
+                #5 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let z = sim.signal("z");
+    assert_eq!(
+        displays(&mut sim),
+        lines(&[
+            (1, "n=11"),
+            (1, "calls=1 fresh=1"),
+            (2, "n=12"),
+            (3, "calls=2 fresh=1"),
+        ])
+    );
+    assert_eq!(sim.get(z), 7u8.into());
+}
+
+/// A local with an initializer in a static task needs an explicit lifetime
+/// keyword (IEEE 1800-2023 6.21): without one, the static lifetime would
+/// run the initializer once while the source suggests a per-call value.
+#[test]
+fn rejects_initialized_locals_of_static_tasks_without_a_lifetime() {
+    let error = build_error(
+        r#"module Top(output logic [7:0] y);
+            task count;
+                logic [7:0] n = 8'd0;
+                #1 n = n + 8'd1;
+                y = n;
+            endtask
+            initial count();
+        endmodule"#,
+    );
+    assert!(
+        error.contains("local `n` with an initializer in a static subroutine"),
+        "{error}"
+    );
+}
+
+/// The event counters of a package variable are the package's: a store of
+/// a process in one module wakes a waiter in another, also when the value
+/// is restored before the storing process suspends.
+#[test]
+fn package_variable_events_cross_modules() {
+    let source = r#"
+        package p;
+            logic a = 1'b0;
+            logic [7:0] n = 8'd0;
+        endpackage
+        module Writer;
+            initial begin
+                #1 p::a = 1'b1;
+                p::a = 1'b0;
+                #1 p::n = 8'd5;
+                p::n = 8'd0;
+            end
+        endmodule
+        module Top(output logic [7:0] woken);
+            import p::*;
+            Writer writer();
+            initial begin
+                woken = 8'd0;
+                @(a);
+                $display("a changed a=%0d", a);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(posedge p::a);
+                $display("a rose");
+                woken = woken + 8'd1;
+            end
+            initial begin
+                @(n or a);
+                $display("n or a n=%0d", n);
+                woken = woken + 8'd1;
+            end
+            initial begin
+                #3 $finish;
+            end
+        endmodule
+    "#;
+    for (four_state, mut sim) in [
+        (false, simulation(source)),
+        (true, four_state_simulation(source)),
+    ] {
+        let woken = sim.signal("woken");
+        assert_eq!(
+            displays(&mut sim),
+            lines(&[(1, "a changed a=0"), (1, "a rose"), (1, "n or a n=0")]),
+            "four_state={four_state}"
+        );
+        assert_eq!(sim.get(woken), 3u8.into(), "four_state={four_state}");
+    }
+
+    let error = build_error(
+        r#"package p;
+            logic a = 1'b0;
+        endpackage
+        module Top(output logic y);
+            initial begin
+                y = 1'b0;
+                @(p::a ^ 1'b0);
+                y = 1'b1;
+            end
+        endmodule"#,
+    );
+    assert!(
+        error.contains("event expression reading package variable `p::a`"),
+        "{error}"
+    );
+}
+
+/// A package's `automatic` default lifetime gives each activation of a
+/// task it exports its own formals and locals; a static package task shares
+/// them (IEEE 1800-2023 13.3.1).
+#[test]
+fn package_lifetime_decides_the_activations_of_an_imported_timed_task() {
+    let source = r#"
+        package automatic p;
+            task put(input logic [7:0] value);
+                logic [7:0] doubled;
+                doubled = value + value;
+                #1;
+                $display("put %0d", doubled);
+            endtask
+        endpackage
+        module Top(output logic [7:0] y);
+            import p::*;
+            initial y = 8'd0;
+            initial put(8'd1);
+            initial put(8'd2);
+            initial begin
+                #2 $finish;
+            end
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    assert_eq!(displays(&mut sim), lines(&[(1, "put 2"), (1, "put 4")]));
+
+    let static_package = source.replace("package automatic p;", "package p;");
+    let mut sim = simulation(&static_package);
+    assert_eq!(displays(&mut sim), lines(&[(1, "put 4"), (1, "put 4")]));
+}
+
+/// A suspended procedural block uses its enclosing module's lifetime,
+/// including when the same declaration is entered again by a loop.
+#[test]
+fn timed_block_locals_follow_the_module_lifetime() {
+    for (lifetime, expected) in [
+        ("static", lines(&[(1, "1"), (2, "2"), (3, "3")])),
+        ("automatic", lines(&[(1, "1"), (2, "1"), (3, "1")])),
+    ] {
+        for declaration in ["bit [7:0] count;", "logic [7:0] count = 0;"] {
+            let source = format!(
+                "module {lifetime} Top;
+                   initial begin
+                     repeat (3) begin
+                       {declaration}
+                       #1; count++; $display(\"%0d\", count);
+                     end
+                     $finish;
+                   end
+                 endmodule"
+            );
+            for four_state in [false, true] {
+                let mut sim = if four_state {
+                    four_state_simulation(&source)
+                } else {
+                    simulation(&source)
+                };
+                assert_eq!(
+                    displays(&mut sim),
+                    expected,
+                    "{source}, four_state={four_state}"
+                );
+            }
+        }
+    }
+}
+
+/// Tasks keep static storage even when their own body has no suspension:
+/// a timed caller can invoke them repeatedly, in modules and packages.
+#[test]
+fn timed_callers_preserve_static_locals_of_untimed_tasks() {
+    for parent in ["module", "package"] {
+        for lifetime in ["static", "automatic"] {
+            let tasks = r#"
+                task count;
+                    static bit [7:0] n = 0;
+                    n++;
+                    $display("%0d", n);
+                endtask
+                task later;
+                    #1; count();
+                endtask
+            "#;
+            let calls = "initial begin later(); later(); $finish; end";
+            let source = if parent == "module" {
+                format!("module {lifetime} Top; {tasks} {calls} endmodule")
+            } else {
+                format!(
+                    "package {lifetime} p; {tasks} endpackage
+                     module Top; import p::*; {calls} endmodule"
+                )
+            };
+            assert_eq!(
+                displays(&mut simulation(&source)),
+                lines(&[(1, "1"), (2, "2")]),
+                "{parent} {lifetime}"
+            );
+        }
+    }
+}
+
+/// Timing operands count as reads of a local's previous entry value, even
+/// when ordinary statements overwrite that local before reading it.
+#[test]
+fn static_locals_read_only_by_timing_controls_keep_their_values() {
+    let delay = r#"
+        module Top;
+            initial begin
+                repeat (2) begin
+                    bit [7:0] pause;
+                    #pause; pause = 2; $display("done");
+                end
+                $finish;
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(delay)),
+        lines(&[(0, "done"), (2, "done")])
+    );
+
+    let wait = r#"
+        module Top;
+            bit trigger;
+            initial begin #1; trigger = 1; #2; $finish; end
+            initial repeat (2) begin
+                bit ready;
+                wait (ready || trigger);
+                ready = 1; trigger = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(
+        displays(&mut simulation(wait)),
+        lines(&[(1, "done"), (1, "done")])
+    );
+
+    let event = r#"
+        module Top;
+            bit pulse;
+            initial begin
+                #1; pulse = 1; #1; pulse = 0; #1; pulse = 1; #1; $finish;
+            end
+            initial repeat (2) begin
+                static bit enabled = 1;
+                @(enabled && pulse);
+                enabled = 0; $display("done");
+            end
+        endmodule
+    "#;
+    assert_eq!(displays(&mut simulation(event)), lines(&[(1, "done")]));
+}
+
+/// A task a package exports is classified like a local one: an
+/// edge-sensitive `always` calling an imported task with timing controls is
+/// a process.
+#[test]
+fn edge_sensitive_always_calling_an_imported_timed_task_runs_as_a_process() {
+    let source = r#"
+        package p;
+            task automatic bump(inout logic [7:0] count);
+                #1 count = count + 8'd1;
+            endtask
+        endpackage
+        module Top(output logic [7:0] y, output logic [7:0] z);
+            import p::*;
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                y = 8'd0;
+                z = 8'd0;
+            end
+            always @(posedge clk) bump(y);
+            always @(posedge clk) p::bump(z);
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let (y, z) = (sim.signal("y"), sim.signal("z"));
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+    assert_eq!(sim.get(z), 2u8.into());
+}
+
+/// An edge-sensitive `always` whose body reaches a timing control through a
+/// task is a process.
+#[test]
+fn edge_sensitive_always_calling_a_timed_task_runs_as_a_process() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            task automatic bump;
+                #1 y = y + 8'd1;
+            endtask
+            task automatic via;
+                bump();
+            endtask
+            initial y = 8'd0;
+            always @(posedge clk) via();
+        endmodule
+    "#;
+    let mut sim = simulation(source);
+    let y = sim.signal("y");
+    // Edges at 5 and 15 increment at 6 and 16.
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.run_until(6).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+}
+
+#[test]
+fn rejects_nonblocking_assignments_in_tasks_a_process_calls() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            task automatic later;
+                #1 q <= 8'd1;
+            endtask
+            initial later();
+        endmodule
+    "#;
+    assert!(
+        build_error(source).contains("nonblocking assignment in a process that runs with timing"),
+        "{}",
+        build_error(source)
+    );
+}
+
+#[test]
+fn review_rejects_impure_wait_conditions_and_static_event_locals() {
+    let source = r#"module Top(input bit go);
+        function automatic bit ready(); $display("poll"); return go; endfunction
+        initial wait (ready());
+    endmodule"#;
+    assert!(build_error(source).contains("wait condition calling side-effecting"));
+    for lifetime in ["", "automatic"] {
+        let source = format!(
+            r#"module Top(input bit go);
+            function {lifetime} bit observe(input bit v);
+                static int count = 0; count++; return v;
+            endfunction
+            initial @(observe(go));
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("event expression calling") || error.contains("static variable"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn review_static_initializers_use_assignment_width() {
+    let source = r#"module Top(output bit [15:0] a, b);
+        task automatic sample();
+            static bit [15:0] signed_value = 8'shff;
+            static bit [15:0] filled_value = '1;
+            #1; a = signed_value; b = filled_value;
+        endtask
+        initial sample();
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 65535u16.into());
+    assert_eq!(sim.get(sim.signal("b")), 65535u16.into());
+}
+
+#[test]
+fn review_timed_process_locals_keep_default_static_lifetime() {
+    let source = r#"module Top(output bit [7:0] y);
+        always begin bit [7:0] n; #1; n++; y = n; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 3u8.into());
+}
+
+#[test]
+fn review_static_tasks_keep_automatic_locals_per_activation() {
+    let source = r#"module Top(output bit [7:0] a, b);
+        task static copy(input bit [7:0] value, output bit [7:0] result);
+            automatic bit [7:0] saved; saved = value; #1; result = saved;
+        endtask
+        initial copy(1, a);
+        initial copy(2, b);
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u8.into());
+}
+
+#[test]
+fn review_shared_stores_update_private_event_watchers() {
+    let source = r#"module Top(output bit a, b);
+        bit global_value;
+        task automatic watch(input bit formal, output bit result);
+            @(formal ^ global_value); result = 1;
+        endtask
+        initial watch(0, a);
+        initial watch(1, b);
+        initial begin #1; global_value = 1; global_value = 0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+}
+
+#[test]
+fn review_static_package_tasks_share_activation_across_instances() {
+    let source = r#"package p;
+        task static copy(input bit [7:0] value, output bit [7:0] result);
+            #1; result = value;
+        endtask
+    endpackage
+    module Child #(parameter int VALUE = 1)(output bit [7:0] y);
+        initial p::copy(VALUE, y);
+    endmodule
+    module Top(output bit [7:0] a, b);
+        Child #(1) first(a); Child #(2) second(b);
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 2u8.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u8.into());
+}
+
+#[test]
+fn review_transient_clock_pulses_trigger_ff_domains() {
+    let source = r#"module Top(output bit q);
+        bit clk;
+        always_ff @(posedge clk) q <= 1;
+        initial begin #1; clk = 1; clk = 0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn review_zero_delay_continuations_run_before_nba() {
+    let source = r#"module Top(output bit q, observed);
+        bit clk;
+        always_ff @(posedge clk) q <= 1;
+        initial begin @(posedge clk); #0; observed = q; end
+        initial begin #1; clk = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+}
+
+#[test]
+fn review_simultaneous_domains_publish_before_waking_waiters() {
+    let source = r#"module Top(output bit q, r, observed);
+        bit clk1, clk2;
+        always_ff @(posedge clk1) q <= 1;
+        always_ff @(posedge clk2) r <= 1;
+        initial begin @(posedge q); observed = r; end
+        initial begin #1; {clk1, clk2} = 2'b11; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("observed")), 1u8.into());
+}
+
+#[test]
+fn review_mixed_edge_and_level_lists_run_as_processes() {
+    let source = r#"module Top(input bit clk, reset, output bit y);
+        always @(posedge clk or reset) y = reset;
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    let reset = sim.signal("reset");
+    sim.modify(|sim| sim.set(reset, 1u8)).unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn review_unknown_delays_are_zero_and_negative_delays_are_unsigned_time() {
+    let source = r#"module Top(output bit done);
+        logic [3:0] delay_value = 4'b001x;
+        initial begin #1; #delay_value; done = 1; end
+    endmodule"#;
+    let mut sim = four_state_simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    let source = r#"module Top(output bit done);
+        initial begin #1; #(4'b001x); done = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    let source = r#"module Top(output bit done);
+        initial begin #(-1); done = 1; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.step().unwrap(), Some(u64::MAX));
+    assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+}
+
+#[test]
+fn review_rejects_composite_events_with_unobservable_comb_transients() {
+    let source = r#"module Top(input bit a, output bit seen);
+        wire q, r; assign q = a; assign r = q;
+        initial begin @(q ^ r); seen = 1; end
+    endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("event expression reading multiple combinationally driven variables")
+    );
+}
+
+#[test]
+fn review_static_initializers_preserve_unknown_masks_and_bit_coercion() {
+    let source = r#"module Top(output logic [15:0] x_value, z_value, output bit bit_value);
+        task automatic sample();
+            static logic [15:0] x_local = 'x;
+            static logic [15:0] z_local = 'z;
+            static bit bit_local = 'x + 1;
+            #1; x_value = x_local; z_value = z_local; bit_value = bit_local;
+        endtask
+        initial begin sample(); $display("%h %h %0d", x_value, z_value, bit_value); end
+    endmodule"#;
+    let mut sim = four_state_simulation(source);
+    assert_eq!(displays(&mut sim), lines(&[(1, "xxxx zzzz 0")]));
+    assert_eq!(sim.get(sim.signal("bit_value")), 0u8.into());
+}
+
+#[test]
+fn inactive_batches_preserve_active_combinational_events() {
+    let source = r#"module Top(output bit seen);
+        bit a=0; wire q=a;
+        initial begin @(posedge q); seen=1; end
+        initial begin a=1; #0 a=0; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn unrolled_loop_indices_record_hidden_edges() {
+    let source = r#"module Top(output bit seen);
+        integer i=0;
+        initial begin @(posedge i); seen=1; end
+        initial begin #1; for (i=0;i<2;i++); end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn inactive_batches_retrigger_the_same_ff_domain() {
+    let mut sim = simulation(
+        r#"module Top(output bit [7:0] q);
+        bit clk = 0; bit [7:0] d = 0;
+        always @(posedge clk) q <= d;
+        initial begin d = 1; clk = 1; #0 clk = 0; #0 d = 2; clk = 1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+}
+
+#[test]
+fn blocking_ff_pulses_wake_process_event_waiters() {
+    let mut sim = simulation(
+        r#"module Top(input bit clk, output bit seen);
+        bit a = 0;
+        always @(posedge clk) begin a = 1; a = 0; end
+        initial begin @(posedge a); seen = 1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn retriggered_domains_keep_prior_unreassigned_nbas() {
+    let mut sim = simulation(
+        r#"module Top(output bit [7:0] q);
+        bit clk=0; bit en=1; bit [7:0] d=7;
+        always @(posedge clk) if(en) q<=d;
+        initial begin clk=1; #0 clk=0; en=0; #0 clk=1; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 7u8.into());
+}
+
+#[test]
+fn event_functions_reject_effectful_omitted_default_arguments() {
+    let error = build_error(
+        r#"module Top(output bit seen); bit state=0;
+        function automatic bit mutate(); state=1; return state; endfunction
+        function automatic bit observe(input bit x=mutate()); return x; endfunction
+        initial begin @(observe()); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("effect besides its result"), "{error}");
+}
+
+#[test]
+fn pure_omitted_default_arguments_keep_event_dependencies() {
+    let mut sim = simulation(
+        r#"module Top(output bit seen); bit state=0;
+        function automatic bit observe(input bit x=state); return x; endfunction
+        initial begin @(posedge observe()); seen=1; end
+        initial begin #1; state=1; state=0; end
+    endmodule"#,
+    );
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn single_comb_signal_with_hidden_pulses_is_rejected() {
+    let error = build_error(
+        r#"module Top(input bit go, output bit seen); bit q;
+        always_comb begin q=0; if(go) begin q=1; q=0; end end
+        initial begin @(posedge q); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn bounded_steps_poll_host_waiters_without_consuming_later_delays() {
+    let mut sim = simulation(
+        r#"module Top(input bit go, output bit seen);
+        initial begin wait(go); seen=1; forever #1 seen=~seen; end
+    endmodule"#,
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    assert_eq!(sim.step_until(0).unwrap(), Some(0));
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.step_until(0).unwrap(), None);
+    assert_eq!(sim.next_event_time(), Some(1));
+}
+
+#[test]
+fn called_tasks_with_hidden_comb_pulses_are_rejected() {
+    for body in ["pulse();", "relay();"] {
+        let source = format!(
+            r#"module Top(input bit go, output bit seen); bit q;
+            task pulse; q=1; q=0; endtask
+            task relay; pulse(); endtask
+            always_comb begin q=0; if(go) {body} end
+            initial begin @(posedge q); seen=1; end
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(error.contains("multiple blocking writes"), "{error}");
+    }
+}
+
+#[test]
+fn expression_calls_with_hidden_comb_pulses_are_rejected() {
+    let error = build_error(
+        r#"module Top(input bit go, output bit seen); bit q,dummy;
+        function bit pulse(); q=1; q=0; return 0; endfunction
+        always_comb dummy=go ? pulse() : 0;
+        initial begin @(posedge q); seen=1; end
+    endmodule"#,
+    );
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn subroutine_and_output_actuals_are_combinational_drivers() {
+    for task in [
+        "task drive; q=a; endtask",
+        "task drive(output bit out); out=a; endtask",
+    ] {
+        let call = if task.contains("output") {
+            "drive(q);"
+        } else {
+            "drive();"
+        };
+        let source = format!(
+            r#"module Top(input bit a, output bit seen); bit q,r;
+            {task} always_comb {call} assign r=q;
+            initial begin @(q^r); seen=1; end
+        endmodule"#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("multiple combinationally driven variables"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn past_targets_leave_host_waiters_suspended() {
+    let mut sim = simulation(
+        r#"module Top(input bit go, output bit seen); initial begin wait(go); seen=1; end endmodule"#,
+    );
+    sim.run_until(100).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(60).unwrap();
+    assert_eq!(sim.time(), 100);
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+    assert!(sim.has_waiting_processes());
+    sim.run_until(100).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn blocking_ff_publication_precedes_inactive_continuations() {
+    for (assign, expected) in [("q=1;", 1u8), ("q<=1;", 0), ("q<=7; q=2;", 2)] {
+        let source = format!(
+            r#"module Top(input bit clk, output bit [7:0] q, observed, derived_seen);
+            bit [7:0] derived; assign derived=q+1;
+            always @(posedge clk) begin {assign} end
+            initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
+        endmodule"#
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("observed")), expected.into(), "{assign}");
+        assert_eq!(
+            sim.get(sim.signal("derived_seen")),
+            (expected + 1).into(),
+            "{assign}"
+        );
+        let final_q = if assign == "q=1;" {
+            9u8
+        } else if assign == "q<=1;" {
+            1
+        } else {
+            7
+        };
+        assert_eq!(sim.get(sim.signal("q")), final_q.into(), "{assign}");
+    }
+}
+
+#[test]
+fn blocking_ff_effects_settle_before_nbas_without_inactive_processes() {
+    let mut sim = simulation(
+        r#"module Top(input bit clk, output bit seen);
+        bit a,q; wire c=a & ~q;
+        always @(posedge clk) begin a=1; q<=1; end
+        always @(posedge c) seen<=1;
+    endmodule"#,
+    );
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("c")), 0u8.into());
+}
+
+#[test]
+fn repeated_watched_nbas_require_an_ordered_update_queue() {
+    for target in ["a", "a[0]"] {
+        let source = format!(
+            r#"module Top(input bit clk, output bit seen);
+            bit a;
+            always @(posedge clk) begin {target}<=1; {target}<=0; end
+            initial begin @(posedge a); seen=1; end
+        endmodule"#
+        );
+        let error =
+            Simulation::from_sv_sources(vec![(&source, Path::new("ordered_nba.sv"))], "Top")
+                .build()
+                .expect_err("collapsed watched NBA pulse must be rejected")
+                .to_string();
+        assert!(error.contains("require ordered NBA updates"), "{error}");
+    }
+}
+
+#[test]
+fn output_formal_writes_publish_only_the_returned_value() {
+    let mut sim = simulation(
+        r#"module Top(output bit seen);
+        bit q;
+        task pulse(output bit out); out=1; out=0; endtask
+        always_comb pulse(q);
+        initial begin @(posedge q); seen=1; end
+        initial begin #1; $finish; end
+    endmodule"#,
+    );
+    sim.run_until(1).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+}
+
+#[test]
+fn mutually_exclusive_nbas_and_disjoint_watched_bits_are_supported() {
+    for body in ["if(en) q<=1; else q<=0;", "q[0]<=en; q[1]<=1;"] {
+        let code = format!(
+            r#"module Top(input bit clk,en, output bit seen); bit [1:0] q;
+            always @(posedge clk) begin {body} end
+            initial begin @(posedge q[0]); seen=1; end
+        endmodule"#
+        );
+        let mut sim = simulation(&code);
+        sim.run_until(0).unwrap();
+        let en = sim.signal("en");
+        sim.modify(|sim| sim.set(en, 1u8)).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+}
+#[test]
+fn nba_updates_across_event_dependencies_require_an_ordered_queue() {
+    let code = r#"module Top(input bit clk, output bit seen); bit a,b;
+      always @(posedge clk) begin a<=1; b<=1; end
+      initial begin @(a ^ b); seen=1; end
+    endmodule"#;
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("multi_nba.sv"))], "Top")
+        .build()
+        .expect_err("ordered dependency pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
+#[test]
+fn event_expression_cannot_mix_comb_state_with_other_variables() {
+    let code = r#"module Top(input bit a, output bit seen); wire q=a;
+        initial begin @(q ^ a); seen=1; end endmodule"#;
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("mixed_comb.sv"))], "Top")
+        .build()
+        .expect_err("comb/source transient")
+        .to_string();
+    assert!(error.contains("together with other variables"), "{error}");
+}
+#[test]
+fn single_iteration_comb_loops_do_not_hide_event_edges() {
+    for body in [
+        "repeat(1) q=a;",
+        "repeat(N) q=a;",
+        "for(int i=0;i<1;i++) q=a;",
+        "for(int i=-1;i<0;i++) q=a;",
+        "do q=a; while(0);",
+    ] {
+        let code = format!(
+            r#"module Top(input bit a, output bit seen); localparam N=1; bit q;
+            always_comb {body}
+            initial begin @(posedge q); seen=1; end endmodule"#
+        );
+        let mut sim = simulation(&code);
+        sim.run_until(0).unwrap();
+        let a = sim.signal("a");
+        sim.modify(|sim| sim.set(a, 1u8)).unwrap();
+        sim.step().unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{body}");
+    }
+}
+
+#[test]
+fn nba_pulses_across_ff_bodies_require_an_ordered_queue() {
+    let code = "module Top(input bit clk);bit a,b;always @(posedge clk) a<=1;always @(posedge clk) b<=1;initial @(a^b); endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("ff_batches.sv"))], "Top")
+        .build()
+        .expect_err("cross-process NBA pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
+#[test]
+fn comb_pulses_across_processes_are_rejected() {
+    let code = "module Top(input bit a);wire[1:0]q;assign q[0]=a;assign q[1]=a;initial @(posedge(q[0]^q[1])); endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("comb_batches.sv"))], "Top")
+        .build()
+        .expect_err("cross-process comb pulse")
+        .to_string();
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+#[test]
+fn rtl_finish_stops_following_stores_and_nbas() {
+    for body in [
+        "always_comb begin q=0; if(go) begin $finish; q=1; end end",
+        "always @(posedge go) begin q<=1; $finish; q=1; end",
+    ] {
+        let code = format!("module Top(output bit q);bit go;initial #1 go=1;{body} endmodule");
+        let mut sim = simulation(&code);
+        sim.run_until(2).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into(), "{body}");
+    }
+}
+
+#[test]
+fn independent_clock_nba_pulses_require_an_ordered_queue() {
+    let code = "module Top(input bit c1,c2);bit a,b;always @(posedge c1)a<=1;always @(posedge c2)b<=1;initial @(a^b);endmodule";
+    let error = Simulation::from_sv_sources(vec![(code, Path::new("independent.sv"))], "Top")
+        .build()
+        .expect_err("independent NBA pulse")
+        .to_string();
+    assert!(error.contains("require ordered NBA updates"), "{error}");
+}
+
+#[test]
+fn disjoint_combinational_slices_do_not_hide_a_watched_bit() {
+    let source = "module Top(input bit a,b,output bit seen);wire[1:0]q;assign q[0]=a;assign q[1]=b;initial begin @(posedge q[0]);seen=1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    let a = sim.signal("a");
+    sim.modify(|sim| sim.set(a, 1u8)).unwrap();
+    sim.step().unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn blocking_ff_comb_events_wake_waiters_before_nba() {
+    let source = r#"module Top(input bit clk, output bit q, observed);
+        bit a; wire c = a;
+        always @(posedge clk) begin a = 1; q <= 1; end
+        initial begin @(posedge c); observed = q; end
+    endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("observed")), 0u8.into());
+}
+
+#[test]
+fn loop_condition_calls_with_hidden_comb_pulses_are_rejected() {
+    for (condition, body) in [
+        ("q=(i==0); return i<1;", "i=0; while(condition(i)) i++;"),
+        ("q=(i==1); return i<2;", "i=0; do i++; while(condition(i));"),
+        (
+            "q=(i==0); return i<1;",
+            "for(i=0;condition(i);i++) begin end",
+        ),
+    ] {
+        let source = format!(
+            "module Top(output bit seen); bit q;
+            function automatic bit condition(input int i); {condition} endfunction
+            always_comb begin int i; {body} end
+            initial begin @(posedge q); seen=1; end
+        endmodule"
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("multiple blocking writes"),
+            "{body}: {error}"
+        );
+    }
+}
+
+#[test]
+fn repeat_count_calls_publish_one_combinational_write() {
+    let mut sim = simulation(
+        "module Top(input bit go, output bit seen); bit q,unused;
+        function automatic int count(); q=go; return 0; endfunction
+        always_comb begin unused=0; repeat(count()) unused=1; end
+        initial begin @(posedge q); seen=1; end
+    endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn nested_omitted_defaults_do_not_hide_combinational_pulses() {
+    let source = "module Top(output bit seen); bit q;
+        function automatic bit pulse(); q=1; q=0; return 0; endfunction
+        function automatic bit middle(input bit x=pulse()); return x; endfunction
+        function automatic bit outer(input bit x=middle()); return x; endfunction
+        always_comb begin bit unused; unused=outer(); end
+        initial begin @(posedge q); seen=1; end
+    endmodule";
+    assert!(build_error(source).contains("multiple blocking writes"));
+}
+
+#[test]
+fn output_arguments_preserve_cascaded_domain_events() {
+    for direction in ["output", "inout"] {
+        let source = format!(
+            "module Top(input bit clk, output bit seen); bit c2,a,b;
+            task automatic drive({direction} bit o); o=1; endtask
+            always @(posedge clk) begin drive(c2); a<=1; end
+            always @(posedge c2) b<=1;
+            initial begin @(a^b); seen=1; end
+        endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        sim.schedule("clk", 1, 1).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{direction}");
+    }
+}
+
+#[test]
+fn inactive_generate_waiters_do_not_reject_combinational_events() {
+    let mut sim = simulation(
+        "module Top(input bit i,output bit q);wire a=i,b=~i;assign q=a; if(0)initial @(a^b);endmodule",
+    );
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+}
+
+#[test]
+fn computed_and_non_ff_multi_edge_always_controls_run_as_processes() {
+    for control in ["posedge (a | b)", "posedge a or negedge b"] {
+        let source = format!(
+            "module Top(input bit a,b,output bit seen);always @({control}) seen=1;endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{control}");
+    }
+}
+
+#[test]
+fn inactive_comb_drivers_do_not_poison_active_waiters() {
+    let mut sim = simulation(
+        "module Top(input bit go,output bit seen);bit q;assign q=go;if(0)always_comb begin q=1;q=0;end initial begin @(posedge q);seen=1;end endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+#[test]
+fn unreachable_function_writes_do_not_poison_active_waiters() {
+    let mut sim = simulation(
+        "module Top(input bit go,output bit seen);bit q,unused;
+        function automatic bit set_q();q=go;return go;q=0;endfunction
+        always_comb unused=set_q();initial begin @(posedge q);seen=1;end endmodule",
+    );
+    sim.run_until(0).unwrap();
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn exclusive_conditional_calls_do_not_poison_active_waiters() {
+    let source = "module Top(input bit sel,output bit seen);bit q,unused;
+      function automatic bit one();q=1;return 1;endfunction
+      function automatic bit zero();q=0;return 0;endfunction
+      always_comb unused=sel?one():zero();initial begin @(posedge q);seen=1;end endmodule";
+    for condition in ["sel", "(sel & 1'b1)", "(sel === 1'b1)", "pick()"] {
+        let source = source
+            .replace(
+                "always_comb",
+                "function automatic bit pick();return sel;endfunction always_comb",
+            )
+            .replace("unused=sel?", &format!("unused={condition}?"));
+        let mut sim = simulation(&source);
+        sim.run_until(0).unwrap();
+        let sel = sim.signal("sel");
+        sim.modify(|io| io.set(sel, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{condition}");
+    }
+    let ambiguous = source.replace("input bit sel", "input logic sel");
+    let error =
+        Simulation::from_sv_sources(vec![(ambiguous.as_str(), Path::new("ambiguous.sv"))], "Top")
+            .four_state(true)
+            .build()
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn cross_instance_hidden_pulses_are_diagnosed() {
+    let sources = [
+        r#"module Child(input bit input_a, output bit seen);
+            initial begin @(posedge input_a); seen = 1; end
+        endmodule
+        module Top(output bit seen); bit a;
+            Child u(.input_a(a), .seen(seen));
+            initial begin #1; a = 1; a = 0; end
+        endmodule"#,
+        r#"module Child(output bit a);
+            initial begin #1; a = 1; a = 0; end
+        endmodule
+        module Top(output bit seen); wire a;
+            Child u(.a(a)); initial begin @(posedge a); seen = 1; end
+        endmodule"#,
+        r#"module Leaf(input bit a, output bit seen);
+            wire derived = a; initial begin @(posedge derived); seen = 1; end
+        endmodule
+        module Child(input bit a, output bit seen); Leaf leaf(.a(a), .seen(seen)); endmodule
+        module Top(output bit seen); bit a;
+            Child u(.a(a), .seen(seen)); initial begin #1; a = 1; a = 0; end
+        endmodule"#,
+    ];
+    for source in sources {
+        let error = build_error(source);
+        assert!(
+            error.contains("cross-instance event dependency with multiple blocking writes"),
+            "{error}"
+        );
+        // Port glue still delivers supported single updates in both directions
+        // and through another instance and a combinational alias.
+        let mut sim = simulation(&source.replace("a = 1; a = 0;", "a = 1;"));
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+}
+
+#[test]
+fn cross_instance_split_drivers_cannot_hide_expression_pulses() {
+    let source = r#"module Child(input bit[1:0]q,output bit seen);
+      initial begin @(posedge(q[0]^q[1]));seen=1;end endmodule
+      module Top(input bit a,output bit seen);wire[1:0]q;
+      assign q[0]=a;assign q[1]=a;Child u(.q(q),.seen(seen));endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}
+
+#[test]
+fn cross_instance_disjoint_writes_do_not_poison_selected_waiters() {
+    for (range, actual, written, observed) in [
+        ("[1:0]", "q", 1, 0),
+        ("[5:4]", "q", 5, 4),
+        ("[0:1]", "q", 0, 1),
+        ("[2:0]", "q[2:1]", 2, 1),
+        ("[1:0]", "{q[1],q[0]}", 1, 0),
+        ("[1:0]", "{q[0],q[1]}", 0, 1),
+    ] {
+        let source = format!(
+            r#"module Child(input bit[1:0]q,output bit seen);
+          initial begin @(posedge q[0]);seen=1;end endmodule
+          module Top(output bit seen);bit{range}q;Child u(.q({actual}),.seen(seen));
+          initial begin #1;q[{written}]=1;q[{written}]=0;#1;q[{observed}]=1;end endmodule"#
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into(), "{range} {actual}");
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into(), "{range} {actual}");
+        let overlapping = source.replace(&format!("q[{written}]="), &format!("q[{observed}]="));
+        assert!(
+            build_error(&overlapping)
+                .contains("cross-instance event dependency with multiple blocking writes")
+        );
+    }
+}
+
+#[test]
+fn cross_instance_counts_keep_distinct_instance_occurrences() {
+    let source = r#"module Child(output bit a);initial begin #1;a=1;end endmodule
+      module Top(output bit seen);wire a,b;Child one(.a(a));Child two(.a(b));
+      initial begin @(posedge(a^b));seen=1;end endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+    let source = r#"module Child #(parameter bit ON=1)(output bit a);
+      if(ON)initial begin #1;a=1;end endmodule
+      module Top(output bit seen);wire a,b;Child one(.a(a));Child #(.ON(0))two(.a(b));
+      initial begin @(posedge(a^b));seen=1;end endmodule"#;
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn cross_instance_clock_generators_settle_between_activations() {
+    for body in [
+        "initial forever begin #1;a=~a;end",
+        "task automatic tick;#1;a=~a;endtask initial forever tick;",
+        "initial begin #1;a=1;wait(0);a=0;end",
+    ] {
+        let source = format!(
+            "module Child(input bit a,output bit seen);initial begin @(posedge a);seen=1;end endmodule module Top(output bit seen);bit a;Child u(.a(a),.seen(seen));{body} endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+    for body in [
+        "initial forever begin a=1;#1;a=0;end",
+        "task automatic tick;#1;a=0;endtask initial forever begin a=1;tick;end",
+        "initial begin #1;a=1;wait(1);a=0;end",
+    ] {
+        let source = format!(
+            "module Child(input bit a,output bit seen);initial begin @(posedge a);seen=1;end endmodule module Top(output bit seen);bit a;Child u(.a(a),.seen(seen));{body} endmodule"
+        );
+        assert!(
+            build_error(&source)
+                .contains("cross-instance event dependency with multiple blocking writes")
+        );
+    }
+}
+
+#[test]
+fn cross_instance_ordered_nbas_require_pulse_preservation() {
+    let source = r#"module Child(input bit[1:0]q,output bit seen);
+      initial begin @(q[0]^q[1]);seen=1;end endmodule
+      module Top(input bit clk,output bit seen);bit[1:0]q;Child u(.q(q),.seen(seen));
+      always @(posedge clk)begin q[0]<=1;q[1]<=1;end endmodule"#;
+    assert!(
+        build_error(source)
+            .contains("cross-instance event dependency with multiple nonblocking writes")
+    );
+    let source = source.replace("q[0]<=1;q[1]<=1;", "{q[1],q[0]}<=2;");
+    let mut sim = simulation(&source);
+    sim.run_until(0).unwrap();
+    sim.schedule("clk", 1, 1).unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn local_comb_aliases_diagnose_hidden_source_pulses() {
+    let source = "module Top(output bit q,seen);bit a;wire clk=a;always_ff @(posedge clk)q<=1;initial begin #1;a=1;a=0;end initial begin @(posedge clk);seen=1;end endmodule";
+    assert!(build_error(source).contains("event dependency through combinational propagation"));
+    let source = source.replace("a=1;a=0;", "a=1;#1;a=0;");
+    let mut sim = simulation(&source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+}
+
+#[test]
+fn distinct_fixed_time_writes_through_ports_are_observable() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=seen+1;@(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]"))
+            .contains("cross-instance event dependency with multiple blocking writes")
+    );
+}
+
+#[test]
+fn readmem_word_stores_cannot_hide_propagated_expression_pulses() {
+    let directory =
+        std::env::temp_dir().join(format!("celox-readmem-pulse-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let data = directory.join("words.bin");
+    std::fs::write(&data, "1\n1\n").unwrap();
+    let source = format!(
+        "module Child(input bit[1:0]q,output bit seen);initial begin @(q[0]^q[1]);seen=1;end endmodule module Top(output bit seen);bit mem[0:1];wire[1:0]q={{mem[1],mem[0]}};Child u(.q(q),.seen(seen));initial begin #1;$readmemb(\"{}\",mem);end endmodule",
+        data.display()
+    );
+    for source in [
+        source.clone(),
+        source
+            .replace(
+                "initial begin #1;$readmemb",
+                "always @(posedge clk) begin $readmemb",
+            )
+            .replace(
+                "module Top(output bit seen)",
+                "module Top(input bit clk,output bit seen)",
+            ),
+    ] {
+        let error = build_error(&source);
+        assert!(error.contains("multiple blocking writes"), "{error}");
+    }
+    // One loaded word, or one selected destination word, cannot hide a pulse.
+    for source in [
+        source.replace(",mem);", ",mem,0,0);"),
+        source.replace("@(q[0]^q[1])", "@(q[0])"),
+    ] {
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn recurring_disjoint_port_writes_keep_known_phases() {
+    let source = "module Child(output bit[1:0]q);always begin #1;q[0]=~q[0];#99;end always begin #2;q[1]=~q[1];#98;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    for (time, seen) in [(1, 1u8), (2, 2), (101, 3), (102, 4)] {
+        sim.run_until(time).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), seen.into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]").replace("#98;", "#99;"))
+            .contains("multiple blocking writes")
+    );
+    // Different periods can also remain disjoint by their GCD residues.
+    let different = source.replace("#99;", "#5;").replace("#98;", "#2;");
+    let mut sim = simulation(&different);
+    sim.run_until(7).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 4u8.into());
+    // Coprime periods eventually coincide even when startup phases differ.
+    let coincident = source.replace("#99;", "#2;").replace("#98;", "#3;");
+    assert!(build_error(&coincident).contains("multiple blocking writes"));
+}
+
+#[test]
+fn inactive_phases_keep_cross_instance_expression_transitions() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;q[0]=1;end initial begin #1;#0;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#1;#0;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+
+#[test]
+fn recurring_terminal_inactive_phases_keep_cross_instance_edges() {
+    let source = "module Child(output bit[1:0]q);always begin #1;#0;q[0]=~q[0];end always begin #1;q[1]=~q[1];end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    for time in 1..=4 {
+        sim.run_until(time).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (time * 2).into());
+    }
+    assert!(
+        build_error(&source.replace("#1;#0;q[0]", "#1;q[0]")).contains("multiple blocking writes")
+    );
+}
+
+#[test]
+fn recurring_startup_writes_do_not_inherit_an_incorrect_fixed_phase() {
+    let source = "module Child(output bit[1:0]q);always begin q[0]=~q[0];#1;#0;end always begin #1;#0;q[1]=~q[1];end endmodule module Top(output bit seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=1;end endmodule";
+    assert!(build_error(source).contains("multiple blocking writes"));
+}
+
+#[test]
+fn pure_rhs_calls_preserve_distinct_cross_instance_write_times() {
+    let source = "module Child(output bit[1:0]q);function automatic bit one();return 1;endfunction initial begin #1;q[0]=one();end initial begin #2;q[1]=one();end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+#[test]
+fn folded_initial_values_are_not_runtime_cross_instance_pulses() {
+    let source = "module Child(output bit[1:0]q);initial q[0]=1;initial q[1]=1;endmodule module Top(output bit seen);wire[1:0]q;Child u(.q(q));initial begin @(q[0]^q[1]);seen=1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+}
+
+#[test]
+fn conditional_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(input bit sel,output bit[1:0]q);initial begin #1;if(sel)q[0]=1;else q[0]=0;end initial begin #2;q[1]=1;end endmodule module Top(input bit sel,output bit[7:0]seen);wire[1:0]q;Child u(.sel(sel),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    for sel in [0u8, 1] {
+        let mut sim = simulation(source);
+        let signal = sim.signal("sel");
+        sim.modify(|io| io.set(signal, sel)).unwrap();
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), sel.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (sel + 1).into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+
+#[test]
+fn case_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(input bit[1:0]sel,output bit[1:0]q);initial begin #1;case(sel) 0:q[0]=0;1:q[0]=1;default:q[0]=1;endcase end initial begin #2;q[1]=1;end endmodule module Top(input bit[1:0]sel,output bit[7:0]seen);wire[1:0]q;Child u(.sel(sel),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    for sel in [0u8, 1, 2] {
+        let mut sim = simulation(source);
+        let signal = sim.signal("sel");
+        sim.modify(|io| io.set(signal, sel)).unwrap();
+        sim.run_until(1).unwrap();
+        let first = u8::from(sel != 0);
+        assert_eq!(sim.get(sim.signal("seen")), first.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), (first + 1).into());
+    }
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+    let error = build_error(&source.replace("1:q[0]=1;", "1:begin #1;q[0]=1;end "));
+    assert!(error.contains("multiple blocking writes"), "{error}");
+}
+
+#[test]
+fn constant_repeat_writes_keep_their_fixed_cross_instance_times() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;repeat(1)q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(
+        build_error(&source.replace("repeat(1)", "repeat(2)")).contains("multiple blocking writes")
+    );
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+    assert!(
+        build_error(&source.replace("repeat(1)q[0]=1;", "repeat(1)begin #1;q[0]=1;end "))
+            .contains("multiple blocking writes")
+    );
+}
+#[test]
+fn separate_comb_assignments_keep_selected_dependencies() {
+    let source = "module Child(input bit a,b,output bit[1:0]q);always_comb begin q[0]=a;q[1]=b;end endmodule module Top(output bit[7:0]seen);bit a,b;wire[1:0]q;Child u(.a(a),.b(b),.q(q));initial begin #1;b=1;b=0;#1;a=1;end initial forever begin @(q[0]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert!(
+        build_error(&source.replace("q[0]=a;", "q[0]=b;")).contains("multiple blocking writes")
+    );
+}
+
+#[test]
+fn mixed_clock_polarities_through_port_aliases_are_rejected() {
+    let source = "module Pos(input bit clk,output bit[7:0]q);always @(posedge clk)q<=q+1;endmodule module Neg(input bit clk,output bit[7:0]q);always @(negedge clk)q<=q+1;endmodule module Top(input bit clk,output bit[7:0]rise,fall);Pos p(.clk(clk),.q(rise));Neg n(.clk(clk),.q(fall));endmodule";
+    assert!(build_error(source).contains("mixed clock-edge polarities through aliases"));
+    // Separate physical clock ports keep their independent polarities.
+    let separate = source
+        .replace(
+            "input bit clk,output bit[7:0]rise,fall",
+            "input bit cp,cn,output bit[7:0]rise,fall",
+        )
+        .replace("Pos p(.clk(clk)", "Pos p(.clk(cp)")
+        .replace("Neg n(.clk(clk)", "Neg n(.clk(cn)");
+    simulation(&separate);
+}
+
+#[test]
+fn mixed_clock_polarities_through_local_aliases_are_rejected() {
+    let source = "module Top(input bit clk,output bit p_seen,n_seen);wire p=clk,n=clk;always @(posedge p)p_seen<=1;always @(negedge n)n_seen<=1;endmodule";
+    assert!(build_error(source).contains("mixed clock-edge polarities through aliases"));
+    simulation(&source.replace("negedge n", "posedge n"));
+}
+
+#[test]
+fn constant_for_writes_preserve_distinct_activation_times() {
+    let source = "module Child(output bit[1:0]q);initial begin #1;for(int i=0;i<1;i++)q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    let mut sim = simulation(source);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    assert!(build_error(&source.replace("i<1", "i<2")).contains("multiple blocking writes"));
+    assert!(
+        build_error(&source.replace("#2;q[1]", "#1;q[1]")).contains("multiple blocking writes")
+    );
+}
+#[test]
+fn mixed_reset_polarities_through_aliases_are_rejected() {
+    let source = "module Top(input bit clk,rst,output bit a,b);wire rh=rst,rl=rst;always_ff @(posedge clk or posedge rh)if(rh)a<=0;else a<=1;always_ff @(posedge clk or negedge rl)if(!rl)b<=0;else b<=1;endmodule";
+    assert!(build_error(source).contains("mixed clock/reset-edge polarities through aliases"));
+    simulation(
+        &source
+            .replace("negedge rl", "posedge rl")
+            .replace("if(!rl)", "if(rl)"),
+    );
+    let role_conflict = "module Top(input bit clk,output bit a,b);wire r=clk;always_ff @(posedge clk)a<=1;always_ff @(posedge clk or posedge r)if(r)b<=0;else b<=1;endmodule";
+    assert!(
+        build_error(role_conflict).contains("mixed clock/reset-edge polarities through aliases")
+    );
+}
+
+#[test]
+fn untimed_task_writes_preserve_distinct_activation_times() {
+    for body in [
+        "task automatic noop();endtask initial begin #1;noop();q[0]=1;end initial begin #2;noop();q[1]=1;end",
+        "task automatic drive(output bit x);x=1;endtask initial begin #1;drive(q[0]);end initial begin #2;drive(q[1]);end",
+    ] {
+        let source = format!(
+            "module Child(output bit[1:0]q);{body} endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+        );
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    }
+}
+#[test]
+fn timed_task_branches_do_not_claim_an_earlier_write_wave() {
+    let source = "module Child(input bit sel,output bit[1:0]q);task automatic delayed();#5;q[0]=1;endtask initial begin #1;if(sel)delayed();end initial begin #6;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.sel(1'b1),.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+    assert!(build_error(source).contains("multiple blocking writes"));
+}
+
+#[test]
+fn coincident_pulse_writers_in_different_instances_are_rejected() {
+    let source = "module Child(input bit clk,output bit q);always_ff @(posedge clk)q<=!q;endmodule module Top(input bit clk,output bit seen);wire a,b;Child c0(.clk(clk),.q(a));Child c1(.clk(clk),.q(b));initial forever begin @(a^b);seen=1;end endmodule";
+    assert!(build_error(source).contains("multiple nonblocking writes"));
+    let timed = "module Child0(output bit q);initial begin #1;q=1;end endmodule module Child1(output bit q);initial begin #2;q=1;end endmodule module Top(output bit[7:0]seen);wire a,b;Child0 c0(.q(a));Child1 c1(.q(b));initial forever begin @(a^b);seen=seen+1;end endmodule";
+    assert!(build_error(&timed.replace("#2;", "#1;")).contains("multiple blocking writes"));
+    let mut sim = simulation(timed);
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+}
+
+#[test]
+fn statically_satisfied_waits_preserve_distinct_activation_times() {
+    for condition in ["1", "128'h80000000000000000000000000000000"] {
+        let source = "module Child(output bit[1:0]q);initial begin #1;wait(1);q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child u(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+        let source = source.replace("wait(1)", &format!("wait({condition})"));
+        let mut sim = simulation(&source);
+        sim.run_until(1).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+    }
+}

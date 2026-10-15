@@ -1878,6 +1878,39 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Whether the current state may wake a suspended process.
+    #[napi]
+    pub fn has_waiting_processes(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.has_waiting_processes())
+    }
+
+    /// Probe current-time work without executing suspended continuations.
+    #[napi]
+    pub fn has_pending_host_work(&mut self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.has_pending_host_work()
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// Run one step without consuming events after `end_time`.
+    #[napi]
+    pub fn step_until(&mut self, end_time: f64) -> Result<Option<f64>> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.step_until(end_time as u64)
+            .map(|time| time.map(|time| time as f64))
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
     /// Returns the current simulation time.
     #[napi]
     pub fn time(&self) -> Result<f64> {
@@ -1965,6 +1998,10 @@ impl NativeSimulationHandle {
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         sim.restore(&checkpoint.inner)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        // A finished snapshot must retain its captured, possibly unsettled output.
+        if sim.is_finished() {
+            return Ok(());
+        }
         // JS reads outputs straight from memory, so settle them now.
         sim.eval_comb()
             .map_err(|e| Error::from_reason(format!("{}", e)))
@@ -1998,8 +2035,10 @@ impl NativeSimulationHandle {
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         // JS writes inputs straight to memory without marking the simulation
         // dirty, so settle combinational logic before saving it.
-        sim.eval_comb()
-            .map_err(|e| Error::from_reason(format!("{}", e)))?;
+        if !sim.is_finished() {
+            sim.eval_comb()
+                .map_err(|e| Error::from_reason(format!("{}", e)))?;
+        }
         let file = sim
             .save_state()
             .map_err(|e| Error::from_reason(e.to_string()))?;

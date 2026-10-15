@@ -87,6 +87,10 @@ pub struct SimModule {
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.
     pub package_bindings: HashMap<SourceVarId, PackageBinding>,
+    /// Shared activation storage of procedural subroutines. Concurrent
+    /// process writes are intentional, unlike independent RTL drivers.
+    pub shared_process_state: HashSet<SourceVarId>,
+    pub process_event_counters: Vec<celox_design::ProcessEventCounters<SourceVarId>>,
 }
 
 /// The package variable a module variable denotes.

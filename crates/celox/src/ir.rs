@@ -445,7 +445,22 @@ pub struct UnoptimizedSir {
 }
 
 impl UnoptimizedSir {
-    pub(crate) fn new(sir: SirProgram, runtime: RuntimeProgram) -> Self {
+    pub(crate) fn new(sir: SirProgram, mut runtime: RuntimeProgram) -> Self {
+        runtime.runtime_schema.active_ff_events = sir.eval_only_ffs.iter()
+            .filter(|(_, units)| units.iter().any(|unit| {
+                // Design destinations are seeded in working storage. Internal
+                // pending-control flags have only stable stores.
+                let working: crate::HashSet<_> = unit.blocks.values().flat_map(|block| &block.instructions)
+                    .filter_map(|inst| match inst {
+                        SIRInstruction::Store(addr, ..) | SIRInstruction::Commit(_, addr, ..)
+                            if addr.region == WORKING_REGION => Some(addr.absolute_addr()),
+                        _ => None,
+                    }).collect();
+                unit.blocks.values().flat_map(|block| &block.instructions).any(|inst|
+                    matches!(inst, SIRInstruction::Store(addr, ..) if addr.region == STABLE_REGION && working.contains(&addr.absolute_addr()))
+                    || matches!(inst,SIRInstruction::RuntimeEvent{site_id,..} if runtime.runtime_schema.runtime_event_sites.get(*site_id as usize).is_some_and(|site|matches!(site.kind,celox_design::RuntimeEventKind::Finish))))
+            }))
+            .map(|(event, _)| *event).collect();
         Self {
             sir,
             layout_requirements: Default::default(),

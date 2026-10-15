@@ -29,6 +29,8 @@ import { isFourStateValue } from "./types.js";
  */
 export interface DirtyState {
 	dirty: boolean;
+	/** Input writes still need scheduler polling, even after a lazy comb read. */
+	pendingHostWrites?: boolean;
 	disposed?: boolean;
 }
 
@@ -431,7 +433,11 @@ function defineSignalProperty(
 		get(): bigint {
 			if (state.disposed) throw new Error("Simulator has been disposed");
 			// Output reads: lazy evalComb if dirty
-			if (state.dirty && !isInput) {
+			if (
+				state.dirty &&
+				!isInput &&
+				!("isFinished" in handle && handle.isFinished?.())
+			) {
 				handle.evalComb();
 				state.dirty = false;
 			}
@@ -479,6 +485,7 @@ function defineSignalProperty(
 			}
 
 			state.dirty = true;
+			state.pendingHostWrites = true;
 		},
 
 		enumerable: true,
@@ -815,7 +822,11 @@ function createArrayDut(
 		at(index: number): bigint {
 			if (state.disposed) throw new Error("Simulator has been disposed");
 			assertArrayIndex(index, totalElements);
-			if (state.dirty && !isInput) {
+			if (
+				state.dirty &&
+				!isInput &&
+				!("isFinished" in handle && handle.isFinished?.())
+			) {
 				handle.evalComb();
 				state.dirty = false;
 			}
@@ -854,6 +865,7 @@ function createArrayDut(
 				if (is4state) storage.write(index, true, 0n);
 			}
 			state.dirty = true;
+			state.pendingHostWrites = true;
 		},
 	};
 }

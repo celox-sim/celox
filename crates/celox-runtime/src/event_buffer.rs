@@ -41,6 +41,14 @@ impl RuntimeEventBuffer {
         }
     }
 
+    pub fn store_atomic_u64(&self, byte_offset: usize, value: u64, ordering: Ordering) {
+        assert_eq!(byte_offset % 8, 0);
+        assert!(byte_offset + 8 <= self.byte_size);
+        unsafe {
+            (*(self.words[byte_offset / 8].get() as *const AtomicU64)).store(value, ordering);
+        }
+    }
+
     pub fn read_u64(&self, byte_offset: usize) -> u64 {
         assert_eq!(byte_offset % 8, 0);
         assert!(byte_offset + 8 <= self.byte_size);

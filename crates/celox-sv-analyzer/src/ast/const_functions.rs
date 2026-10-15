@@ -21,6 +21,7 @@ const MAX_DEPTH: usize = 64;
 /// A function whose calls in constant expressions are evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConstantFunction {
+    automatic: bool,
     params: Vec<(String, crate::ir::Type)>,
     argument_names: Vec<String>,
     argument_defaults: Vec<Option<Expr>>,
@@ -196,6 +197,7 @@ impl ConstantFunctions {
                 (
                     name(function_name),
                     ConstantFunction {
+                        automatic: function.automatic,
                         argument_names: function.argument_names.clone(),
                         argument_defaults: function
                             .argument_defaults
@@ -249,6 +251,7 @@ impl ConstantFunctions {
             .map(|(name, function)| crate::ir::Subroutine {
                 name: name.clone(),
                 is_task: false,
+                automatic: function.automatic,
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
                 params: function
@@ -431,6 +434,7 @@ fn collect_module_constant_functions(
             Some((
                 subroutine.name.clone(),
                 ConstantFunction {
+                    automatic: subroutine.automatic,
                     argument_names: subroutine
                         .params
                         .iter()
@@ -846,7 +850,7 @@ impl Frame<'_> {
                 let value = self.eval(rhs)?;
                 self.assign(lhs, value)?;
             }
-            Stmt::Local { name, init } => {
+            Stmt::Local { name, init, .. } => {
                 let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
                 self.declare(name, &r#type)?;
                 let value = match init {
@@ -964,7 +968,11 @@ impl Frame<'_> {
             // Messages have no effect on the value. Unknown and unsupported
             // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
-            Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
+            Stmt::AssignConcat { .. }
+            | Stmt::Call { .. }
+            | Stmt::Delay(_)
+            | Stmt::WaitEvent(_)
+            | Stmt::Wait(_) => return None,
         }
         Some(Flow::Next)
     }

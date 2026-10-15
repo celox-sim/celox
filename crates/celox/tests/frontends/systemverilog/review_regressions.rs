@@ -7611,6 +7611,10 @@ sv_backends! {
         @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
     }
 
+    fn for_assignment_context_and_wrapping_preserve_iterations(sim) {
+        @case "review_regressions::for_assignment_context_and_wrapping_preserve_iterations";
+    }
+
     fn size_of_a_type_uses_the_dimension_argument(sim) {
         @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
     }
@@ -8458,9 +8462,9 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
 }
 
 #[test]
-fn commits_ff_output_actuals_whose_index_calls_a_function() {
-    // `outer` writes `state[inner(k)]` from an always_ff select index; the
-    // write is committed with the process.
+fn publishes_ff_output_actuals_whose_index_calls_a_function() {
+    // `outer` writes the selected state bit in the active region; the
+    // earlier whole-state NBA still publishes zero afterwards.
     let source = r#"
         module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
                    output logic [3:0] bits);
@@ -8471,10 +8475,11 @@ fn commits_ff_output_actuals_whose_index_calls_a_function() {
                 y = 1'b1;
                 return 2'd2;
             endfunction
-            logic [3:0] state;
+            logic [3:0] state=0;
             always_ff @(posedge clk) begin
                 state <= 4'd0;
                 bits[outer(state[inner(k)])] <= 1'b1;
+                $display("active=%0d",state);
             end
             assign st = state;
         endmodule
@@ -8489,7 +8494,13 @@ fn commits_ff_output_actuals_whose_index_calls_a_function() {
     for index in [1u8, 3, 0] {
         sim.modify(|io| io.set(k, index)).unwrap();
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get_as::<u8>(st), 1 << index, "k = {index}");
+        assert_eq!(sim.get_as::<u8>(st), 0, "k = {index}");
+        assert_eq!(
+            sim.drain_runtime_events(),
+            vec![celox::RuntimeEvent::Display {
+                message: format!("active={}", 1u8 << index).into_bytes()
+            }]
+        );
         assert_eq!(sim.get_as::<u8>(bits), 4);
     }
 }

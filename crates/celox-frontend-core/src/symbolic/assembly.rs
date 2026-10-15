@@ -280,7 +280,16 @@ fn check_package_variable_drivers(
     package_instances: &HashMap<ModuleId, InstanceId>,
     comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
 ) -> Result<(), ParserError> {
-    let packages: HashSet<AbsoluteAddr> = bindings.targets.values().copied().collect();
+    let packages: HashSet<AbsoluteAddr> = bindings
+        .targets
+        .values()
+        .copied()
+        .filter(|address| {
+            !modules[&instance_modules[&address.instance_id]]
+                .shared_process_state
+                .contains(&address.var_id)
+        })
+        .collect();
     if packages.is_empty() {
         return Ok(());
     }
@@ -1125,7 +1134,8 @@ pub fn schedule_symbolic_rtl(
         .values()
         .filter(|units| !units.is_empty())
         .count();
-    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    let needs_split_path =
+        active_ff_domains > 1 || !cascaded_clocks.is_empty() || !processes.is_empty();
     let parallel_sir = parallel.enabled().then(|| {
         let mut events = eval_apply_ffs
             .iter()
@@ -1282,6 +1292,28 @@ pub fn schedule_symbolic_rtl(
             .collect(),
     };
     let event_aliases = events.aliases.clone();
+    let mut process_event_counters = instance_modules
+        .iter()
+        .flat_map(|(&instance, module)| {
+            modules[module]
+                .process_event_counters
+                .iter()
+                .map(move |counters| celox_design::ProcessEventCounters {
+                    signal: project(bindings.locate(instance, counters.signal)),
+                    rises: project(bindings.locate(instance, counters.rises)),
+                    falls: project(bindings.locate(instance, counters.falls)),
+                })
+        })
+        .collect::<Vec<_>>();
+    for counters in &mut process_event_counters {
+        counters.signal = events.canonical(counters.signal);
+    }
+    process_event_counters
+        .sort_unstable_by_key(|counters| (counters.signal, counters.rises, counters.falls));
+    let process_read_roots = process_event_counters
+        .iter()
+        .flat_map(|counters| [counters.rises, counters.falls])
+        .collect();
     let runtime_errors = runtime_errors
         .into_iter()
         .map(|(code, info)| {
@@ -1405,12 +1437,14 @@ pub fn schedule_symbolic_rtl(
             runtime_event_sites,
             extern_functions,
             comb_observers,
-            testbench_read_roots: Default::default(),
+            testbench_read_roots: process_read_roots,
             rtl_writes,
             comb_writes: Default::default(),
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            process_event_counters,
+            active_ff_events: HashSet::default(),
         },
     };
 

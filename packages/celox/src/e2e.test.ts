@@ -3905,3 +3905,204 @@ describe("E2E: four-state wildcard comparison", () => {
 		}
 	});
 });
+
+test("finished simulation checkpoints preserve unsettled output until explicit eval", () => {
+	const artifact = JSON.parse(FRONTEND_FINISH_ARTIFACT);
+	artifact.signals[0].direction = "Input";
+	artifact.signals.push({
+		...artifact.signals[0],
+		id: 1,
+		name: "derived",
+		direction: "Output",
+	});
+	artifact.port_order.push(1);
+	artifact.expressions.push({
+		id: 2,
+		node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+		value_type: { width: 8, signed: false, four_state: false },
+	});
+	artifact.assignments = [
+		{ target: { signal: 1, lsb: 0, width: 8 }, value: 2 },
+	];
+	artifact.processes[0].body = ["Finish"];
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const raw = Handle.fromFrontendArtifact(JSON.stringify(artifact));
+	try {
+		raw.runUntil(0);
+		expect(raw.isFinished?.()).toBe(true);
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.y.offset] = 7;
+		expect(memory[layout.derived.offset]).toBe(0);
+		if (!raw.checkpoint || !raw.restore)
+			throw new Error("checkpoint unavailable");
+		const saved = raw.checkpoint();
+		raw.restore(saved);
+		expect(memory[layout.derived.offset]).toBe(0);
+		raw.evalComb();
+		expect(memory[layout.derived.offset]).toBe(7);
+	} finally {
+		raw.dispose();
+	}
+});
+
+test("DUT lazy reads preserve finished outputs until explicit evalComb", () => {
+	const artifact = JSON.parse(FRONTEND_FINISH_ARTIFACT);
+	artifact.signals[0].direction = "Input";
+	artifact.signals.push({
+		...artifact.signals[0],
+		id: 1,
+		name: "derived",
+		direction: "Output",
+	});
+	artifact.port_order.push(1);
+	artifact.expressions.push({
+		id: 2,
+		node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+		value_type: { width: 8, signed: false, four_state: false },
+	});
+	artifact.assignments = [
+		{ target: { signal: 1, lsb: 0, width: 8 }, value: 2 },
+	];
+	artifact.processes[0].body = ["Finish"];
+	artifact.signals[1].value_type.four_state = true;
+	artifact.expressions[2].value_type.four_state = true;
+	artifact.signals[0].initial = {
+		payload: [0],
+		mask: [0],
+		value_type: artifact.signals[0].value_type,
+	};
+	const sim = Simulation.fromFrontendArtifact<{
+		y: bigint;
+		readonly derived: bigint;
+	}>(JSON.stringify(artifact), { fourState: true });
+	try {
+		sim.runUntil(0);
+		expect(sim.isFinished()).toBe(true);
+		sim.dut.y = 7n;
+		expect(sim.dut.derived).toBe(0n);
+		expect(sim.fourState("derived")).toEqual(FourState(0n, 0n));
+	} finally {
+		sim.dispose();
+	}
+});
+
+test.each(["step", "run", "bounded"])(
+	"host FF pulses survive repeated lazy reads (%s)",
+	(method) => {
+		const sim = Simulation.fromSource<{
+			go: bigint;
+			readonly level: bigint;
+			readonly count: bigint;
+		}>(
+			"module Top(clk:input clock,go:input logic,level:output logic,count:output logic<8>){var r:logic<8>;let derived:'_ clock=clk & go;assign level=derived;assign count=r;always_ff(derived){r=r+1;}}",
+			"Top",
+		);
+		try {
+			sim.schedule("clk", { time: 0, value: 1 });
+			sim.runUntil(0);
+			sim.dut.go = 1n;
+			expect(sim.dut.level).toBe(1n);
+			expect(sim.dut.count).toBe(0n);
+			sim.dut.go = 0n;
+			expect(sim.dut.level).toBe(0n);
+			expect(sim.dut.count).toBe(0n);
+			if (method === "step") expect(sim.step()).toBe(0);
+			else sim.runUntil(0, method === "bounded" ? { maxSteps: 1 } : undefined);
+			expect(sim.dut.count).toBe(1n);
+			expect(sim.step()).toBe(null);
+		} finally {
+			sim.dispose();
+		}
+	},
+);
+
+test("finished native state files preserve cached outputs after shared writes", () => {
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const source =
+		"module Top(go:input logic<8>,q:output logic<8>){always_comb{q=go+8'd1;if go==1 {$finish();}}}";
+	const raw = new Handle(
+		[{ content: source, path: "finished-save.veryl" }],
+		"Top",
+	);
+	try {
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.go.offset] = 1;
+		raw.evalComb();
+		expect(raw.isFinished?.()).toBe(true);
+		expect(memory[layout.q.offset]).toBe(2);
+		memory[layout.go.offset] = 7;
+		if (!raw.saveState || !raw.loadState)
+			throw new Error("state files unavailable");
+		const saved = raw.saveState();
+		raw.loadState(saved);
+		expect(memory[layout.q.offset]).toBe(2);
+		raw.evalComb();
+		expect(memory[layout.q.offset]).toBe(8);
+	} finally {
+		raw.dispose();
+	}
+});
+
+test("native host-work probes preserve pending FF edges without running them", () => {
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const raw = new Handle(
+		[
+			{
+				content:
+					"module Top(clk:input clock,noise:input logic,count:output logic<8>){var r:logic<8>;assign count=r;always_ff(clk){r=r+1;}}",
+				path: "host-probe.veryl",
+			},
+		],
+		"Top",
+	);
+	try {
+		raw.runUntil(0);
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.noise.offset] = 1;
+		raw.evalComb();
+		expect(raw.hasPendingHostWork!()).toBe(false);
+		memory[layout.clk.offset] = 1;
+		raw.evalComb();
+		for (let n = 0; n < 2; n++) {
+			expect(raw.hasPendingHostWork!()).toBe(true);
+			expect(memory[layout.count.offset]).toBe(0);
+		}
+		raw.runUntil(0);
+		expect(memory[layout.count.offset]).toBe(1);
+		expect(raw.hasPendingHostWork!()).toBe(false);
+	} finally {
+		raw.dispose();
+	}
+});
+
+test("nextEventTime exposes a pending native host wake without executing it", () => {
+	const sim = Simulation.fromSource<{ go: bigint; readonly count: bigint }>(
+		"module Top(clk:input clock,go:input logic,count:output logic<8>){var r:logic<8>;let derived:'_ clock=clk & go;assign count=r;always_ff(derived){r=r+1;}}",
+		"Top",
+	);
+	try {
+		sim.schedule("clk", { time: 0, value: 1 });
+		sim.runUntil(0);
+		expect(sim.nextEventTime()).toBeNull();
+		sim.dut.go = 1n;
+		expect(sim.nextEventTime()).toBe(0);
+		expect(sim.nextEventTime()).toBe(0);
+		expect(sim.dut.count).toBe(0n);
+		expect(sim.time()).toBe(0);
+		expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(sim.dut.count).toBe(0n);
+		expect(sim.step()).toBe(0);
+		expect(sim.dut.count).toBe(1n);
+		expect(sim.nextEventTime()).toBeNull();
+	} finally {
+		sim.dispose();
+	}
+});

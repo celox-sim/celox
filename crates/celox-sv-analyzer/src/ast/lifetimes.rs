@@ -8,7 +8,8 @@
 //! entry is never read gives the same results that way. Any other static
 //! local of a procedural block keeps its value instead: its declaration no
 //! longer initializes it, and its initializer runs once at time zero. Static
-//! locals of subroutines that keep their value are not supported.
+//! locals of expression-expanded functions that keep their value are not
+//! supported. Task locals retain their static lifetime in statement IR.
 
 use super::*;
 
@@ -54,7 +55,7 @@ fn keep_in<T>(
 ) -> Result<(), AnalyzerError> {
     let mut index = 0;
     while index < stmts.len() {
-        if let Stmt::Local { name, init } = &stmts[index]
+        if let Stmt::Local { name, init, .. } = &stmts[index]
             && statics.contains_key(name)
             && entry(
                 name,
@@ -64,7 +65,7 @@ fn keep_in<T>(
                 &HashMap::default(),
             )? == Entry::Observed
         {
-            let Stmt::Local { name, init } = stmts.remove(index) else {
+            let Stmt::Local { name, init, .. } = stmts.remove(index) else {
                 unreachable!("the statement is a local declaration");
             };
             kept.push(name.clone());
@@ -121,7 +122,7 @@ pub(super) fn check_subroutine_statics(
     let mut result = Ok(());
     let mut check = |stmts: &[Stmt]| {
         for (index, stmt) in stmts.iter().enumerate() {
-            if let Stmt::Local { name, init } = stmt
+            if let Stmt::Local { name, init, .. } = stmt
                 && statics.contains(name)
                 && result.is_ok()
             {
@@ -509,8 +510,14 @@ impl Flow<'_> {
                 }
                 Ok(Exits::next(written || outputs))
             }
-            Stmt::Eval(expr) => {
+            Stmt::Delay(expr) | Stmt::Wait(expr) | Stmt::Eval(expr) => {
                 self.read(expr, written)?;
+                Ok(Exits::next(written))
+            }
+            Stmt::WaitEvent(items) => {
+                for item in items {
+                    self.read(&item.expr, written)?;
+                }
                 Ok(Exits::next(written))
             }
             Stmt::SystemTask { args, .. } => {
@@ -651,7 +658,8 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         }
         Stmt::Return(value) => value.iter().collect(),
         Stmt::Call { args, .. } => args.iter().flatten().collect(),
-        Stmt::Eval(expr) => vec![expr],
+        Stmt::Delay(expr) | Stmt::Wait(expr) | Stmt::Eval(expr) => vec![expr],
+        Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
         Stmt::SystemTask { args, .. } => args
             .iter()
             .filter_map(|arg| match arg {

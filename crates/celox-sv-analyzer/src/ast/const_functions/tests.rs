@@ -41,6 +41,7 @@ fn fixed_ty(width: usize, signed: bool) -> crate::ir::Type {
 
 fn function(name: &str, params: Vec<(&str, crate::ir::Type)>, body: Vec<Stmt>) -> ConstantFunction {
     ConstantFunction {
+        automatic: false,
         argument_names: params.iter().map(|(name, _)| (*name).to_string()).collect(),
         argument_defaults: vec![None; params.len()],
         params: params
@@ -108,6 +109,7 @@ fn functions() -> ConstantFunctions {
         vec![
             Stmt::Local {
                 name: "low".into(),
+                r#static: false,
                 init: Some(Expr::Select {
                     expr: Box::new(ident("x")),
                     msb: ConstExpr::Literal("7".into()),
