@@ -39,7 +39,7 @@ fn width(t: &Term) -> u32 {
         _ => panic!("internal non-word"),
     }
 }
-fn constant(t: &Term) -> Option<u64> {
+fn constant(t: &Term) -> Option<BigUint> {
     t.0.op
         .strip_prefix("(_ bv")?
         .split_whitespace()
@@ -47,11 +47,17 @@ fn constant(t: &Term) -> Option<u64> {
         .parse()
         .ok()
 }
+fn ones(w: u32) -> BigUint {
+    (BigUint::from(1u8) << w) - 1u8
+}
+fn bvb(w: u32, v: &BigUint) -> Term {
+    ir::bv_big(w, v)
+}
 fn b(v: bool) -> Term {
     ir::boolv(v)
 }
 fn bv(w: u32, v: u64) -> Term {
-    ir::bv(w, v)
+    bvb(w, &BigUint::from(v))
 }
 fn not(x: Term) -> Term {
     if x == b(true) {
@@ -119,7 +125,7 @@ fn extract(x: Term, lo: u32, w: u32) -> Term {
         return x;
     }
     if let Some(n) = constant(&x) {
-        return bv(w, n >> lo);
+        return bvb(w, &(n >> lo));
     }
     // Collapse slices of slices; preserve word structure at storage boundaries.
     if x.0.op.starts_with("(_ extract ") {
@@ -147,12 +153,12 @@ fn resize(x: Term, w: u32, signed: bool) -> Term {
         return extract(x, 0, w);
     }
     if let Some(n) = constant(&x) {
-        let value = if signed && old < 64 && n & (1 << (old - 1)) != 0 {
-            n | (!0u64 << old)
+        let value = if signed && n.bit(u64::from(old - 1)) {
+            n | (ones(w) ^ ones(old))
         } else {
             n
         };
-        return bv(w, value);
+        return bvb(w, &value);
     }
     ir::node(
         Sort::Bv(w),
@@ -166,26 +172,27 @@ fn resize(x: Term, w: u32, signed: bool) -> Term {
 }
 fn bitnot(x: Term) -> Term {
     if let Some(value) = constant(&x) {
-        bv(width(&x), !value)
+        bvb(width(&x), &(ones(width(&x)) ^ value))
     } else {
         ir::node(x.0.sort.clone(), "bvnot", vec![x])
     }
 }
 fn op(name: &str, w: u32, a: Term, c: Term) -> Term {
     if let (Some(x), Some(y)) = (constant(&a), constant(&c)) {
+        let shift = u32::try_from(&y).ok().filter(|y| *y < w);
         let n = match name {
-            "bvadd" => Some(x.wrapping_add(y)),
-            "bvsub" => Some(x.wrapping_sub(y)),
-            "bvmul" => Some(x.wrapping_mul(y)),
+            "bvadd" => Some(x + y),
+            "bvsub" => Some(x + (BigUint::from(1u8) << w) - (y & ones(w))),
+            "bvmul" => Some(x * y),
             "bvand" => Some(x & y),
             "bvor" => Some(x | y),
             "bvxor" => Some(x ^ y),
-            "bvshl" => Some(if y >= 64 { 0 } else { x << y }),
-            "bvlshr" => Some(if y >= 64 { 0 } else { x >> y }),
+            "bvshl" => Some(shift.map_or_else(BigUint::default, |y| x << y)),
+            "bvlshr" => Some(shift.map_or_else(BigUint::default, |y| x >> y)),
             _ => None,
         };
         if let Some(n) = n {
-            return bv(w, n);
+            return bvb(w, &n);
         }
     }
     if name == "bvand" {
@@ -210,18 +217,17 @@ fn op(name: &str, w: u32, a: Term, c: Term) -> Term {
     ir::node(Sort::Bv(w), name, vec![a, c])
 }
 fn cat(a: Term, c: Term) -> Res<Term> {
-    let w = width(&a) + width(&c);
-    if w > 64 {
-        return Err("concatenation wider than 64 bits".into());
-    }
+    let w = width(&a)
+        .checked_add(width(&c))
+        .filter(|w| *w <= MAX_WIDTH)
+        .ok_or("concatenation wider than the symbolic width budget")?;
     if let (Some(x), Some(y)) = (constant(&a), constant(&c)) {
-        return Ok(bv(w, (x << width(&c)) | y));
+        return Ok(bvb(w, &((x << width(&c)) | y)));
     }
     Ok(ir::node(Sort::Bv(w), "concat", vec![a, c]))
 }
-fn bytes(v: &BigUint) -> Res<u64> {
-    u64::try_from(v).map_err(|_| "constant exceeds 64 bits".into())
-}
+/// Widest register, access or storage lane the lifter models.
+const MAX_WIDTH: u32 = 4096;
 
 // Preserve whole-word writes as guarded updates. Partial writes invalidate this
 // optional tag and continue through the existing bit-mask semantics.
@@ -346,14 +352,7 @@ impl Storage {
                 self.lane,
                 false,
             );
-            let mask = bv(
-                self.lane,
-                if n == 64 {
-                    !0
-                } else {
-                    ((1u64 << n) - 1) << low
-                },
-            );
+            let mask = bvb(self.lane, &(ones(n) << low));
             let moved = op("bvshl", self.lane, piece, bv(self.lane, low as u64));
             let cell = &mut self.cells[index];
             if cell.value.is_none() && !(low == 0 && n == self.lane) {
@@ -498,6 +497,29 @@ pub struct Transition {
 struct Lifter {
     frame: Frame,
     stats: Statistics,
+    /// `None` keeps trigger-bearing stores and comb captures fail-closed.
+    events: Option<Events>,
+}
+/// Trigger bits and comb-capture enables, each accumulated as a disjunction of
+/// path-guarded conditions. Mirrors Celox's interpreter: trigger detection
+/// compares the stored range with the object's first word at group entry.
+#[derive(Clone, Debug)]
+struct Events {
+    snapshots: BTreeMap<Addr, Term>,
+    triggers: BTreeMap<usize, Term>,
+    sites: BTreeMap<u32, Term>,
+    /// Guards under which a unit reached an `Error` terminator.
+    errors: Term,
+}
+impl Default for Events {
+    fn default() -> Self {
+        Self {
+            snapshots: BTreeMap::new(),
+            triggers: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            errors: b(false),
+        }
+    }
 }
 fn term_to_word(t: Term, w: u32) -> Res<Term> {
     match t.0.sort {
@@ -525,8 +547,10 @@ fn storage_shape(metadata: &VariableMetadata) -> Res<(u32, usize)> {
         return Err("invalid flattened storage shape or exceeds 65536-bit budget".into());
     }
     let lane = total / count;
-    if !(1..=64).contains(&lane) {
-        return Err(format!("symbolic storage lane width {lane} outside 1..64"));
+    if !(1..=MAX_WIDTH as usize).contains(&lane) {
+        return Err(format!(
+            "symbolic storage lane width {lane} outside 1..{MAX_WIDTH}"
+        ));
     }
     Ok((lane as u32, count))
 }
@@ -673,6 +697,7 @@ pub fn lift(code: &Compiled, config: &Value) -> Res<Transition> {
     let mut l = Lifter {
         frame,
         stats: Statistics::default(),
+        events: None,
     };
     l.phase(&code.sir.eval_comb)?;
     let mut outputs = Env::new();
@@ -758,10 +783,27 @@ impl Lifter {
         Ok(())
     }
     fn phase(&mut self, units: &[Unit]) -> Res<()> {
+        self.snapshot_group();
         for unit in units {
             self.execute(unit)?
         }
         Ok(())
+    }
+    /// Celox snapshots trigger-bearing objects once per unit group.
+    fn snapshot_group(&mut self) {
+        if let Some(events) = &mut self.events {
+            // Storage that is unbound at group entry has no snapshot; a trigger
+            // on it is rejected when it fires.
+            events.snapshots = self
+                .frame
+                .state
+                .iter()
+                .filter_map(|(a, s)| {
+                    let w = s.bits().min(64) as u32;
+                    s.read(0, w).ok().map(|t| (*a, t))
+                })
+                .collect();
+        }
     }
     fn access_guard(offset: &SIROffset, regs: &BTreeMap<usize, Term>, at: usize) -> Res<Term> {
         let reg = |r: &RegisterId| -> Res<Term> {
@@ -810,6 +852,9 @@ impl Lifter {
                     );
                 };
                 let dynamic = reg(dynamic)?;
+                if width(&index) > 64 || width(&dynamic) > 64 {
+                    return Err("element offset register wider than 64 bits".into());
+                }
                 // Bounds ensure the 64-bit arithmetic cannot wrap into a valid address.
                 let ix = resize(index, 64, false);
                 let dy = resize(dynamic, 64, false);
@@ -869,6 +914,101 @@ impl Lifter {
             }
         }
         Ok(())
+    }
+    fn events(&mut self) -> Res<&mut Events> {
+        self.events
+            .as_mut()
+            .ok_or_else(|| "triggered/observed SIR store needs event semantics".to_string())
+    }
+    fn mark_triggers(&mut self, ids: impl IntoIterator<Item = (usize, Term)>) -> Res<()> {
+        let guard = self.frame.guard.clone();
+        let events = self.events()?;
+        for (id, condition) in ids {
+            let old = events.triggers.remove(&id).unwrap_or(b(false));
+            events
+                .triggers
+                .insert(id, or(old, and(guard.clone(), condition)));
+        }
+        Ok(())
+    }
+    fn mark_sites(&mut self, sites: &[u32], condition: Term) -> Res<()> {
+        let guard = and(self.frame.guard.clone(), condition);
+        let events = self.events()?;
+        for site in sites {
+            let old = events.sites.remove(site).unwrap_or(b(false));
+            events.sites.insert(*site, or(old, guard.clone()));
+        }
+        Ok(())
+    }
+    fn snapshot(&mut self, a: Addr) -> Res<Term> {
+        self.events()?
+            .snapshots
+            .get(&a)
+            .cloned()
+            .ok_or_else(|| format!("trigger storage {a:?} has no group-entry snapshot"))
+    }
+    /// Per-kind edge detection on the stored range, after the write.
+    fn notify(
+        &mut self,
+        a: Addr,
+        off: &SIROffset,
+        bits: usize,
+        triggers: &[celox_sir::TriggerIdWithKind],
+    ) -> Res<()> {
+        use celox_sir::DomainKind;
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let snapshot = resize(self.snapshot(a)?, 64, false);
+        let offset = off
+            .constant_bit_offset()
+            .ok_or("triggered store with a dynamic offset")?;
+        let w = bits.min(64) as u32;
+        let old = if offset >= 64 {
+            bv(w, 0)
+        } else {
+            extract(op("bvlshr", 64, snapshot, bv(64, offset as u64)), 0, w)
+        };
+        let new = self.load(a, off, w)?;
+        let (zero, one) = (bv(w, 0), bv(w, 1));
+        let conditions = triggers
+            .iter()
+            .map(|t| {
+                let c = match t.kind {
+                    DomainKind::ClockPosedge => {
+                        and(eq(old.clone(), zero.clone()), eq(new.clone(), one.clone()))
+                    }
+                    DomainKind::ClockNegedge => {
+                        and(eq(old.clone(), one.clone()), eq(new.clone(), zero.clone()))
+                    }
+                    DomainKind::ResetAsyncHigh => eq(new.clone(), one.clone()),
+                    DomainKind::ResetAsyncLow => eq(new.clone(), zero.clone()),
+                    DomainKind::Other => not(eq(old.clone(), new.clone())),
+                };
+                (t.id, c)
+            })
+            .collect::<Vec<_>>();
+        self.mark_triggers(conditions)
+    }
+    /// A zero-width aliased store: no write; the first byte is compared with
+    /// its group-entry snapshot.
+    fn notify_trigger_only(
+        &mut self,
+        a: Addr,
+        triggers: &[celox_sir::TriggerIdWithKind],
+    ) -> Res<()> {
+        let snapshot = self.snapshot(a)?;
+        self.ensure(a)?;
+        let st = &self.frame.state[&a];
+        let w = st.bits().min(8) as u32;
+        let current = st.read(0, w)?;
+        let changed = not(eq(extract(snapshot, 0, w), current));
+        self.mark_triggers(
+            triggers
+                .iter()
+                .map(|t| (t.id, changed.clone()))
+                .collect::<Vec<_>>(),
+        )
     }
     fn commit(&mut self, src: Addr, dst: Addr, off: &SIROffset, w: usize) -> Res<()> {
         if w == 0 || w > 65536 {
@@ -937,15 +1077,29 @@ impl Lifter {
         self.store(dst, off, w as u32, value)
     }
     fn execute(&mut self, unit: &Unit) -> Res<()> {
+        let kinds = self.prepare(unit)?;
+        let mut frame = self.frame.clone();
+        frame.regs.clear();
+        frame.guard = b(true);
+        let region = self.region(unit, &kinds, unit.entry_block_id.0, frame, &BTreeSet::new())?;
+        if region.returns.is_empty() {
+            return Err("SIR has no returning path".into());
+        }
+        if let Some(events) = &mut self.events {
+            events.errors = or(events.errors.clone(), region.errors);
+        }
+        self.frame = merge_frames(region.returns, &mut self.stats)?;
+        Ok(())
+    }
+    /// Register types, after validating the unit and creating its storage.
+    fn prepare(&mut self, unit: &Unit) -> Res<Kinds> {
         validate_unit(unit)?;
         self.stats.execution_units += 1;
-        self.frame.regs.clear();
-        self.frame.guard = b(true);
         let mut kinds = BTreeMap::new();
         for (k, t) in &unit.register_map {
             let w = t.width();
-            if !(1..=64).contains(&w) {
-                return Err(format!("SIR register width {w} outside 1..64"));
+            if !(1..=MAX_WIDTH as usize).contains(&w) {
+                return Err(format!("SIR register width {w} outside 1..{MAX_WIDTH}"));
             }
             kinds.insert(k.0, (w as u32, t.is_signed()));
         }
@@ -963,13 +1117,25 @@ impl Lifter {
                 }
             }
         }
+        Ok(kinds)
+    }
+    /// Execute the acyclic region from `start` until a return, an error, or an
+    /// edge into a block of `cuts` (collected unexecuted, with its arguments bound).
+    fn region(
+        &mut self,
+        unit: &Unit,
+        kinds: &Kinds,
+        start: usize,
+        frame: Frame,
+        cuts: &BTreeSet<usize>,
+    ) -> Res<Region> {
         let get = |id: usize| unit.blocks.get(&BlockId(id)).ok_or("missing CFG target");
-        let entry = unit.entry_block_id.0;
         let mut marks = BTreeMap::new();
         let mut order = vec![];
         fn visit(
             id: usize,
             unit: &Unit,
+            cuts: &BTreeSet<usize>,
             marks: &mut BTreeMap<usize, u8>,
             order: &mut Vec<usize>,
         ) -> Res<()> {
@@ -983,17 +1149,21 @@ impl Lifter {
             marks.insert(id, 1);
             let block = unit.blocks.get(&BlockId(id)).ok_or("missing CFG target")?;
             for target in successors(&block.terminator) {
-                visit(target, unit, marks, order)?
+                if !cuts.contains(&target) {
+                    visit(target, unit, cuts, marks, order)?
+                }
             }
             marks.insert(id, 2);
             order.push(id);
             Ok(())
         }
-        visit(entry, unit, &mut marks, &mut order)?;
+        visit(start, unit, cuts, &mut marks, &mut order)?;
         order.reverse();
         let mut incoming: BTreeMap<usize, Vec<Frame>> = BTreeMap::new();
-        incoming.insert(entry, vec![self.frame.clone()]);
+        incoming.insert(start, vec![frame]);
         let mut returns = vec![];
+        let mut exits: BTreeMap<usize, Vec<Frame>> = BTreeMap::new();
+        let mut errors = b(false);
         for id in order {
             let Some(frames) = incoming.remove(&id) else {
                 continue;
@@ -1016,18 +1186,17 @@ impl Lifter {
                 };
                 let result: Option<(usize, Term)> = match instruction {
                     SIRInstruction::Imm(dst, value) => {
-                        if bytes(&value.mask)? != 0 {
+                        if value.mask.bits() != 0 {
                             return Err(
                                 "four-state immediate unsupported in symbolic two-state model"
                                     .into(),
                             );
                         }
                         let w = rwidth(dst)?;
-                        let value = bytes(&value.payload)?;
-                        if w < 64 && value >= 1u64 << w {
+                        if value.payload.bits() > u64::from(w) {
                             return Err("SIR immediate exceeds destination width".into());
                         }
-                        Some((dst.0, bv(w, value)))
+                        Some((dst.0, bvb(w, &value.payload)))
                     }
                     SIRInstruction::Unary(dst, name, src) => {
                         let x = reg(&self.frame, src)?;
@@ -1044,8 +1213,8 @@ impl Lifter {
                     }
                     SIRInstruction::Load(dst, a, off, w) => {
                         let w = *w;
-                        if !(1..=64).contains(&w) {
-                            return Err("load width outside 1..64".into());
+                        if !(1..=MAX_WIDTH as usize).contains(&w) {
+                            return Err("load width outside the symbolic width budget".into());
                         }
                         if rwidth(dst)? != w as u32 {
                             return Err("SIR load width mismatch".into());
@@ -1053,32 +1222,59 @@ impl Lifter {
                         Some((dst.0, self.load(addr(a), off, w as u32)?))
                     }
                     SIRInstruction::Store(a, off, w, src, triggers, observers) => {
-                        if !triggers.is_empty() || !observers.is_empty() {
+                        if (!triggers.is_empty() || !observers.is_empty()) && self.events.is_none()
+                        {
                             return Err("triggered/observed SIR store needs event semantics".into());
                         }
-                        let value = reg(&self.frame, src)?;
                         let w = *w;
-                        if !(1..=64).contains(&w) {
-                            return Err("store width outside 1..64".into());
+                        // Zero-width aliased stores write nothing and never read `src`.
+                        if w == 0 && self.events.is_some() {
+                            if !triggers.is_empty() {
+                                self.notify_trigger_only(addr(a), triggers)?;
+                            }
+                            continue;
+                        }
+                        let value = reg(&self.frame, src)?;
+                        if !(1..=MAX_WIDTH as usize).contains(&w) {
+                            return Err("store width outside the symbolic width budget".into());
                         }
                         if w as u32 > width(&value) {
                             return Err("SIR store wider than source".into());
                         }
+                        let before = if observers.is_empty() {
+                            None
+                        } else {
+                            Some(self.load(addr(a), off, w as u32)?)
+                        };
                         self.store(addr(a), off, w as u32, resize(value, w as u32, false))?;
+                        self.notify(addr(a), off, w, triggers)?;
+                        if let Some(before) = before {
+                            let after = self.load(addr(a), off, w as u32)?;
+                            self.mark_sites(observers, not(eq(before, after)))?;
+                        }
                         None
                     }
                     SIRInstruction::Commit(src, dst, off, w, triggers) => {
-                        if !triggers.is_empty() {
+                        if !triggers.is_empty() && self.events.is_none() {
                             return Err("triggered commit needs event semantics".into());
                         }
                         self.commit(addr(src), addr(dst), off, *w)?;
+                        self.notify(addr(dst), off, *w, triggers)?;
+                        None
+                    }
+                    SIRInstruction::CombCaptureEnableIfChanged { old, new, sites }
+                        if self.events.is_some() =>
+                    {
+                        let (x, y) = (reg(&self.frame, old)?, reg(&self.frame, new)?);
+                        let w = width(&x).max(width(&y));
+                        self.mark_sites(sites, not(eq(resize(x, w, false), resize(y, w, false))))?;
                         None
                     }
                     SIRInstruction::Slice(dst, src, lo, w) => {
                         let x = reg(&self.frame, src)?;
                         let lo = u32::try_from(*lo).map_err(|_| "SIR slice offset overflow")?;
                         let w = u32::try_from(*w).map_err(|_| "SIR slice width overflow")?;
-                        if w == 0 || w > 64 || lo.checked_add(w).is_none_or(|n| n > width(&x)) {
+                        if w == 0 || lo.checked_add(w).is_none_or(|n| n > width(&x)) {
                             return Err("invalid SIR slice".into());
                         }
                         if rwidth(dst)? != w {
@@ -1167,21 +1363,25 @@ impl Lifter {
                     let mut remaining = b(true);
                     let mut seen = BTreeSet::new();
                     for case in cases {
-                        let n = bytes(&case.value)?;
-                        if !seen.insert(n) {
+                        let n = case.value.clone();
+                        if !seen.insert(n.clone()) {
                             return Err("duplicate switch case".into());
                         }
-                        if width(&selector) < 64 && n >= 1 << width(&selector) {
+                        if n.bits() > u64::from(width(&selector)) {
                             return Err("switch case exceeds selector width".into());
                         }
-                        let cond = eq(selector.clone(), bv(width(&selector), n));
+                        let cond = eq(selector.clone(), bvb(width(&selector), &n));
                         edges.push((case.target.0, &[], and(remaining.clone(), cond.clone())));
                         remaining = and(remaining, not(cond));
                     }
                     edges.push((default.0, &[], remaining));
                 }
                 SIRTerminator::Error(code) => {
-                    return Err(format!("symbolically reachable SIR runtime error {code}"));
+                    if self.events.is_none() {
+                        return Err(format!("symbolically reachable SIR runtime error {code}"));
+                    }
+                    errors = or(errors, self.frame.guard.clone());
+                    continue;
                 }
             }
             for (target, arguments, guard) in edges {
@@ -1212,15 +1412,27 @@ impl Lifter {
                     }
                     frame.regs.insert(p, value);
                 }
-                incoming.entry(target).or_default().push(frame);
+                if cuts.contains(&target) {
+                    exits.entry(target).or_default().push(frame);
+                } else {
+                    incoming.entry(target).or_default().push(frame);
+                }
             }
         }
-        if returns.is_empty() {
-            return Err("SIR has no returning path".into());
-        }
-        self.frame = merge_frames(returns, &mut self.stats)?;
-        Ok(())
+        Ok(Region {
+            returns,
+            exits,
+            errors,
+        })
     }
+}
+type Kinds = BTreeMap<usize, (u32, bool)>;
+/// Paths leaving an executed region; `errors` is the disjunction of the guards
+/// that reached an `Error` terminator (only collected with event semantics).
+struct Region {
+    returns: Vec<Frame>,
+    exits: BTreeMap<usize, Vec<Frame>>,
+    errors: Term,
 }
 fn successors(term: &SIRTerminator) -> Vec<usize> {
     match term {
@@ -1304,17 +1516,13 @@ fn unary(name: UnaryOp, x: Term, w: u32, signed: bool) -> Res<Term> {
         Ident | ToTwoState => resize(x, w, name == Ident && signed),
         BitNot => {
             let x = resize(x, w, signed);
-            if let Some(n) = constant(&x) {
-                bv(w, !n)
-            } else {
-                ir::node(Sort::Bv(w), "bvnot", vec![x])
-            }
+            bitnot(x)
         }
         Minus => op("bvsub", w, bv(w, 0), resize(x, w, true)),
         LogicNot => boolword(not(truth(x)), w),
         And => {
             let n = width(&x);
-            boolword(eq(x, bv(n, if n == 64 { !0 } else { (1 << n) - 1 })), w)
+            boolword(eq(x, bvb(n, &ones(n))), w)
         }
         Or => boolword(truth(x), w),
         Xor => {
@@ -1324,8 +1532,25 @@ fn unary(name: UnaryOp, x: Term, w: u32, signed: bool) -> Res<Term> {
             }
             boolword(v, w)
         }
-        PopCount | CountLeadingZeros | CountTrailingZeros => {
-            return Err(format!("unsupported symbolic unary {name}"));
+        // Counts over the operand width, truncated to the result width.
+        PopCount => (0..width(&x)).fold(bv(w, 0), |sum, i| {
+            op("bvadd", w, sum, resize(extract(x.clone(), i, 1), w, false))
+        }),
+        CountTrailingZeros => {
+            let n = width(&x);
+            (0..n).rev().fold(bv(w, u64::from(n)), |v, i| {
+                ite(truth(extract(x.clone(), i, 1)), bv(w, u64::from(i)), v)
+            })
+        }
+        CountLeadingZeros => {
+            let n = width(&x);
+            (0..n).fold(bv(w, u64::from(n)), |v, i| {
+                ite(
+                    truth(extract(x.clone(), i, 1)),
+                    bv(w, u64::from(n - 1 - i)),
+                    v,
+                )
+            })
         }
     })
 }
@@ -1380,7 +1605,7 @@ fn binary(name: BinaryOp, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<
     if matches!(name, Shl | Shr | Sar) {
         let n = if name == Shl { w } else { w.max(width(&a)) };
         let operand = resize(a.clone(), n, name == Sar || (name == Shl && sa));
-        let limit = if width(&c) < 64 && (n as u64) >= 1 << width(&c) {
+        let limit = if BigUint::from(n).bits() > u64::from(width(&c)) {
             b(true)
         } else {
             compare("bvult", c.clone(), bv(width(&c), n as u64))
@@ -1402,15 +1627,14 @@ fn binary(name: BinaryOp, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<
         };
         let fallback = if name == Sar {
             let sign = truth(extract(shifted.clone(), n - 1, 1));
-            ite(
-                sign,
-                bv(n, if n == 64 { !0 } else { (1 << n) - 1 }),
-                bv(n, 0),
-            )
+            ite(sign, bvb(n, &ones(n)), bv(n, 0))
         } else {
             bv(n, 0)
         };
         return Ok(resize(ite(limit, shifted, fallback), w, false));
+    }
+    if matches!(name, DivU | RemU | DivS | RemS) {
+        return Ok(division(name, a, c, w));
     }
     let opn = match name {
         Add => "bvadd",
@@ -1422,6 +1646,35 @@ fn binary(name: BinaryOp, a: Term, c: Term, w: u32, sa: bool, _sc: bool) -> Res<
         _ => return Err(format!("unsupported symbolic binary {name}")),
     };
     Ok(op(opn, w, resize(a, w, sa), resize(c, w, false)))
+}
+/// Celox two-state division: a zero divisor yields 0; signed operands are read
+/// at their own widths, truncate toward zero, and wrap to the result width.
+fn division(name: BinaryOp, a: Term, c: Term, w: u32) -> Term {
+    use BinaryOp::*;
+    let signed = matches!(name, DivS | RemS);
+    let m = width(&a).max(width(&c)) + u32::from(signed);
+    let (x, y) = (resize(a, m, signed), resize(c, m, signed));
+    let zero = bv(m, 0);
+    let quotient = matches!(name, DivU | DivS);
+    let result = if signed {
+        let sign = |v: &Term| truth(extract(v.clone(), m - 1, 1));
+        let neg = |v: Term| op("bvsub", m, zero.clone(), v);
+        let abs = |v: &Term| ite(sign(v), neg(v.clone()), v.clone());
+        let (sx, sy) = (sign(&x), sign(&y));
+        let (ux, uy) = (abs(&x), abs(&y));
+        if quotient {
+            let q = ir::node(Sort::Bv(m), "bvudiv", vec![ux, uy]);
+            ite(ir::node(Sort::Bool, "xor", vec![sx, sy]), neg(q.clone()), q)
+        } else {
+            let r = ir::node(Sort::Bv(m), "bvurem", vec![ux, uy]);
+            ite(sx, neg(r.clone()), r)
+        }
+    } else {
+        let name = if quotient { "bvudiv" } else { "bvurem" };
+        ir::node(Sort::Bv(m), name, vec![x, y.clone()])
+    };
+    let guarded = ite(eq(y, zero.clone()), zero, result);
+    resize(guarded, w, signed)
 }
 fn simplify(t: Term) -> Term {
     let args = t.0.args.iter().cloned().map(simplify).collect::<Vec<_>>();
@@ -1457,6 +1710,8 @@ impl Export {
             return Ok(json!(name));
         }
         if let Some(value) = constant(t) {
+            let value =
+                u64::try_from(&value).map_or_else(|_| json!(value.to_string()), |v| json!(v));
             return Ok(json!(["bv", width(t), value]));
         }
         if !self.inline {
@@ -1635,7 +1890,6 @@ fn validate_unit(unit: &Unit) -> Res<()> {
                 target(default)?;
                 for case in cases {
                     target(&case.target)?;
-                    bytes(&case.value)?;
                 }
             }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
