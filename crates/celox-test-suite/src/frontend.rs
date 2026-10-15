@@ -345,7 +345,7 @@ fn timed_source(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) 
 fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {
     let mut output = String::new();
     let mut previous = 0;
-    let initializers = timed_initializers::rewrites(source, names)?;
+    let initializers = timed_initializers::rewrites(source, names, tasks.packages.as_ref())?;
     let connections = timed_connections::rewrites(source, names, tasks)?;
     for (start, end, word) in sv_words(source) {
         if start < previous {

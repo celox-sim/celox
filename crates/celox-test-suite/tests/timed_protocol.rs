@@ -354,3 +354,30 @@ fn callable_input_connections_preserve_unpacked_typedef_shape() {
     verilator.run_testbench().unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires Icarus, Verilator and a C++ compiler"]
+fn cross_file_constant_initializers_do_not_create_startup_edges() {
+    let text = r##"(group protocol(category sequential))
+    (case cross_file_initializer
+      (source "values.sv" #"package P;function automatic bit high_value();return 1;endfunction endpackage"#)
+      (source "top.sv" #"module Top(output bit[7:0]q);bit clk=P::high_value();always @(posedge clk)q++;initial #2 $finish;endmodule"#)
+      (top Top)(run_until 0)(assert_eq q 0)(run_until 1)(assert_eq q 0))"##;
+    let case = load_group("cross_file_initializer.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/cross-file-initializer-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .unwrap();
+    icarus.run_testbench().unwrap();
+    let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .unwrap();
+    verilator.run_testbench().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
