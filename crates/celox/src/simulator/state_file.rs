@@ -292,6 +292,7 @@ impl<B: SimBackend> Simulator<B> {
                 .as_ref()
                 .is_some_and(|schedule| schedule.finished),
         );
+        self.pending_host_writes.clear();
         self.comb_observer_snapshots = self.snapshot_all_comb_observers();
         self.comb_observer_initial_eval = false;
         if let Some(writer) = &mut self.vcd_writer {
@@ -507,6 +508,12 @@ impl<B: SimBackend> Simulator<B> {
             // State files are rejected for designs with processes.
             process_wakeups: Vec::new(),
             waiting_processes: Vec::new(),
+            process_clocks: Vec::new(),
+            clock_waits: Vec::new(),
+            done_processes: Vec::new(),
+            ticks: 0,
+            scheduled_clock_time: record.time,
+            scheduled_clock_drives: Vec::new(),
             inactive_processes: Vec::new(),
             finished: record.finished,
         })

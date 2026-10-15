@@ -116,6 +116,41 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             .map_err(|e| self.decorate_runtime_error(e))
     }
 
+    fn tick_many(&mut self, event: B::Event, count: u64) -> (u64, Result<(), RuntimeErrorCode>) {
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        if !self.program.runtime_schema.comb_observers.is_empty() {
+            if let Err(error) = self.eval_comb_checked() {
+                return (0, Err(error));
+            }
+            let result = self.tick_deferred_comb(event);
+            return (u64::from(result.is_ok()), result);
+        }
+        // Every tick settles the combinational logic first, so a clean
+        // state needs no special case and the whole run stays in the
+        // backend's loop.
+        let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
+        self.dirty = true;
+        (
+            completed,
+            result.map_err(|error| self.decorate_runtime_error(error)),
+        )
+    }
+
+    fn fused_ticks_allowed(&self) -> bool {
+        self.vcd_writer.is_none()
+            && !self.components.has_scheduled_components()
+            && self.program.runtime_schema.comb_observers.is_empty()
+            && !self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| matches!(site.kind, celox_design::RuntimeEventKind::Finish))
+            && !self.program.runtime_schema.clock_phase_sensitive_comb
+    }
+
     fn stage_external_event(
         &mut self,
         event: B::Event,
@@ -265,6 +300,19 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .map(|slots| ProcessRefs {
             status: simulator.backend.resolve_signal(&slots.status),
             delay: simulator.backend.resolve_signal(&slots.delay),
+            clock: simulator.backend.resolve_signal(&slots.clock),
+            clocks: slots
+                .clocks
+                .iter()
+                .map(|clock| celox_runtime::ProcessClockRef {
+                    event: simulator
+                        .backend
+                        .resolve_event_opt(&clock.signal)
+                        .expect("a process clock is the clock of a sequential domain"),
+                    signal: simulator.backend.resolve_signal(&clock.signal),
+                    period: clock.period,
+                })
+                .collect(),
         })
         .collect();
 
@@ -318,6 +366,14 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Save the design state, simulation time, clocks and pending events.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
+        if self.simulator.escaped_mutable_memory
+            && !self
+                .state
+                .escaped_host_clock_writes(&self.simulator.backend)
+                .is_empty()
+        {
+            return Err(CheckpointError::UntrackedHostClockWrite);
+        }
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
@@ -420,6 +476,19 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.signal(path)
     }
 
+    fn record_escaped_host_clock_writes(&mut self) {
+        if self.simulator.escaped_mutable_memory {
+            for signal in self
+                .state
+                .escaped_host_clock_writes(&self.simulator.backend)
+            {
+                if !self.simulator.pending_host_writes.contains(&signal) {
+                    self.simulator.pending_host_writes.push(signal);
+                }
+            }
+        }
+    }
+
     fn synchronize_runtime_finish(&mut self, was_dirty: bool) {
         if !self.simulator.dirty {
             self.pending_host_work = false;
@@ -444,6 +513,7 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get(signal)
@@ -459,6 +529,7 @@ impl<B: SimBackend> Simulation<B> {
         &mut self,
         signal: SignalRef,
     ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let value = if self.state.is_finished() {
             self.simulator.backend.get_four_state(signal)
@@ -565,21 +636,21 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.poll_waiting(&mut self.simulator)? {
             return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             let active = self
                 .state
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                self.state.step(&mut self.simulator)?;
-            } else {
-                self.state.settle_at(&mut self.simulator, time)?;
+                let result = self.state.step(&mut self.simulator)?;
+                return Ok(result.filter(|_| !self.state.is_finished()));
             }
+            self.state.settle_at(&mut self.simulator, time)?;
             if self.state.is_finished() {
                 return Ok(None);
             }
-            if active || queued {
+            if active {
                 return Ok(Some(time));
             }
         }
@@ -600,7 +671,8 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         let time = self.state.time();
-        if self.simulator.dirty
+        if !self.simulator.pending_host_writes.is_empty()
+            || self.simulator.dirty
             || !self.simulator.backend.get_triggered_bits().is_empty()
             || self.state.has_unsettled_edges(&self.simulator.backend)
             || self
@@ -618,14 +690,14 @@ impl<B: SimBackend> Simulation<B> {
                 .next_event_time()
                 .is_some_and(|next| next <= time)
             {
-                self.state.step(&mut self.simulator)?;
+                self.state.step_until(&mut self.simulator, time)?;
                 drained = true;
             }
             if !drained {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
         } else {
-            self.state.poll_waiting(&mut self.simulator)?;
+            self.state.poll_waiting_until(&mut self.simulator, time)?;
         }
         Ok(())
     }
@@ -635,6 +707,14 @@ impl<B: SimBackend> Simulation<B> {
     fn settle_host_writes(&mut self) -> Result<(), RuntimeErrorCode> {
         if self.state.is_finished() {
             return Ok(());
+        }
+        self.record_escaped_host_clock_writes();
+        let writes = self.simulator.take_host_writes();
+        for &signal in &writes {
+            if let Err(error) = self.state.validate_host_write(signal) {
+                self.simulator.pending_host_writes = writes;
+                return Err(error);
+            }
         }
         if self.simulator.dirty {
             self.eval_comb()?;
@@ -671,24 +751,24 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_finished() {
             return Ok(None);
         }
-        if self.state.poll_waiting(&mut self.simulator)? {
+        if self.state.poll_waiting_until(&mut self.simulator, limit)? {
             return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             let active = self
                 .state
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                self.state.step(&mut self.simulator)?;
-            } else {
-                self.state.settle_at(&mut self.simulator, time)?;
+                let result = self.state.step_until(&mut self.simulator, limit)?;
+                return Ok(result.filter(|_| !self.state.is_finished()));
             }
+            self.state.settle_at(&mut self.simulator, time)?;
             if self.state.is_finished() {
                 return Ok(None);
             }
-            if active || queued {
+            if active {
                 return Ok(Some(time));
             }
         }
@@ -697,14 +777,15 @@ impl<B: SimBackend> Simulation<B> {
             .next_event_time()
             .is_some_and(|time| time <= limit)
         {
-            self.state.step(&mut self.simulator)
+            self.state.step_until(&mut self.simulator, limit)
         } else {
             Ok(None)
         }
     }
 
     /// Advance time and run until `end_time` (inclusive). As for
-    /// [`Self::step`], processes that a host write woke resume first.
+    /// [`Self::step`], processes that a host write woke resume first. A time
+    /// before the current time leaves the simulation unchanged.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
         if self.state.is_finished() {
             return Ok(());
@@ -713,11 +794,12 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         self.settle_host_writes()?;
-        self.state.poll_waiting(&mut self.simulator)?;
-        if self.state.has_unsettled_edges(&self.simulator.backend) {
+        self.state
+            .poll_waiting_until(&mut self.simulator, end_time)?;
+        if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
             if self.state.next_event_time() == Some(time) {
-                self.state.step(&mut self.simulator)?;
+                self.state.step_until(&mut self.simulator, end_time)?;
             } else {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
@@ -729,7 +811,7 @@ impl<B: SimBackend> Simulation<B> {
             if next_time > end_time {
                 break;
             }
-            self.state.step(&mut self.simulator)?;
+            self.state.step_until(&mut self.simulator, end_time)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -755,6 +837,12 @@ impl<B: SimBackend> Simulation<B> {
         self.state.time()
     }
 
+    /// Rising edges of the clocks processes wait on that the simulation has
+    /// run so far.
+    pub fn ticks(&self) -> u64 {
+        self.state.ticks()
+    }
+
     /// Periodic clocks registered with [`Self::add_clock`] (or loaded with a
     /// state), as (event id, period).
     pub fn clock_periods(&self) -> Vec<(usize, u64)> {
@@ -764,6 +852,7 @@ impl<B: SimBackend> Simulation<B> {
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
     /// design emitted since the last call, in emission order.
     pub fn drain_runtime_events(&mut self) -> Vec<crate::RuntimeEvent> {
+        self.record_escaped_host_clock_writes();
         let was_dirty = self.simulator.dirty;
         let events = if self.state.is_finished() {
             self.simulator.drain_runtime_events_without_evaluation()
@@ -786,6 +875,10 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.record_escaped_host_clock_writes();
+        for &signal in &self.simulator.pending_host_writes {
+            self.state.validate_host_write(signal)?;
+        }
         self.simulator.eval_comb()?;
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
@@ -1490,9 +1583,246 @@ mod wait_tests {
     }
 }
 
+/// Clock waits of processes on every backend: fused where the backend
+/// loops in generated code, one tick per call elsewhere.
+#[cfg(all(test, feature = "host-runtime"))]
+mod clock_wait_tests {
+    use celox_frontend_sdk::{
+        BinaryOp, Constant, Edge, FrontendArtifact, ModuleBuilder, Statement, ValueType,
+    };
+
+    use super::Simulation;
+    use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+    /// A counter clocked by a process clock; one process waits 1000 edges
+    /// and records the count, another waits 400 and then 5 more.
+    fn design(four_state: bool) -> FrontendArtifact {
+        let bit = ValueType::new(1, false, four_state).unwrap();
+        let word = ValueType::new(16, false, four_state).unwrap();
+        let mut module = ModuleBuilder::new("ClockWaits").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let count = module.output("count", word).unwrap();
+        let late = module.output("late", word).unwrap();
+        let early = module.output("early", word).unwrap();
+        for signal in [count, late, early] {
+            module
+                .set_initial(signal, Constant::two_state(0u8, 16).unwrap())
+                .unwrap();
+        }
+        let count_expr = module.read(count).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 16).unwrap());
+        let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
+        let count_target = module.whole(count).unwrap();
+        module
+            .register(count_target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let constant = |module: &mut ModuleBuilder, value: u64| {
+            module.constant(Constant::two_state(value, 64).unwrap())
+        };
+        let thousand = constant(&mut module, 1000);
+        let late_target = module.whole(late).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: thousand,
+                },
+                Statement::Assign {
+                    target: late_target,
+                    value: count_expr,
+                },
+                Statement::Finish,
+            ])
+            .unwrap();
+        let four_hundred = constant(&mut module, 400);
+        let five = constant(&mut module, 5);
+        let early_target = module.whole(early).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: four_hundred,
+                },
+                Statement::Assign {
+                    target: early_target,
+                    value: count_expr,
+                },
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: five,
+                },
+            ])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let count = sim.signal("count");
+        let early = sim.signal("early");
+        let late = sim.signal("late");
+        sim.run_until(1601).unwrap();
+        assert_eq!(sim.get(early), 400u16.into());
+        assert_eq!(sim.get(count), 401u16.into());
+        assert_eq!(sim.ticks(), 401);
+        sim.run_until(u64::MAX - 1).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.time(), 4000);
+        assert_eq!(sim.get(late), 1000u16.into());
+        assert_eq!(sim.get(count), 1000u16.into());
+        assert_eq!(sim.ticks(), 1000);
+    }
+
+    fn builder(four_state: bool) -> SimulatorBuilder<'static, Simulator> {
+        Simulator::from_frontend(design(four_state))
+            .four_state(four_state)
+            .emit_triggers()
+    }
+
+    fn check_all_backends(four_state: bool) {
+        check(Simulation::new(
+            builder(four_state).build_interpreter().unwrap(),
+        ));
+        check(Simulation::new(
+            builder(four_state).build_cranelift().unwrap(),
+        ));
+        check(Simulation::new(builder(four_state).build_wasm().unwrap()));
+        check(Simulation::new(builder(four_state).build_tiered().unwrap()));
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        check(Simulation::new(builder(four_state).build_native().unwrap()));
+    }
+
+    #[test]
+    fn clock_waits_run_on_every_backend() {
+        check_all_backends(false);
+    }
+
+    #[test]
+    fn four_state_clock_waits_run_on_every_backend() {
+        check_all_backends(true);
+    }
+    fn edge_design(edge: Edge) -> FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Edges").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let clock_value = module.read(clk).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let value = if edge == Edge::Posedge {
+            clock_value
+        } else {
+            one
+        };
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, value, clk, edge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let three = module.constant(Constant::two_state(3u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: three,
+                },
+                Statement::Finish,
+            ])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check_edge<B: SimBackend>(mut sim: Simulation<B>, edge: Edge) {
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(1).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.run_until(20).unwrap();
+        assert_eq!(sim.time(), 12);
+        assert_eq!(sim.ticks(), 3);
+        assert!(sim.is_finished());
+    }
+
+    #[test]
+    fn clock_levels_and_falling_edges_agree_across_backends() {
+        for edge in [Edge::Posedge, Edge::Negedge] {
+            let builder = || Simulator::from_frontend(edge_design(edge)).emit_triggers();
+            check_edge(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                edge,
+            );
+            check_edge(Simulation::new(builder().build_cranelift().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_wasm().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_tiered().unwrap()), edge);
+            check_edge(Simulation::new(builder().build_native().unwrap()), edge);
+        }
+    }
+
+    #[test]
+    fn settle_at_does_not_fuse_past_a_delay_boundary() {
+        // Use a dedicated SDK design so settle_at itself advances to the due delay.
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Boundary").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let target = module.whole(q).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        let five = module.constant(Constant::two_state(5u8, 8).unwrap());
+        let ten = module.constant(Constant::two_state(10u8, 8).unwrap());
+        module
+            .process(vec![
+                Statement::Delay { amount: five },
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: ten,
+                },
+            ])
+            .unwrap();
+        let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 5).unwrap(), Some(5));
+        assert_eq!(sim.time(), 5);
+        assert_eq!(sim.ticks(), 1);
+    }
+}
+
 #[cfg(all(test, feature = "systemverilog"))]
 mod process_review_tests {
     use super::*;
+
+    fn check_failed_batch<B: SimBackend>(mut sim: Simulator<B>) {
+        let event = sim.event("clk");
+        let (completed, result) = SimulationExecutor::tick_many(&mut sim, event, 10);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    }
+
+    #[test]
+    fn failed_pre_edge_comb_does_not_complete_a_clock_tick() {
+        let source = "module Top(input bit clk, input bit ok, output bit q); always_comb assert(ok) else $fatal(1, \"failed comb\"); always_ff @(posedge clk) q <= 1; endmodule";
+        let builder =
+            || Simulator::from_sv_sources(vec![(source, std::path::Path::new("batch.sv"))], "Top");
+        check_failed_batch(builder().build_interpreter().unwrap());
+        check_failed_batch(builder().build_cranelift().unwrap());
+        check_failed_batch(builder().build_wasm().unwrap());
+        check_failed_batch(builder().build_tiered().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_failed_batch(builder().build_native().unwrap());
+    }
 
     fn check<B: SimBackend>(mut sim: Simulation<B>) {
         sim.run_until(2).unwrap();
@@ -1550,6 +1880,221 @@ mod process_review_tests {
     }
 }
 
+#[cfg(test)]
+mod bounded_clock_phase_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let enable = module.output("enable", bit).unwrap();
+        let v = module.output("v", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let zero = module.constant(Constant::two_state(0u8, 1).unwrap());
+        let target = module.whole(enable).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let clock = module.read(clk).unwrap();
+        let enabled = module.read(enable).unwrap();
+        let previous = module.read(v).unwrap();
+        let low = module.unary(UnaryOp::BitNot, clock, bit).unwrap();
+        let active = module.binary(BinaryOp::And, low, enabled, bit).unwrap();
+        let toggled = module.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let next = module.mux(active, toggled, zero).unwrap();
+        let target = module.whole(v).unwrap();
+        module.assign(target, next).unwrap();
+        let count = module.constant(Constant::two_state(10u8, 64).unwrap());
+        module
+            .process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        assert!(sim.run_until(40).is_err());
+        assert_eq!(sim.time(), 2);
+        assert_eq!(sim.ticks(), 1);
+    }
+
+    #[test]
+    fn low_phase_comb_failures_stop_before_later_fused_edges() {
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(
+            Simulation::from_frontend(design())
+                .true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+                .build_native()
+                .unwrap(),
+        );
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn step_until_leaves_later_events_queued() {
+        let source =
+            "module Top(input bit clk, output bit q); always_ff @(posedge clk) q<=1; endmodule";
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("limit.sv"))], "Top")
+                .build()
+                .unwrap();
+        sim.schedule("clk", 5, 1).unwrap();
+        assert_eq!(sim.state.step_until(&mut sim.simulator, 4).unwrap(), None);
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.next_event_time(), Some(5));
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(
+            sim.state.step_until(&mut sim.simulator, 5).unwrap(),
+            Some(5)
+        );
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    fn check_past_limit<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(100).unwrap();
+        let gate = sim.signal("gate");
+        let seen = sim.signal("seen");
+        sim.set_wide(gate, 1u8.into());
+        sim.run_until(60).unwrap();
+        assert_eq!(sim.time(), 100);
+        assert_eq!(sim.get(seen), 0u8.into());
+        assert!(sim.has_waiting_processes());
+        sim.run_until(100).unwrap();
+        assert_eq!(sim.get(seen), 1u8.into());
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn past_run_limit_does_not_poll_waiters_or_rewind_time() {
+        let source = "module Top(input bit gate, output bit seen); initial begin wait(gate); seen=1; end endmodule";
+        let builder =
+            || Simulation::from_sv_sources(vec![(source, std::path::Path::new("past.sv"))], "Top");
+        check_past_limit(builder().build_interpreter().unwrap());
+        check_past_limit(builder().build_cranelift().unwrap());
+        check_past_limit(builder().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_past_limit(builder().build_native().unwrap());
+    }
+
+    fn coincident_design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let byte = ValueType::bits(8).unwrap();
+        let mut module = ModuleBuilder::new("Coincident").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let other = module.internal("other", bit).unwrap();
+        let count = module.output("count", byte).unwrap();
+        let sampled = module.output("sampled", byte).unwrap();
+        let seen = module.output("seen", bit).unwrap();
+        let count_expr = module.read(count).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        let two = module.constant(Constant::two_state(2u8, 8).unwrap());
+        let next = module.binary(BinaryOp::Add, count_expr, one, byte).unwrap();
+        let target = module.whole(count).unwrap();
+        module
+            .register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        let target = module.whole(sampled).unwrap();
+        module
+            .register(target, count_expr, other, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 4).unwrap();
+        let target = module.whole(seen).unwrap();
+        let value = module.read(clk).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: one,
+                },
+                Statement::Assign { target, value },
+            ])
+            .unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            }])
+            .unwrap();
+        module.finish()
+    }
+
+    fn check_coincident<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("other", 4, 1).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 1u8.into());
+        assert_eq!(sim.ticks(), 2);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.time(), 4);
+        assert_eq!(sim.ticks(), 2);
+    }
+
+    #[test]
+    fn clock_wait_resumes_before_coincident_generated_edge() {
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_wasm()
+                .unwrap(),
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_coincident(
+            Simulation::from_frontend(coincident_design())
+                .build_native()
+                .unwrap(),
+        );
+    }
+}
+
 #[cfg(all(test, feature = "systemverilog"))]
 mod ff_counter_regressions {
     use super::*;
@@ -1578,6 +2123,568 @@ mod ff_counter_regressions {
     }
 }
 
+#[cfg(test)]
+mod clock_failure_progress_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+
+    fn design(on_rising: bool) -> crate::frontend_sdk::FrontendArtifact {
+        module_design(on_rising).0.finish()
+    }
+
+    fn module_design(on_rising: bool) -> (ModuleBuilder, crate::frontend_sdk::SignalId) {
+        module_design_with_failure(on_rising, true)
+    }
+
+    fn module_design_with_failure(
+        on_rising: bool,
+        after_first_rise: bool,
+    ) -> (ModuleBuilder, crate::frontend_sdk::SignalId) {
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(32).unwrap();
+        let mut m = ModuleBuilder::new("Progress").unwrap();
+        let other = m.internal("other", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let bad = m.input("bad", bit).unwrap();
+        let count = m.output("count", word).unwrap();
+        let falls = m.output("falls", word).unwrap();
+        let fallclk = m.internal("fallclk", bit).unwrap();
+        let clk_expr = m.read(clk).unwrap();
+        let low = m.unary(UnaryOp::BitNot, clk_expr, bit).unwrap();
+        let count_expr = m.read(count).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 32).unwrap());
+        let running = m.binary(BinaryOp::NotEqual, count_expr, zero, bit).unwrap();
+        let fall_phase = m.binary(BinaryOp::And, low, running, bit).unwrap();
+        let target = m.whole(fallclk).unwrap();
+        m.assign(target, fall_phase).unwrap();
+        for (signal, clock) in [(count, clk), (falls, fallclk)] {
+            let value = m.read(signal).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 32).unwrap());
+            let next = m.binary(BinaryOp::Add, value, one, word).unwrap();
+            let target = m.whole(signal).unwrap();
+            m.register(target, next, clock, Edge::Posedge, None, None)
+                .unwrap();
+        }
+        let v = m.output("v", bit).unwrap();
+        let phase = m.read(clk).unwrap();
+        let phase = if on_rising {
+            phase
+        } else {
+            m.unary(UnaryOp::BitNot, phase, bit).unwrap()
+        };
+        let bad = m.read(bad).unwrap();
+        let active = m.binary(BinaryOp::And, phase, bad, bit).unwrap();
+        let count = m.read(count).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 32).unwrap());
+        let nonzero = m.binary(BinaryOp::NotEqual, count, zero, bit).unwrap();
+        let active = if after_first_rise {
+            m.binary(BinaryOp::And, active, nonzero, bit).unwrap()
+        } else {
+            active
+        };
+        let previous = m.read(v).unwrap();
+        let toggled = m.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 1).unwrap());
+        let next = m.mux(active, toggled, zero).unwrap();
+        let target = m.whole(v).unwrap();
+        m.assign(target, next).unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        (m, other)
+    }
+
+    fn check<B: SimBackend>(mut sim: Simulation<B>, on_rising: bool) {
+        sim.set_wide(sim.signal("bad"), 1u8.into());
+        let time = if on_rising { 0 } else { 2 };
+        assert!(sim.run_until(time).is_err());
+        assert_eq!(sim.time(), time);
+        assert_eq!(sim.ticks(), 1);
+        let count = sim.signal("count");
+        let falls = sim.signal("falls");
+        assert_eq!(sim.simulator.backend.get_as::<u32>(count), 1);
+        assert_eq!(sim.simulator.backend.get_as::<u32>(falls), 0);
+        assert_eq!(sim.next_event_time(), Some(2));
+        sim.set_wide(sim.signal("bad"), 0u8.into());
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(falls), 1u32.into());
+        assert_eq!(sim.get(count), 1u32.into());
+        assert_eq!(sim.ticks(), 1);
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(count), 2u32.into());
+        assert_eq!(sim.ticks(), 2);
+    }
+
+    #[test]
+    fn generated_clock_failures_retain_committed_and_pending_phases() {
+        for on_rising in [true, false] {
+            let builder = || {
+                Simulation::from_frontend(design(on_rising)).true_loop(
+                    (Vec::new(), vec!["v".into()]),
+                    (Vec::new(), vec!["v".into()]),
+                    8,
+                )
+            };
+            check(builder().build_interpreter().unwrap(), on_rising);
+            check(builder().build_cranelift().unwrap(), on_rising);
+            check(builder().build_wasm().unwrap(), on_rising);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(builder().build_native().unwrap(), on_rising);
+        }
+    }
+
+    #[test]
+    fn escaped_memory_preserves_unpublished_generated_phase_retries() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, on_rising: bool) {
+            let clock = sim.signal("clk");
+            let (pointer, length) = sim.memory_as_mut_ptr();
+            assert!(clock.offset < length);
+            if !on_rising {
+                sim.run_until(0).unwrap();
+            }
+            sim.set_wide(sim.signal("bad"), 1u8.into());
+            let time = if on_rising { 0 } else { 2 };
+            let error = sim.run_until(time).unwrap_err().to_string();
+            assert!(!error.contains("direct host write"), "{error}");
+            assert_eq!(sim.ticks(), u64::from(!on_rising));
+            // Merely obtaining the pointer does not invalidate a retained
+            // scheduler drive, even before that drive is published.
+            let checkpoint = sim.checkpoint().unwrap();
+            for step in [true, false] {
+                sim.restore(&checkpoint).unwrap();
+                let parts = sim.state.export_schedule(&sim.simulator.backend);
+                sim.state.import_schedule(parts);
+                let error = sim.run_until(time).unwrap_err().to_string();
+                assert!(!error.contains("direct host write"), "{error}");
+                sim.set_wide(sim.signal("bad"), 0u8.into());
+                if step {
+                    assert_eq!(sim.step_until(time).unwrap(), Some(time));
+                } else {
+                    sim.run_until(time).unwrap();
+                }
+                sim.run_until(2).unwrap();
+                assert_eq!(
+                    sim.get(sim.signal("count")),
+                    1u32.into(),
+                    "rising={on_rising}, step={step}"
+                );
+                assert_eq!(sim.get(sim.signal("falls")), 1u32.into());
+                assert_eq!(sim.ticks(), 1);
+                sim.run_until(4).unwrap();
+                assert_eq!(sim.get(sim.signal("count")), 2u32.into());
+                assert_eq!(sim.ticks(), 2);
+            }
+            sim.restore(&checkpoint).unwrap();
+            // A real pointer write back to the OLD sampling baseline must
+            // still be rejected while the generated drive is pending.
+            unsafe {
+                pointer.add(clock.offset).write(u8::from(!on_rising));
+            }
+            assert!(matches!(
+                sim.checkpoint(),
+                Err(CheckpointError::UntrackedHostClockWrite)
+            ));
+            let error = sim.step_until(time).unwrap_err().to_string();
+            assert!(error.contains("direct host write"), "{error}");
+            sim.restore(&checkpoint).unwrap();
+            sim.set_wide(sim.signal("bad"), 0u8.into());
+            sim.run_until(4).unwrap();
+            assert_eq!(sim.ticks(), 2);
+        }
+        for on_rising in [true, false] {
+            let build = || {
+                Simulator::from_frontend(module_design_with_failure(on_rising, false).0.finish())
+                    .true_loop(
+                        (Vec::new(), vec!["v".into()]),
+                        (Vec::new(), vec!["v".into()]),
+                        8,
+                    )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                on_rising,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                on_rising,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), on_rising);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), on_rising);
+        }
+    }
+
+    #[test]
+    fn custom_executors_keep_per_edge_hooks_without_fusion_opt_in() {
+        struct Host<B: SimBackend> {
+            sim: Simulator<B>,
+            staged: Vec<u64>,
+            fired: Vec<u64>,
+        }
+        impl<B: SimBackend> SimulationExecutor for Host<B> {
+            type Backend = B;
+            fn backend(&self) -> &B {
+                &self.sim.backend
+            }
+            fn backend_mut(&mut self) -> &mut B {
+                &mut self.sim.backend
+            }
+            fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_comb(&mut self.sim)
+            }
+            fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
+            }
+            fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_only_ff_at(&mut self.sim, event)
+            }
+            fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::apply_ff_at(&mut self.sim, event)
+            }
+            fn stage_external_event(
+                &mut self,
+                _event: B::Event,
+                time: u64,
+            ) -> Result<(), RuntimeErrorCode> {
+                self.staged.push(time);
+                Ok(())
+            }
+            fn fire_external_event(
+                &mut self,
+                _event: B::Event,
+                time: u64,
+            ) -> Result<(), RuntimeErrorCode> {
+                self.fired.push(time);
+                Ok(())
+            }
+            // Intentionally rely on the default capability and tick_many.
+        }
+        fn check<B: SimBackend>(sim: Simulator<B>) {
+            let mut state = simulation_state(&sim);
+            let mut host = Host {
+                sim,
+                staged: Vec::new(),
+                fired: Vec::new(),
+            };
+            while state.next_event_time().is_some_and(|time| time <= 4) {
+                state.step_until(&mut host, 4).unwrap();
+            }
+            assert_eq!(state.ticks(), 3);
+            assert_eq!(host.staged, vec![0, 2, 4]);
+            assert_eq!(host.fired, vec![0, 2, 4]);
+            assert_eq!(host.sim.backend.get_as::<u8>(host.sim.signal("q")), 3);
+        }
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", ValueType::bits(1).unwrap()).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let q = m.output("q", word).unwrap();
+        let current = m.read(q).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = m.binary(BinaryOp::Add, current, one, word).unwrap();
+        m.register(m.whole(q).unwrap(), next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 2).unwrap();
+        let count = m.constant(Constant::two_state(3u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        let design = m.finish();
+        let build = || Simulator::from_frontend(design.clone());
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+
+    struct FailingExecutor<B: SimBackend> {
+        sim: Simulator<B>,
+        fail: Option<usize>,
+        in_apply: bool,
+    }
+    impl<B: SimBackend> SimulationExecutor for FailingExecutor<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if !self.in_apply && self.fail == Some(event.id()) {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: "injected FF failure".into(),
+                    signals: Vec::new(),
+                });
+            }
+            SimulationExecutor::eval_only_ff_at(&mut self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if self.in_apply && self.fail == Some(event.id()) {
+                return Err(RuntimeErrorCode::Runtime {
+                    message: "injected publication failure".into(),
+                    signals: Vec::new(),
+                });
+            }
+            SimulationExecutor::apply_ff_at(&mut self.sim, event)
+        }
+        fn fused_ticks_allowed(&self) -> bool {
+            false
+        }
+    }
+
+    fn coincident_design() -> crate::frontend_sdk::FrontendArtifact {
+        let (mut m, other) = module_design(false);
+        let word = ValueType::bits(32).unwrap();
+        let count = m.output("other_count", word).unwrap();
+        let current = m.read(count).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 32).unwrap());
+        let next = m.binary(BinaryOp::Add, current, one, word).unwrap();
+        let target = m.whole(count).unwrap();
+        m.register(target, next, other, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(other, 2).unwrap();
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: other,
+            count: two,
+        }])
+        .unwrap();
+        m.finish()
+    }
+
+    fn check_coincident_failure<B: SimBackend>(sim: Simulator<B>, in_apply: bool) {
+        let mut state = simulation_state(&sim);
+        let mut executor = FailingExecutor {
+            sim,
+            fail: None,
+            in_apply,
+        };
+        assert_eq!(state.step_until(&mut executor, 0).unwrap(), Some(0));
+        let initial_ticks = state.ticks();
+        assert_eq!(state.step_until(&mut executor, 1).unwrap(), Some(1));
+        let failed = executor
+            .sim
+            .event(if in_apply { "fallclk" } else { "other" });
+        executor.fail = Some(failed.id());
+        assert!(state.step_until(&mut executor, 2).is_err());
+        assert_eq!(state.ticks(), initial_ticks + u64::from(in_apply));
+        let falls = executor.sim.signal("falls");
+        assert_eq!(executor.backend().get_as::<u32>(falls), 0);
+        assert_eq!(state.next_event_time(), Some(2));
+        assert!(
+            state
+                .escaped_host_clock_writes(executor.backend())
+                .is_empty()
+        );
+        executor.fail = None;
+        assert_eq!(state.step_until(&mut executor, 2).unwrap(), Some(2));
+        assert_eq!(executor.backend().get_as::<u32>(falls), 1);
+        assert_eq!(state.ticks(), initial_ticks + 1);
+        assert_eq!(
+            executor
+                .backend()
+                .get_as::<u32>(executor.sim.signal("other_count")),
+            2
+        );
+    }
+
+    #[test]
+    fn coincident_ff_failures_do_not_discard_unpublished_falling_domains() {
+        for in_apply in [false, true] {
+            let builder = || {
+                Simulator::from_frontend(coincident_design())
+                    .emit_triggers()
+                    .true_loop(
+                        (Vec::new(), vec!["v".into()]),
+                        (Vec::new(), vec!["v".into()]),
+                        8,
+                    )
+            };
+            check_coincident_failure(builder().build_interpreter().unwrap(), in_apply);
+            check_coincident_failure(builder().build_cranelift().unwrap(), in_apply);
+            check_coincident_failure(builder().build_wasm().unwrap(), in_apply);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check_coincident_failure(builder().build_native().unwrap(), in_apply);
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_provenance_checkpoint_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", ValueType::bits(1).unwrap()).unwrap();
+        let q = m.output("q", ValueType::bits(1).unwrap()).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let value = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(q).unwrap();
+        m.register(target, value, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        m.process(vec![
+            Statement::Delay { amount: one },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    #[test]
+    fn failed_clock_activations_remain_errors_on_retry() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, scheduled: bool) {
+            if scheduled {
+                sim.schedule("clk", 0, 1).unwrap();
+            } else {
+                sim.add_clock("clk", 4, 0);
+            }
+            assert_eq!(sim.step().unwrap(), Some(0));
+            let expected = if scheduled {
+                "already driven by schedule"
+            } else {
+                "already driven by add_clock"
+            };
+            let error = sim.run_until(2).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            let time = sim.time();
+            for _ in 0..2 {
+                let error = sim.step().unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                let error = sim.run_until(20).unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                assert_eq!(sim.time(), time);
+                assert_eq!(sim.ticks(), 0);
+            }
+            let saved = sim.checkpoint().unwrap();
+            sim.restore(&saved).unwrap();
+            let error = sim.step().unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        for scheduled in [false, true] {
+            check(
+                Simulation::from_frontend(design())
+                    .build_interpreter()
+                    .unwrap(),
+                scheduled,
+            );
+            check(
+                Simulation::from_frontend(design())
+                    .build_cranelift()
+                    .unwrap(),
+                scheduled,
+            );
+            check(
+                Simulation::from_frontend(design()).build_wasm().unwrap(),
+                scheduled,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::from_frontend(design()).build_native().unwrap(),
+                scheduled,
+            );
+        }
+    }
+    #[test]
+    fn earlier_scheduled_drives_conflict_with_delayed_clock_activation() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.schedule("clk", 0, 1).unwrap();
+            assert_eq!(sim.step().unwrap(), Some(0));
+            let error = sim.run_until(2).unwrap_err().to_string();
+            assert!(error.contains("already driven by schedule"), "{error}");
+            assert_eq!(sim.ticks(), 0);
+        }
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("clk", 0, 1).unwrap();
+        assert_eq!(sim.step().unwrap(), Some(0));
+        let checkpoint = sim.checkpoint().unwrap();
+        let error = sim.run_until(2).unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        sim.restore(&checkpoint).unwrap();
+        // Model a host waking the suspended process at the restored timestamp.
+        let mut parts = sim.state.export_schedule(&sim.simulator.backend);
+        parts.process_wakeups = vec![(0, 0)];
+        sim.state.import_schedule(parts);
+        let error = sim.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(sim.ticks(), 0);
+    }
+    fn check_transfer<B: SimBackend>(mut from: Simulation<B>, mut to: Simulation<B>) {
+        from.schedule("clk", 0, 1).unwrap();
+        from.step().unwrap();
+        let design = from.simulator.checkpoint().unwrap();
+        let mut parts = from.state.export_schedule(&from.simulator.backend);
+        parts.process_wakeups = vec![(0, 0)];
+        to.simulator.restore(&design).unwrap();
+        to.state.import_schedule(parts);
+        let error = to.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(to.ticks(), 0);
+    }
+    #[test]
+    fn exported_schedule_retains_consumed_clock_drives() {
+        let build = || {
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap()
+        };
+        check_transfer(build(), build());
+        let build = || {
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap()
+        };
+        check_transfer(build(), build());
+        let build = || Simulation::from_frontend(design()).build_wasm().unwrap();
+        check_transfer(build(), build());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let build = || Simulation::from_frontend(design()).build_native().unwrap();
+            check_transfer(build(), build());
+        }
+    }
+    #[test]
+    fn restored_clock_drive_provenance_rejects_a_same_time_generator() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
 #[cfg(all(test, feature = "systemverilog"))]
 mod active_ff_metadata_tests {
     #[test]
@@ -1660,6 +2767,135 @@ mod rtl_finish_backend_tests {
             check(Simulation::new(builder().build_wasm().unwrap()));
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(builder().build_native().unwrap()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod finish_clock_batch_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    #[test]
+    fn coincident_finish_suppresses_an_overflowing_next_edge() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(u64::MAX - 1).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        let bit = ValueType::bits(1).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let dst = m.whole(q).unwrap();
+        m.register(dst, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 2).unwrap();
+        let start = m.constant(Constant::two_state(u64::MAX - 3, 64).unwrap());
+        let end = m.constant(Constant::two_state(u64::MAX - 1, 64).unwrap());
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        m.process(vec![
+            Statement::Delay { amount: start },
+            Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            },
+        ])
+        .unwrap();
+        m.process(vec![Statement::Delay { amount: end }, Statement::Finish])
+            .unwrap();
+        let design = m.finish();
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_interpreter()
+                .unwrap(),
+        ));
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_cranelift()
+                .unwrap(),
+        ));
+        check(Simulation::new(
+            Simulator::from_frontend(design.clone())
+                .build_wasm()
+                .unwrap(),
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(
+            Simulator::from_frontend(design).build_native().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn finish_suppresses_coincident_generated_edges() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, scheduled: bool) {
+            if scheduled {
+                sim.schedule("other", 4, 1).unwrap();
+            }
+            sim.run_until(4).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+            assert_eq!(sim.ticks(), 2);
+        }
+        for scheduled in [false, true] {
+            let bit = ValueType::bits(1).unwrap();
+            let word = ValueType::bits(8).unwrap();
+            let mut m = ModuleBuilder::new("Top").unwrap();
+            let clk = m.internal("clk", bit).unwrap();
+            let other = m.internal("other", bit).unwrap();
+            let q = m.output("count", word).unwrap();
+            let r = m.output("other_q", bit).unwrap();
+            let v = m.read(q).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+            let next = m.binary(BinaryOp::Add, v, one, word).unwrap();
+            let dst = m.whole(q).unwrap();
+            m.register(dst, next, clk, Edge::Posedge, None, None)
+                .unwrap();
+            let dst = m.whole(r).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+            m.register(dst, one, other, Edge::Posedge, None, None)
+                .unwrap();
+            m.clock_period(clk, 2).unwrap();
+            let ten = m.constant(Constant::two_state(10u8, 64).unwrap());
+            let four = m.constant(Constant::two_state(4u8, 64).unwrap());
+            m.process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            }])
+            .unwrap();
+            m.process(vec![Statement::Delay { amount: four }, Statement::Finish])
+                .unwrap();
+            let design = m.finish();
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_interpreter()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_cranelift()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            check(
+                Simulation::new(
+                    Simulator::from_frontend(design.clone())
+                        .build_wasm()
+                        .unwrap(),
+                ),
+                scheduled,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(Simulator::from_frontend(design).build_native().unwrap()),
+                scheduled,
+            );
         }
     }
 }
@@ -1829,6 +3065,74 @@ mod direct_finish_tests {
     }
 }
 
+#[cfg(test)]
+mod pending_generated_clock_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let a = m.internal("a", bit).unwrap();
+        let b = m.internal("b", bit).unwrap();
+        let qa = m.output("qa", bit).unwrap();
+        let qb = m.output("qb", bit).unwrap();
+        let old = m.read(qb).unwrap();
+        let next = m.unary(UnaryOp::BitNot, old, bit).unwrap();
+        let qa_target = m.whole(qa).unwrap();
+        let qb_target = m.whole(qb).unwrap();
+        m.register(qa_target, old, a, Edge::Posedge, None, None)
+            .unwrap();
+        m.register(qb_target, next, b, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(a, 4).unwrap();
+        m.clock_period(b, 4).unwrap();
+        let two = m.constant(Constant::two_state(2u8, 64).unwrap());
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let four = m.constant(Constant::two_state(4u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: b,
+            count: two,
+        }])
+        .unwrap();
+        m.process(vec![
+            Statement::Delay { amount: four },
+            Statement::ClockCycles {
+                clock: a,
+                count: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(3).unwrap();
+        assert_eq!(sim.get(sim.signal("qb")), 1u8.into());
+        // A failed round can leave this generated drive high without publishing its FF batch.
+        sim.simulator.backend.set(sim.signal("b"), 1u8);
+        sim.step().unwrap();
+        assert_eq!(sim.get(sim.signal("qa")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("qb")), 0u8.into());
+        // B rose once at time zero; both A and B rise at time four.
+        assert_eq!(sim.ticks(), 3);
+    }
+    #[test]
+    fn pending_rises_share_pre_edge_state_with_new_clocks() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
+
 #[cfg(all(test, feature = "systemverilog"))]
 mod current_time_settle_tests {
     use super::*;
@@ -1965,6 +3269,302 @@ mod scheduled_pulse_tests {
                         .unwrap(),
                 ));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_clock_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", word).unwrap();
+        module
+            .set_initial(q, Constant::two_state(0u8, 8).unwrap())
+            .unwrap();
+        let value = module.read(q).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = module.binary(BinaryOp::Add, value, one, word).unwrap();
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        let ten = module.constant(Constant::two_state(10u8, 64).unwrap());
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            }])
+            .unwrap();
+        module.finish()
+    }
+    fn settle<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), Some(1));
+    }
+    fn host<B: SimBackend>(mut sim: Simulation<B>, mode: u8) {
+        let clk = sim.signal("clk");
+        let before = sim.checkpoint().unwrap();
+        match mode {
+            0 => sim.set_wide(clk, 1u8.into()),
+            1 => sim.set_four_state(clk, 1u8.into(), 0u8.into()),
+            2 => sim
+                .modify(|io| {
+                    io.set(clk, 1u8);
+                    io.set(clk, 0u8);
+                })
+                .unwrap(),
+            _ => {
+                sim.set_wide(clk, 1u8.into());
+                sim.get(sim.signal("q"));
+            }
+        }
+        let error = sim.run_until(0).unwrap_err().to_string();
+        assert!(error.contains("direct host write"), "{error}");
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.ticks(), 0);
+        assert!(
+            sim.run_until(0)
+                .unwrap_err()
+                .to_string()
+                .contains("direct host write")
+        );
+        sim.restore(&before).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn settling_a_process_clock_keeps_current_time() {
+        let build = || Simulator::from_frontend(design());
+        settle(Simulation::new(build().build_interpreter().unwrap()));
+        settle(Simulation::new(build().build_cranelift().unwrap()));
+        settle(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        settle(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn checkpoint_rejects_escaped_generated_clock_writes() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let clk = sim.signal("clk");
+            let (ptr, len) = sim.memory_as_mut_ptr();
+            assert!(clk.offset < len);
+            sim.run_until(1).unwrap();
+            sim.checkpoint().unwrap();
+            unsafe {
+                ptr.add(clk.offset).write(1);
+            }
+            assert!(sim.checkpoint().is_err());
+            unsafe {
+                ptr.add(clk.offset).write(0);
+            }
+            let checkpoint = sim.checkpoint().unwrap();
+            sim.restore(&checkpoint).unwrap();
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.ticks(), 2);
+        }
+        let build = || Simulator::from_frontend(design());
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn retained_memory_cannot_inject_generated_clock_edges() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, explicit: bool) {
+            let clk = sim.signal("clk");
+            let (ptr, len) = sim.memory_as_mut_ptr();
+            assert!(clk.offset < len);
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.ticks(), 1);
+            unsafe {
+                ptr.add(clk.offset).write(1);
+            }
+            let result = if explicit {
+                sim.eval_comb()
+            } else {
+                sim.run_until(2)
+            };
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("direct host write")
+            );
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.time(), 1);
+            assert_eq!(sim.simulator.backend.get(sim.signal("q")), 1u8.into());
+        }
+        for explicit in [false, true] {
+            let build = || Simulator::from_frontend(design());
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                explicit,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                explicit,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), explicit);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), explicit);
+        }
+    }
+    #[test]
+    fn direct_host_clock_writes_are_rejected_before_activation() {
+        let build = || Simulator::from_frontend(design());
+        for mode in 0..4 {
+            host(Simulation::new(build().build_interpreter().unwrap()), mode);
+            host(Simulation::new(build().build_cranelift().unwrap()), mode);
+            host(Simulation::new(build().build_wasm().unwrap()), mode);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            host(Simulation::new(build().build_native().unwrap()), mode);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod failed_ff_progress_tests {
+    use super::*;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let event = sim.event("clk");
+        let (completed, result) = SimulationExecutor::tick_many(&mut sim, event, 10);
+        assert_eq!(completed, 0, "{}", std::any::type_name::<B>());
+        assert!(result.is_err());
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            0u8.into(),
+            "{}",
+            std::any::type_name::<B>()
+        );
+    }
+    #[test]
+    fn failed_ff_evaluation_does_not_complete_a_tick() {
+        let source = "module Top(input bit clk,ok,output bit q);always_ff @(posedge clk)begin assert(ok)else $fatal(1,\"failed FF\");q<=1;end endmodule";
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("failed-ff.sv"))], "Top")
+        };
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        check(build().build_tiered().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            check(build().build_native().unwrap());
+            check(
+                build()
+                    .threads(4)
+                    .parallel_partition(crate::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod generated_phase_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design(unknown: Option<u8>, edge: Edge) -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("ClockPhases").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let clk = m.internal("clk", ValueType::logic(1).unwrap()).unwrap();
+        m.set_initial(
+            clk,
+            match unknown {
+                Some(value) => Constant::four_state(value, 1u8, 1).unwrap(),
+                None => Constant::two_state(0u8, 1).unwrap(),
+            },
+        )
+        .unwrap();
+        let q = m.output("q", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(q).unwrap();
+        m.register(target, one, clk, edge, None, None).unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let three = m.constant(Constant::two_state(3u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn fall<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.state.settle_at(&mut sim.simulator, 2).unwrap(), Some(2));
+        assert_eq!(sim.time(), 2);
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), Some(4));
+    }
+    fn unknown<B: SimBackend>(mut sim: Simulation<B>, payload: u8, edge: Edge) {
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (payload.into(), 1u8.into())
+        );
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get(sim.signal("q")),
+            u8::from(edge == Edge::Posedge).into()
+        );
+        assert_eq!(
+            sim.get_four_state(sim.signal("clk")),
+            (1u8.into(), 0u8.into())
+        );
+        assert_eq!(sim.ticks(), 1);
+        sim.run_until(2).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    #[test]
+    fn settle_at_drains_a_generated_fall_at_the_target() {
+        let build = || Simulator::from_frontend(design(None, Edge::Negedge));
+        fall(Simulation::new(build().build_interpreter().unwrap()));
+        fall(Simulation::new(build().build_cranelift().unwrap()));
+        fall(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        fall(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
+    fn unknown_initial_clock_payloads_have_the_same_edge_sequence() {
+        for (payload, edge) in [
+            (0, Edge::Posedge),
+            (1, Edge::Posedge),
+            (0, Edge::Negedge),
+            (1, Edge::Negedge),
+        ] {
+            let build = || Simulator::from_frontend(design(Some(payload), edge)).four_state(true);
+            unknown(
+                Simulation::new(build().build_interpreter().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_cranelift().unwrap()),
+                payload,
+                edge,
+            );
+            unknown(
+                Simulation::new(build().build_wasm().unwrap()),
+                payload,
+                edge,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            unknown(
+                Simulation::new(build().build_native().unwrap()),
+                payload,
+                edge,
+            );
         }
     }
 }
@@ -2117,6 +3717,80 @@ mod staged_edge_review_tests {
             Simulation::new(build().build_native().unwrap()),
             Simulation::new(build().build_native().unwrap()),
         );
+    }
+}
+
+#[cfg(test)]
+mod normalizing_fall_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{
+        BinaryOp, Constant, Edge, ModuleBuilder, Statement, UnaryOp, ValueType,
+    };
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        m.set_initial(clk, Constant::two_state(1u8, 1).unwrap())
+            .unwrap();
+        let enable = m.input("enable", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let v = m.output("v", bit).unwrap();
+        m.set_initial(q, Constant::two_state(1u8, 1).unwrap())
+            .unwrap();
+        let clock_value = m.read(clk).unwrap();
+        let zero = m.constant(Constant::two_state(0u8, 1).unwrap());
+        m.register(
+            m.whole(q).unwrap(),
+            clock_value,
+            clk,
+            Edge::Negedge,
+            None,
+            None,
+        )
+        .unwrap();
+        m.clock_period(clk, 4).unwrap();
+
+        let low = m.unary(UnaryOp::BitNot, clock_value, bit).unwrap();
+        let enabled = m.read(enable).unwrap();
+        let active = m.binary(BinaryOp::And, low, enabled, bit).unwrap();
+        let previous = m.read(v).unwrap();
+        let toggled = m.unary(UnaryOp::BitNot, previous, bit).unwrap();
+        let next = m.mux(active, toggled, zero).unwrap();
+        m.assign(m.whole(v).unwrap(), next).unwrap();
+        let count = m.constant(Constant::two_state(1u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.memory_as_mut_ptr();
+        assert_eq!(sim.get(sim.signal("clk")), 1u8.into());
+        sim.set_wide(sim.signal("enable"), 1u8.into());
+        assert!(sim.run_until(0).is_err());
+        assert_eq!(sim.ticks(), 0);
+        sim.checkpoint().unwrap();
+        let parts = sim.state.export_schedule(&sim.simulator.backend);
+        assert_eq!(parts.process_clocks[0].falling_edge, Some(0));
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        sim.set_wide(sim.signal("enable"), 0u8.into());
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn failed_initial_falls_publish_before_the_first_rise_on_retry() {
+        let build = || {
+            Simulator::from_frontend(design()).true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
 
@@ -2550,6 +4224,118 @@ mod queued_derived_ff_review_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod coincident_host_edge_limit_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        design_with_initial_host(false)
+    }
+    fn design_with_initial_host(high: bool) -> crate::frontend_sdk::FrontendArtifact {
+        let bit = ValueType::bits(1).unwrap();
+        let byte = ValueType::bits(8).unwrap();
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let host = m.input("host", bit).unwrap();
+        if high {
+            m.set_initial(host, Constant::two_state(1u8, 1).unwrap())
+                .unwrap();
+        }
+        let clk = m.internal("clk", bit).unwrap();
+        let seen = m.output("seen", bit).unwrap();
+        let q = m.output("q", byte).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(seen).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let value = m.read(q).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = m.binary(BinaryOp::Add, value, one, byte).unwrap();
+        let target = m.whole(q).unwrap();
+        m.register(target, next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(8u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>, method: &str, limit: u64) {
+        sim.set_wide(sim.signal("host"), 1u8.into());
+        if method == "step_until" {
+            let reached = sim.step_until(limit).unwrap().unwrap();
+            assert_eq!(reached, sim.time());
+            assert!(reached <= limit);
+        } else {
+            sim.run_until(limit).unwrap();
+        }
+        if method == "run_until" {
+            assert_eq!(sim.time(), limit);
+        }
+        let ticks = 1 + sim.time() / 4;
+        assert_eq!(sim.ticks(), ticks);
+        assert_eq!(sim.get(sim.signal("q")), (ticks as u8).into());
+        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.time(), 4);
+        assert_eq!(sim.ticks(), 2);
+        assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+        sim.run_until(28).unwrap();
+        assert_eq!(sim.ticks(), 8);
+        assert_eq!(sim.get(sim.signal("q")), 8u8.into());
+    }
+    #[test]
+    fn coincident_host_edges_report_the_time_reached_by_step() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.set_wide(sim.signal("host"), 0u8.into());
+            let reached = sim.step().unwrap().unwrap();
+            assert_eq!(reached, sim.time());
+            assert_eq!(sim.get(sim.signal("q")), (sim.ticks() as u8).into());
+            sim.run_until(28).unwrap();
+            assert_eq!(sim.ticks(), 8);
+            assert_eq!(sim.get(sim.signal("q")), 8u8.into());
+        }
+        let build = || Simulator::from_frontend(design_with_initial_host(true));
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
+    #[test]
+    fn coincident_host_edges_do_not_fuse_past_public_time_limits() {
+        for (method, limit) in [
+            ("step_until", 0),
+            ("step_until", 4),
+            ("run_until", 0),
+            ("run_until", 4),
+        ] {
+            let build = || Simulator::from_frontend(design());
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                method,
+                limit,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                method,
+                limit,
+            );
+            check(
+                Simulation::new(build().build_wasm().unwrap()),
+                method,
+                limit,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::new(build().build_native().unwrap()),
+                method,
+                limit,
+            );
+        }
     }
 }
 
@@ -3567,6 +5353,60 @@ mod nba_waiter_sampling_review {
     }
 }
 
+#[cfg(test)]
+mod host_clock_activation_review {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let host = m.input("host", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let source = m.output("source", bit).unwrap();
+        let sampled = m.output("sampled", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(source).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let old = m.read(source).unwrap();
+        let target = m.whole(sampled).unwrap();
+        m.register(target, old, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let host = sim.signal("host");
+        sim.modify(|io| io.set(host, 1u8)).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("source")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn captured_host_edges_share_pre_edge_state_with_first_clock_wait() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
+    }
+}
+
 #[cfg(all(test, feature = "systemverilog"))]
 mod mixed_other_domain_host_review {
     use super::*;
@@ -3771,6 +5611,86 @@ mod cross_depth_write_review {
                 second,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_clock_activation_review {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let host = m.internal("host", bit).unwrap();
+        let word = ValueType::bits(32).unwrap();
+        let rises = m.internal("rises", word).unwrap();
+        let falls = m.internal("falls", word).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let source = m.output("source", bit).unwrap();
+        let sampled = m.output("sampled", bit).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = m.whole(source).unwrap();
+        m.register(target, one, host, Edge::Posedge, None, None)
+            .unwrap();
+        let old = m.read(source).unwrap();
+        let target = m.whole(sampled).unwrap();
+        m.register(target, old, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let high = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let low = m.constant(Constant::two_state(0u8, 1).unwrap());
+        let target = m.whole(host).unwrap();
+        let edge = m.constant(Constant::two_state(1u8, 32).unwrap());
+        m.process(vec![
+            Statement::Assign {
+                target,
+                value: high,
+            },
+            Statement::Assign { target, value: low },
+            Statement::Assign {
+                target: m.whole(rises).unwrap(),
+                value: edge,
+            },
+            Statement::Assign {
+                target: m.whole(falls).unwrap(),
+                value: edge,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        let signal = sim.signal("host");
+        let rises = sim.signal("rises");
+        let falls = sim.signal("falls");
+        sim.state = sim
+            .state
+            .with_process_event_counters(vec![(signal, rises, falls)]);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("source")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("sampled")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    #[test]
+    fn transient_process_edges_share_pre_edge_state_with_first_clock_wait() {
+        check(
+            Simulation::from_frontend(design())
+                .build_interpreter()
+                .unwrap(),
+        );
+        check(
+            Simulation::from_frontend(design())
+                .build_cranelift()
+                .unwrap(),
+        );
+        check(Simulation::from_frontend(design()).build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::from_frontend(design()).build_native().unwrap());
     }
 }
 
@@ -4967,6 +6887,357 @@ mod round57_sdk_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod clean_waiter_settle_review {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    use celox_frontend_core::process::ProcessKernelBuilder;
+    use celox_sir::{SIRInstruction, SIROffset, SIRValue};
+
+    fn program() -> crate::ir::LaidOutProgram {
+        program_with_sampling_waiter(false)
+    }
+    fn program_with_sampling_waiter(extra: bool) -> crate::ir::LaidOutProgram {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let go = m.input("go", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", word).unwrap();
+        let done = m.output("done", bit).unwrap();
+        let old = m.read(q).unwrap();
+        let input = m.read(go).unwrap();
+        let next = m.binary(BinaryOp::Add, old, input, word).unwrap();
+        m.register(m.whole(q).unwrap(), next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(4u8, 64).unwrap());
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        m.process(vec![
+            Statement::ClockCycles { clock: clk, count },
+            Statement::Assign {
+                target: m.whole(done).unwrap(),
+                value: one,
+            },
+        ])
+        .unwrap();
+        let noise = if extra {
+            let noise = m.input("noise", bit).unwrap();
+            let echo = m.output("noise_seen", bit).unwrap();
+            let value = m.read(noise).unwrap();
+            m.assign(m.whole(echo).unwrap(), value).unwrap();
+            let falls = m.output("falls", word).unwrap();
+            let old = m.read(falls).unwrap();
+            let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+            let next = m.binary(BinaryOp::Add, old, one, word).unwrap();
+            let fallclk = m.internal("fallclk", bit).unwrap();
+            let clk_value = m.read(clk).unwrap();
+            let go_value = m.read(go).unwrap();
+            let low = m
+                .unary(crate::frontend_sdk::UnaryOp::BitNot, clk_value, bit)
+                .unwrap();
+            let active_low = m.binary(BinaryOp::And, low, go_value, bit).unwrap();
+            m.assign(m.whole(fallclk).unwrap(), active_low).unwrap();
+            m.register(
+                m.whole(falls).unwrap(),
+                next,
+                fallclk,
+                Edge::Posedge,
+                None,
+                None,
+            )
+            .unwrap();
+            m.process(vec![Statement::Finish]).unwrap();
+            Some(noise)
+        } else {
+            None
+        };
+        let (mut program, _) = crate::compile_frontend_to_sir(
+            &m.finish(),
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let address = |id| {
+            *program
+                .design
+                .state_objects
+                .keys()
+                .find(|a| {
+                    program
+                        .design
+                        .variable(a)
+                        .is_some_and(|v| v.source_id == crate::ir::SourceVarId(id))
+                })
+                .unwrap()
+        };
+        let go = address(noise.unwrap_or(go).index());
+        let done = address(done.index());
+        let mut addresses = Vec::new();
+        let mut intern = |address| {
+            let index = match addresses.iter().position(|a| *a == address) {
+                Some(index) => index,
+                None => {
+                    addresses.push(address);
+                    addresses.len() - 1
+                }
+            };
+            crate::ir::SourceVarId(index as u32)
+        };
+        let index = usize::from(extra);
+        let slots = program.runtime_schema.processes[index]
+            .clone()
+            .map(&mut intern);
+        let go = intern(go);
+        let done = intern(done);
+        let stable = |var_id| celox_design::RegionedVarAddrBase {
+            region: celox_design::STABLE_REGION,
+            var_id,
+        };
+        // The SDK has clock waits but no level-wait statement. Build the
+        // combined kernel through the shared frontend process contract.
+        let mut kernel = ProcessKernelBuilder::new(slots);
+        kernel.begin_wait().unwrap();
+        let condition = kernel.builder().alloc_bit(1, false);
+        kernel.builder().emit(SIRInstruction::Load(
+            condition,
+            stable(go),
+            SIROffset::Static(0),
+            1,
+        ));
+        kernel.wake_if(condition);
+        if !extra {
+            let count = kernel.builder().alloc_bit(64, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
+            kernel.wait_clock(0, count).unwrap();
+            let one = kernel.builder().alloc_bit(1, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+            kernel.builder().emit(SIRInstruction::Store(
+                stable(done),
+                SIROffset::Static(0),
+                1,
+                one,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        kernel.finish();
+        program.sir.processes[index] = kernel.build().into_map_addr(&mut |addr| {
+            let address = addresses[addr.var_id.0 as usize];
+            crate::ir::RegionedAbsoluteAddr {
+                region: addr.region,
+                instance_id: address.instance_id,
+                var_id: address.var_id,
+            }
+        });
+        program.into_laid_out(false)
+    }
+    struct SamplingFailure<B: SimBackend> {
+        sim: Simulator<B>,
+        fail: bool,
+        low_samples: usize,
+    }
+    impl<B: SimBackend> SimulationExecutor for SamplingFailure<B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(&mut self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(&mut self.sim, e)
+        }
+        fn eval_only_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_only_ff_at(&mut self.sim, e)
+        }
+        fn apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::apply_ff_at(&mut self.sim, e)
+        }
+        fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+            let slots = &self.sim.program.runtime_schema.processes[index];
+            let mode = self
+                .sim
+                .backend
+                .get_as::<u64>(self.sim.backend.resolve_signal(&slots.delay));
+            let clk = self.sim.backend.get_as::<u8>(self.sim.signal("clk"));
+            if self.fail && index == 1 && mode == 1 && clk == 0 {
+                self.low_samples += 1;
+                // Skip sampling during scheduled-value application, then fail
+                // the post-settle sample before the falling-edge FF is run.
+                if self.low_samples == 2 {
+                    return Err(RuntimeErrorCode::Runtime {
+                        message: "injected wait sampling failure".into(),
+                        signals: Vec::new(),
+                    });
+                }
+            }
+            SimulationExecutor::run_process(&mut self.sim, index)
+        }
+    }
+    #[test]
+    fn round61_failed_wait_sampling_retains_unpublished_generated_fall() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            sim.apply_initial_values();
+            let go = sim.signal("go");
+            sim.set_wide(go, 1u8.into());
+            let mut state = simulation_state(&sim);
+            let mut executor = SamplingFailure {
+                sim,
+                fail: false,
+                low_samples: 0,
+            };
+            assert_eq!(state.step_until(&mut executor, 0).unwrap(), Some(0));
+            executor.fail = true;
+            let error = state.step_until(&mut executor, 2).unwrap_err().to_string();
+            assert!(error.contains("injected wait sampling failure"), "{error}");
+            assert_eq!(executor.low_samples, 2);
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("falls")),
+                0
+            );
+            let schedule = state.export_schedule(executor.backend());
+            assert_eq!(schedule.process_clocks[0].falling_edge, Some(2));
+            assert_eq!(state.next_event_time(), Some(2));
+            executor.fail = false;
+            assert_eq!(state.step_until(&mut executor, 2).unwrap(), Some(2));
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("falls")),
+                1
+            );
+        }
+        let program = program_with_sampling_waiter(true);
+        let options = crate::SimulatorOptions {
+            emit_triggers: true,
+            ..Default::default()
+        };
+        macro_rules! run {
+            ($backend:expr) => {
+                check(Simulator::with_backend_and_program(
+                    $backend.unwrap(),
+                    program.runtime().clone(),
+                    Vec::new(),
+                ));
+            };
+        }
+        run!(crate::backend::InterpBackend::new(&program, &options));
+        run!(crate::backend::JitBackend::new(&program, &options, None));
+        run!(crate::backend::wasm_runtime::WasmBackend::new(
+            &program, &options
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        run!(crate::backend::native::NativeBackend::new(
+            &program, &options
+        ));
+    }
+    #[test]
+    fn round61_zero_count_delta_errors_remain_retryable() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            for _ in 0..2 {
+                let error = sim.step().unwrap_err().to_string();
+                assert!(error.contains("delta limit"), "{error}");
+                assert_eq!(sim.next_event_time(), Some(0));
+                let saved = sim.checkpoint().unwrap();
+                sim.restore(&saved).unwrap();
+                let error = sim.run_until(0).unwrap_err().to_string();
+                assert!(error.contains("delta limit"), "{error}");
+                assert_eq!(sim.time(), 0);
+                assert_eq!(sim.ticks(), 0);
+            }
+        }
+        let build = || {
+            let mut m = ModuleBuilder::new("Top").unwrap();
+            let clk = m.input("clk", ValueType::bits(1).unwrap()).unwrap();
+            let q = m.output("q", ValueType::bits(8).unwrap()).unwrap();
+            let value = m.read(q).unwrap();
+            m.register(m.whole(q).unwrap(), value, clk, Edge::Posedge, None, None)
+                .unwrap();
+            m.clock_period(clk, 4).unwrap();
+            let zero = m.constant(Constant::two_state(0u8, 64).unwrap());
+            m.process(vec![Statement::Forever {
+                body: vec![Statement::ClockCycles {
+                    clock: clk,
+                    count: zero,
+                }],
+            }])
+            .unwrap();
+            Simulator::from_frontend(m.finish())
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    fn check<B: SimBackend>(mut simulator: Simulator<B>) {
+        simulator.apply_initial_values();
+        let mut sim = Simulation::new(simulator);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.next_event_time(), None);
+        let go = sim.signal("go");
+        let (pointer, length) = sim.memory_as_mut_ptr();
+        assert!(go.offset < length);
+        unsafe {
+            pointer.add(go.offset).write(1);
+        }
+        assert!(!sim.simulator.dirty);
+        assert!(sim.simulator.pending_host_writes.is_empty());
+        assert!(sim.simulator.backend.get_triggered_bits().is_empty());
+        assert!(!sim.state.has_unsettled_edges(&sim.simulator.backend));
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("done")), 0u8.into());
+        sim.run_until(16).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    }
+    #[test]
+    fn clean_raw_level_waiter_settle_keeps_current_time() {
+        let program = program();
+        let options = crate::SimulatorOptions {
+            emit_triggers: true,
+            ..Default::default()
+        };
+        macro_rules! run {
+            ($backend:expr) => {
+                check(Simulator::with_backend_and_program(
+                    $backend.unwrap(),
+                    program.runtime().clone(),
+                    Vec::new(),
+                ));
+            };
+        }
+        run!(crate::backend::InterpBackend::new(&program, &options));
+        run!(crate::backend::JitBackend::new(&program, &options, None));
+        run!(crate::backend::wasm_runtime::WasmBackend::new(
+            &program, &options
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        run!(crate::backend::native::NativeBackend::new(
+            &program, &options
+        ));
     }
 }
 

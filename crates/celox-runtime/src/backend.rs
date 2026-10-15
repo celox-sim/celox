@@ -53,7 +53,13 @@ pub trait SimBackend {
         if count == 0 {
             return (0, Ok(()));
         }
-        (1, self.eval_comb_apply_ff_at(event))
+        if let Err(error) = self.eval_comb() {
+            return (0, Err(error));
+        }
+        {
+            let result = self.eval_apply_ff_at(event);
+            (u64::from(result.is_ok()), result)
+        }
     }
 
     /// Evaluate FF domain without applying (for cascaded clocks).

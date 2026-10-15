@@ -622,3 +622,691 @@ fn zero_delay_pulse_triggers_registers() {
     assert_eq!(sim.get(clk), 1u8.into());
     assert_eq!(sim.next_event_time(), None);
 }
+
+/// A counter clocked by `clk`, which only processes drive: the runtime
+/// generates its edges while a process waits on it.
+fn clocked_by_process_waits(
+    period: u64,
+) -> (
+    ModuleBuilder,
+    celox::frontend_sdk::SignalId,
+    celox::frontend_sdk::SignalId,
+) {
+    let bit = ValueType::bits(1).unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let mut module = ModuleBuilder::new("ClockWaits").unwrap();
+    let clk = module.internal("clk", bit).unwrap();
+    let count = module.output("count", word).unwrap();
+    module
+        .set_initial(count, Constant::two_state(0u8, 32).unwrap())
+        .unwrap();
+    let count_expr = module.read(count).unwrap();
+    let one = constant(&mut module, 1, 32);
+    let next = module.binary(BinaryOp::Add, count_expr, one, word).unwrap();
+    let count_target = module.whole(count).unwrap();
+    module
+        .register(count_target, next, clk, Edge::Posedge, None, None)
+        .unwrap();
+    module.clock_period(clk, period).unwrap();
+    (module, clk, count)
+}
+
+#[test]
+fn clock_waits_count_rising_edges_and_resume_before_the_next() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    let word = ValueType::bits(32).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let ten = constant(&mut module, 10, 64);
+    let three = constant(&mut module, 3, 64);
+    let zero = constant(&mut module, 0, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let seen = sim.signal("seen");
+    // Edges at 0, 2, ..., 18; the process resumes at 20, before the edge there.
+    sim.run_until(19).unwrap();
+    assert_eq!(sim.get(count), 10u32.into());
+    assert_eq!(sim.get(seen), 0u32.into());
+    assert_eq!(sim.ticks(), 10);
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert!(!sim.is_finished());
+    // Three more edges at 20, 22 and 24; the process finishes at 26.
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 26);
+    assert_eq!(sim.get(count), 13u32.into());
+    assert_eq!(sim.ticks(), 13);
+}
+
+#[test]
+fn clock_waits_of_several_processes_share_fused_edges() {
+    let (mut module, clk, count) = clocked_by_process_waits(10);
+    let word = ValueType::bits(32).unwrap();
+    let early = module.output("early", word).unwrap();
+    let late = module.output("late", word).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let early_target = module.whole(early).unwrap();
+    let late_target = module.whole(late).unwrap();
+    let a_lot = constant(&mut module, 1_000_000, 64);
+    let fewer = constant(&mut module, 300_000, 64);
+    let some = constant(&mut module, 5, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: a_lot,
+            },
+            Statement::Assign {
+                target: late_target,
+                value: count_expr,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: fewer,
+            },
+            Statement::Assign {
+                target: early_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: some,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let early = sim.signal("early");
+    let late = sim.signal("late");
+    sim.run_until(u64::MAX - 1).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(early), 300_000u32.into());
+    assert_eq!(sim.get(late), 1_000_000u32.into());
+    assert_eq!(sim.ticks(), 1_000_000);
+    assert_eq!(sim.time(), 10_000_000);
+}
+
+#[test]
+fn clock_waits_interleave_with_delays_and_checkpoints() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    let word = ValueType::bits(32).unwrap();
+    let bit = ValueType::bits(1).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let flag = module.output("flag", bit).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let flag_target = module.whole(flag).unwrap();
+    let ten = constant(&mut module, 10, 64);
+    let five = constant(&mut module, 5, 64);
+    let one = constant(&mut module, 1, 1);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    module
+        .process(vec![
+            Statement::Delay { amount: five },
+            Statement::Assign {
+                target: flag_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let seen = sim.signal("seen");
+    let flag = sim.signal("flag");
+    let clk = sim.signal("clk");
+    // Edges at 0, 2 and 4 run one by one around the delay at 5; the clock
+    // signal shows them.
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(count), 2u32.into());
+    assert_eq!(sim.get(clk), 1u8.into());
+    sim.run_until(5).unwrap();
+    assert_eq!(sim.get(flag), 1u8.into());
+    assert_eq!(sim.get(count), 3u32.into());
+    let checkpoint = sim.checkpoint().unwrap();
+    sim.run_until(20).unwrap();
+    // The process resumed at 20 before the edge there, and waits again, so
+    // that edge fires.
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert_eq!(sim.get(count), 11u32.into());
+    sim.restore(&checkpoint).unwrap();
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.get(seen), 0u32.into());
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.time(), 40);
+    assert_eq!(sim.get(seen), 10u32.into());
+    assert_eq!(sim.get(count), 20u32.into());
+}
+
+/// A step whose clock waits ran as fused ticks reports the time it reached.
+#[test]
+fn a_fused_step_returns_the_time_it_reached() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    // Edges at 0, 2, ..., 18 run as one step.
+    assert_eq!(sim.step().unwrap(), Some(18));
+    assert_eq!(sim.time(), 18);
+    assert_eq!(sim.ticks(), 10);
+}
+
+/// A process clock that is high when a wait begins falls first: only real
+/// rising edges count, so the registers see every counted edge.
+#[test]
+fn a_high_process_clock_falls_before_its_first_counted_edge() {
+    let (mut module, clk, count) = clocked_by_process_waits(2);
+    module
+        .set_initial(clk, Constant::two_state(1u8, 1).unwrap())
+        .unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let seen = module.output("seen", word).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let count_expr = module.read(count).unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: count_expr,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let seen = sim.signal("seen");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(seen), 3u32.into());
+    assert_eq!(sim.ticks(), 3);
+}
+
+/// A clock edge that would lie beyond simulation time is an error, like a
+/// delay that overflows.
+#[test]
+fn clock_edges_beyond_simulation_time_are_an_error() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let late = module.constant(Constant::two_state(u64::MAX - 2, 64).unwrap());
+    let two = constant(&mut module, 2, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: late },
+            Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    loop {
+        match sim.step() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the overflowing edge was not reported"),
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("overflows simulation time"),
+                    "{error}"
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// A design whose registers drive another clock keeps the scheduler's
+/// rounds: the derived clock's domain fires on every clock wait too.
+#[test]
+fn clock_waits_keep_derived_clocks_running() {
+    let (mut module, clk, _count) = clocked_by_process_waits(2);
+    let bit = ValueType::bits(1).unwrap();
+    let word = ValueType::bits(32).unwrap();
+    let half = module.internal("half", bit).unwrap();
+    module
+        .set_initial(half, Constant::two_state(0u8, 1).unwrap())
+        .unwrap();
+    let half_expr = module.read(half).unwrap();
+    let toggled = module.unary(UnaryOp::BitNot, half_expr, bit).unwrap();
+    let half_target = module.whole(half).unwrap();
+    module
+        .register(half_target, toggled, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let slow = module.output("slow", word).unwrap();
+    module
+        .set_initial(slow, Constant::two_state(0u8, 32).unwrap())
+        .unwrap();
+    let slow_expr = module.read(slow).unwrap();
+    let one = constant(&mut module, 1, 32);
+    let next = module.binary(BinaryOp::Add, slow_expr, one, word).unwrap();
+    let slow_target = module.whole(slow).unwrap();
+    module
+        .register(slow_target, next, half, Edge::Posedge, None, None)
+        .unwrap();
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let count = sim.signal("count");
+    let slow = sim.signal("slow");
+    sim.run_until(100).unwrap();
+    assert!(sim.is_finished());
+    assert_eq!(sim.get(count), 10u32.into());
+    // `half` rises on every second edge of `clk`.
+    assert_eq!(sim.get(slow), 5u32.into());
+}
+
+#[test]
+fn zero_clock_wait_does_not_yield_to_another_process() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let bit = ValueType::bits(1).unwrap();
+    let x = module.output("x", bit).unwrap();
+    let seen = module.output("seen", bit).unwrap();
+    let x_target = module.whole(x).unwrap();
+    let seen_target = module.whole(seen).unwrap();
+    let x_value = module.read(x).unwrap();
+    let zero = constant(&mut module, 0, 1);
+    let one = constant(&mut module, 1, 1);
+    module
+        .process(vec![
+            Statement::Assign {
+                target: x_target,
+                value: one,
+            },
+            Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            },
+            Statement::Assign {
+                target: seen_target,
+                value: x_value,
+            },
+        ])
+        .unwrap();
+    module
+        .process(vec![Statement::Assign {
+            target: x_target,
+            value: zero,
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.settle().unwrap();
+    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("x")), 0u8.into());
+    assert_eq!(sim.ticks(), 0);
+}
+
+#[test]
+fn settle_bounds_clock_waits_started_by_a_due_delay() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let five = constant(&mut module, 5, 64);
+    let ten = constant(&mut module, 10, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: five },
+            Statement::ClockCycles {
+                clock: clk,
+                count: ten,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.run_until(5).unwrap();
+    sim.settle().unwrap();
+    assert_eq!(sim.time(), 5);
+    assert_eq!(sim.ticks(), 1);
+    assert_eq!(sim.get(sim.signal("count")), 1u32.into());
+}
+
+#[test]
+fn scheduled_and_process_clock_edges_sample_the_same_old_state() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let bit = ValueType::bits(1).unwrap();
+    let manual = module.input("manual", bit).unwrap();
+    let b = module.output("b", bit).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let one = constant(&mut module, 1, 1);
+    let b_value = module.read(b).unwrap();
+    let b_target = module.whole(b).unwrap();
+    let q_target = module.whole(q).unwrap();
+    module
+        .register(b_target, one, manual, Edge::Posedge, None, None)
+        .unwrap();
+    module
+        .register(q_target, b_value, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    sim.schedule("manual", 4, 1).unwrap();
+    sim.run_until(4).unwrap();
+    assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+    sim.run_until(8).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
+fn clock_wait_vcd_records_each_edge_timestamp() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![
+            Statement::ClockCycles {
+                clock: clk,
+                count: three,
+            },
+            Statement::Finish,
+        ])
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wait.vcd");
+    let mut sim = Simulation::from_frontend(module.finish())
+        .vcd(&path)
+        .build()
+        .unwrap();
+    sim.run_until(20).unwrap();
+    sim.flush_vcd().unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    for time in [2, 4, 6, 8, 10, 12] {
+        assert!(
+            text.lines().any(|line| line == format!("#{time}")),
+            "missing timestamp {time}: {text}"
+        );
+    }
+}
+
+#[test]
+fn overflowing_generated_edges_do_not_commit_or_credit_on_retry() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let delay = constant(&mut module, u64::MAX - 3, 64);
+    let one = constant(&mut module, 1, 64);
+    module
+        .process(vec![
+            Statement::Delay { amount: delay },
+            Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            },
+        ])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    for _ in 0..2 {
+        let error = sim.step().unwrap_err();
+        assert!(
+            error.to_string().contains("overflows simulation time"),
+            "{error}"
+        );
+        assert_eq!(sim.get(sim.signal("count")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("clk")), 0u8.into());
+        assert_eq!(sim.ticks(), 0);
+    }
+}
+
+#[test]
+fn periodic_and_process_generators_for_one_clock_are_rejected() {
+    for register_first in [true, false] {
+        let (mut module, clk, _) = clocked_by_process_waits(4);
+        let two = constant(&mut module, 2, 64);
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: two,
+            }])
+            .unwrap();
+        let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+        if !register_first {
+            sim.step().unwrap();
+        }
+        let count = sim.get(sim.signal("count"));
+        let ticks = sim.ticks();
+        // Register a valid current-time edge so this tests competing drivers.
+        sim.add_clock("clk", 4, sim.time());
+        let error = sim.step().unwrap_err();
+        assert!(
+            error.to_string().contains("already driven by add_clock"),
+            "{error}"
+        );
+        assert_eq!(sim.get(sim.signal("count")), count);
+        assert_eq!(sim.ticks(), ticks);
+    }
+}
+
+#[test]
+fn imported_clock_periods_reject_duplicate_signal_entries() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let one = constant(&mut module, 1, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&module.finish().to_json().unwrap()).unwrap();
+    let periods = value["clock_periods"].as_array_mut().unwrap();
+    let mut duplicate = periods[0].clone();
+    duplicate[1] = 8.into();
+    periods.push(duplicate);
+    let error = FrontendArtifact::from_json(&value.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate process-clock period"),
+        "{error}"
+    );
+}
+
+#[test]
+fn one_shot_events_conflict_with_new_process_clock_generators() {
+    for time in [0, 4] {
+        let (mut m, clk, _) = clocked_by_process_waits(4);
+        let one = constant(&mut m, 1, 64);
+        m.process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: one,
+        }])
+        .unwrap();
+        let mut sim = Simulation::from_frontend(m.finish()).build().unwrap();
+        sim.schedule("clk", time, 1).unwrap();
+        let error = sim.step().unwrap_err().to_string();
+        assert!(error.contains("already driven by schedule"), "{error}");
+        assert_eq!(sim.ticks(), 0);
+        assert_eq!(sim.get(sim.signal("count")), 0u32.into());
+    }
+}
+
+#[test]
+fn newly_started_process_clocks_share_scheduled_domains_pre_edge_state() {
+    fn design() -> FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let a = m.internal("a", bit).unwrap();
+        let b = m.input("b", bit).unwrap();
+        let qa = m.output("qa", bit).unwrap();
+        let qb = m.output("qb", bit).unwrap();
+        let one = constant(&mut m, 1, 1);
+        let qb_read = m.read(qb).unwrap();
+        let qa_target = m.whole(qa).unwrap();
+        let qb_target = m.whole(qb).unwrap();
+        m.register(qa_target, qb_read, a, Edge::Posedge, None, None)
+            .unwrap();
+        m.register(qb_target, one, b, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(a, 4).unwrap();
+        let four = constant(&mut m, 4, 64);
+        let count = constant(&mut m, 1, 64);
+        m.process(vec![
+            Statement::Delay { amount: four },
+            Statement::ClockCycles { clock: a, count },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: celox::SimBackend>(mut sim: Simulation<B>) {
+        sim.schedule("b", 4, 1).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("qb")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("qa")), 0u8.into());
+        assert_eq!(sim.ticks(), 1);
+    }
+    check(
+        Simulation::from_frontend(design())
+            .build_interpreter()
+            .unwrap(),
+    );
+    check(
+        Simulation::from_frontend(design())
+            .build_cranelift()
+            .unwrap(),
+    );
+    check(Simulation::from_frontend(design()).build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(Simulation::from_frontend(design()).build_native().unwrap());
+}
+
+#[test]
+fn repeating_zero_count_clock_waits_report_non_progress() {
+    let (mut module, clk, _) = clocked_by_process_waits(2);
+    let zero = constant(&mut module, 0, 64);
+    module
+        .process(vec![Statement::Forever {
+            body: vec![Statement::ClockCycles {
+                clock: clk,
+                count: zero,
+            }],
+        }])
+        .unwrap();
+    let mut sim = Simulation::from_frontend(module.finish()).build().unwrap();
+    let error = sim.step().unwrap_err().to_string();
+    assert!(error.contains("delta limit"), "{error}");
+    assert_eq!(sim.time(), 0);
+    assert_eq!(sim.ticks(), 0);
+}
+
+#[test]
+fn due_process_clock_batches_with_a_combinationally_derived_edge() {
+    let (mut module, clk, _) = clocked_by_process_waits(4);
+    let bit = ValueType::bits(1).unwrap();
+    let src = module.internal("src", bit).unwrap();
+    let enable = module.input("enable", bit).unwrap();
+    let gated = module.internal("gated", bit).unwrap();
+    let b = module.output("b", bit).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let src_expr = module.read(src).unwrap();
+    let en_expr = module.read(enable).unwrap();
+    let value = module
+        .binary(BinaryOp::And, src_expr, en_expr, bit)
+        .unwrap();
+    let gate_target = module.whole(gated).unwrap();
+    module.assign(gate_target, value).unwrap();
+    let one = constant(&mut module, 1, 1);
+    let b_target = module.whole(b).unwrap();
+    module
+        .register(b_target, one, gated, Edge::Posedge, None, None)
+        .unwrap();
+    let b_expr = module.read(b).unwrap();
+    let q_target = module.whole(q).unwrap();
+    module
+        .register(q_target, b_expr, clk, Edge::Posedge, None, None)
+        .unwrap();
+    let three = constant(&mut module, 3, 64);
+    module
+        .process(vec![Statement::ClockCycles {
+            clock: clk,
+            count: three,
+        }])
+        .unwrap();
+    let four = constant(&mut module, 4, 64);
+    let src_target = module.whole(src).unwrap();
+    module
+        .process(vec![
+            Statement::Delay { amount: four },
+            Statement::Assign {
+                target: src_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+    let artifact = module.finish();
+    fn check<B: celox::SimBackend>(mut sim: Simulation<B>) {
+        let en = sim.signal("enable");
+        sim.modify(|io| io.set(en, 1u8)).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        sim.run_until(8).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
+    let build = || Simulation::from_frontend(artifact.clone());
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}

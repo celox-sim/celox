@@ -95,6 +95,7 @@ pub struct Checkpoint {
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
     runtime_finish_requested: bool,
+    pending_host_writes: Vec<crate::SignalRef>,
 }
 
 impl Checkpoint {
@@ -115,6 +116,10 @@ impl std::fmt::Debug for Checkpoint {
 /// Reasons a checkpoint cannot be taken or restored.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckpointError {
+    #[error(
+        "cannot checkpoint a process clock changed by a direct host write through escaped memory"
+    )]
+    UntrackedHostClockWrite,
     /// External component instances hold opaque state. They currently exist
     /// only while a testbench runs, when no checkpoint can be taken.
     #[error(
@@ -146,6 +151,7 @@ impl<B: SimBackend> Simulator<B> {
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
             runtime_finish_requested: self.has_pending_runtime_finish(),
+            pending_host_writes: self.pending_host_writes.clone(),
         })
     }
 
@@ -165,6 +171,8 @@ impl<B: SimBackend> Simulator<B> {
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
         self.reset_runtime_finish(checkpoint.runtime_finish_requested);
+        self.pending_host_writes
+            .clone_from(&checkpoint.pending_host_writes);
         if let Some(writer) = &mut self.vcd_writer {
             writer.rescan();
         }

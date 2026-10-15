@@ -197,9 +197,13 @@ impl SharedNativeCode {
     ///
     /// # Safety
     ///
-    /// The image's machine code must come from a trusted source. Structural
-    /// validation and the container checksum detect corruption, but do not
-    /// authenticate code before it is mapped executable and invoked.
+    /// The entire compiler-produced image, including its code and metadata,
+    /// must come from a trusted source and preserve its compiler-produced ABI.
+    /// Supported API transformations, such as diagnostic path remapping, are
+    /// allowed. Structural validation and the container checksum do not
+    /// authenticate either code or metadata.
+    /// In particular, coherently rewritten ABI metadata cannot be checked
+    /// against the original compiler intent without external authentication.
     pub unsafe fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
         // Safety: upheld by this constructor's caller.
         unsafe { Self::from_image_with_dpi(program_image, &crate::DpiSymbols::default()) }
@@ -388,6 +392,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) clock_phase_sensitive_comb: bool,
     pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
@@ -408,6 +413,11 @@ pub struct NativeProgramImage {
     comb_unit_offsets: Vec<usize>,
     /// Entry offset of each process kernel.
     process_offsets: Vec<usize>,
+    /// Clock-control addresses and byte offsets used to compile each process kernel.
+    compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
+    compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
+    compiled_clock_phase_sensitive_comb: bool,
+    compiled_native_tick_loop: bool,
     required_native_features: u8,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -490,6 +500,7 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                clock_phase_sensitive_comb: self.runtime_schema.clock_phase_sensitive_comb,
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
@@ -512,6 +523,9 @@ impl NativeProgramImage {
         self.reflection
             .validate()
             .map_err(|error| format!("invalid design reflection: {error}"))?;
+        if self.options.native_tick_loop != self.compiled_native_tick_loop {
+            return Err("native tick-loop eligibility differs from compiled image".into());
+        }
         if self.code.is_empty() {
             return Err("code image is empty".into());
         }
@@ -555,6 +569,86 @@ impl NativeProgramImage {
         }
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if self.compiled_process_clocks.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_clocks
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|((address, offset), process)| {
+                    process.clock != *address || self.layout.offsets.get(address) != Some(offset)
+                })
+        {
+            return Err(
+                "process clock control slots disagree with compiled kernel bindings".into(),
+            );
+        }
+        let mut process_clock_periods = fxhash::FxHashMap::default();
+        for process in &self.runtime_schema.processes {
+            if !self
+                .design
+                .state_objects
+                .get(&process.clock)
+                .is_some_and(|metadata| {
+                    metadata.width == celox_design::PROCESS_CLOCK_WIDTH
+                        && !metadata.is_4state
+                        && metadata.array_dims.is_empty()
+                })
+            {
+                return Err("a process clock control slot has an invalid state object".into());
+            }
+            for clock in &process.clocks {
+                if clock.period < 2
+                    || !self.event_map.contains_key(&clock.signal)
+                    || !self
+                        .design
+                        .state_objects
+                        .get(&clock.signal)
+                        .is_some_and(|metadata| {
+                            metadata.width == 1
+                                && metadata.array_dims.is_empty()
+                                && matches!(
+                                    metadata.kind,
+                                    celox_design::DomainKind::ClockPosedge
+                                        | celox_design::DomainKind::ClockNegedge
+                                )
+                        })
+                {
+                    return Err("a process clock has an invalid event domain or period".into());
+                }
+                if self
+                    .runtime_schema
+                    .rtl_writes
+                    .iter()
+                    .any(|write| {
+                        let clock_bit=self.layout.offsets.get(&clock.signal).and_then(|offset|offset.checked_mul(8));
+                        let written=self.layout.offsets.get(&write.id).and_then(|offset|offset.checked_mul(8)).and_then(|base|Some((base.checked_add(write.access.lsb)?,base.checked_add(write.access.msb)?)));
+                        matches!((clock_bit,written),(Some(clock),Some((first,last))) if first<=clock && clock<=last)
+                    })
+                {
+                    return Err("a process clock is driven by design logic".into());
+                }
+                let event = self.event_map[&clock.signal].id;
+                if let Some(previous) = process_clock_periods.insert(event, clock.period)
+                    && previous != clock.period
+                {
+                    return Err("process clocks for one event have conflicting periods".into());
+                }
+            }
+        }
+        if self.compiled_process_clock_lists.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_clock_lists
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| compiled != &process.clocks)
+        {
+            return Err("process clock lists disagree with compiled kernel indices".into());
+        }
+        if self.compiled_clock_phase_sensitive_comb
+            != self.runtime_schema.clock_phase_sensitive_comb
+        {
+            return Err("clock phase sensitivity disagrees with compiled kernels".into());
         }
         for counters in &self.runtime_schema.process_event_counters {
             if !self.event_map.contains_key(&counters.signal) {
@@ -1808,6 +1902,23 @@ fn compile_program(
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
+    // Make the compiled ABI and serialized dispatch agree. Fallible phases
+    // must return to the host without crediting a failed loop iteration.
+    let mut effective_options = options.clone();
+    effective_options.x86_options.native_tick_loop &= !sir
+        .sir
+        .eval_comb
+        .iter()
+        .chain(sir.sir.eval_apply_ffs.values().flatten())
+        .chain(
+            compile_tasks
+                .iter()
+                .filter(|task| task.label == "eval_comb_apply_ff")
+                .flat_map(|task| task.units.iter().copied()),
+        )
+        .flat_map(|unit| unit.blocks.values())
+        .any(|block| matches!(block.terminator, celox_sir::SIRTerminator::Error(_)));
+    let options = &effective_options;
     let comb_blocks = sir
         .sir
         .eval_comb
@@ -2261,6 +2372,25 @@ fn compile_program(
             comb_offset,
             comb_unit_offsets,
             process_offsets,
+            compiled_process_clocks: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| (process.clock, layout.offsets[&process.clock]))
+                .collect(),
+            compiled_process_clock_lists: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| process.clocks.clone())
+                .collect(),
+            compiled_native_tick_loop: options.x86_options.native_tick_loop,
+            compiled_clock_phase_sensitive_comb: sir
+                .runtime()
+                .runtime_schema
+                .clock_phase_sensitive_comb,
             required_native_features,
             event_map,
             eval_only_event_map,
@@ -2284,6 +2414,7 @@ fn compile_program(
                     .iter()
                     .copied()
                     .collect(),
+                clock_phase_sensitive_comb: sir.runtime().runtime_schema.clock_phase_sensitive_comb,
                 dead_store_policy: sir.runtime().runtime_schema.dead_store_policy,
                 live_signals: sir
                     .runtime()
@@ -2479,9 +2610,9 @@ impl NativeBackend {
     ///
     /// # Safety
     ///
-    /// The image's machine code must come from a trusted compiler or image
-    /// container. Structural validation does not authenticate code before it
-    /// is mapped executable and invoked.
+    /// The entire compiler-produced image, including code and ABI metadata,
+    /// must come from a trusted source and preserve its compiler-produced ABI. A successful
+    /// container checksum or structural validation does not authenticate it.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, SimulatorError> {
         // Safety: upheld by this constructor's caller.
         unsafe { Self::from_image_with_dpi(image, &crate::DpiSymbols::default()) }
@@ -3033,7 +3164,11 @@ impl super::super::SimBackend for NativeBackend {
             if count == 0 {
                 return (0, Ok(()));
             }
-            return (1, self.eval_comb_apply_ff_at(event));
+            if let Err(error) = self.eval_comb() {
+                return (0, Err(error));
+            }
+            let result = self.eval_apply_ff_at(event);
+            return (u64::from(result.is_ok()), result);
         }
         if self.compiled.options.native_tick_loop {
             let (executed, result) = self.call_func_many_timed(event.comb_apply_func, count);
@@ -3047,11 +3182,17 @@ impl super::super::SimBackend for NativeBackend {
         } else if count == 0 {
             (0, Ok(()))
         } else {
+            if let Err(error) = self.eval_comb() {
+                return (0, Err(error));
+            }
             if fused_sequential {
                 self.lane_selectors
                     .advance(super::super::lanes::LaneKernelSlot::Fused(event.id), 1);
             }
-            (1, self.call_func_timed(event.comb_apply_func))
+            {
+                let result = self.eval_apply_ff_at(event);
+                (u64::from(result.is_ok()), result)
+            }
         }
     }
 
@@ -3314,5 +3455,302 @@ impl super::super::SimBackend for NativeBackend {
             }
         }
         bs
+    }
+}
+
+#[cfg(test)]
+mod process_metadata_tests {
+    use super::super::image_file::NativeImageContainerError;
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn image() -> NativeProgramImage {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let clk2 = module.internal("clk2", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        module
+            .output("unrelated", ValueType::bits(32).unwrap())
+            .unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        let q2 = module.output("q2", bit).unwrap();
+        let target2 = module.whole(q2).unwrap();
+        module
+            .register(target2, one, clk2, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk2, 4).unwrap();
+        module.clock_period(clk, 2).unwrap();
+        module
+            .process(vec![
+                Statement::ClockCycles {
+                    clock: clk,
+                    count: one,
+                },
+                Statement::ClockCycles {
+                    clock: clk2,
+                    count: one,
+                },
+            ])
+            .unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
+        crate::Simulator::from_frontend(module.finish())
+            .compile_native()
+            .unwrap()
+            .into_program_image()
+    }
+
+    #[test]
+    fn process_clock_lists_match_the_compiled_indices() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        assert_eq!(original.runtime_schema.processes[0].clocks.len(), 2);
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clocks.swap(0, 1);
+        assert!(broken.to_container_bytes().is_err());
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clocks[0] =
+            original.runtime_schema.processes[0].clocks[1];
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn clock_phase_sensitivity_matches_compilation() {
+        let mut broken = image();
+        broken.runtime_schema.clock_phase_sensitive_comb =
+            !broken.runtime_schema.clock_phase_sensitive_comb;
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn process_clock_control_cannot_name_an_unrelated_register() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        let clock = original.runtime_schema.processes[0].clock;
+        let unrelated = *original
+            .design
+            .state_objects
+            .iter()
+            .find(|(addr, metadata)| {
+                **addr != clock
+                    && metadata.width == celox_design::PROCESS_CLOCK_WIDTH
+                    && !original
+                        .runtime_schema
+                        .processes
+                        .iter()
+                        .any(|p| [p.resume, p.status, p.delay, p.clock].contains(addr))
+            })
+            .unwrap()
+            .0;
+        let mut broken = original.clone();
+        broken.runtime_schema.processes[0].clock = unrelated;
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
+    }
+
+    #[test]
+    fn process_clock_control_layout_matches_the_compiled_kernel() {
+        let mut broken = image();
+        let process = &broken.runtime_schema.processes[0];
+        broken
+            .layout
+            .offsets
+            .insert(process.clock, broken.layout.offsets[&process.resume]);
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
+    }
+
+    #[test]
+    fn process_clock_metadata_is_checked_before_image_attachment() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for corruption in 0..5 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes[0];
+            match corruption {
+                0 => slots.clocks[0].signal = slots.delay,
+                1 => slots.clocks[0].period = 1,
+                2 => slots.clock = slots.status,
+                4 => {
+                    let signal = slots.clocks[0].signal;
+                    broken
+                        .runtime_schema
+                        .rtl_writes
+                        .insert(celox_design::VarAtomBase {
+                            id: signal,
+                            access: celox_design::BitAccess::new(0, 0),
+                        });
+                }
+                _ => {
+                    let signal = *broken
+                        .design
+                        .state_objects
+                        .iter()
+                        .find(|(_, metadata)| {
+                            metadata.width == 1 && metadata.kind == celox_design::DomainKind::Other
+                        })
+                        .unwrap()
+                        .0;
+                    let event = broken.event_map[&slots.clocks[0].signal];
+                    broken.event_map.insert(signal, event);
+                    slots.clocks[0].signal = signal;
+                }
+            }
+            assert!(
+                matches!(
+                    broken.to_container_bytes(),
+                    Err(NativeImageContainerError::InvalidImage(_))
+                ),
+                "accepted corruption {corruption}"
+            );
+        }
+    }
+
+    #[test]
+    fn aliased_rtl_storage_cannot_drive_a_process_clock() {
+        let mut broken = image();
+        broken.to_container_bytes().unwrap();
+        let clock = broken.runtime_schema.processes[0].clocks[0].signal;
+        let driver = broken
+            .runtime_schema
+            .rtl_writes
+            .iter()
+            .find(|write| write.id != clock)
+            .unwrap()
+            .id;
+        assert_ne!(driver, clock);
+        assert_ne!(
+            broken.layout.offsets[&driver],
+            broken.layout.offsets[&clock]
+        );
+        broken
+            .layout
+            .offsets
+            .insert(clock, broken.layout.offsets[&driver]);
+        assert!(matches!(
+            broken.to_container_bytes(),
+            Err(NativeImageContainerError::InvalidImage(_))
+        ));
+    }
+
+    #[test]
+    fn process_clock_periods_must_agree_across_slot_tables() {
+        let mut broken = image();
+        broken.to_container_bytes().unwrap();
+        broken.runtime_schema.processes[1].clocks[0].period = 4;
+        assert!(
+            matches!(broken.to_container_bytes(), Err(NativeImageContainerError::InvalidImage(message)) if message.contains("conflicting periods"))
+        );
+    }
+
+    #[test]
+    fn native_loop_eligibility_cannot_be_changed_in_a_checksummed_image() {
+        let source = r#"module Top(clk:input clock,enable:output logic,v:output logic){
+            assign v=if enable ? ~v : 1'd0;
+            always_ff(clk){enable=1;}
+        }"#;
+        let original = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        assert!(!original.options.native_tick_loop);
+        let pure = image();
+        assert!(pure.options.native_tick_loop);
+        for original in [original, pure] {
+            let mut changed = original.clone();
+            changed.options.native_tick_loop = !changed.options.native_tick_loop;
+            // Bypass the writer's validation and regenerate a valid payload
+            // checksum, exercising the reader's attachment boundary directly.
+            let mut bytes = original.to_container_bytes().unwrap();
+            let trailer = bytes.len() - 32;
+            let payload = postcard::to_stdvec(&changed).unwrap();
+            assert_eq!(payload.len(), trailer);
+            bytes[..trailer].copy_from_slice(&payload);
+            let checksum = payload.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+            bytes[trailer + 24..trailer + 32].copy_from_slice(&checksum.to_le_bytes());
+            assert!(
+                matches!(NativeProgramImage::from_container_bytes(&bytes),Err(NativeImageContainerError::InvalidImage(message)) if message.contains("tick-loop"))
+            );
+        }
+    }
+
+    #[test]
+    fn default_native_loops_do_not_credit_a_failed_pre_edge_iteration() {
+        use crate::backend::SimBackend;
+        let source = r#"module Top(clk:input clock,enable:output logic,v:output logic){
+           assign v=if enable ? ~v : 1'd0;
+           always_ff(clk){enable=1;}
+        }"#;
+        let mut sim = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .build_native()
+            .unwrap();
+        let event = sim.event("clk");
+        let bytes = sim
+            .backend
+            .shared_code()
+            .program_image()
+            .to_container_bytes()
+            .unwrap();
+        let image = NativeProgramImage::from_container_bytes(&bytes).unwrap();
+        // Safety: this round-trip image was compiled in this test.
+        let mut loaded = unsafe { NativeBackend::from_image(image) }.unwrap();
+        for backend in [&mut sim.backend, &mut loaded] {
+            let (completed, result) = backend.eval_comb_apply_ff_many_at(event, 10);
+            assert_eq!(completed, 1);
+            assert!(result.is_ok());
+            let (completed, result) = backend.eval_comb_apply_ff_many_at(event, 9);
+            assert_eq!(completed, 0);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn lane_ticks_report_zero_progress_for_pre_edge_comb_failure() {
+        use crate::backend::SimBackend;
+        let source = r#"module Top(clk: input clock, ok: input logic, q: output logic, a: output logic, b: output logic, c: output logic, v: output logic) {
+            assign v = if ok ? 1'd0 : ~v;
+            always_ff(clk) { q=1; }
+            always_ff(clk) { a=1; }
+            always_ff(clk) { b=1; }
+            always_ff(clk) { c=1; }
+        }"#;
+        let mut sim = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .threads(4)
+            .parallel_partition(crate::ParallelPartition::Always)
+            .build_native()
+            .unwrap();
+        let event = sim.event("clk");
+        assert!(sim.backend.lane_event_kernel(event));
+        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 10);
+        assert_eq!(completed, 0);
+        assert!(result.is_err());
+        assert_eq!(sim.backend.get_as::<u8>(sim.signal("q")), 0);
     }
 }

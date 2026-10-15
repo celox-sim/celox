@@ -6,7 +6,7 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-const CONTAINER_VERSION: u16 = 18;
+const CONTAINER_VERSION: u16 = 22;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -172,6 +172,10 @@ impl NativeProgramImage {
     }
 
     /// Decode a standalone container with no runtime prefix.
+    ///
+    /// Successful decoding checks structure and consistency, not authenticity.
+    /// Before attaching this image, the caller must establish trust in the
+    /// entire compiler-produced artifact, including its ABI metadata.
     pub fn from_container_bytes(bytes: &[u8]) -> Result<Self, NativeImageContainerError> {
         let appended =
             Self::discover_appended(bytes)?.ok_or(NativeImageContainerError::MissingTrailer)?;
@@ -260,6 +264,46 @@ fn checksum(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })
+}
+
+#[cfg(test)]
+mod process_metadata_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+
+    fn image() -> NativeProgramImage {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Top").unwrap();
+        let clk = module.internal("clk", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = module.whole(q).unwrap();
+        module
+            .register(target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        module.clock_period(clk, 2).unwrap();
+        module
+            .process(vec![Statement::ClockCycles {
+                clock: clk,
+                count: one,
+            }])
+            .unwrap();
+        crate::Simulator::from_frontend(module.finish())
+            .compile_native()
+            .unwrap()
+            .into_program_image()
+    }
+
+    #[test]
+    fn the_previous_process_schema_is_rejected_before_decoding() {
+        let mut bytes = image().to_container_bytes().unwrap();
+        let version = bytes.len() - TRAILER_SIZE + 8;
+        bytes[version..version + 2].copy_from_slice(&(CONTAINER_VERSION - 1).to_le_bytes());
+        assert!(matches!(
+            NativeProgramImage::from_container_bytes(&bytes),
+            Err(NativeImageContainerError::UnsupportedVersion(version)) if version == CONTAINER_VERSION - 1
+        ));
+    }
 }
 
 #[cfg(test)]
