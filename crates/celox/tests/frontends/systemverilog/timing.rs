@@ -232,3 +232,7 @@ sv_backends! {
         @case "timing::continuous_call_drivers_preserve_assignment_context";
     }
 }
+
+sv_backends! { fn blocking_ff_woken_waiters_sample_before_continuations(sim) {
+    @case "timing::blocking_ff_woken_waiters_sample_before_continuations";
+} }

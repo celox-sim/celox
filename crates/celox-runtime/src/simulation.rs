@@ -2316,6 +2316,9 @@ impl<B: SimBackend> SimulationState<B> {
                             self.finished = true;
                             return Ok(true);
                         }
+                        // Latch every waiter before another active FF or
+                        // continuation can erase a propagated blocking edge.
+                        self.sample_waiting_events(executor)?;
                         self.replace_triggers_with_stable_edges(executor.backend_mut());
                         for id in ff_body_edges.iter() {
                             executor.backend_mut().mark_triggered_bit(id);

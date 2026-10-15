@@ -173,6 +173,10 @@ impl NativeProgramImage {
     }
 
     /// Decode a standalone container with no runtime prefix.
+    ///
+    /// Successful decoding checks structure and consistency, not authenticity.
+    /// Before attaching this image, the caller must establish trust in the
+    /// entire compiler-produced artifact, including its ABI metadata.
     pub fn from_container_bytes(bytes: &[u8]) -> Result<Self, NativeImageContainerError> {
         let appended =
             Self::discover_appended(bytes)?.ok_or(NativeImageContainerError::MissingTrailer)?;

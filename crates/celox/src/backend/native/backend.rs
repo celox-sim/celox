@@ -197,9 +197,13 @@ impl SharedNativeCode {
     ///
     /// # Safety
     ///
-    /// The image's machine code must come from a trusted source. Structural
-    /// validation and the container checksum detect corruption, but do not
-    /// authenticate code before it is mapped executable and invoked.
+    /// The entire compiler-produced image, including its code and metadata,
+    /// must come from a trusted source and preserve its compiler-produced ABI.
+    /// Supported API transformations, such as diagnostic path remapping, are
+    /// allowed. Structural validation and the container checksum do not
+    /// authenticate either code or metadata.
+    /// In particular, coherently rewritten ABI metadata cannot be checked
+    /// against the original compiler intent without external authentication.
     pub unsafe fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
         // Safety: upheld by this constructor's caller.
         unsafe { Self::from_image_with_dpi(program_image, &crate::DpiSymbols::default()) }
@@ -2852,9 +2856,9 @@ impl NativeBackend {
     ///
     /// # Safety
     ///
-    /// The image's machine code must come from a trusted compiler or image
-    /// container. Structural validation does not authenticate code before it
-    /// is mapped executable and invoked.
+    /// The entire compiler-produced image, including code and ABI metadata,
+    /// must come from a trusted source and preserve its compiler-produced ABI. A successful
+    /// container checksum or structural validation does not authenticate it.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, SimulatorError> {
         // Safety: upheld by this constructor's caller.
         unsafe { Self::from_image_with_dpi(image, &crate::DpiSymbols::default()) }
