@@ -3096,38 +3096,10 @@ fn validate_cross_instance_event_pulses(
                 .iter()
                 .map(|&(signal, range)| ((id, signal), range, false, false))
                 .collect::<Vec<_>>();
-            let mut visited = HashSet::default();
-            while !pending.is_empty() {
-                let wave = std::mem::take(&mut pending);
-                let mut cross: HashMap<usize, Vec<(SourceVarId, BitAccess)>> = HashMap::default();
-                let mut crossed_port = false;
-                for (signal, range, propagated, crossed) in wave {
-                    if !visited.insert((signal, range, propagated, crossed)) {
-                        continue;
-                    }
-                    if propagated {
-                        crossed_port |= crossed;
-                        cross.entry(signal.0).or_default().push((signal.1, range));
-                    }
-                    if let Some(edges) = dependencies.get(&signal) {
-                        for edge in edges {
-                            if !range.overlaps(&edge.target) {
-                                continue;
-                            }
-                            let read = if edge.linear {
-                                BitAccess::new(
-                                    edge.read.lsb + range.lsb.max(edge.target.lsb)
-                                        - edge.target.lsb,
-                                    edge.read.lsb + range.msb.min(edge.target.msb)
-                                        - edge.target.lsb,
-                                )
-                            } else {
-                                edge.read
-                            };
-                            pending.push((edge.source, read, true, crossed || edge.port));
-                        }
-                    }
-                }
+            let validate = |cross: HashMap<usize, Vec<(SourceVarId, BitAccess)>>,
+                            crossed_port: bool,
+                            include_combinational: bool|
+             -> Result<(), ParserError> {
                 let mut wave_unknown = [0usize; 2];
                 let mut wave_timed: [Vec<(u64, u64, Option<u64>, usize)>; 2] =
                     std::array::from_fn(|_| Vec::new());
@@ -3173,7 +3145,7 @@ fn validate_cross_instance_event_pulses(
                                 .source
                                 .comb_processes()
                                 .iter()
-                                .filter(|p| active(p.condition()))
+                                .filter(|p| include_combinational && active(p.condition()))
                                 .map(|p| (p.body(), false)),
                         );
                     let bodies = bodies.collect::<Vec<_>>();
@@ -3224,7 +3196,53 @@ fn validate_cross_instance_event_pulses(
                         }
                     }
                 }
+                Ok(())
+            };
+            let mut visited = HashSet::default();
+            let mut complete: HashMap<usize, Vec<(SourceVarId, BitAccess)>> = HashMap::default();
+            let mut complete_crossed_port = false;
+            while !pending.is_empty() {
+                let wave = std::mem::take(&mut pending);
+                let mut cross: HashMap<usize, Vec<(SourceVarId, BitAccess)>> = HashMap::default();
+                let mut crossed_port = false;
+                for (signal, range, propagated, crossed) in wave {
+                    if !visited.insert((signal, range, propagated, crossed)) {
+                        continue;
+                    }
+                    if propagated {
+                        crossed_port |= crossed;
+                        cross.entry(signal.0).or_default().push((signal.1, range));
+                        complete_crossed_port |= crossed;
+                        complete
+                            .entry(signal.0)
+                            .or_default()
+                            .push((signal.1, range));
+                    }
+                    if let Some(edges) = dependencies.get(&signal) {
+                        for edge in edges {
+                            if !range.overlaps(&edge.target) {
+                                continue;
+                            }
+                            let read = if edge.linear {
+                                BitAccess::new(
+                                    edge.read.lsb + range.lsb.max(edge.target.lsb)
+                                        - edge.target.lsb,
+                                    edge.read.lsb + range.msb.min(edge.target.msb)
+                                        - edge.target.lsb,
+                                )
+                            } else {
+                                edge.read
+                            };
+                            pending.push((edge.source, read, true, crossed || edge.port));
+                        }
+                    }
+                }
+                validate(cross, crossed_port, true)?;
             }
+            // Combinational propagation is checked per wave above. Aggregate
+            // procedural source writes across the full dependency closure,
+            // without counting a propagated copy as another source write.
+            validate(complete, complete_crossed_port, false)?;
         }
     }
     Ok(())
