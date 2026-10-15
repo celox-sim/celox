@@ -54,8 +54,9 @@ impl NativeProgramInstance {
     ///
     /// # Safety
     ///
-    /// The image's machine code must come from a trusted source. Image
-    /// validation is structural and does not authenticate executable code.
+    /// The entire compiler-produced image, including code and ABI metadata,
+    /// must come from a trusted source and preserve its compiler-produced ABI. Image validation
+    /// is structural and does not authenticate either code or metadata.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
         // Safety: upheld by this constructor's caller.
         let shared = Arc::new(
@@ -82,8 +83,9 @@ impl NativeProgramInstance {
     ///
     /// # Safety
     ///
-    /// The appended machine code must come from a trusted source. The
-    /// container checksum is not an authenticity check.
+    /// The entire appended image, including its code and ABI metadata, must
+    /// come from a trusted source and preserve its compiler-produced ABI. The checksum
+    /// is not an authenticity check.
     pub unsafe fn from_attached_bytes(bytes: &[u8]) -> Result<Self, NativeProgramLoadError> {
         let appended = NativeProgramImage::discover_appended(bytes)?
             .ok_or(NativeProgramLoadError::MissingImage)?;
