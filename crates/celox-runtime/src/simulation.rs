@@ -660,19 +660,42 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.sample_waiting(executor, time, false)
+    }
+
+    /// Probe event and level waits without running their continuations.
+    /// Level conditions are re-evaluated on ordinary resumption.
+    pub fn probe_waiting<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.sample_waiting(executor, self.time(), true)
+    }
+
+    fn sample_waiting<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+        probe: bool,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         if self.finished {
             return Ok(());
         }
         for &process in &self.waiting {
             let refs = &self.processes[process];
-            if !matches!(
-                ProcessStatus::from_code(executor.backend().get_as(refs.status)),
-                Some(ProcessStatus::Wait | ProcessStatus::Pending)
-            ) {
+            let status = ProcessStatus::from_code(executor.backend().get_as(refs.status));
+            if !matches!(status, Some(ProcessStatus::Wait | ProcessStatus::Pending))
+                && !(probe && status == Some(ProcessStatus::Ready))
+            {
                 continue;
             }
             let delay = executor.backend().get_as::<u64>(refs.delay);
-            executor.backend_mut().set(refs.delay, 1u64);
+            executor
+                .backend_mut()
+                .set(refs.delay, if probe { 2u64 } else { 1u64 });
             let result = executor.run_process(process, time);
             executor.backend_mut().set(refs.delay, delay);
             result?;
@@ -680,6 +703,8 @@ impl<B: SimBackend> SimulationState<B> {
                 == Some(ProcessStatus::Ready)
             {
                 self.sampled_ready.insert(process);
+            } else if probe {
+                self.sampled_ready.remove(&process);
             }
         }
         Ok(())
@@ -1821,6 +1846,7 @@ impl<B: SimBackend> SimulationState<B> {
         // Early settling can expose a derived edge that a later source store
         // or awakened process restores. Capture every update we settle early.
         let capture_batch_edges = events_to_process.len() > 1;
+        let mut batch_edge_counts = BTreeMap::<usize, u64>::new();
         for event in &events_to_process {
             let settle_update = capture_batch_edges
                 || !self.waiting.is_empty()
@@ -1852,6 +1878,7 @@ impl<B: SimBackend> SimulationState<B> {
                     return Ok(true);
                 }
             }
+            let mut seen = BitSet::with_capacity(num_events);
             for ((signal, id, _), before) in self.topo_signals.iter().zip(domain_values) {
                 if *id != usize::MAX
                     && self.edge_triggers(
@@ -1860,6 +1887,16 @@ impl<B: SimBackend> SimulationState<B> {
                         sample_event_signal(executor.backend(), *signal),
                     )
                 {
+                    let canonical = self.event_info[*id].canonical_id;
+                    let info = &self.event_info[canonical];
+                    if capture_batch_edges
+                        && (info.eval_ff_event.is_some()
+                            || info.eval_only_event.is_some()
+                            || info.apply_event.is_some())
+                        && seen.insert(canonical)
+                    {
+                        *batch_edge_counts.entry(canonical).or_default() += 1;
+                    }
                     if capture_batch_edges || blocking_source {
                         // Blocking source FF stores run in the active region
                         // and can remove an edge already sampled by waiters.
@@ -1875,6 +1912,12 @@ impl<B: SimBackend> SimulationState<B> {
             && (!ready_processes.is_empty() || !self.waiting.is_empty())
         {
             executor.eval_comb()?;
+        }
+        for (id, count) in batch_edge_counts {
+            // The first occurrence is already in scheduled_edges, unless a
+            // host edge occupies that slot. Aliases share one replay count.
+            let has_host_edge = host_replays.contains_key(&id);
+            *host_replays.entry(id).or_default() += count.saturating_sub(u64::from(!has_host_edge));
         }
 
         // Processes run after this time's scheduled values are applied and

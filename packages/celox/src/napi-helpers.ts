@@ -48,6 +48,7 @@ export interface RawNapiSimulationHandle {
 	step(): number | null;
 	stepUntil?(endTime: number): number | null;
 	hasWaitingProcesses?(): boolean;
+	hasPendingHostWork?(): boolean;
 	time(): number;
 	nextEventTime(): number | null;
 	/** Whether a process requested the end of the simulation. */
@@ -853,6 +854,9 @@ export function wrapDirectSimulationHandle(
 	raw: RawNapiSimulationHandle,
 ): NativeSimulationHandle {
 	return {
+		...(raw.hasPendingHostWork
+			? { hasPendingHostWork: () => raw.hasPendingHostWork!() }
+			: {}),
 		...(raw.hasWaitingProcesses
 			? { hasWaitingProcesses: () => raw.hasWaitingProcesses!() }
 			: {}),

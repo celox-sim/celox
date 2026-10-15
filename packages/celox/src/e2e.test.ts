@@ -4106,3 +4106,37 @@ test("finished native state files preserve cached outputs after shared writes", 
 		raw.dispose();
 	}
 });
+
+test("native host-work probes preserve pending FF edges without running them", () => {
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const raw = new Handle(
+		[
+			{
+				content:
+					"module Top(clk:input clock,noise:input logic,count:output logic<8>){var r:logic<8>;assign count=r;always_ff(clk){r=r+1;}}",
+				path: "host-probe.veryl",
+			},
+		],
+		"Top",
+	);
+	try {
+		raw.runUntil(0);
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.noise.offset] = 1;
+		raw.evalComb();
+		expect(raw.hasPendingHostWork!()).toBe(false);
+		memory[layout.clk.offset] = 1;
+		raw.evalComb();
+		for (let n = 0; n < 2; n++) {
+			expect(raw.hasPendingHostWork!()).toBe(true);
+			expect(memory[layout.count.offset]).toBe(0);
+		}
+		raw.runUntil(0);
+		expect(memory[layout.count.offset]).toBe(1);
+		expect(raw.hasPendingHostWork!()).toBe(false);
+	} finally {
+		raw.dispose();
+	}
+});
