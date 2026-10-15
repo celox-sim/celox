@@ -431,6 +431,14 @@ impl<B: SimBackend> Simulation<B> {
         }
     }
 
+    // A write itself can settle eagerly while a RuntimeEventDrain is active.
+    // In that case publish its edges even if the simulator was clean before
+    // the write; otherwise retain the notification until the next settle.
+    fn synchronize_host_write(&mut self) {
+        self.pending_host_work = true;
+        self.synchronize_runtime_finish(true);
+    }
+
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
         let was_dirty = self.simulator.dirty;
@@ -448,10 +456,8 @@ impl<B: SimBackend> Simulation<B> {
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
-        let was_dirty = self.simulator.dirty;
         let result = self.simulator.modify(f);
-        self.pending_host_work = true;
-        self.synchronize_runtime_finish(was_dirty);
+        self.synchronize_host_write();
         result
     }
 
@@ -4143,6 +4149,65 @@ mod round62_review_tests {
                 check(sim);
             }
             backends!(&source, arm);
+        }
+    }
+    #[test]
+    fn eager_host_writes_publish_ff_edges_and_waiters() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clean = sim.checkpoint().unwrap();
+            for active_drain in [true, false] {
+                for observe in 0..3 {
+                    sim.restore(&clean).unwrap();
+                    sim.eval_comb().unwrap();
+                    let drain = active_drain
+                        .then(|| sim.simulator.runtime_event_drain())
+                        .flatten();
+                    let go = sim.signal("go");
+                    sim.modify(|io| io.set(go, 1u8)).unwrap();
+                    if drain.is_some() {
+                        assert!(!sim.simulator.dirty);
+                    }
+                    match observe {
+                        1 => {
+                            sim.get(go);
+                        }
+                        2 => {
+                            sim.eval_comb().unwrap();
+                        }
+                        _ => {}
+                    }
+                    assert_eq!(sim.next_event_time(), Some(0));
+                    assert_eq!(sim.next_event_time(), Some(0));
+                    assert_eq!(sim.step().unwrap(), Some(0));
+                    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+                    assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+                    assert_eq!(sim.next_event_time(), None);
+                }
+            }
+        }
+        backends!(
+            "module Top(input bit go,output bit[7:0]q,seen);always_comb if(go)$display(1);always @(posedge go)q++;initial begin @(posedge go);seen++;end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn zero_trip_hierarchy_dependencies_ignore_unexecuted_body_and_step() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        }
+        for body in [
+            "repeat(0)q=a;",
+            "repeat(32'sd0)q=read_a();",
+            "while(1'b0)q=read_a();",
+            "for(int i=0;i<0;i++)q=a;",
+            "for(int i=0;1'b0;i=read_a())q=a;",
+        ] {
+            let source = format!(
+                "module Child(input bit a,output bit q);function bit read_a();return a;endfunction always_comb begin q=0;{body} end endmodule module Top(output bit[7:0]seen);bit a;wire q;Child c(a,q);initial begin #1;a=1;a=0;end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
         }
     }
 }
