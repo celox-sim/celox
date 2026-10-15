@@ -6,6 +6,8 @@
 //! and total sparse-array model replay. Unsupported terms or exhausted budgets yield Unknown.
 //! Diagnostics are not proof certificates: UNSAT trusts this Rust implementation.
 use lydite_ir::{Env, Res, Sort, Term};
+pub use num_bigint::BigUint;
+use num_traits::{ToPrimitive, Zero};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -92,22 +94,75 @@ impl SearchStrategy {
         }
     }
 }
+/// Largest bit-vector width accepted by the finite solver.
+pub const MAX_WIDTH: u32 = 65536;
+/// A scalar model value. `Bv::value` is always below `2^width`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scalar {
     Bool(bool),
-    Bv { width: u32, value: u64 },
+    Bv { width: u32, value: BigUint },
 }
 impl Scalar {
+    /// Bit-vector value reduced modulo `2^width`.
+    pub fn bv(width: u32, value: u64) -> Self {
+        Self::bv_big(width, BigUint::from(value))
+    }
+    /// Bit-vector value reduced modulo `2^width`.
+    pub fn bv_big(width: u32, value: BigUint) -> Self {
+        Self::Bv {
+            width,
+            value: truncate(value, width),
+        }
+    }
+    /// Parse a JSON bit-vector value as produced by [`Scalar::json_value`]:
+    /// an unsigned integer number or a string of decimal digits, below `2^width`.
+    pub fn bv_from_json(width: u32, value: &Value) -> Res<Self> {
+        let value = if let Some(n) = value.as_u64() {
+            BigUint::from(n)
+        } else if let Some(text) = value
+            .as_str()
+            .filter(|t| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()))
+        {
+            text.parse::<BigUint>()
+                .map_err(|_| "invalid bit-vector value")?
+        } else {
+            return Err("bit-vector value must be an unsigned integer or decimal string".into());
+        };
+        if value.bits() > u64::from(width) {
+            return Err("bit-vector value out of range".into());
+        }
+        Ok(Self::Bv { width, value })
+    }
     pub fn smt(&self) -> String {
         match self {
             Self::Bool(b) => b.to_string(),
             Self::Bv { width, value } => format!("(_ bv{value} {width})"),
         }
     }
+    /// JSON value only: a Bool, a number for widths up to 64, and a decimal
+    /// string for wider bit-vectors (JSON numbers cannot carry them exactly).
+    pub fn json_value(&self) -> Value {
+        match self {
+            Self::Bool(b) => json!(b),
+            Self::Bv { width, value } => match value.to_u64() {
+                Some(n) if *width <= 64 => json!(n),
+                _ => json!(value.to_string()),
+            },
+        }
+    }
     pub fn json(&self) -> Value {
         match self {
-            Self::Bool(b) => json!({"sort":"Bool","value":b}),
-            Self::Bv { width, value } => json!({"sort":"Bv","width":width,"value":value}),
+            Self::Bool(_) => json!({"sort":"Bool","value":self.json_value()}),
+            Self::Bv { width, .. } => {
+                json!({"sort":"Bv","width":width,"value":self.json_value()})
+            }
+        }
+    }
+    /// The bit-vector value if it fits in 64 bits.
+    pub fn to_u64(&self) -> Option<u64> {
+        match self {
+            Self::Bv { value, .. } => value.to_u64(),
+            Self::Bool(_) => None,
         }
     }
     fn sort(&self) -> Sort {
@@ -122,11 +177,15 @@ impl Scalar {
             _ => unreachable!("checked type"),
         }
     }
-    fn word(&self) -> u64 {
+    fn word(&self) -> &BigUint {
         match self {
-            Self::Bv { value, .. } => *value,
+            Self::Bv { value, .. } => value,
             _ => unreachable!("checked type"),
         }
+    }
+    fn word64(&self) -> Res<u64> {
+        self.to_u64()
+            .ok_or_else(|| "finite value does not fit in 64 bits".into())
     }
 }
 #[derive(Default, Clone, Debug)]
@@ -229,17 +288,24 @@ impl Budget {
         Ok(())
     }
 }
-fn mask(w: u32) -> u64 {
-    if w == 64 { u64::MAX } else { (1u64 << w) - 1 }
+fn mask(w: u32) -> BigUint {
+    (BigUint::from(1u8) << w) - 1u8
+}
+fn truncate(v: BigUint, w: u32) -> BigUint {
+    if v.bits() <= u64::from(w) {
+        v
+    } else {
+        v & mask(w)
+    }
 }
 fn valid_sort(s: &Sort) -> bool {
-    matches!(s, Sort::Bool | Sort::Bv(1..=64))
+    matches!(s, Sort::Bool | Sort::Bv(1..=MAX_WIDTH))
 }
 #[derive(Clone, Debug)]
 enum Op {
     Variable(String),
     Bool(bool),
-    Word(u64),
+    Word(BigUint),
     Not,
     And,
     Or,
@@ -254,6 +320,8 @@ enum Op {
     Add,
     Sub,
     Mul,
+    UDiv,
+    URem,
     Shl,
     LShr,
     Ult,
@@ -289,10 +357,18 @@ fn operation(t: &Term) -> Res<Op> {
         }
         if let Some(text) = name.strip_prefix("(_ bv").and_then(|s| s.strip_suffix(')')) {
             let fields = text.split_whitespace().collect::<Vec<_>>();
-            if fields.len() == 2 {
-                if let (Ok(v), Ok(w)) = (fields[0].parse::<u64>(), fields[1].parse::<u32>()) {
-                    if t.0.sort == Sort::Bv(w) {
-                        return Ok(Op::Word(v & mask(w)));
+            if fields.len() == 2
+                && !fields[0].is_empty()
+                && fields[0].bytes().all(|c| c.is_ascii_digit())
+            {
+                if let Ok(w) = fields[1].parse::<u32>() {
+                    // The sort is already width-checked; this bounds the decimal
+                    // text (and parse cost) by the width while still accepting
+                    // every 64-bit literal that was accepted before.
+                    if t.0.sort == Sort::Bv(w) && fields[0].len() <= w as usize + 20 {
+                        if let Ok(v) = fields[0].parse::<BigUint>() {
+                            return Ok(Op::Word(truncate(v, w)));
+                        }
                     }
                 }
             }
@@ -300,8 +376,9 @@ fn operation(t: &Term) -> Res<Op> {
         return Err(bad());
     }
     let bools = || a.iter().all(|x| x.0.sort == Sort::Bool) && t.0.sort == Sort::Bool;
-    let words =
-        || a.iter().all(|x| x.0.sort == a[0].0.sort) && matches!(a[0].0.sort, Sort::Bv(1..=64));
+    let words = || {
+        a.iter().all(|x| x.0.sort == a[0].0.sort) && matches!(a[0].0.sort, Sort::Bv(1..=MAX_WIDTH))
+    };
     let op = match name {
         "not" if a.len() == 1 && bools() => Op::Not,
         "and" if a.len() == 2 && bools() => Op::And,
@@ -318,7 +395,8 @@ fn operation(t: &Term) -> Res<Op> {
             Op::Ite
         }
         "bvnot" if a.len() == 1 && words() && t.0.sort == a[0].0.sort => Op::BNot,
-        "bvand" | "bvor" | "bvxor" | "bvadd" | "bvsub" | "bvmul" | "bvshl" | "bvlshr"
+        "bvand" | "bvor" | "bvxor" | "bvadd" | "bvsub" | "bvmul" | "bvudiv" | "bvurem"
+        | "bvshl" | "bvlshr"
             if a.len() == 2 && words() && t.0.sort == a[0].0.sort =>
         {
             match name {
@@ -328,6 +406,8 @@ fn operation(t: &Term) -> Res<Op> {
                 "bvadd" => Op::Add,
                 "bvsub" => Op::Sub,
                 "bvmul" => Op::Mul,
+                "bvudiv" => Op::UDiv,
+                "bvurem" => Op::URem,
                 "bvshl" => Op::Shl,
                 _ => Op::LShr,
             }
@@ -812,6 +892,47 @@ impl Blast {
         }
         Ok(out)
     }
+    /// Ripple-carry sum with its carry out.
+    fn add_carry(
+        &mut self,
+        x: &[Lit],
+        y: &[Lit],
+        mut carry: Lit,
+        b: &mut Budget,
+    ) -> Res<(Vec<Lit>, Lit)> {
+        let mut out = Vec::with_capacity(x.len());
+        for (&a, &c) in x.iter().zip(y) {
+            let pair = self.xor(a, c, b)?;
+            out.push(self.xor(pair, carry, b)?);
+            let ac = self.and(a, c, b)?;
+            let pc = self.and(pair, carry, b)?;
+            carry = self.or(ac, pc, b)?;
+        }
+        Ok((out, carry))
+    }
+    /// Restoring unsigned division with SMT-LIB semantics: dividing by zero
+    /// yields an all-ones quotient and the dividend as remainder. Each step
+    /// subtracts in w+1 bits; the carry out is the quotient bit (no borrow).
+    fn divide(&mut self, x: &[Lit], y: &[Lit], b: &mut Budget) -> Res<(Vec<Lit>, Vec<Lit>)> {
+        let w = x.len();
+        // Complement of the zero-extended divisor.
+        let mut negated = y.iter().map(|l| -l).collect::<Vec<_>>();
+        negated.push(TRUE);
+        let mut quotient = vec![FALSE; w];
+        let mut remainder = vec![FALSE; w];
+        for i in (0..w).rev() {
+            let mut shifted = Vec::with_capacity(w + 1);
+            shifted.push(x[i]);
+            shifted.extend_from_slice(&remainder);
+            let (difference, fits) = self.add_carry(&shifted, &negated, TRUE, b)?;
+            quotient[i] = fits;
+            // The selected value is below max(y, 2^(w-i)) <= 2^w, so bit w is zero.
+            remainder = (0..w)
+                .map(|j| self.mux(fits, difference[j], shifted[j], b))
+                .collect::<Res<Vec<_>>>()?;
+        }
+        Ok((quotient, remainder))
+    }
     fn lt(&mut self, x: &[Lit], y: &[Lit], b: &mut Budget) -> Res<Lit> {
         let mut less = FALSE;
         for (&x, &y) in x.iter().zip(y) {
@@ -1012,9 +1133,30 @@ impl Blast {
                 }
                 value.bits
             }
+            op => self.gate(op, &args, w, b)?,
+        };
+        if bits.len() != w {
+            return Err("finite encoder width mismatch".into());
+        }
+        if self.memo.len() >= b.limits.max_terms {
+            return Err("finite solver term budget exhausted".into());
+        }
+        let value = Bits {
+            sort: t.0.sort.clone(),
+            bits,
+        };
+        self.memo.insert(t.clone(), value.clone());
+        Ok(value)
+    }
+    /// Gates for one non-variable node over already encoded arguments. Kept
+    /// out of the recursive `term` so its match does not enlarge every frame.
+    #[inline(never)]
+    fn gate(&mut self, op: Op, args: &[Bits], w: usize, b: &mut Budget) -> Res<Vec<Lit>> {
+        Ok(match op {
+            Op::Variable(_) => unreachable!("encoded by term"),
             Op::Bool(v) => vec![if v { TRUE } else { FALSE }],
             Op::Word(v) => (0..w)
-                .map(|i| if v & (1u64 << i) != 0 { TRUE } else { FALSE })
+                .map(|i| if v.bit(i as u64) { TRUE } else { FALSE })
                 .collect(),
             Op::Not | Op::BNot => args[0].bits.iter().map(|x| -x).collect(),
             Op::And | Op::BAnd | Op::Or | Op::BOr | Op::Xor | Op::BXor | Op::Implies => args[0]
@@ -1060,6 +1202,14 @@ impl Blast {
                 }
                 sum
             }
+            Op::UDiv | Op::URem => {
+                let (quotient, remainder) = self.divide(&args[0].bits, &args[1].bits, b)?;
+                if matches!(op, Op::UDiv) {
+                    quotient
+                } else {
+                    remainder
+                }
+            }
             Op::Shl | Op::LShr => {
                 let mut value = args[0].bits.clone();
                 for (i, &shift) in args[1].bits.iter().enumerate() {
@@ -1103,19 +1253,7 @@ impl Blast {
                 x.resize(w, high);
                 x
             }
-        };
-        if bits.len() != w {
-            return Err("finite encoder width mismatch".into());
-        }
-        if self.memo.len() >= b.limits.max_terms {
-            return Err("finite solver term budget exhausted".into());
-        }
-        let value = Bits {
-            sort: t.0.sort.clone(),
-            bits,
-        };
-        self.memo.insert(t.clone(), value.clone());
-        Ok(value)
+        })
     }
 }
 
@@ -1167,18 +1305,32 @@ fn evaluate(
             .iter()
             .map(|t| evaluate(t, inputs, memo, b, depth + 1))
             .collect::<Res<Vec<_>>>()?;
-    let word = |value: u64| match t.0.sort {
-        Sort::Bv(width) => Scalar::Bv {
-            width,
-            value: value & mask(width),
-        },
-        _ => unreachable!(),
-    };
     let value = match op {
         Op::Variable(n) => inputs
             .get(&n)
             .cloned()
             .ok_or(format!("finite witness missing {n}"))?,
+        op => apply(op, &a, &t.0.sort),
+    };
+    if value.sort() != t.0.sort {
+        return Err("finite witness type mismatch".into());
+    }
+    memo.insert(t.clone(), value.clone());
+    Ok(value)
+}
+
+/// One evaluation step on already evaluated, type-checked arguments. Kept out
+/// of the recursive `evaluate` so wide-word temporaries do not enlarge its frame.
+#[inline(never)]
+fn apply(op: Op, a: &[Scalar], sort: &Sort) -> Scalar {
+    let width = match sort {
+        Sort::Bv(w) => *w,
+        _ => 0,
+    };
+    let word = |value: BigUint| Scalar::bv_big(width, value);
+    let shift = |amount: &BigUint, w: u32| amount.to_usize().filter(|n| *n < w as usize);
+    match op {
+        Op::Variable(_) => unreachable!("evaluated by the caller"),
         Op::Bool(v) => Scalar::Bool(v),
         Op::Word(v) => word(v),
         Op::Not => Scalar::Bool(!a[0].boolean()),
@@ -1188,22 +1340,31 @@ fn evaluate(
         Op::Implies => Scalar::Bool(!a[0].boolean() || a[1].boolean()),
         Op::Eq => Scalar::Bool(a[0] == a[1]),
         Op::Ite => a[if a[0].boolean() { 1 } else { 2 }].clone(),
-        Op::BNot => word(!a[0].word()),
+        Op::BNot => word(a[0].word() ^ mask(width)),
         Op::BAnd => word(a[0].word() & a[1].word()),
         Op::BOr => word(a[0].word() | a[1].word()),
         Op::BXor => word(a[0].word() ^ a[1].word()),
-        Op::Add => word(a[0].word().wrapping_add(a[1].word())),
-        Op::Sub => word(a[0].word().wrapping_sub(a[1].word())),
-        Op::Mul => word(a[0].word().wrapping_mul(a[1].word())),
-        Op::Shl => word(if a[1].word() >= 64 {
-            0
+        Op::Add => word(a[0].word() + a[1].word()),
+        // x - y = x + (2^w - 1 - y) + 1 (mod 2^w); y < 2^w.
+        Op::Sub => word(a[0].word() + (mask(width) - a[1].word()) + 1u8),
+        Op::Mul => word(a[0].word() * a[1].word()),
+        Op::UDiv => word(if a[1].word().is_zero() {
+            mask(width)
         } else {
-            a[0].word() << a[1].word()
+            a[0].word() / a[1].word()
         }),
-        Op::LShr => word(if a[1].word() >= 64 {
-            0
+        Op::URem => word(if a[1].word().is_zero() {
+            a[0].word().clone()
         } else {
-            a[0].word() >> a[1].word()
+            a[0].word() % a[1].word()
+        }),
+        Op::Shl => word(match shift(a[1].word(), width) {
+            Some(n) => a[0].word() << n,
+            None => BigUint::zero(),
+        }),
+        Op::LShr => word(match shift(a[1].word(), width) {
+            Some(n) => a[0].word() >> n,
+            None => BigUint::zero(),
         }),
         Op::Ult => Scalar::Bool(a[0].word() < a[1].word()),
         Op::Ule => Scalar::Bool(a[0].word() <= a[1].word()),
@@ -1211,41 +1372,35 @@ fn evaluate(
             let Sort::Bv(w) = a[0].sort() else {
                 unreachable!()
             };
-            let signed = |x: u64| {
-                if w == 64 {
-                    x as i64
-                } else {
-                    ((x << (64 - w)) as i64) >> (64 - w)
-                }
-            };
-            let (x, y) = (signed(a[0].word()), signed(a[1].word()));
-            Scalar::Bool(if matches!(op, Op::Slt) { x < y } else { x <= y })
+            let (x, y) = (a[0].word(), a[1].word());
+            let sign = u64::from(w - 1);
+            Scalar::Bool(match (x.bit(sign), y.bit(sign)) {
+                (true, false) => true,
+                (false, true) => false,
+                _ if matches!(op, Op::Slt) => x < y,
+                _ => x <= y,
+            })
         }
         Op::Concat => {
             let Sort::Bv(w) = a[1].sort() else {
                 unreachable!()
             };
-            word((a[0].word() << w) | a[1].word())
+            word((a[0].word() << w as usize) | a[1].word())
         }
-        Op::Extract(_, lo) => word(a[0].word() >> lo),
-        Op::Zext => word(a[0].word()),
+        Op::Extract(_, lo) => word(a[0].word() >> lo as usize),
+        Op::Zext => word(a[0].word().clone()),
         Op::Sext => {
             let Sort::Bv(w) = a[0].sort() else {
                 unreachable!()
             };
             let x = a[0].word();
-            word(if x & (1u64 << (w - 1)) != 0 {
-                x | !mask(w)
+            word(if x.bit(u64::from(w - 1)) {
+                x | (mask(width) - mask(w))
             } else {
-                x
+                x.clone()
             })
         }
-    };
-    if value.sort() != t.0.sort {
-        return Err("finite witness type mismatch".into());
     }
-    memo.insert(t.clone(), value.clone());
-    Ok(value)
 }
 
 /// Indexed activity heap. Equal scores prefer the lowest variable number, just
@@ -2067,12 +2222,15 @@ fn solve_plain(formula: &Term, context: &Env, limits: Limits, search_hint: Searc
         for (n, bits) in &blast.inputs {
             let value = match bits.sort {
                 Sort::Bool => Scalar::Bool(truth(&sat.values, bits.bits[0]) > 0),
-                Sort::Bv(width) => Scalar::Bv {
-                    width,
-                    value: bits.bits.iter().enumerate().fold(0u64, |v, (i, &p)| {
-                        v | ((truth(&sat.values, p) > 0) as u64) << i
-                    }),
-                },
+                Sort::Bv(width) => {
+                    let mut value = BigUint::zero();
+                    for (i, &p) in bits.bits.iter().enumerate() {
+                        if truth(&sat.values, p) > 0 {
+                            value.set_bit(i as u64, true);
+                        }
+                    }
+                    Scalar::Bv { width, value }
+                }
                 _ => unreachable!(),
             };
             assignments.insert(n.clone(), value);
@@ -2357,7 +2515,7 @@ mod tests {
         let result = solve(&formula, &Env::new(), Limits::default());
         assert_eq!(result.verdict, Verdict::Sat);
         assert!(result.original_formula_validated);
-        assert_eq!(result.assignments["x"], Scalar::Bv { width: 3, value: 0 });
+        assert_eq!(result.assignments["x"], Scalar::bv(3, 0));
         assert!(result.stats.asserted_definitions > 0);
         let cycle = and(eq(x.clone(), plus), eq(y.clone(), x.clone()));
         assert_eq!(
@@ -2768,22 +2926,10 @@ mod tests {
         let result = solve(&formula, &ctx, Limits::default());
         assert_eq!(result.verdict, Verdict::Sat);
         assert!(result.original_formula_validated);
-        assert_eq!(
-            result.assignments["x"],
-            Scalar::Bv {
-                width: 8,
-                value: 255
-            }
-        );
+        assert_eq!(result.assignments["x"], Scalar::bv(8, 255));
         assert!(result.assignments.contains_key("extra"));
-        assert_eq!(
-            result.context_values["sum"],
-            Scalar::Bv { width: 8, value: 0 }
-        );
-        assert_eq!(
-            result.context_values["chosen"],
-            Scalar::Bv { width: 8, value: 3 }
-        );
+        assert_eq!(result.context_values["sum"], Scalar::bv(8, 0));
+        assert_eq!(result.context_values["chosen"], Scalar::bv(8, 3));
     }
     #[test]
     fn contradictions_require_unsat_and_all_limits_are_unknown() {
@@ -2969,3 +3115,6 @@ mod tests {
 
 #[cfg(test)]
 mod guarded_tests;
+
+#[cfg(test)]
+mod wide_tests;

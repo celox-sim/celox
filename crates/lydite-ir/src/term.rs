@@ -156,6 +156,12 @@ pub fn bv(w: u32, v: u64) -> Term {
         vec![],
     )
 }
+/// Arbitrary-width constant; `v` is reduced modulo 2^w. Produces the same
+/// `(_ bvV W)` operator text as [`bv`] for values that fit both.
+pub fn bv_big(w: u32, v: &num_bigint::BigUint) -> Term {
+    let modulus = num_bigint::BigUint::from(1u8) << w;
+    node(Sort::Bv(w), format!("(_ bv{} {})", v % modulus, w), vec![])
+}
 pub fn var(n: String, s: Sort) -> Term {
     node(s, format!("@{n}"), vec![])
 }
@@ -323,5 +329,27 @@ mod dag_comparison_tests {
             lhs.cmp(&different_metadata),
             old_cmp(&lhs, &different_metadata)
         );
+    }
+}
+
+#[cfg(test)]
+mod wide_constant_tests {
+    use super::*;
+    use num_bigint::BigUint;
+    #[test]
+    fn bv_big_matches_bv_and_reduces_modulo_width() {
+        for (w, v) in [
+            (1, 3u64),
+            (8, 300),
+            (63, u64::MAX),
+            (64, u64::MAX),
+            (100, 7),
+        ] {
+            assert_eq!(bv_big(w, &BigUint::from(v)), bv(w, v));
+        }
+        let wide = (BigUint::from(1u8) << 70u32) + 3u8;
+        assert_eq!(bv_big(70, &wide).0.op, "(_ bv3 70)");
+        assert_eq!(bv_big(80, &wide).0.op, "(_ bv1180591620717411303427 80)");
+        assert_eq!(bv_big(80, &wide).0.sort, Sort::Bv(80));
     }
 }
