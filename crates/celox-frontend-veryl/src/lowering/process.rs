@@ -2944,7 +2944,7 @@ impl<'a> BlockLowering<'a> {
     fn lower_system_function(&mut self, call: &SystemFunctionCall) -> Result<Flow, ParserError> {
         match &call.kind {
             SystemFunctionKind::Finish => {
-                self.kernel.finish();
+                self.kernel.finish_after_publication();
                 Ok(Flow::Ended)
             }
             SystemFunctionKind::Assert { kind, cond, args } => {

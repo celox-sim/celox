@@ -1514,8 +1514,11 @@ impl<B: SimBackend> SimulationState<B> {
                             self.done.insert(process);
                             any_ran = true;
                         }
-                        Some(ProcessStatus::Finish) => {
-                            self.finish_round = true;
+                        Some(
+                            status
+                            @ (ProcessStatus::Finish | ProcessStatus::FinishAfterPublication),
+                        ) => {
+                            self.finish_round = status == ProcessStatus::Finish;
                             self.waiting.remove(&process);
                             self.done.insert(process);
                             self.finished = true;

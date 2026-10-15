@@ -349,6 +349,11 @@ impl<A: Clone> ProcessKernelBuilder<A> {
         self.end(ProcessStatus::Finish);
     }
 
+    /// End a sequential testbench after publishing this round's prior writes.
+    pub fn finish_after_publication(&mut self) {
+        self.end(ProcessStatus::FinishAfterPublication);
+    }
+
     /// Complete the kernel. If a block is still open, the process ends there.
     pub fn build(mut self) -> ExecutionUnit<A> {
         if self.builder.has_open_block() {

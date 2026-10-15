@@ -265,6 +265,11 @@ pub enum ProcessStatus {
     Yield,
     /// An event occurred while sampling queued drives; resume its body after the batch.
     Ready,
+    /// End a sequential testbench after publishing writes and captured edges
+    /// from the current round. No later process or generated clock runs.
+    /// Veryl testbenches use this completion boundary; HDL `$finish` uses
+    /// [`Self::Finish`] and suppresses all subsequent publication.
+    FinishAfterPublication,
 }
 
 impl ProcessStatus {
@@ -283,6 +288,7 @@ impl ProcessStatus {
             Self::Settle => 8,
             Self::Yield => 10,
             Self::Ready => 11,
+            Self::FinishAfterPublication => 12,
         }
     }
 
@@ -299,6 +305,7 @@ impl ProcessStatus {
             8 => Some(Self::Settle),
             10 => Some(Self::Yield),
             11 => Some(Self::Ready),
+            12 => Some(Self::FinishAfterPublication),
             _ => None,
         }
     }
