@@ -3676,6 +3676,29 @@ pub(super) fn fixed_runtime_write_times(
     let mut phase = 0u64;
     let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
     for stmt in stmts {
+        // A false while condition does not execute its body, including any
+        // suspensions or calls in that body. Keep the current time and phase.
+        if let Stmt::Loop {
+            kind: LoopKind::While,
+            init,
+            condition: Some(condition),
+            step,
+            ..
+        } = stmt
+            && init.is_empty()
+            && step.is_empty()
+            && !expr_calls(condition, &|_| true)
+            && known_loop_value(
+                condition,
+                pm.variables,
+                pm.name_to_id,
+                pm.constants,
+                pm.parameter_types,
+            ) == Some(0)
+        {
+            continue;
+        }
+
         let mut calls = Vec::new();
         stmt_calls(stmt, &mut calls);
         if !matches!(stmt, Stmt::Call { .. })

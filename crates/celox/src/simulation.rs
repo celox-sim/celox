@@ -5439,6 +5439,43 @@ mod wait_and_finish_review {
             .is_err()
         );
     }
+    #[test]
+    fn zero_trip_while_preserves_fixed_write_times() {
+        for body in ["q[0]=1;", "begin #7;q[0]=1;end", "begin skipped();end"] {
+            let source = format!(
+                "module Child(output bit[1:0]q);task skipped;#7;q[0]=1;endtask initial begin #1;while(0){body} q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+            );
+            fn check<B: SimBackend>(mut sim: Simulation<B>) {
+                sim.run_until(1).unwrap();
+                assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+                sim.run_until(2).unwrap();
+                assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+            }
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("while.sv"))],
+                    "Top",
+                )
+            };
+            check(Simulation::new(build().build_interpreter().unwrap()));
+            check(Simulation::new(build().build_cranelift().unwrap()));
+            check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()));
+            let coincident = source.replace("#2;q[1]", "#1;q[1]");
+            assert!(
+                Simulator::from_sv_sources(
+                    vec![(
+                        coincident.as_str(),
+                        std::path::Path::new("coincident-while.sv")
+                    )],
+                    "Top"
+                )
+                .build_interpreter()
+                .is_err()
+            );
+        }
+    }
     struct DefaultFinish<B: SimBackend> {
         sim: Simulator<B>,
         combs: usize,
