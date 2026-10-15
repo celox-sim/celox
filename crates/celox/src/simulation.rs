@@ -7221,7 +7221,7 @@ mod clean_waiter_settle_review {
         kernel
             .builder()
             .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
-        kernel.wait_clock(0, count).unwrap();
+        kernel.wait_clock(0, count, None).unwrap();
         let one = kernel.builder().alloc_bit(1, false);
         kernel
             .builder()
