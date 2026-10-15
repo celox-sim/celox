@@ -1,11 +1,49 @@
 # yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
 # Keep ordinary PR checks focused; validate combined trees on queue draft PRs.
 merge_queue:
-  # Keep combined-tree validation across categories sharing a base branch.
-  mode: serial
+  # Independent scopes advance separately; overlapping changes stay ordered.
+  mode: parallel
   max_parallel_checks: 5
   queued_label: queued
   dequeued_label: dequeued
+
+# Keep the product dependency graph together. Only these standalone PR-policy
+# validators are independent of Veryl/compiler changes; unknown paths stay core.
+scopes:
+  source:
+    files:
+      core:
+        include:
+          - "**"
+        exclude:
+          - .github/workflows/pr-title.yml
+          - scripts/check-pr-title.mjs
+          - scripts/check-pr-title.test.mjs
+          - scripts/check-pr-release-impact.mjs
+          - scripts/check-pr-release-impact.test.mjs
+          - scripts/check-mergify-batch.mjs
+          - scripts/check-mergify-batch.test.mjs
+          - scripts/check-mergify-queue-title.mjs
+          - scripts/check-mergify-queue-title.test.mjs
+      pr-policy:
+        include:
+          - .github/workflows/pr-title.yml
+          - scripts/check-pr-title.mjs
+          - scripts/check-pr-title.test.mjs
+          - scripts/check-pr-release-impact.mjs
+          - scripts/check-pr-release-impact.test.mjs
+          - scripts/check-mergify-batch.mjs
+          - scripts/check-mergify-batch.test.mjs
+          - scripts/check-mergify-queue-title.mjs
+          - scripts/check-mergify-queue-title.test.mjs
+  capacities:
+    core: 2
+    pr-policy: 1
+  barrier_files:
+    include:
+      - .mergify.yml
+      - release-please-config.json
+      - VERSION
 
 queue_rules:
   - name: integration

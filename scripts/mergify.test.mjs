@@ -14,7 +14,7 @@ const queues = queueConfig
   .map((block) => ({ name: block.split("\n")[0], block }));
 
 test("all queue categories preserve combined-tree validation and merge protections", () => {
-  assert.match(queueConfig, /mode: serial/);
+  assert.match(queueConfig, /mode: parallel/);
   assert.match(queueConfig, /max_parallel_checks: 5/);
   assert.deepEqual(
     queues.map((queue) => queue.name),
@@ -129,4 +129,51 @@ test("Renovate preserves the manually reviewed compatibility group", () => {
     rules.indexOf(compatibility) >
       rules.findLastIndex((rule) => rule.labels?.includes("merge-ready")),
   );
+});
+
+test("PR-policy repairs are independent of Veryl while dependencies and features overlap", () => {
+  const scopes = queueConfig.split("scopes:\n")[1].split("queue_rules:\n")[0];
+  const core = scopes.split("      core:\n")[1].split("      pr-policy:")[0];
+  const policy = scopes
+    .split("      pr-policy:\n")[1]
+    .split("  capacities:")[0];
+  assert.match(core, /include:\n          - "\*\*"/);
+  const paths = (block) =>
+    [...block.matchAll(/^          - ([^"\n]+)$/gm)].map((m) => m[1]);
+  const excluded = paths(core.split("        exclude:")[1]);
+  const included = paths(policy);
+  assert.deepEqual(excluded, included);
+  // These scopes deliberately use exact paths, avoiding an expanding glob that
+  // could silently classify new runtime-dependent scripts as independent.
+  for (const path of included) assert.doesNotMatch(path, /[?*{}\[\]]/);
+  function assigned(files) {
+    return [
+      files.some((file) => !excluded.includes(file)) && "core",
+      files.some((file) => included.includes(file)) && "pr-policy",
+    ].filter(Boolean);
+  }
+  const repair = [
+    ".github/workflows/pr-title.yml",
+    "scripts/check-mergify-queue-title.mjs",
+    "scripts/check-mergify-queue-title.test.mjs",
+  ];
+  assert.deepEqual(assigned(repair), ["pr-policy"]);
+  for (const file of [
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "crates/celox/src/lib.rs",
+    "packages/celox/package.json",
+    "pnpm-lock.yaml",
+    "scripts/ci-changes.mjs",
+    ".github/workflows/ci.yml",
+    "new-component/unknown.rs",
+  ])
+    assert.deepEqual(assigned([file]), ["core"], file);
+  assert.deepEqual(assigned([...repair, "Cargo.lock"]), ["core", "pr-policy"]);
+  assert.match(scopes, /capacities:\n    core: 2\n    pr-policy: 1/);
+  for (const file of [".mergify.yml", "release-please-config.json", "VERSION"])
+    assert.ok(
+      scopes.split("  barrier_files:")[1].includes(`      - ${file}\n`),
+    );
 });

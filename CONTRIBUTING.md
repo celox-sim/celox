@@ -72,8 +72,8 @@ Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
 workspace when Rust is affected. Mergify checks up to five batches concurrently
-across three queue rules, using serial mode to preserve combined-tree validation
-between categories targeting the same base branch:
+across three queue rules. Parallel mode separates independent file scopes while
+retaining combined-tree validation for overlapping scopes:
 
 | Queue | PR heads | Batch size | Maximum collection wait |
 | --- | --- | --- | --- |
@@ -86,7 +86,18 @@ commands. The existing `merge-ready` rule selects the matching queue without
 changing which PRs may auto-merge; manual-review dependency groups still require
 an explicit merge request. All three queues retain the same GitHub protections,
 queue validation, title checks, release hold, and release authorization gate.
-These categories control batching, not independence or separate runner capacity.
+Queue categories control batch sizes; file scopes control independence. The
+`pr-policy` scope contains only the title workflow and its standalone title,
+release-impact, and batch validators. Everything else (including unknown paths,
+Rust dependencies, Veryl, NAPI, and feature changes) shares `core`. This lets a
+PR-title repair advance without inheriting a speculative Veryl update, while
+compiler and dependency changes still validate together. Mixed PRs share both
+scopes. Core is capped at two concurrent batches and PR policy at one, within
+the global five-batch ceiling; these are batch limits, not runner counts.
+Changes to `.mergify.yml`, `release-please-config.json`, or `VERSION` are barriers, requiring
+ordering across both scopes. Extend the narrow policy allowlist only after
+checking its runtime dependencies. Scopes do not change CI job selection.
+See [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
 The separate lydite proof/editor gates run on queue drafts rather than ordinary
 PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
