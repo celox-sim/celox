@@ -5813,6 +5813,119 @@ mod wait_and_finish_review {
     }
 
     #[test]
+    fn single_pass_loops_preserve_fixed_write_times_and_parent_continuations() {
+        for four_state in [false, true] {
+            for control in [
+                "forever",
+                "while(1)",
+                "repeat(5)",
+                "do",
+                "for(int i=0;1;i++)",
+                "for(;1;q[0]=0)",
+            ] {
+                for (body, first) in [
+                    ("q[0]=1;break;#9;q[0]=0;", 1u64),
+                    ("if(4'bx001)begin q[0]=1;break;end skipped();", 1),
+                    (
+                        "case(1)1:begin q[0]=1;break;end default:skipped();endcase skipped();",
+                        1,
+                    ),
+                    ("repeat(0)begin continue;end q[0]=1;break;", 1),
+                    ("forever begin break;end q[0]=1;break;", 1),
+                    ("#2;q[0]=1;break;skipped();", 3),
+                ] {
+                    let suffix = if control == "do" { "while(1);" } else { "" };
+                    let second = first + 1;
+                    let source = format!(
+                        "module Child(output bit[1:0]q);task skipped;#7;q[0]=0;endtask initial begin #1;{control} begin {body} end {suffix} #2;q[0]=0;end initial begin #{second};q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+                    );
+                    fn check<B: SimBackend>(mut sim: Simulation<B>, first: u64) {
+                        sim.run_until(first - 1).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+                        sim.run_until(first).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+                        sim.run_until(first + 1).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+                        sim.run_until(first + 2).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 3u8.into());
+                    }
+                    macro_rules! build {
+                        ($method:ident) => {
+                            check(
+                                Simulation::new(
+                                    Simulator::from_sv_sources(
+                                        vec![(
+                                            source.as_str(),
+                                            std::path::Path::new("single-pass.sv"),
+                                        )],
+                                        "Top",
+                                    )
+                                    .four_state(four_state)
+                                    .$method()
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "{control}, {body}, four_state={four_state}: {error:?}"
+                                        )
+                                    }),
+                                ),
+                                first,
+                            );
+                        };
+                    }
+                    build!(build_interpreter);
+                    build!(build_cranelift);
+                    build!(build_wasm);
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    build!(build_native);
+                    let coincident =
+                        source.replace(&format!("#{second};q[1]"), &format!("#{first};q[1]"));
+                    assert!(
+                        Simulator::from_sv_sources(
+                            vec![(
+                                coincident.as_str(),
+                                std::path::Path::new("coincident-single-pass.sv")
+                            )],
+                            "Top"
+                        )
+                        .four_state(four_state)
+                        .build_interpreter()
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_jumps_and_nested_breaks_keep_loop_timing_conservative() {
+        for body in [
+            "for(q[0]=1;1;)begin q[0]=0;break;end break;",
+            "while(select)begin #5;q[0]=1;break;end q[0]=0;break;",
+            "q[0]=~q[0];continue;break;",
+            "q[0]=~q[0];if(select)continue;break;",
+            "if(select)break;#5;q[0]=1;break;",
+            "forever begin q[0]=1;break;end #1;q[0]=0;break;",
+        ] {
+            let source = format!(
+                "module Child(input bit select,output bit[1:0]q);initial begin #1;forever begin {body} end end initial begin #2;q[1]=1;end endmodule module Top(input bit select);wire[1:0]q;Child child(.select(select),.q(q));initial forever @(q[0]^q[1]);endmodule"
+            );
+            let result = Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("live-loop.sv"))],
+                "Top",
+            )
+            .build_interpreter();
+            let error = match result {
+                Ok(_) => panic!("must preserve loop control flow: {body}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("multiple blocking writes"),
+                "{body}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn selected_constant_if_delays_advance_the_fixed_time() {
         let source = "module Child(output bit[1:0]q);initial begin #1;if(1)begin #2;q[0]=1;end else #7;end initial begin #4;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
