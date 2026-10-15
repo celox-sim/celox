@@ -307,10 +307,7 @@ pub(super) fn rewrites(
         let RefNode::DataDeclaration(sv_parser::DataDeclaration::Variable(variable)) = node else {
             continue;
         };
-        // Const declarations cannot be assigned procedurally.
-        if variable.nodes.0.is_some() {
-            continue;
-        }
+        let is_const = variable.nodes.0.is_some();
         let (start, end) = span(&tree, node).ok_or("missing declaration source span")?;
         let mut removals = Vec::new();
         let mut assignments = String::new();
@@ -379,6 +376,13 @@ pub(super) fn rewrites(
                     format!("localparam {datatype} {name}{dimensions} = {expression};"),
                 ));
                 continue;
+            }
+            if is_const {
+                return Err(crate::script::sv::Unsupported(format!(
+                    "dynamic const initializer `{}` cannot be staged after host setup",
+                    name.trim()
+                ))
+                .into());
             }
             let mut suffix = equal_start;
             let temporary = loop {

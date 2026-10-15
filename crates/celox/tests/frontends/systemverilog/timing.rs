@@ -287,3 +287,11 @@ sv_backends! { fn continuous_zero_argument_function_tracks_global_reads(sim) {
 sv_backends! { fn initializer_explicit_arguments_skip_effectful_defaults(sim) {
     @case "timing::initializer_explicit_arguments_skip_effectful_defaults";
 } }
+
+sv_backends! { fn constant_continuous_function_edges_match_staged_startup(sim) {
+    @case "timing::constant_continuous_function_edges_match_staged_startup";
+} }
+
+sv_backends! { fn escaped_initializer_function_effects_finish_during_initialization(sim) {
+    @case "timing::escaped_initializer_function_effects_finish_during_initialization";
+} }
