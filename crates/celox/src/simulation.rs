@@ -6679,6 +6679,68 @@ mod round57_review_tests {
         run(Simulation::new(build().build_native().unwrap()), &check);
     }
     #[test]
+    fn round61_constant_exits_and_four_state_truth_preserve_single_child_writes() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        for four_state in [false, true] {
+            for action in [
+                "repeat(2) begin v=~v;if(1'b1)break;end",
+                "repeat(2) begin v=~v;case(1)1:break;default:;endcase end",
+                "if(4'bx001)v=~v;else begin v=0;v=1;end",
+                "if(4'bz001)v=~v;else begin v=0;v=1;end",
+                "if(4'b000x)begin v=0;v=1;end else v=~v;",
+            ] {
+                let source = format!(
+                    "module Child(input bit clk,output bit v);always @(posedge clk) begin {action} end endmodule module Top(output bit[7:0]q);bit clk;wire v;Child c(clk,v);initial forever begin @(v);q++;end initial begin #1;clk=1;end endmodule"
+                );
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(&source, std::path::Path::new("truth-exit.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                };
+                check(Simulation::new(build().build_interpreter().unwrap()));
+                check(Simulation::new(build().build_cranelift().unwrap()));
+                check(Simulation::new(build().build_wasm().unwrap()));
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(Simulation::new(build().build_native().unwrap()));
+            }
+        }
+    }
+    #[test]
+    fn round61_unknown_or_unreachable_loop_exits_keep_pulse_guard() {
+        for action in [
+            "repeat(2)begin v=~v;if(0)break;end",
+            "repeat(2)begin v=~v;if(select)break;end",
+            "repeat(2)begin v=~v;case(0)1:break;default:;endcase end",
+            "repeat(2)begin v=~v;case(select)1:break;default:;endcase end",
+            "repeat(2)begin v=~v;repeat(1)break;end",
+        ] {
+            let source = format!(
+                "module Child(input bit clk,select,output bit v);always @(posedge clk)begin {action} end endmodule module Top(input bit clk,select,output bit[7:0]q);wire v;Child c(clk,select,v);initial forever begin @(v);q++;end endmodule"
+            );
+            for four_state in [false, true] {
+                let error = match Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("loop-exit-guard.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .build_interpreter()
+                {
+                    Ok(_) => panic!("multiple writes must remain rejected"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("multiple blocking writes"),
+                    "{action}: {error}"
+                );
+            }
+        }
+    }
+    #[test]
     fn round60_static_if_excludes_unreachable_comb_pulses() {
         let exact = "module Top(output bit q);logic v;always_comb if(1'b1)v=0;else begin v=0;v=1;end initial @(v)q=1;endmodule";
         check_backends(exact, |advance| {

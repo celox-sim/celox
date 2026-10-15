@@ -45,9 +45,7 @@ static TRACE_METADATA: tracing::Metadata<'static> = tracing::Metadata::new(
 );
 
 fn execution_tracing_enabled() -> bool {
-    if tracing::Level::TRACE > tracing::level_filters::STATIC_MAX_LEVEL
-        || !tracing::dispatcher::has_been_set()
-    {
+    if tracing::Level::TRACE > tracing::level_filters::STATIC_MAX_LEVEL {
         return false;
     }
     TRACE_GATE.register();
