@@ -5,6 +5,7 @@ import {
   collectMergeQueuePullRequests,
   commitReleaseImpact,
   loadMergeGroupPullRequests,
+  loadReleasePolicy,
   mergeGroupHeadPullRequestNumber,
   releasePolicyFromFiles,
   releaseImpactErrors,
@@ -352,4 +353,24 @@ test("allows the commits from the missed breaking-change pull request", () => {
     ),
     [],
   );
+});
+
+
+test("in-place validation uses the PR's policy rather than the old base policy", async () => {
+  const sha = "a".repeat(40);
+  const calls = [];
+  const options = await loadReleasePolicy("owner/repo", sha, async (repo, path, ref) => {
+    calls.push([repo, path, ref]);
+    return path === "VERSION" ? "1.0.0" : '{"bump-patch-for-minor-pre-major":true}';
+  });
+  assert.deepEqual(calls, [["owner/repo", "VERSION", sha], ["owner/repo", "release-please-config.json", sha]]);
+  const commits = [commit("feat: add output")];
+  assert.deepEqual(releaseImpactErrors("fix: repair output", commits, {preMajor: true, bumpPatchForMinorPreMajor: true}), []);
+  assert.equal(releaseImpactErrors("fix: repair output", commits, options).length, 1);
+});
+
+test("missing or unreadable policy cannot pass the release gate", async () => {
+  await assert.rejects(loadReleasePolicy("owner/repo", undefined), /exact commit SHA/);
+  await assert.rejects(loadReleasePolicy("owner/repo", "master"), /exact commit SHA/);
+  await assert.rejects(loadReleasePolicy("owner/repo", "a".repeat(40), async () => {throw new Error("policy missing");}), /policy missing/);
 });

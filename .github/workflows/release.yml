@@ -92,8 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # An enqueue event created with GITHUB_TOKEN would not start the required
-      # merge_group workflows. Use the release App so queue checks run normally.
+      # Use the release App to request Mergify queueing through a label.
       - name: Create release app token
         id: release-token
         uses: actions/create-github-app-token@v3
@@ -102,6 +101,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: write
           permission-workflows: write
 
       - name: Queue the release pull request
