@@ -2555,6 +2555,13 @@ impl<'a> LoopConstContext<'a> {
         known_loop_value(expr, self.variables, self.ids, self.constants, self.types)
     }
 
+    pub(super) fn truth(&self, expr: &sv::ir::Expr) -> Option<bool> {
+        let mut arena = SLTNodeArena::new();
+        let node = self.lower(expr, None, &mut arena)?;
+        let truth = slt_truth(&mut arena, node).ok()?;
+        slt_bool(&arena, &mut ConstCache::default(), truth)
+    }
+
     fn lower(
         &self,
         expr: &sv::ir::Expr,
@@ -2723,28 +2730,27 @@ pub(super) fn procedural_write_counts(
                     }
                 }
                 sv::ir::Stmt::If {
+                    condition,
                     then_body,
                     else_body,
-                    ..
                 } => {
-                    next = counts(
-                        then_body,
-                        subroutines,
-                        visiting,
-                        eval,
-                        two_state,
-                        include_nonblocking,
-                    );
-                    for (name, count) in counts(
-                        else_body,
-                        subroutines,
-                        visiting,
-                        eval,
-                        two_state,
-                        include_nonblocking,
-                    ) {
-                        let entry = next.entry(name).or_default();
-                        *entry = (*entry).max(count);
+                    let branches: Vec<&[sv::ir::Stmt]> = match eval.truth(condition) {
+                        Some(true) => vec![then_body],
+                        Some(false) => vec![else_body],
+                        None => vec![then_body, else_body],
+                    };
+                    for body in branches {
+                        for (name, count) in counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        ) {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry).max(count);
+                        }
                     }
                 }
                 sv::ir::Stmt::Case { items, default, .. } => {
@@ -2933,5 +2939,36 @@ pub(super) fn stmt_may_fall_through(stmt: &sv::ir::Stmt) -> bool {
                 || items.iter().any(|item| body_falls(&item.body))
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod pulse_summary_review_tests {
+    use super::*;
+    #[test]
+    fn round60_constant_if_folds_before_write_summary() {
+        use sv::ir::{Expr, LValue, Stmt};
+        let variables = HashMap::default();
+        let ids = HashMap::default();
+        let constants = HashMap::default();
+        let types = HashMap::default();
+        let subroutines = HashMap::default();
+        let write = || Stmt::Assign {
+            lhs: LValue::Ident("q".into()),
+            rhs: Expr::Literal("1'b0".into()),
+            nonblocking: false,
+        };
+        for four_state in [false, true] {
+            let eval = LoopConstContext::new(&variables, &ids, &constants, &types, four_state);
+            for (condition, expected) in [("1'b1", 1), ("2'b10", 1), ("1'b0", 2)] {
+                let body = [Stmt::If {
+                    condition: Expr::Literal(condition.into()),
+                    then_body: vec![write()],
+                    else_body: vec![write(), write()],
+                }];
+                let counts = procedural_write_counts(&body, &subroutines, &eval, &|_| true, false);
+                assert_eq!(counts["q"], expected);
+            }
+        }
     }
 }

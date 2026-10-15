@@ -4140,3 +4140,29 @@ test("native host-work probes preserve pending FF edges without running them", (
 		raw.dispose();
 	}
 });
+
+test("nextEventTime exposes a pending native host wake without executing it", () => {
+	const sim = Simulation.fromSource<{ go: bigint; readonly count: bigint }>(
+		"module Top(clk:input clock,go:input logic,count:output logic<8>){var r:logic<8>;let derived:'_ clock=clk & go;assign count=r;always_ff(derived){r=r+1;}}",
+		"Top",
+	);
+	try {
+		sim.schedule("clk", { time: 0, value: 1 });
+		sim.runUntil(0);
+		expect(sim.nextEventTime()).toBeNull();
+		sim.dut.go = 1n;
+		expect(sim.nextEventTime()).toBe(0);
+		expect(sim.nextEventTime()).toBe(0);
+		expect(sim.dut.count).toBe(0n);
+		expect(sim.time()).toBe(0);
+		expect(() => sim.runUntil(0, { maxSteps: 0 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(sim.dut.count).toBe(0n);
+		expect(sim.step()).toBe(0);
+		expect(sim.dut.count).toBe(1n);
+		expect(sim.nextEventTime()).toBeNull();
+	} finally {
+		sim.dispose();
+	}
+});

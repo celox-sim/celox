@@ -3419,17 +3419,29 @@ pub(super) fn runtime_watched_write_count(
                             };
                         effects.then(branches)
                     }
-                    Stmt::Case { items, default, .. } => {
-                        let default = default.as_ref().map_or_else(WritePhases::default, |stmts| {
-                            body(stmts, pm, expr, active, nonblocking)
-                        });
-                        let branches = items
-                            .iter()
-                            .map(|item| body(&item.body, pm, expr, active, nonblocking))
-                            .chain(std::iter::once(default))
-                            .reduce(WritePhases::choice)
-                            .unwrap_or_default();
-                        effects.then(branches)
+                    Stmt::Case {
+                        kind,
+                        selector,
+                        items,
+                        default,
+                    } => {
+                        if let Some(selected) =
+                            selected_case_body(*kind, selector, items, default.as_deref(), pm)
+                        {
+                            effects.then(body(selected, pm, expr, active, nonblocking))
+                        } else {
+                            let default =
+                                default.as_ref().map_or_else(WritePhases::default, |stmts| {
+                                    body(stmts, pm, expr, active, nonblocking)
+                                });
+                            let branches = items
+                                .iter()
+                                .map(|item| body(&item.body, pm, expr, active, nonblocking))
+                                .chain(std::iter::once(default))
+                                .reduce(WritePhases::choice)
+                                .unwrap_or_default();
+                            effects.then(branches)
+                        }
                     }
                     Stmt::Loop {
                         kind,
@@ -3498,6 +3510,37 @@ pub(super) struct FixedWriteTimes {
     pub period: Option<u64>,
 }
 
+fn known_condition(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<bool> {
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .truth(condition)
+}
+fn selected_case_body<'a>(
+    kind: sv::ir::CaseKind,
+    selector: &sv::ir::Expr,
+    items: &'a [sv::ir::CaseItem],
+    default: Option<&'a [sv::ir::Stmt]>,
+    pm: &ProcModule<'_>,
+) -> Option<&'a [sv::ir::Stmt]> {
+    // Lowering evaluates the selector even when there are no items.
+    if expr_calls(selector, &|_| true) {
+        return None;
+    }
+    for item in items {
+        let condition = case_item_condition(kind, selector, &item.labels).ok()?;
+        // An unknown earlier match prevents choosing a later item.
+        if known_condition(&condition, pm)? {
+            return Some(&item.body);
+        }
+    }
+    Some(default.unwrap_or_default())
+}
+
 /// Exact times for a straight-line initial activation with constant delays.
 /// Other control flow retains the conservative activation summary above.
 pub(super) fn fixed_runtime_write_times(
@@ -3506,45 +3549,6 @@ pub(super) fn fixed_runtime_write_times(
     expr: &sv::ir::Expr,
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
-    fn known_condition(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<bool> {
-        if expr_calls(condition, &|_| true) {
-            return None;
-        }
-        let condition = expr_for_state_mode(condition, pm.four_state);
-        let mut arena = SLTNodeArena::new();
-        let (node, _) = lower_expr_with_context(
-            &condition,
-            pm.variables,
-            pm.name_to_id,
-            pm.constants,
-            pm.parameter_types,
-            &mut arena,
-            None,
-            None,
-        )?;
-        let truth = slt_truth(&mut arena, node).ok()?;
-        slt_bool(&arena, &mut ConstCache::default(), truth)
-    }
-    fn selected_case_body<'a>(
-        kind: sv::ir::CaseKind,
-        selector: &sv::ir::Expr,
-        items: &'a [sv::ir::CaseItem],
-        default: Option<&'a [sv::ir::Stmt]>,
-        pm: &ProcModule<'_>,
-    ) -> Option<&'a [sv::ir::Stmt]> {
-        // Lowering evaluates the selector even when there are no items.
-        if expr_calls(selector, &|_| true) {
-            return None;
-        }
-        for item in items {
-            let condition = case_item_condition(kind, selector, &item.labels).ok()?;
-            // An unknown earlier match prevents choosing a later item.
-            if known_condition(&condition, pm)? {
-                return Some(&item.body);
-            }
-        }
-        Some(default.unwrap_or_default())
-    }
     fn selected_branch<'a>(
         stmt: &'a sv::ir::Stmt,
         pm: &ProcModule<'_>,
@@ -4225,19 +4229,41 @@ pub(super) fn watched_write_count(
                 watched_readmem_count(pm, expr, name, args)
             }
             sv::ir::Stmt::If {
+                condition,
                 then_body,
                 else_body,
-                ..
-            } => watched_write_count(then_body, pm, expr, visiting, nonblocking).max(
-                watched_write_count(else_body, pm, expr, visiting, nonblocking),
-            ),
-            sv::ir::Stmt::Case { items, default, .. } => items
-                .iter()
-                .map(|item| item.body.as_slice())
-                .chain(default.iter().map(Vec::as_slice))
-                .map(|body| watched_write_count(body, pm, expr, visiting, nonblocking))
-                .max()
-                .unwrap_or(0),
+            } => match known_condition(condition, pm) {
+                Some(value) => watched_write_count(
+                    if value { then_body } else { else_body },
+                    pm,
+                    expr,
+                    visiting,
+                    nonblocking,
+                ),
+                None => watched_write_count(then_body, pm, expr, visiting, nonblocking).max(
+                    watched_write_count(else_body, pm, expr, visiting, nonblocking),
+                ),
+            },
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => {
+                if let Some(selected) =
+                    selected_case_body(*kind, selector, items, default.as_deref(), pm)
+                {
+                    watched_write_count(selected, pm, expr, visiting, nonblocking)
+                } else {
+                    items
+                        .iter()
+                        .map(|item| item.body.as_slice())
+                        .chain(default.iter().map(Vec::as_slice))
+                        .map(|body| watched_write_count(body, pm, expr, visiting, nonblocking))
+                        .max()
+                        .unwrap_or(0)
+                }
+            }
             sv::ir::Stmt::Loop {
                 kind,
                 init,

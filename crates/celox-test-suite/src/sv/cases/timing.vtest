@@ -1324,3 +1324,29 @@ endmodule"#)
  endmodule
  "#)
  (top Top)(run_to_finish)(assert_eq seen 0)(expect_output ""))
+
+(case constant_comb_if_discards_unreachable_pulse_branch
+ (source "constant-comb-if.sv" #"module Top(input bit go,output bit[7:0]q);bit v;
+ always_comb if(1'b1)v=go;else begin v=0;v=1;end
+ initial forever begin @(v);q++;end endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 0)(set go 1)(run_until 1)(assert_eq q 1)
+ (set go 0)(run_until 2)(assert_eq q 2))
+
+(case constant_child_ff_case_discards_unreachable_pulse_arm
+ (source "constant-child-ff-case.sv" #"module Child(input bit clk,output bit v);
+ always @(posedge clk) case(2'd1) 2'd1:v<=~v;default:begin v<=0;v<=1;end endcase endmodule
+ module Top(input bit clk,output bit[7:0]q);wire v;Child c(clk,v);
+ initial forever begin @(v);q++;end endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 0)(set clk 1)(run_until 1)(assert_eq q 1)
+ (set clk 0)(run_until 2)(set clk 1)(run_until 3)(assert_eq q 2))
+
+(case typed_continuous_enum_drivers_preserve_assignment_types
+ (source "typed-continuous-enum.sv" #"module Top(input bit[1:0]go,output wire a,b);
+ typedef enum logic {LOW,HIGH} level_t;
+ function automatic level_t checked(input bit[1:0]value);
+ if(!value)$fatal(1,"early enum driver");if(value[0])return HIGH;return LOW;endfunction
+ wire level_t first=checked(go);
+ wire level_t second;assign second=checked(go);
+ assign a=first;assign b=second;initial #2 $finish;endmodule"#)
+ (top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1)
+ (set go 2)(run_until 1)(assert_eq a 0)(assert_eq b 0))
