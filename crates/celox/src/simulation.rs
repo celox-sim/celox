@@ -5259,6 +5259,31 @@ mod nba_waiter_sampling_review {
         check(Simulation::new(build().build_native().unwrap()));
     }
     #[test]
+    fn all_direct_blocking_ff_waiters_sample_before_any_continuation() {
+        let source = "module Top(input bit clk,output bit a,b);bit enable=1;bit go;always_ff @(posedge clk)go=1;initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("b")), 1u8.into());
+        }
+        let build = || {
+            Simulator::from_sv_sources(
+                vec![(
+                    source,
+                    std::path::Path::new("direct-blocking-ff-waiters.sv"),
+                )],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+    #[test]
     fn finished_save_preserves_unsettled_output_and_roundtrip() {
         let source = "module Top(input bit clk,go,output bit q,derived);assign derived=q;always_comb begin q=go;if(go)$finish;end always @(posedge clk)begin end endmodule";
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
