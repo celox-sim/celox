@@ -2232,12 +2232,21 @@ fn recorded_pulses_join_the_first_generated_clock_batch() {
             TestResult::Pass
         );
     }
-    let build = || Simulator::builder(source, "Top").testbench_kernels(true);
-    check(build().build_interpreter().unwrap());
-    check(build().build_cranelift().unwrap());
-    check(build().build_wasm().unwrap());
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    check(build().build_native().unwrap());
+    let derived = source
+        .replace(
+            "var source:u32;",
+            "var source:u32;var enable:logic;let gated:'_ clock=go & enable;",
+        )
+        .replace("always_ff(go)", "always_ff(gated)")
+        .replace("initial{go=1;", "initial{enable=1;go=1;");
+    for source in [source, derived.as_str()] {
+        let build = || Simulator::builder(source, "Top").testbench_kernels(true);
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
 }
 
 #[test]
