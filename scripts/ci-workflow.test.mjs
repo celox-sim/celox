@@ -29,7 +29,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   );
   assert.match(
     gate,
-    /ARM64_REQUIRED: \$\{\{ github\.event_name != 'pull_request' && needs\.changes\.outputs\.rust != 'false' \}\}/,
+    /ARM64_REQUIRED: \$\{\{ needs\.changes\.outputs\.rust != 'false' \}\}/,
   );
   assert.match(gate, /ARM64_RESULT: \$\{\{ needs\.arm64-backend\.result \}\}/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
@@ -86,7 +86,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
-  // PRs and non-Rust changes may skip ARM64; other results fail closed.
+  // Only non-Rust changes may skip ARM64; other results fail closed.
   for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
     cases.push({
       env: { ...success, ARM64_REQUIRED: "false", ARM64_RESULT: status },
@@ -169,13 +169,10 @@ test("scheduled and manual validation run all paths and external suites", () => 
   );
   assert.match(
     job("changes"),
-    /MERGE_GROUP_BASE_REF: \$\{\{ github\.event\.merge_group\.base_ref \}\}/,
+    /MERGE_GROUP_BASE_REF: .*github\.event\.merge_group\.base_ref.*github\.base_ref/,
   );
-  // Only the repository's own release branch may skip PR product checks.
-  assert.match(
-    job("changes"),
-    /RELEASE_PLEASE_PR: \$\{\{ github\.event_name == 'pull_request' && github\.head_ref == 'release-please--branches--master--components--celox' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/,
-  );
+  assert.doesNotMatch(job("changes"), /RELEASE_PLEASE_PR:/);
+  assert.match(job("changes"), /MERGIFY_INPLACE: "true"/);
   assert.match(external, /fail-fast: false/);
   assert.match(external, /suite: \[veryl, sv\]/);
   assert.match(external, /tool: \[verilator, icarus\]/);
@@ -228,8 +225,9 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   );
 });
 
-test("pull requests scope the Rust tests and every other run keeps the workspace", () => {
+test("in-place CI retains the whole workspace and keeps the optional scope runner", () => {
   const rust = job("rust-tests");
+  assert.match(job("changes"), /MERGIFY_INPLACE: "true"/);
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
@@ -239,7 +237,10 @@ test("pull requests scope the Rust tests and every other run keeps the workspace
     rust,
     /name: Run the tests this pull request can affect\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
   );
-  assert.match(job("changes"), /rust_filter: \$\{\{ steps\.classify\.outputs\.rust_filter \}\}/);
+  assert.match(
+    job("changes"),
+    /rust_filter: \$\{\{ steps\.classify\.outputs\.rust_filter \}\}/,
+  );
 });
 
 test("artifact consumers wait for their producer rather than the Rust test gate", () => {
@@ -264,7 +265,7 @@ test("landed commits are not re-validated by a push run", () => {
   assert.match(triggers, /^\s+schedule:/m);
 });
 
-test("platform jobs run in merge groups and full runs, not on pull requests", () => {
+test("platform jobs run on in-place pull requests as well as legacy merge groups", () => {
   const platform = [
     "arm64-backend",
     "napi-windows",
@@ -272,14 +273,16 @@ test("platform jobs run in merge groups and full runs, not on pull requests", ()
     "js-windows",
   ];
   for (const name of platform) {
-    assert.match(
-      job(name),
-      /\n    if: always\(\) && github\.event_name != 'pull_request' && \(/,
-      name,
-    );
+    assert.match(job(name), /\n    if: always\(\) && \(/, name);
   }
   // Linux jobs still give pull requests their feedback.
-  for (const name of ["lint", "rust-tests", "napi-linux", "js-ubuntu", "rust"]) {
+  for (const name of [
+    "lint",
+    "rust-tests",
+    "napi-linux",
+    "js-ubuntu",
+    "rust",
+  ]) {
     assert.doesNotMatch(
       job(name).match(/^    if: (.*)$/m)[1],
       /github\.event_name != 'pull_request'/,

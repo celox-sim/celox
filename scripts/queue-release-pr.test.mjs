@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import {
   queueReleasePullRequest,
   RELEASE_HEAD,
   selectReleasePullRequest,
 } from "./queue-release-pr.mjs";
 
-function pullRequest(overrides = {}) {
+function pr(overrides = {}) {
   return {
     id: "PR_1",
     number: 388,
@@ -16,249 +15,121 @@ function pullRequest(overrides = {}) {
     headRefName: RELEASE_HEAD,
     isCrossRepository: false,
     isInMergeQueue: false,
-    mergeQueueEntry: null,
     autoMergeRequest: null,
     labels: [],
     ...overrides,
   };
 }
-
-function fakeGitHub({ candidates = [pullRequest()], states, enqueue, enable }) {
+function fake(
+  states = [pr(), pr({ labels: [{ name: "queued" }] })],
+  candidates = [pr()],
+) {
   const calls = [];
-  const queuedStates = [...(states ?? [pullRequest()])];
-  let lastState = queuedStates.at(-1);
-
+  let last = states.at(-1);
   return {
     calls,
     async listOpenPullRequests() {
-      calls.push("list");
       return candidates;
     },
-    async getPullRequest(id) {
-      calls.push(["get", id]);
-      lastState = queuedStates.shift() ?? lastState;
-      return lastState;
+    async getPullRequest() {
+      last = states.shift() ?? last;
+      return last;
     },
-    async enableAutoMerge(id) {
-      calls.push(["enable", id]);
-      return enable?.();
+    async addLabel(number, label) {
+      calls.push(["add", number, label]);
+    },
+    async removeLabel(number, label) {
+      calls.push(["remove", number, label]);
     },
     async disableAutoMerge(id) {
       calls.push(["disable", id]);
-    },
-    async enqueuePullRequest(id) {
-      calls.push(["enqueue", id]);
-      return enqueue ? enqueue() : { id: "MQE_1", position: 1 };
     },
     async dequeuePullRequest(id) {
       calls.push(["dequeue", id]);
     },
   };
 }
-
-test("selects only the trusted same-repository release branch", () => {
-  const expected = pullRequest();
+function run(github) {
+  let time = 0;
+  return queueReleasePullRequest({
+    github,
+    now: () => time,
+    sleep: async (ms) => {
+      time += ms;
+    },
+    timeoutMs: 30,
+    pollIntervalMs: 10,
+    log() {},
+  });
+}
+test("selects only the same-repository release branch and rejects ambiguity", () => {
+  const expected = pr();
   assert.equal(
     selectReleasePullRequest([
-      pullRequest({ id: "fork", isCrossRepository: true }),
-      pullRequest({ id: "other", headRefName: "release-lookalike" }),
+      pr({ isCrossRepository: true }),
+      pr({ headRefName: "other" }),
       expected,
     ]),
     expected,
   );
+  assert.throws(() => selectReleasePullRequest([pr(), pr()]), /Found 2/);
 });
-
-test("rejects ambiguous release pull requests", () => {
-  assert.throws(
-    () => selectReleasePullRequest([pullRequest(), pullRequest({ id: "PR_2" })]),
-    /Found 2 matching release pull requests/,
-  );
+test("missing release does not mutate anything", async () => {
+  const github = fake([], []);
+  assert.deepEqual(await run(github), { outcome: "missing" });
+  assert.deepEqual(github.calls, []);
 });
-
-test("does nothing when no release pull request is open", async () => {
-  const github = fakeGitHub({ candidates: [] });
-  const result = await queueReleasePullRequest({ github });
-  assert.deepEqual(result, { outcome: "missing" });
-  assert.deepEqual(github.calls, ["list"]);
-});
-
-test("enqueues a green release before trying to enable auto-merge", async () => {
-  const github = fakeGitHub({});
-  const result = await queueReleasePullRequest({ github });
-  assert.deepEqual(result, { outcome: "queued", number: 388, position: 1 });
+test("requests Mergify and waits for its queue acknowledgment", async () => {
+  const github = fake([pr(), pr(), pr({ labels: [{ name: "queued" }] })]);
+  assert.deepEqual(await run(github), { outcome: "queued", number: 388 });
   assert.deepEqual(github.calls, [
-    "list",
-    ["get", "PR_1"],
-    ["get", "PR_1"],
-    ["enqueue", "PR_1"],
+    ["remove", 388, "dequeued"],
+    ["add", 388, "merge-ready"],
   ]);
 });
-
-test("enables auto-merge after pending requirements reject direct enqueue", async () => {
-  const github = fakeGitHub({
-    states: [
-      pullRequest(),
-      pullRequest(),
-      pullRequest({
-        autoMergeRequest: { enabledAt: "now" },
-        isInMergeQueue: true,
-      }),
-    ],
-    enqueue() {
-      throw new Error("Required checks have not passed");
-    },
-  });
-  let clock = 0;
-  const result = await queueReleasePullRequest({
-    github,
-    timeoutMs: 100,
-    pollIntervalMs: 10,
-    now: () => clock,
-    sleep: async (duration) => {
-      clock += duration;
-    },
-    log() {},
-  });
-  assert.deepEqual(result, { outcome: "queued", number: 388 });
-  assert.deepEqual(github.calls.slice(0, 5), [
-    "list",
-    ["get", "PR_1"],
-    ["get", "PR_1"],
-    ["enqueue", "PR_1"],
-    ["enable", "PR_1"],
+test("clears legacy GitHub auto-merge and queue membership before requesting Mergify", async () => {
+  const github = fake([
+    pr({ isInMergeQueue: true, autoMergeRequest: {} }),
+    pr({ merged: true }),
+  ]);
+  assert.deepEqual(await run(github), { outcome: "merged", number: 388 });
+  assert.deepEqual(github.calls.slice(0, 2), [
+    ["dequeue", "PR_1"],
+    ["disable", "PR_1"],
   ]);
 });
-
-test("keeps polling when auto-merge is rejected for a green release", async () => {
-  const github = fakeGitHub({
-    states: [
-      pullRequest(),
-      pullRequest(),
-      pullRequest({ isInMergeQueue: true }),
-    ],
-    enqueue() {
-      throw new Error("Queue entry is not visible yet");
-    },
-    enable() {
-      throw new Error("Pull request is already queueable");
-    },
-  });
-  let clock = 0;
-  const result = await queueReleasePullRequest({
-    github,
-    timeoutMs: 100,
-    pollIntervalMs: 10,
-    now: () => clock,
-    sleep: async (duration) => {
-      clock += duration;
-    },
-    log() {},
-  });
-  assert.deepEqual(result, { outcome: "queued", number: 388 });
+test("a held release is not requested", async () => {
+  const github = fake([pr({ labels: [{ name: "release:hold" }] })]);
+  assert.deepEqual(await run(github), { outcome: "held", number: 388 });
+  assert.deepEqual(github.calls, []);
 });
-
-test("observes a queue entry created asynchronously", async () => {
-  const github = fakeGitHub({
-    states: [
-      pullRequest({ autoMergeRequest: { enabledAt: "now" } }),
-      pullRequest({ autoMergeRequest: { enabledAt: "now" } }),
-      pullRequest({
-        autoMergeRequest: { enabledAt: "now" },
-        isInMergeQueue: true,
-      }),
-    ],
-    enqueue() {
-      throw new Error("Required checks have not passed");
-    },
-  });
-  let clock = 0;
-  const result = await queueReleasePullRequest({
-    github,
-    timeoutMs: 100,
-    pollIntervalMs: 10,
-    now: () => clock,
-    sleep: async (duration) => {
-      clock += duration;
-    },
-    log() {},
-  });
-  assert.deepEqual(result, { outcome: "queued", number: 388 });
-});
-
-test("honors a hold added while waiting", async () => {
-  const github = fakeGitHub({
-    states: [
-      pullRequest({ autoMergeRequest: { enabledAt: "now" } }),
-      pullRequest({ autoMergeRequest: { enabledAt: "now" } }),
-      pullRequest({
-        autoMergeRequest: { enabledAt: "now" },
-        labels: [{ name: "release:hold" }],
-      }),
-    ],
-    enqueue() {
-      throw new Error("Required checks have not passed");
-    },
-  });
-  let clock = 0;
-  const result = await queueReleasePullRequest({
-    github,
-    timeoutMs: 100,
-    pollIntervalMs: 10,
-    now: () => clock,
-    sleep: async (duration) => {
-      clock += duration;
-    },
-    log() {},
-  });
-  assert.deepEqual(result, { outcome: "held", number: 388 });
-  assert.ok(
-    github.calls.some(
-      (call) => Array.isArray(call) && call[0] === "disable",
-    ),
-  );
-});
-
-test("removes an already queued held release", async () => {
-  const held = pullRequest({
-    isInMergeQueue: true,
-    mergeQueueEntry: { id: "MQE_1", position: 1 },
-    autoMergeRequest: { enabledAt: "now" },
-    labels: [{ name: "release:hold" }],
-  });
-  const github = fakeGitHub({ states: [held, held] });
-  const result = await queueReleasePullRequest({ github, log() {} });
-  assert.deepEqual(result, { outcome: "held", number: 388 });
-  assert.ok(
-    github.calls.some(
-      (call) => call[0] === "dequeue" && call[1] === "PR_1",
-    ),
-  );
-  assert.ok(
-    !github.calls.some(
-      (call) => call[0] === "dequeue" && call[1] === "MQE_1",
-    ),
-  );
-  assert.ok(github.calls.some((call) => call[0] === "disable"));
-});
-
-test("fails instead of reporting success when queueing times out", async () => {
-  const github = fakeGitHub({
-    enqueue() {
-      throw new Error("Required checks have not passed");
-    },
-  });
-  let clock = 0;
-  await assert.rejects(
-    queueReleasePullRequest({
-      github,
-      timeoutMs: 20,
-      pollIntervalMs: 10,
-      now: () => clock,
-      sleep: async (duration) => {
-        clock += duration;
-      },
-      log() {},
+test("a hold added while waiting removes the request before accepting queued status", async () => {
+  const github = fake([
+    pr(),
+    pr({
+      labels: ["merge-ready", "release:hold", "queued"].map((name) => ({
+        name,
+      })),
     }),
-    /Timed out queueing release pull request #388.*Required checks have not passed/,
+  ]);
+  assert.deepEqual(await run(github), { outcome: "held", number: 388 });
+  assert.deepEqual(github.calls.at(-1), ["remove", 388, "merge-ready"]);
+});
+test("failure or timeout never reports a successful queue entry", async () => {
+  await assert.rejects(
+    run(fake([pr(), pr({ labels: [{ name: "dequeued" }] })])),
+    /Mergify dequeued/,
   );
+  await assert.rejects(run(fake([pr()])), /Timed out queueing/);
+  await assert.rejects(
+    run(fake([pr(), pr({ state: "CLOSED" })])),
+    /became CLOSED/,
+  );
+});
+test("label write failures propagate", async () => {
+  const github = fake();
+  github.addLabel = async () => {
+    throw new Error("forbidden");
+  };
+  await assert.rejects(run(github), /forbidden/);
 });
