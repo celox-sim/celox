@@ -2879,20 +2879,18 @@ fn validate_cross_instance_event_pulses(
                 let mut pending = vec![body];
                 let mut visited = HashSet::default();
                 while let Some(body) = pending.pop() {
-                    for stmt in body {
-                        stmt.walk(&mut |stmt| {
-                            procedural::stmt_reads(stmt, &mut reads);
-                            let mut calls = Vec::new();
-                            procedural::stmt_calls(stmt, &mut calls);
-                            for (name, _) in calls {
-                                if visited.insert(name.clone())
-                                    && let Some(function) = pm.subroutines.get(&name)
-                                {
-                                    pending.push(&function.body);
-                                }
+                    ff::walk_reachable(body, &pm, &mut |stmt| {
+                        procedural::stmt_reads(stmt, &mut reads);
+                        let mut calls = Vec::new();
+                        procedural::stmt_calls(stmt, &mut calls);
+                        for (name, _) in calls {
+                            if visited.insert(name.clone())
+                                && let Some(function) = pm.subroutines.get(&name)
+                            {
+                                pending.push(&function.body);
                             }
-                        });
-                    }
+                        }
+                    });
                 }
                 for name in count(body).keys() {
                     if let Some(&target) = module.signal_names.get(name) {
@@ -7757,6 +7755,61 @@ pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round62_runtime_loop_summary_stops_after_selected_exit() {
+        use sv::ir::{Expr, LValue, LoopKind, Stmt};
+        let ir = sv::analyze_source_module_with_parameter_overrides(
+            "module Top(input bit select,output bit q);endmodule",
+            std::path::Path::new("summary.sv"),
+            "Top",
+            &Default::default(),
+        )
+        .unwrap();
+        for four_state in [false, true] {
+            let mut module =
+                lower_module(&ir.modules()[0], four_state, true, false, false).unwrap();
+            let pm = procedural::ProcModule::new(
+                &module.source,
+                &mut module.variables,
+                &mut module.signal_names,
+                &module.constants,
+                &module.parameter_types,
+                four_state,
+            );
+            let write = || Stmt::Assign {
+                lhs: LValue::Ident("q".into()),
+                rhs: Expr::Literal("1'b1".into()),
+                nonblocking: false,
+            };
+            for (condition, expected) in [
+                (Expr::Literal("1'b1".into()), 1),
+                (Expr::Literal("4'bx001".into()), 1),
+                (Expr::Literal("1'b0".into()), 2),
+                (Expr::Ident("select".into()), 2),
+            ] {
+                let body = [Stmt::Loop {
+                    kind: LoopKind::Repeat(Expr::Literal("2".into())),
+                    init: vec![],
+                    condition: None,
+                    step: vec![],
+                    body: vec![
+                        write(),
+                        Stmt::If {
+                            condition,
+                            then_body: vec![Stmt::Break],
+                            else_body: vec![],
+                        },
+                        write(),
+                    ],
+                }];
+                assert_eq!(
+                    ff::runtime_watched_write_count(&body, &pm, &Expr::Ident("q".into()), false),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn select_sources_adds_nested_offsets_and_keeps_computed_dependencies() {

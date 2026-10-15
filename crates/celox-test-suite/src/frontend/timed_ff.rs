@@ -702,6 +702,70 @@ impl TaskTiming {
         format!("reg [$bits({lhs} )-1:0] {name};")
     }
 
+    pub(super) fn connection_declaration(
+        &self,
+        module: &str,
+        port: &str,
+        instance: &str,
+        array: bool,
+        expression: &str,
+        name: &str,
+    ) -> Result<String> {
+        let declaration = self.driver_types.iter().find_map(|(source, declarations)| {
+            declarations.iter().find(|(offset, id, _, _)| {
+                id.trim_start_matches('\\') == port.trim().trim_start_matches('\\')
+                    && container_at(source, *offset) == module
+                    && self.lexical_scope(source, *offset).len() == 1
+            })
+        });
+        if declaration.is_none() {
+            return Err(format!(
+                "missing input-port type for {module}.{port} in timed callable staging"
+            )
+            .into());
+        }
+        if let Some((_, _, datatype, dimensions)) = declaration {
+            let datatype = datatype.trim();
+            let builtin = datatype.is_empty()
+                || datatype.starts_with('[')
+                || sv_words(datatype).first().is_some_and(|w| {
+                    matches!(
+                        w.2,
+                        "bit"
+                            | "logic"
+                            | "reg"
+                            | "signed"
+                            | "unsigned"
+                            | "byte"
+                            | "shortint"
+                            | "int"
+                            | "longint"
+                            | "integer"
+                            | "time"
+                    )
+                });
+            if !builtin || !dimensions.is_empty() {
+                // A package-qualified typedef keeps nominal enum/struct identity,
+                // signedness and unpacked shape without relying on type(expr),
+                // which the available Icarus adapter does not implement.
+                if !array
+                    && datatype.contains("::")
+                    && !datatype.contains(['[', '{', '('])
+                    && dimensions.is_empty()
+                {
+                    return Ok(format!("{datatype} {name};"));
+                }
+                return Err(format!("cannot preserve callable input-port type `{datatype} {dimensions}` for {module}.{port} in timed staging").into());
+            }
+        }
+        let width = if array {
+            expression.to_owned()
+        } else {
+            format!("{instance} .{port} ")
+        };
+        Ok(format!("reg [$bits({width} )-1:0] {name};"))
+    }
+
     fn lexical_scope(&self, source: &str, at: usize) -> Vec<usize> {
         lexical_scope_at(
             source,

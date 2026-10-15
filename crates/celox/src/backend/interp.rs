@@ -481,6 +481,10 @@ impl Machine<'_> {
         // buffer allocation because `seq` is masked by the capacity.
         unsafe {
             let event_ptr = self.read_u64(STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET) as *mut AtomicU64;
+            if self.layout.runtime_event_site_layouts[site_id as usize].is_finish {
+                (*event_ptr.add(celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET / 8))
+                    .store(1, Ordering::Release);
+            }
             let seq = (*event_ptr).load(Ordering::Acquire);
             let capacity = self.layout.runtime_event_capacity as u64;
             if capacity == 0 {

@@ -115,6 +115,15 @@ impl ProcessKernelBuilder {
         self.delay_with_status(amount, ProcessStatus::InactiveDelay)
     }
 
+    /// Return for a budget check and immediately resume this same process.
+    /// This does not schedule an inactive-region delay or run another process.
+    pub fn yield_events(&mut self) -> Result<(), ProcessKernelError> {
+        let zero = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        self.delay_with_status(zero, ProcessStatus::Yield)
+    }
+
     fn delay_with_status(
         &mut self,
         amount: RegisterId,

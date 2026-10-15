@@ -172,14 +172,6 @@ mod host {
     #[derive(Default)]
     struct RuntimeFinishState {
         requested: bool,
-        read_seq: u64,
-    }
-
-    fn raw_events_request_finish(events: &[RawRuntimeEvent], sites: &[RuntimeEventSite]) -> bool {
-        events.iter().any(|event| {
-            matches!(event, RawRuntimeEvent::Event { site_id, .. }
-                if sites.get(*site_id).is_some_and(|site| matches!(site.kind, RuntimeEventKind::Finish)))
-        })
     }
 
     impl RuntimeEventDrain {
@@ -194,15 +186,10 @@ mod host {
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish))
             {
                 let mut finish = self.finish_state.lock().unwrap();
-                if !finish.requested {
-                    let events = drain_raw_runtime_events_from_buffer(
-                        &self.buffer,
-                        &self.layout,
-                        &self.sites,
-                        &mut finish.read_seq,
-                    );
-                    finish.requested = raw_events_request_finish(&events, &self.sites);
-                }
+                finish.requested |= self.buffer.load_atomic_u64(
+                    celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET,
+                    Ordering::Acquire,
+                ) != 0;
             }
             let events = drain_raw_runtime_events_from_buffer(
                 &self.buffer,
@@ -1005,18 +992,33 @@ mod host {
             }
             let mut finish = self.runtime_finish_state.lock().unwrap();
             if !finish.requested {
-                let events = self.read_backend_runtime_events(&mut finish.read_seq);
-                finish.requested = raw_events_request_finish(
-                    &events,
-                    &self.program.runtime_schema.runtime_event_sites,
-                );
+                let offset = celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET;
+                finish.requested = if let Some(buffer) = self.backend.runtime_event_buffer() {
+                    buffer.load_atomic_u64(offset, Ordering::Acquire) != 0
+                } else {
+                    let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+                    assert!(offset + 8 <= size);
+                    unsafe { std::ptr::read_volatile(ptr.add(offset).cast::<u64>()) != 0 }
+                };
             }
             finish.requested
         }
 
         pub(super) fn reset_runtime_finish(&self, finished: bool) {
             let mut finish = self.runtime_finish_state.lock().unwrap();
-            finish.read_seq = self.runtime_event_write_seq();
+            let offset = celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET;
+            if let Some(buffer) = self.backend.runtime_event_buffer() {
+                buffer.store_atomic_u64(offset, u64::from(finished), Ordering::Release);
+            } else {
+                let (ptr, size) = self.backend.runtime_event_buffer_as_ptr();
+                assert!(offset + 8 <= size);
+                unsafe {
+                    std::ptr::write_volatile(
+                        ptr.add(offset).cast_mut().cast::<u64>(),
+                        u64::from(finished),
+                    );
+                }
+            }
             finish.requested = finished;
         }
 

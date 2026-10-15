@@ -98,12 +98,15 @@ pub(super) fn rewrites(
                 // arrays: one port width broadcasts, the aggregate width
                 // distributes (IEEE 1800-2023 23.3.3.5). A scalar connection
                 // instead supplies its port's assignment context.
-                let width = if array {
-                    expression.clone()
-                } else {
-                    format!("{instance_name} .{port} ")
-                };
-                drivers.push_str(&format!("reg [$bits({width} )-1:0] {name};\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package));
+                let declaration = tasks.connection_declaration(
+                    module_name,
+                    &port,
+                    instance_name,
+                    array,
+                    &expression,
+                    &name,
+                )?;
+                drivers.push_str(&format!("{declaration}\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package));
                 replacements.push((begin, finish, name));
             }
         }
