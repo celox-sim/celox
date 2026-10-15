@@ -534,6 +534,11 @@ impl<B: SimBackend> SimulationState<B> {
             .scheduler
             .next_event_time()
             .is_some_and(|next| next <= time)
+            || self
+                .process_wakeups
+                .peek()
+                .is_some_and(|Reverse((next, _))| *next <= time)
+            || !self.inactive.is_empty()
         {
             return Ok(false);
         }
@@ -595,87 +600,108 @@ impl<B: SimBackend> SimulationState<B> {
             if pass.is_empty() {
                 return Ok(progressed);
             }
-            count_delta_pass(delta_rounds)?;
+            if let Err(error) = count_delta_pass(delta_rounds) {
+                for process in pass {
+                    self.process_wakeups.push(Reverse((current_time, process)));
+                }
+                return Err(error);
+            }
             let mut any_ran = false;
-            for process in pass.drain(..) {
-                let before = self
-                    .process_event_counters
-                    .iter()
-                    .map(|(_, rises, falls)| {
-                        (
-                            executor.backend().get_as::<u32>(*rises),
-                            executor.backend().get_as::<u32>(*falls),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                // A previous delay amount is no longer live on resumption.
-                executor
-                    .backend_mut()
-                    .set(self.processes[process].delay, 0u64);
-                executor.run_process(process)?;
-                self.sampled_ready.remove(&process);
-                if executor.finish_requested(current_time) {
-                    self.finish_round = true;
-                    self.finished = true;
-                    return Ok(true);
-                }
-                for ((id, rises, falls), (old_rises, old_falls)) in
-                    self.process_event_counters.iter().zip(before)
-                {
-                    let changed = match self.domain_kinds[*id] {
-                        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                            executor.backend().get_as::<u32>(*falls) != old_falls
-                        }
-                        _ => executor.backend().get_as::<u32>(*rises) != old_rises,
-                    };
-                    if changed {
-                        executor.backend_mut().mark_triggered_bit(*id);
-                    }
-                }
-                let refs = self.processes[process];
-                let status: u8 = executor.backend().get_as(refs.status);
-                match ProcessStatus::from_code(status) {
-                    Some(ProcessStatus::Delay | ProcessStatus::InactiveDelay) => {
-                        let delay: u64 = executor.backend().get_as(refs.delay);
-                        let time = current_time.checked_add(delay).ok_or_else(|| {
-                            SimulatorErrorCode::Runtime {
-                                message: format!(
-                                    "process {process} delay overflows simulation time"
-                                ),
-                                signals: Vec::new(),
-                            }
-                        })?;
-                        self.waiting.remove(&process);
-                        if delay == 0
-                            && ProcessStatus::from_code(status)
-                                == Some(ProcessStatus::InactiveDelay)
-                        {
-                            self.inactive.insert(process);
-                        } else {
-                            self.process_wakeups.push(Reverse((time, process)));
-                        }
-                        any_ran = true;
-                    }
-                    Some(ProcessStatus::Done) => {
-                        self.waiting.remove(&process);
-                        any_ran = true;
-                    }
-                    Some(ProcessStatus::Finish) => {
+            let mut remaining = std::mem::take(&mut pass).into_iter();
+            while let Some(process) = remaining.next() {
+                loop {
+                    let before = self
+                        .process_event_counters
+                        .iter()
+                        .map(|(_, rises, falls)| {
+                            (
+                                executor.backend().get_as::<u32>(*rises),
+                                executor.backend().get_as::<u32>(*falls),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    // A previous delay amount is no longer live on resumption.
+                    executor
+                        .backend_mut()
+                        .set(self.processes[process].delay, 0u64);
+                    executor.run_process(process)?;
+                    self.sampled_ready.remove(&process);
+                    if executor.finish_requested(current_time) {
                         self.finish_round = true;
-                        self.waiting.remove(&process);
                         self.finished = true;
                         return Ok(true);
                     }
-                    Some(ProcessStatus::Wait) => {
-                        self.waiting.insert(process);
-                        any_ran = true;
+                    for ((id, rises, falls), (old_rises, old_falls)) in
+                        self.process_event_counters.iter().zip(before)
+                    {
+                        let changed = match self.domain_kinds[*id] {
+                            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                                executor.backend().get_as::<u32>(*falls) != old_falls
+                            }
+                            _ => executor.backend().get_as::<u32>(*rises) != old_rises,
+                        };
+                        if changed {
+                            executor.backend_mut().mark_triggered_bit(*id);
+                        }
                     }
-                    // The kernel found its wait condition unmet and ran
-                    // nothing; it stays waiting.
-                    Some(ProcessStatus::Pending) => {}
-                    Some(ProcessStatus::Ready) | None => {
-                        return Err(SimulatorErrorCode::InternalError);
+                    let refs = self.processes[process];
+                    let status: u8 = executor.backend().get_as(refs.status);
+                    match ProcessStatus::from_code(status) {
+                        Some(ProcessStatus::Yield) => {
+                            self.waiting.remove(&process);
+                            if let Err(error) = count_delta_pass(delta_rounds) {
+                                self.process_wakeups.push(Reverse((current_time, process)));
+                                for process in remaining {
+                                    self.process_wakeups.push(Reverse((current_time, process)));
+                                }
+                                return Err(error);
+                            }
+                            any_ran = true;
+                            continue;
+                        }
+                        Some(ProcessStatus::Delay | ProcessStatus::InactiveDelay) => {
+                            let delay: u64 = executor.backend().get_as(refs.delay);
+                            let time = current_time.checked_add(delay).ok_or_else(|| {
+                                SimulatorErrorCode::Runtime {
+                                    message: format!(
+                                        "process {process} delay overflows simulation time"
+                                    ),
+                                    signals: Vec::new(),
+                                }
+                            })?;
+                            self.waiting.remove(&process);
+                            if delay == 0
+                                && ProcessStatus::from_code(status)
+                                    == Some(ProcessStatus::InactiveDelay)
+                            {
+                                self.inactive.insert(process);
+                            } else {
+                                self.process_wakeups.push(Reverse((time, process)));
+                            }
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Done) => {
+                            self.waiting.remove(&process);
+                            any_ran = true;
+                        }
+                        Some(ProcessStatus::Finish) => {
+                            self.finish_round = true;
+                            self.waiting.remove(&process);
+                            self.finished = true;
+                            return Ok(true);
+                        }
+                        Some(ProcessStatus::Wait) => {
+                            self.waiting.insert(process);
+                            any_ran = true;
+                        }
+                        // The kernel found its wait condition unmet and ran
+                        // nothing; it stays waiting.
+                        Some(ProcessStatus::Pending) => {}
+                        Some(ProcessStatus::Ready) | None => {
+                            return Err(SimulatorErrorCode::InternalError);
+                        }
                     }
+                    break;
                 }
             }
             if !any_ran {
@@ -785,7 +811,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut early_settle_edges = BitSet::with_capacity(num_events);
         // Early settling can expose a derived edge that a later source store
         // or awakened process restores. Capture every update we settle early.
-        let capture_batch_edges = events_to_process.len() > 1;
+        let capture_batch_edges = events_to_process.len() > 1 || !host_edges.is_empty();
         let mut batch_edge_counts = BTreeMap::<usize, u64>::new();
         for event in &events_to_process {
             let settle_update = capture_batch_edges

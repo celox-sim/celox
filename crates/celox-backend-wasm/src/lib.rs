@@ -964,6 +964,16 @@ fn emit_runtime_event_write(
     }));
     instrs.push(Instruction::LocalSet(event_ptr));
 
+    if layout.runtime_event_site_layouts[site_id as usize].is_finish {
+        instrs.push(Instruction::LocalGet(event_ptr));
+        instrs.push(Instruction::I32WrapI64);
+        instrs.push(Instruction::I64Const(1));
+        instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
+            offset: celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET as u64,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
     instrs.push(Instruction::LocalGet(event_ptr));
     instrs.push(Instruction::I32WrapI64);
     instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
