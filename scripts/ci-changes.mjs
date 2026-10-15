@@ -239,7 +239,9 @@ if (
   const files = scheduledFull
     ? null
     : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  const release = isReleaseMergeGroup({
+  const queue = process.env.QUEUE_VALIDATION === "true" ||
+    (process.env.QUEUE_VALIDATION !== "false" && process.env.GITHUB_EVENT_NAME !== "pull_request");
+  const release = queue && isReleaseMergeGroup({
     event: process.env.GITHUB_EVENT_NAME,
     baseRef: process.env.MERGE_GROUP_BASE_REF,
     files,
@@ -252,11 +254,12 @@ if (
           heliodor_arm64: affectsHeliodorArm64(files),
         };
   writeOutputs({
+    queue,
     ...affected,
     release,
     ...rustScopeOutputs(
       process.env.GITHUB_EVENT_NAME === "pull_request" &&
-        process.env.MERGIFY_INPLACE !== "true" &&
+        !queue &&
         !release &&
         affected.rust
         ? files
@@ -265,7 +268,7 @@ if (
   });
 }
 
-// In-place queue validation, legacy merge groups, releases and daily runs keep
+// Queue drafts, legacy merge groups, releases and daily runs keep
 // the whole workspace. The scope helper remains available outside queue CI.
 function rustScopeOutputs(files) {
   let scope = { full: true };

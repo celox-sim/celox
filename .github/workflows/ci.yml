@@ -1,6 +1,6 @@
 name: CI
 
-# Mergify checks each PR in place after updating it with the target branch.
+# Ordinary PRs run focused checks; queue draft PRs run pre-merge validation.
 # Keep merge_group during migration and rollback; landed pushes need no rerun.
 on:
   pull_request:
@@ -28,6 +28,7 @@ jobs:
     env:
       STABLE_LANE: ${{ github.ref_name == 'master' || github.base_ref == 'master' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
+      queue: ${{ steps.classify.outputs.queue }}
       docs: ${{ steps.classify.outputs.docs }}
       release: ${{ steps.classify.outputs.release }}
       javascript: ${{ steps.classify.outputs.javascript }}
@@ -53,7 +54,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref || format('refs/heads/{0}', github.base_ref) }}
-          MERGIFY_INPLACE: "true"
+          QUEUE_VALIDATION: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           # Keep the classifier usable before the pinned toolchain is installed.
           RUSTUP_TOOLCHAIN: stable
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
@@ -497,8 +498,8 @@ jobs:
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
-      # In-place queue validation must include ARM64 on the original PR.
-      ARM64_REQUIRED: ${{ needs.changes.outputs.rust != 'false' }}
+      # Platform coverage is mandatory in queue and full validation runs.
+      ARM64_REQUIRED: ${{ needs.changes.outputs.queue != 'false' && needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
@@ -533,9 +534,8 @@ jobs:
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    # Mergify checks the original PR; platform checks must run there too.
-    # The required Rust gate rejects a skipped or failed ARM64 result.
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    # Full platform checks run once in the queue, not on every PR push.
+    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -572,7 +572,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -608,7 +608,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -695,7 +695,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: always() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -767,13 +767,43 @@ jobs:
         timeout-minutes: 5
         run: pnpm --filter @celox-sim/playground exec playwright test
 
-  # Full runs are not merge gates, so a failure must reach someone. Keep one
-  # issue per branch open while full CI fails and close it once it passes.
+  queue-validation:
+    name: Queue validation
+    needs: [changes, lint, rust, napi-windows, napi-linux-arm64, js-ubuntu, js-windows, playground-browser, docs]
+    if: always() && needs.changes.outputs.queue != 'false'
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require successful pre-merge validation
+        run: |
+          node --input-type=module -e '
+            const jobs = JSON.parse(process.env.NEEDS);
+            const changed = jobs.changes.outputs;
+            const required = {
+              docs: changed.docs === "true",
+              lint: [changed.rust, changed.javascript, changed.scripts].includes("true"),
+              rust: [changed.rust, changed.napi].includes("true"),
+              "napi-windows": changed.napi === "true",
+              "napi-linux-arm64": changed.napi_arm64 === "true",
+              "js-ubuntu": changed.javascript === "true",
+              "js-windows": changed.javascript === "true",
+              "playground-browser": [changed.napi, changed.javascript].includes("true"),
+            };
+            if (Object.entries(required).some(([name, required]) => required && jobs[name].result !== "success") ||
+                jobs.changes.result !== "success" || jobs.changes.outputs.queue !== "true" ||
+                Object.values(jobs).some(job => !["success", "skipped"].includes(job.result))) {
+              process.exit(1);
+            }
+          '
+
+  # Report daily/manual runs independently of merge queue validation.
   report-full-validation:
     name: Report full validation
     needs:
       [
         changes,
+        queue-validation,
         docs,
         lint,
         rust-tests,

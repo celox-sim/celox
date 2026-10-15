@@ -68,12 +68,14 @@ minimum safety net, not the definition of validation completeness.
 
 ## CI coverage and cadence
 
-Pull requests use `scripts/ci-changes.mjs` to select jobs. Mergify updates each
-queued PR with its target branch and reruns the same checks in place, one PR at
-a time. Windows and ARM64 jobs therefore run on PRs as well as Linux jobs.
-When Rust is affected, CI runs the whole workspace before merging; the Rust
-scope helper remains available for local focused validation. Jobs unrelated to
-the changed paths may still skip.
+Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
+by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
+legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
+workspace when Rust is affected. Mergify checks up to five batches concurrently,
+with up to five PRs per batch and no delay waiting to fill a batch.
+The `Queue validation` merge condition requires those pre-merge checks to pass;
+ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
+same coverage on its next push. Unrelated paths may still skip jobs.
 
 - Add `merge-ready` to request automatic queueing, or comment `@mergifyio queue`
   for an ordinary PR. A failed queue entry receives `dequeued`; investigate it,
@@ -81,9 +83,12 @@ the changed paths may still skip.
 - The release PR requires `merge-ready` from the weekly release workflow and
   must not carry `release:hold`. Dependency rolls and lane synchronization use
   the same queue request label.
-- `merge_group` remains supported for migration and rollback to GitHub's native
-  queue. Do not enable Mergify batching or parallel speculative checks without
-  implementing and testing batch-PR title and release-impact validation first.
+- Queue draft title checks validate the original PRs and their release impact,
+  using the release policy from the exact batch tree.
+- GitHub's strict up-to-date setting must be off for draft-PR queues: Mergify
+  validates the combined tree instead of updating every original PR. Required
+  status checks remain enabled. Keep the `Queue validation` merge condition.
+- `merge_group` remains supported for rollback to GitHub's native queue.
 - The queue validates the tree before it lands, so pushes to `master` and
   `develop` do not run CI again. Daily full runs keep those branches' caches warm.
 - `sync-develop.yml` opens or updates the master-to-develop synchronization pull
