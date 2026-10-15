@@ -44,6 +44,11 @@ pub trait Frontend: Sync {
     fn source_extension(&self) -> &'static str;
 
     fn prepare(&self, design: &Design) -> Result<PreparedDesign>;
+
+    /// Prepare declarations and sources using the external adapter's macros.
+    fn prepare_with_defines(&self, design: &Design, _defines: &[&str]) -> Result<PreparedDesign> {
+        self.prepare(design)
+    }
 }
 
 /// The files and settings an adapter compiles.
@@ -73,17 +78,26 @@ pub(crate) fn stage(
             source.text.as_bytes(),
         )?;
     }
-    let mut prepared =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
-            .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
+    let mut prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        frontend.prepare_with_defines(design, defines)
+    }))
+    .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
     if design.timed {
-        for (index, source) in prepared.sources.iter_mut().enumerate() {
-            let path = design
-                .sources
-                .get(index)
-                .map_or(Path::new("timed.sv"), |source| source.path.as_path());
-            *source = expanded_timed_source(source, defines, path)?;
-        }
+        let paths = prepared
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                (
+                    source.as_str(),
+                    design
+                        .sources
+                        .get(index)
+                        .map_or(Path::new("timed.sv"), |source| source.path.as_path()),
+                )
+            })
+            .collect::<Vec<_>>();
+        prepared.sources = expanded_timed_sources(&paths, defines)?;
     }
     let task_timing = timed_ff::TaskTiming::new(&prepared.sources);
     let control_names = timed_names(&prepared.sources);
@@ -263,13 +277,60 @@ impl TimedNames {
     }
 }
 
+#[cfg(test)]
+mod ordered_macro_tests {
+    use super::*;
+    #[test]
+    fn definitions_redefinitions_and_undef_follow_source_order() {
+        let sources = [
+            ("`define ENABLED\n`define VALUE 1\n", Path::new("header.sv")),
+            (
+                "`ifdef ENABLED\nmodule First;initial $display(`VALUE);endmodule\n`endif\n`undef VALUE\n`define VALUE 2\n",
+                Path::new("first.sv"),
+            ),
+            (
+                "module Second;initial $display(`VALUE);endmodule\n`undef ENABLED\n",
+                Path::new("second.sv"),
+            ),
+            (
+                "`ifdef ENABLED\nmodule Wrong;endmodule\n`else\nmodule Last;endmodule\n`endif\n",
+                Path::new("last.sv"),
+            ),
+        ];
+        let expanded = expanded_timed_sources(&sources, &[]).unwrap();
+        assert!(expanded[1].contains("$display(1)"));
+        assert!(expanded[2].contains("$display(2)"));
+        assert!(expanded[3].contains("module Last"));
+        assert!(!expanded[3].contains("module Wrong"));
+    }
+}
+
+#[cfg(test)]
 fn expanded_timed_source(source: &str, defines: &[&str], path: &Path) -> Result<String> {
-    let syntax = celox_sv_analyzer::syntax::parse_source_with_defines(source, path, defines)?;
-    let root = (&syntax).into_iter().next().ok_or("empty timed source")?;
-    Ok(syntax
-        .get_str(vec![root])
-        .ok_or("missing timed source text")?
-        .to_owned())
+    Ok(expanded_timed_sources(&[(source, path)], defines)?.remove(0))
+}
+
+pub(crate) fn expanded_timed_sources(
+    sources: &[(&str, &Path)],
+    names: &[&str],
+) -> Result<Vec<String>> {
+    let mut defines: sv_parser::Defines = Default::default();
+    for name in names {
+        defines.insert(
+            (*name).to_owned(),
+            Some(sv_parser::Define::new((*name).to_owned(), Vec::new(), None)),
+        );
+    }
+    let includes: Vec<&Path> = Vec::new();
+    let mut result = Vec::new();
+    for (source, path) in sources {
+        let (expanded, next) =
+            sv_parser::preprocess_str(source, path, &defines, &includes, true, false, 0, 0)
+                .map_err(|error| format!("timed source preprocessing: {error}"))?;
+        defines = next;
+        result.push(expanded.text().to_owned());
+    }
+    Ok(result)
 }
 
 fn timed_source(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {

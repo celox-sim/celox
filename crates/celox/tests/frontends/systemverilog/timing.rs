@@ -307,3 +307,15 @@ sv_backends! { fn constant_child_ff_case_discards_unreachable_pulse_arm(sim) {
 sv_backends! { fn typed_continuous_enum_drivers_preserve_assignment_types(sim) {
     @case "timing::typed_continuous_enum_drivers_preserve_assignment_types";
 } }
+
+sv_backends! { fn constant_child_loop_exit_keeps_one_write(sim) {
+    @case "timing::constant_child_loop_exit_keeps_one_write";
+} }
+
+sv_backends! { fn constant_child_case_exit_keeps_one_write(sim) {
+    @case "timing::constant_child_case_exit_keeps_one_write";
+} }
+
+sv_backends! { fn four_state_child_if_keeps_one_write(sim) {
+    @case "timing::four_state_child_if_keeps_one_write";
+} }

@@ -19,7 +19,7 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
     }
     let includes: Vec<&std::path::Path> = Vec::new();
     for source in &design.sources {
-        let (active, _) = sv_parser::preprocess_str(
+        let (active, next_defines) = sv_parser::preprocess_str(
             &source.text,
             &source.path,
             &defines,
@@ -30,6 +30,7 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
             0,
         )
         .map_err(|error| format!("timed source preprocessing: {error}"))?;
+        defines = next_defines;
         let text = active.text();
         if sv_words(text).iter().any(|(start, _, word)| {
             matches!(*word, "timeunit" | "timeprecision")
@@ -137,6 +138,37 @@ mod tests {
         let source = "// `timescale 10ns/1ps\nmodule Top; bit timescale; initial $display(\"timeunit 10ns\"); endmodule";
         assert!(validate_timed_design(&design(source)).is_ok());
     }
+    #[test]
+    fn source_order_controls_macro_hidden_scale_validation() {
+        for directive in [
+            "`timescale 10ns/1ps",
+            "`resetall",
+            "timeunit 10ns;",
+            "timeprecision 1fs;",
+        ] {
+            for undef in [false, true] {
+                let text = format!(
+                    r##"(group timing (category sequential))
+                  (case scale (source "header.sv" #"`define SCALE_ON
+module Header;endmodule"#)
+                  (source "top.sv" #"{}
+`ifdef SCALE_ON
+{}
+`endif
+module Top;endmodule"#) (top Top)(run_until 0))"##,
+                    if undef { "`undef SCALE_ON" } else { "" },
+                    directive
+                );
+                let case = crate::load_group("timing.vtest", &text, crate::no_std_library)[0];
+                assert_eq!(
+                    validate_timed_design(&case.design()).is_ok(),
+                    undef,
+                    "{directive}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn scales_follow_active_preprocessor_defines() {
         for directive in [

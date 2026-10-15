@@ -1350,3 +1350,27 @@ endmodule"#)
  assign a=first;assign b=second;initial #2 $finish;endmodule"#)
  (top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1)
  (set go 2)(run_until 1)(assert_eq a 0)(assert_eq b 0))
+
+(case constant_child_loop_exit_keeps_one_write
+ (source "constant_child_loop_exit_keeps_one_write.sv" #"module Child(input bit clk,output bit v);
+ always @(posedge clk)begin repeat(2)begin v=~v;if(1'b1)break;end end endmodule
+ module Top(input bit clk,output bit[7:0]q);wire v;Child c(clk,v);
+ initial forever begin @(v);q++;end endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 0)(set clk 1)(run_until 1)(assert_eq q 1)
+ (set clk 0)(run_until 2)(set clk 1)(run_until 3)(assert_eq q 2))
+
+(case constant_child_case_exit_keeps_one_write
+ (source "constant_child_case_exit_keeps_one_write.sv" #"module Child(input bit clk,output bit v);
+ always @(posedge clk)begin repeat(2)begin v=~v;case(1)1:break;default:;endcase end end endmodule
+ module Top(input bit clk,output bit[7:0]q);wire v;Child c(clk,v);
+ initial forever begin @(v);q++;end endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 0)(set clk 1)(run_until 1)(assert_eq q 1)
+ (set clk 0)(run_until 2)(set clk 1)(run_until 3)(assert_eq q 2))
+
+(case four_state_child_if_keeps_one_write
+ (source "four_state_child_if_keeps_one_write.sv" #"module Child(input bit clk,output bit v);
+ always @(posedge clk)begin if(4'bx001)v=~v;else begin v=0;v=1;end end endmodule
+ module Top(input bit clk,output bit[7:0]q);wire v;Child c(clk,v);
+ initial forever begin @(v);q++;end endmodule"#)
+ (top Top)(run_until 0)(assert_eq q 0)(set clk 1)(run_until 1)(assert_eq q 1)
+ (set clk 0)(run_until 2)(set clk 1)(run_until 3)(assert_eq q 2))

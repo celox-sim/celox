@@ -156,7 +156,23 @@ impl Frontend for SvFrontend {
     }
 
     fn prepare(&self, design: &Design) -> Result<PreparedDesign> {
-        let info = design_info(design);
+        self.prepare_with_defines(design, &[])
+    }
+
+    fn prepare_with_defines(&self, design: &Design, defines: &[&str]) -> Result<PreparedDesign> {
+        let mut analyzed = design.clone();
+        if design.timed {
+            let sources = design
+                .sources
+                .iter()
+                .map(|s| (s.text.as_str(), s.path.as_path()))
+                .collect::<Vec<_>>();
+            let expanded = crate::frontend::expanded_timed_sources(&sources, defines)?;
+            for (source, text) in analyzed.sources.iter_mut().zip(expanded) {
+                source.text = text;
+            }
+        }
+        let info = design_info(&analyzed);
         Ok(PreparedDesign {
             sources: design
                 .sources

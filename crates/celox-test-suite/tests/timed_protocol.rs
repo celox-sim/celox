@@ -257,3 +257,48 @@ fn unpacked_continuous_drivers_preserve_destination_shape() {
     assert!(verilator.run_testbench().is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "requires Icarus, Verilator and a C++ compiler"]
+fn timed_sources_share_ordered_macro_definitions() {
+    let text = r##"(group protocol (category sequential))
+      (case ordered_macros
+      (source "defines.sv" #"`define ENABLE_WRITE
+`define WIDTH 4
+`define STORE(v) q=(v)
+module Definitions;endmodule"#)
+      (source "top.sv" #"module Top(input bit[`WIDTH-1:0]go,output bit[`WIDTH-1:0]q);
+initial begin #1;
+`ifdef ENABLE_WRITE
+`STORE(go);
+`else
+q=0;
+`endif
+end endmodule"#)
+      (source "tail.sv" #"`undef ENABLE_WRITE
+module Tail(output wire value);
+`ifdef ENABLE_WRITE
+assign value=0;
+`else
+assign value=1;
+`endif
+endmodule"#)
+      (top Top)(set go 3)(run_until 1)(assert_eq q 3))"##;
+    let case = load_group("macros.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/ordered-macro-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .unwrap();
+    let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .unwrap();
+    assert!(icarus.run_testbench().is_ok());
+    assert!(verilator.run_testbench().is_ok());
+    std::fs::remove_dir_all(root).unwrap();
+}
