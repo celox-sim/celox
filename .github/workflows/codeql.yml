@@ -1,0 +1,45 @@
+name: CodeQL
+
+# Enable CODEQL_ADVANCED_ENABLED only after disabling GitHub's default setup.
+# See CONTRIBUTING.md for the cutover and rollback procedure.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+  schedule:
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || 'full' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    if: vars.CODEQL_ADVANCED_ENABLED == 'true' && !startsWith(github.head_ref, 'mergify/merge-queue/')
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        language: ${{ fromJSON(github.event_name == 'pull_request' && '["actions"]' || '["actions", "c-cpp", "javascript-typescript", "python", "rust"]') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
+        with:
+          category: /language:${{ matrix.language }}
