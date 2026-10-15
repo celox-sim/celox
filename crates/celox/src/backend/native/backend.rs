@@ -418,6 +418,7 @@ pub struct NativeProgramImage {
     compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
     compiled_clock_phase_sensitive_comb: bool,
     compiled_process_releases: Vec<Vec<celox_design::ProcessRelease<(AbsoluteAddr, usize)>>>,
+    compiled_testbench_kernels: Option<usize>,
     compiled_process_host_requests: Vec<Vec<celox_design::HostRequest<(AbsoluteAddr, usize)>>>,
     required_native_features: u8,
     #[serde(serialize_with = "celox_design::serde_sorted::map")]
@@ -539,6 +540,9 @@ impl NativeProgramImage {
             .map_err(|error| format!("invalid design reflection: {error}"))?;
         if self.code.is_empty() {
             return Err("code image is empty".into());
+        }
+        if self.runtime_schema.testbench_kernels != self.compiled_testbench_kernels {
+            return Err("testbench kernel boundary differs from compiled image".into());
         }
         if self
             .runtime_schema
@@ -2538,6 +2542,7 @@ fn compile_program(
                 .iter()
                 .map(|process| process.clocks.clone())
                 .collect(),
+            compiled_testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
             compiled_process_releases: sir
                 .runtime()
                 .runtime_schema
@@ -3700,17 +3705,37 @@ mod process_metadata_tests {
     }
 
     #[test]
-    fn testbench_boundary_must_fit_process_table() {
-        let mut image = image();
-        for start in [0, image.runtime_schema.processes.len()] {
-            image.runtime_schema.testbench_kernels = Some(start);
-            image.to_container_bytes().unwrap();
+    fn testbench_boundary_must_match_compiled_boundary() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for start in [
+            0,
+            original.runtime_schema.processes.len(),
+            original.runtime_schema.processes.len() + 1,
+        ] {
+            let mut changed = original.clone();
+            changed.runtime_schema.testbench_kernels = Some(start);
+            assert!(matches!(
+                changed.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
         }
-        image.runtime_schema.testbench_kernels = Some(image.runtime_schema.processes.len() + 1);
-        assert!(matches!(
-            image.to_container_bytes(),
-            Err(NativeImageContainerError::InvalidImage(_))
-        ));
+        let source =
+            "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{clk.next(2);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        for boundary in [None, Some(original.runtime_schema.processes.len())] {
+            let mut changed = original.clone();
+            changed.runtime_schema.testbench_kernels = boundary;
+            assert!(matches!(
+                changed.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
+        }
     }
 
     #[test]

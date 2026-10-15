@@ -1770,6 +1770,9 @@ impl<'a> BlockLowering<'a> {
         load: impl FnOnce(&mut Self) -> Result<RegisterId, ParserError>,
     ) -> Result<Flow, ParserError> {
         let inputs = expressions::selection(&destination.index, &destination.select);
+        if !inputs.is_empty() {
+            self.settle_if_dirty()?;
+        }
         let mut bindings = HashMap::default();
         if inputs.iter().any(|expr| expressions::has_call(expr)) {
             for expr in &inputs {

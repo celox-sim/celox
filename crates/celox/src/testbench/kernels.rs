@@ -360,7 +360,13 @@ pub(crate) fn serve_host_request<B: SimBackend>(
             path,
             append,
         } => {
-            let bytes = read(sim, &path).to_bytes_be();
+            // BigUint omits leading zero bytes; the declared string width
+            // is part of the path and must survive conversion (including NUL).
+            let value = read(sim, &path).to_bytes_be();
+            let mut bytes = vec![0; path.width.div_ceil(8)];
+            let count = bytes.len().min(value.len());
+            let start = bytes.len() - count;
+            bytes[start..].copy_from_slice(&value[value.len() - count..]);
             let path = String::from_utf8(bytes)
                 .map_err(|error| format!("testbench file path: {error}"))?;
             let files = sim
@@ -1077,5 +1083,60 @@ mod event_yield_settle_tests {
         check(Simulator::builder(code, "Top").build_wasm().unwrap());
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulator::builder(code, "Top").build_native().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod file_path_width_tests {
+    use super::*;
+    #[test]
+    fn leading_nul_host_path_does_not_open_the_stripped_filename() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>, filename: &std::path::Path, zeros: usize) {
+            std::fs::write(filename, b"keep").unwrap();
+            let (process, request, path) =
+                sim.program
+                    .runtime_schema
+                    .processes
+                    .iter()
+                    .enumerate()
+                    .find_map(|(p, slots)| {
+                        slots.host_requests.iter().enumerate().find_map(
+                            |(r, request)| match request {
+                                HostRequest::FileOpen { path, .. } => Some((p, r, path.clone())),
+                                _ => None,
+                            },
+                        )
+                    })
+                    .unwrap();
+            let text = filename.to_str().unwrap();
+            assert!(path.is_string);
+            assert_eq!(path.width, (text.len() + zeros) * 8);
+            // The compiled scratch has room for the declared leading bytes.
+            // Set its payload directly: Veryl source literals cannot spell NUL.
+            let signal = sim.backend.resolve_signal(&path.signal);
+            sim.backend
+                .set_wide(signal, BigUint::from_bytes_be(text.as_bytes()));
+            sim.testbench_files = Some(FileTable {
+                files: crate::HashMap::default(),
+                base: None,
+            });
+            let result = serve_host_request(&mut sim, process, request, 0);
+            assert!(result.is_err(), "leading NUL path was accepted: {result:?}");
+            assert_eq!(std::fs::read(filename).unwrap(), b"keep");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let filename = dir.path().join("output");
+        for zeros in [1, 2] {
+            let text = format!("{}{}", " ".repeat(zeros), filename.display());
+            let source = format!(
+                r#"#[test(Top)]module Top{{var f:$tb::file;initial{{f.open("{text}");$finish();}}}}"#
+            );
+            let build = || crate::Simulator::builder(&source, "Top").testbench_kernels(true);
+            check(build().build_interpreter().unwrap(), &filename, zeros);
+            check(build().build_cranelift().unwrap(), &filename, zeros);
+            check(build().build_wasm().unwrap(), &filename, zeros);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(build().build_native().unwrap(), &filename, zeros);
+        }
     }
 }

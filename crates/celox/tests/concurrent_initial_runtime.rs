@@ -2157,3 +2157,21 @@ fn derived_clock_pulses_survive_process_settles() {
         }
     }
 }
+
+#[test]
+fn plain_output_selectors_see_the_callee_final_design_write() {
+    let source = r#"#[test(Top)]module Top{var source:u32;let index:u32=source;var words:u32[2];function give(value:output u32){value=7;source=1;}initial{source=0;give(words[index]);$assert(words[0]==0,"old index");$assert(words[1]==7,"new index");$finish();}}"#;
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+    let build = || Simulator::builder(source, "Top");
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}
