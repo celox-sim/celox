@@ -72,7 +72,9 @@ Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
 workspace when Rust is affected. Mergify checks up to five batches concurrently,
-with up to five PRs per batch and no delay waiting to fill a batch.
+with up to five PRs per batch, waiting at most one minute to collect them.
+The separate lydite proof/editor gates run on queue drafts rather than ordinary
+PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
 The `Queue validation` merge condition requires those pre-merge checks to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
 same coverage on its next push. Unrelated paths may still skip jobs.
