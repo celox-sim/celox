@@ -260,7 +260,7 @@ pub(super) fn statement_end(source: &str, at: usize) -> Option<usize> {
     }
 }
 
-fn single_generate_body(source: &str, start: usize) -> bool {
+pub(super) fn single_generate_body(source: &str, start: usize) -> bool {
     let mut at = 0;
     let mut last_word = "";
     let mut control_end = None;

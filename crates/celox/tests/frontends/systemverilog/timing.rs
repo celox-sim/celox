@@ -240,3 +240,18 @@ sv_backends! { fn blocking_ff_woken_waiters_sample_before_continuations(sim) {
 sv_backends! { fn direct_blocking_ff_woken_waiters_sample_before_continuations(sim) {
     @case "timing::direct_blocking_ff_woken_waiters_sample_before_continuations";
 } }
+
+sv_backends! { fn variable_initializers_observe_staged_inputs_before_initial_blocks(sim) {
+    @case "timing::variable_initializers_observe_staged_inputs_before_initial_blocks";
+} }
+
+sv_backends! { fn constant_variable_initializers_do_not_invent_clock_edges(sim) {
+    @case "timing::constant_variable_initializers_do_not_invent_clock_edges";
+} }
+
+sv_backends! { fn variable_initializer_dependencies_and_automatic_locals_preserve_order(sim) {
+    @case "timing::variable_initializer_dependencies_and_automatic_locals_preserve_order";
+} }
+sv_backends! { fn variable_initializer_finish_prevents_procedural_start(sim) {
+    @case "timing::variable_initializer_finish_prevents_procedural_start";
+} }

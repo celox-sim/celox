@@ -1138,6 +1138,8 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
   task automatic settle_now;
     if (!celox_suite_timed_control::started) begin
       settle_queues();
+      celox_suite_begin_initializers();
+      settle_queues();
       celox_suite_start_design();
     end
     settle_queues();
