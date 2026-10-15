@@ -220,6 +220,9 @@ struct TickClock<B: SimBackend> {
     period: u64,
     next_edge: u64,
     falling_edge: Option<u64>,
+    /// Last level actually driven by this generator, independent of the
+    /// edge-detection baseline retained until publication succeeds.
+    driven_value: Option<bool>,
 }
 
 impl<B: SimBackend> Clone for TickClock<B> {
@@ -230,6 +233,7 @@ impl<B: SimBackend> Clone for TickClock<B> {
             period: self.period,
             next_edge: self.next_edge,
             falling_edge: self.falling_edge,
+            driven_value: self.driven_value,
         }
     }
 }
@@ -251,6 +255,9 @@ pub struct ProcessClockState<B: SimBackend> {
     pub period: u64,
     pub next_edge: u64,
     pub falling_edge: Option<u64>,
+    /// Last generator drive; `None` before its first drive. Retain this
+    /// across failed rounds independently of the sampled event baseline.
+    pub driven_value: Option<bool>,
 }
 
 /// A process waiting for simulation time to reach `time`. Ordered so that a
@@ -402,6 +409,9 @@ impl<B: SimBackend> SimulationState<B> {
         self.pending_host_edges.clear();
         self.settled_process_edges.clear();
         self.sample_event_values(backend);
+        for clock in self.tick_clocks.values_mut() {
+            clock.driven_value = None;
+        }
     }
 
     fn sample_event_values(&mut self, backend: &B) {
@@ -421,13 +431,29 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
+    fn pending_generated_baseline(&self, id: usize) -> Option<(bool, bool)> {
+        let driven = self.tick_clocks.get(&id)?.driven_value?;
+        let baseline = (
+            self.last_clock_values.contains(id),
+            self.unknown_clock_values.contains(id),
+        );
+        (baseline != (driven, false)).then_some(baseline)
+    }
+
     /// Retain FF occurrences observed by a host evaluation until the scheduler runs.
     pub fn capture_host_edges(&mut self, backend: &B) {
         if self.finished {
             return;
         }
+        // A failed generated round owns its unpublished source edge. Host
+        // settling must neither dispatch it nor consume its retry baseline.
+        let generated_baselines: Vec<_> = self
+            .tick_clocks
+            .keys()
+            .filter_map(|&id| self.pending_generated_baseline(id).map(|value| (id, value)))
+            .collect();
         for (_, id, _) in &self.topo_signals {
-            if *id == usize::MAX {
+            if *id == usize::MAX || self.pending_generated_baseline(*id).is_some() {
                 continue;
             }
             let info = &self.event_info[*id];
@@ -440,6 +466,18 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         self.sample_event_values(backend);
+        for (id, (value, unknown)) in generated_baselines {
+            if value {
+                self.last_clock_values.insert(id);
+            } else {
+                self.last_clock_values.remove(id);
+            }
+            if unknown {
+                self.unknown_clock_values.insert(id);
+            } else {
+                self.unknown_clock_values.remove(id);
+            }
+        }
     }
 
     fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
@@ -717,13 +755,26 @@ impl<B: SimBackend> SimulationState<B> {
             .flat_map(|process| &process.clocks)
             .filter_map(|clock| {
                 let id = clock.event.id();
-                let baseline = (
-                    self.last_clock_values.contains(id),
-                    self.unknown_clock_values.contains(id),
-                );
-                (baseline != sample_event_signal(backend, clock.signal)).then_some(clock.signal)
+                let expected = self
+                    .tick_clocks
+                    .get(&id)
+                    .and_then(|clock| clock.driven_value)
+                    .map(|value| (value, false))
+                    .unwrap_or((
+                        self.last_clock_values.contains(id),
+                        self.unknown_clock_values.contains(id),
+                    ));
+                (expected != sample_event_signal(backend, clock.signal)).then_some(clock.signal)
             })
             .collect()
+    }
+
+    fn record_generated_clock_drive(&mut self, event: &SimEvent<B>) {
+        if let Some(clock) = self.tick_clocks.get_mut(&event.event_ref.id())
+            && clock.signal == event.signal
+        {
+            clock.driven_value = Some(event.next_val & 1 != 0);
+        }
     }
 
     /// A generated process clock owns its signal, including before its first wait.
@@ -1126,9 +1177,11 @@ impl<B: SimBackend> SimulationState<B> {
         }
         // Combinational next-state logic samples the rising level of the clock.
         executor.backend_mut().set(signal, 1u8);
+        self.tick_clocks.get_mut(&clock).unwrap().driven_value = Some(true);
         let (completed, result) = executor.tick_many(event, count);
         if completed == 0 {
             executor.backend_mut().set(signal, 0u8);
+            self.tick_clocks.get_mut(&clock).unwrap().driven_value = Some(false);
         }
         if completed > count || (completed == 0 && result.is_ok()) {
             return Err(SimulatorErrorCode::Runtime {
@@ -1621,6 +1674,7 @@ impl<B: SimBackend> SimulationState<B> {
                                         period: clock.period.max(2),
                                         next_edge: current_time,
                                         falling_edge: None,
+                                        driven_value: None,
                                     });
                                 tick_clock.next_edge = tick_clock.next_edge.max(current_time);
                                 self.clock_waits.insert(
@@ -1867,6 +1921,7 @@ impl<B: SimBackend> SimulationState<B> {
             };
             let before = sample_event_signal(executor.backend(), event.signal);
             executor.backend_mut().set(event.signal, event.next_val);
+            self.record_generated_clock_drive(event);
             let after = sample_event_signal(executor.backend(), event.signal);
             let mut blocking_source = false;
             if let Some(&id) = self.signal_to_id.get(&event.signal)
@@ -2056,6 +2111,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
         for event in &generated_events {
             executor.backend_mut().set(event.signal, event.next_val);
+            self.record_generated_clock_drive(event);
         }
         events_to_process.extend(generated_events);
 
@@ -2847,6 +2903,7 @@ impl<B: SimBackend> SimulationState<B> {
                     period: clock.period,
                     next_edge: clock.next_edge,
                     falling_edge: clock.falling_edge,
+                    driven_value: clock.driven_value,
                 })
                 .collect(),
             clock_waits: self
@@ -2928,6 +2985,7 @@ impl<B: SimBackend> SimulationState<B> {
                         period: clock.period,
                         next_edge: clock.next_edge,
                         falling_edge: clock.falling_edge,
+                        driven_value: clock.driven_value,
                     },
                 )
             })
