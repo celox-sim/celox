@@ -77,6 +77,10 @@ The `Queue validation` merge condition requires those pre-merge checks to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
 same coverage on its next push. Unrelated paths may still skip jobs.
 
+- Enable both Merge Queue and Workflow Automation in Mergify; the latter runs
+  the label-based queue rule.
+- Version-only Release Please PRs defer product tests to the queue, where the
+  release manifest change requires full validation including external suites.
 - Add `merge-ready` to request automatic queueing, or comment `@mergifyio queue`
   for an ordinary PR. A failed queue entry receives `dequeued`; investigate it,
   remove that label, and request queueing again. There is no automatic retry loop.

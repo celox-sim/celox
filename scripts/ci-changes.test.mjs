@@ -482,3 +482,8 @@ test("queue drafts on master run release gates even with an unknown diff", () =>
     { ...all, heliodor_arm64: true, release: true },
   );
 });
+
+test("version-only Release Please PRs defer product tests to queue validation", () => {
+  assert.deepEqual(classifyFiles(releasePullRequestFiles, { releasePlease: true }), none);
+  assert.equal(classifyFiles([...releasePullRequestFiles, "crates/celox/src/lib.rs"], { releasePlease: true }).rust, true);
+});

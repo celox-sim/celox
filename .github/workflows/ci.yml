@@ -54,6 +54,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref || format('refs/heads/{0}', github.base_ref) }}
+          RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
           QUEUE_VALIDATION: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           # Keep the classifier usable before the pinned toolchain is installed.
           RUSTUP_TOOLCHAIN: stable
