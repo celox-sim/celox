@@ -4017,3 +4017,32 @@ test.each(["step", "run", "bounded"])(
 		}
 	},
 );
+
+test("finished native state files preserve cached outputs after shared writes", () => {
+	const Handle = loadNativeAddon().NativeSimulationHandle;
+	if (!Handle) throw new Error("native simulation unavailable");
+	const source =
+		"module Top(go:input logic<8>,q:output logic<8>){always_comb{q=go+8'd1;if go==1 {$finish();}}}";
+	const raw = new Handle(
+		[{ content: source, path: "finished-save.veryl" }],
+		"Top",
+	);
+	try {
+		const layout = parseNapiLayout(raw.layoutJson).forDut;
+		const memory = raw.sharedMemory();
+		memory[layout.go.offset] = 1;
+		raw.evalComb();
+		expect(raw.isFinished?.()).toBe(true);
+		expect(memory[layout.q.offset]).toBe(2);
+		memory[layout.go.offset] = 7;
+		if (!raw.saveState || !raw.loadState)
+			throw new Error("state files unavailable");
+		const saved = raw.saveState();
+		raw.loadState(saved);
+		expect(memory[layout.q.offset]).toBe(2);
+		raw.evalComb();
+		expect(memory[layout.q.offset]).toBe(8);
+	} finally {
+		raw.dispose();
+	}
+});
