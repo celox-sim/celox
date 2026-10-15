@@ -3592,6 +3592,58 @@ pub(super) fn fixed_runtime_write_times(
             .iter()
             .all(|(name, args)| call_preserves_time(name, args, pm, &mut HashSet::default()))
     }
+    fn zero_trip_for(
+        init: &[sv::ir::Stmt],
+        condition: Option<&sv::ir::Expr>,
+        step: &[sv::ir::Stmt],
+        pm: &ProcModule<'_>,
+    ) -> bool {
+        let Some(loop_) = canonical_for_loop(init, condition, step) else {
+            return false;
+        };
+        if expr_calls(&loop_.start, &|_| true) || expr_calls(&loop_.end, &|_| true) {
+            return false;
+        }
+        let eval = |expr| {
+            known_loop_value(
+                expr,
+                pm.variables,
+                pm.name_to_id,
+                pm.constants,
+                pm.parameter_types,
+            )
+        };
+        let (Some(start), Some(end), Some(id)) =
+            (eval(&loop_.start), eval(&loop_.end), pm.id(&loop_.var))
+        else {
+            return false;
+        };
+        let variable = pm.var(id);
+        if !(1..=64).contains(&variable.width) {
+            return false;
+        }
+        let (low, high) = if variable.signed {
+            let half = 1i128 << (variable.width - 1);
+            (-half, half - 1)
+        } else {
+            (0, (1i128 << variable.width) - 1)
+        };
+        // Prove only comparisons whose integer values survive assignment
+        // coercion and the comparison's signed/unsigned conversion.
+        if !(low..=high).contains(&start)
+            || !(low..=high).contains(&end)
+            || (variable.signed && start < 0 && !pm.expr_signed(&loop_.end))
+        {
+            return false;
+        }
+        match loop_.compare {
+            sv::ir::BinaryOp::Lt => start >= end,
+            sv::ir::BinaryOp::Le => start > end,
+            sv::ir::BinaryOp::Gt => start <= end,
+            sv::ir::BinaryOp::Ge => start < end,
+            _ => false,
+        }
+    }
     fn bounded_for(
         init: &[sv::ir::Stmt],
         condition: Option<&sv::ir::Expr>,
@@ -3676,7 +3728,22 @@ pub(super) fn fixed_runtime_write_times(
     let mut time = 0u64;
     let mut phase = 0u64;
     let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
-    for stmt in stmts {
+    let mut pending: Vec<_> = stmts.iter().rev().collect();
+    while let Some(stmt) = pending.pop() {
+        // A zero-trip for still executes its initializer. Analyze those
+        // statements normally, without inspecting the unreachable body.
+        if let Stmt::Loop {
+            kind: LoopKind::For,
+            init,
+            condition,
+            step,
+            ..
+        } = stmt
+            && zero_trip_for(init, condition.as_ref(), step, pm)
+        {
+            pending.extend(init.iter().rev());
+            continue;
+        }
         // Zero-trip loops preserve the current time and phase even when
         // their skipped bodies contain suspensions or impure calls.
         if let Stmt::Loop {

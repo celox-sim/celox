@@ -583,12 +583,17 @@ export class Simulation<P = Record<string, unknown>> {
 				this._state.pendingHostWrites = false;
 				break;
 			}
+			const needsHostPoll = this.needsHostPoll();
+			const hostWork =
+				needsHostPoll && (this._handle.hasPendingHostWork?.() ?? true);
+			const queued = this._handle.nextEventTime();
+			if (needsHostPoll && !hostWork) {
+				this._state.pendingHostWrites = false;
+				if (queued == null) break;
+			}
 			// An exhausted queue is a normal completion, even when the budget is
 			// already spent. Preserve that behavior instead of reporting a timeout.
-			if (
-				steps >= max &&
-				(this._handle.nextEventTime() != null || this.needsHostPoll())
-			) {
+			if (steps >= max && (queued != null || hostWork)) {
 				throw new SimulationTimeoutError(
 					`waitUntil: condition not met after ${max} steps at time ${this._handle.time()}`,
 					this._handle.time(),

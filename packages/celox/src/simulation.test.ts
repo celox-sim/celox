@@ -981,3 +981,23 @@ test("a satisfied host wait requires budget before its continuation", () => {
 	expect(handle.stepUntil).toHaveBeenCalledOnce();
 	sim.dispose();
 });
+
+for (const pending of [false, true]) {
+	test(`waitUntil probes host readiness before charging a zero budget (${pending})`, () => {
+		const { create, handle } = createMockNative({ emptyEventQueue: true });
+		vi.mocked(handle.hasWaitingProcesses!).mockReturnValue(true);
+		handle.hasPendingHostWork = vi.fn(() => pending);
+		const sim = Simulation.create(TopModule, { __nativeCreate: create });
+		sim.dut.d = 1n;
+		if (pending) {
+			expect(() => sim.waitUntil(() => false, { maxSteps: 0 })).toThrow(
+				SimulationTimeoutError,
+			);
+		} else {
+			expect(sim.waitUntil(() => false, { maxSteps: 0 })).toBe(0);
+		}
+		expect(handle.hasPendingHostWork).toHaveBeenCalledOnce();
+		expect(handle.step).not.toHaveBeenCalled();
+		sim.dispose();
+	});
+}

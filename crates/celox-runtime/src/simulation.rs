@@ -1339,6 +1339,7 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &B,
         before: &[(u32, u32)],
         replays: &mut std::collections::BTreeMap<usize, u64>,
+        preceding_edges: &BitSet,
     ) {
         let mut counters = std::collections::BTreeMap::new();
         for ((id, rises, falls), (old_rises, old_falls)) in
@@ -1374,7 +1375,12 @@ impl<B: SimBackend> SimulationState<B> {
             *totals.entry(id).or_default() += count;
         }
         for (id, count) in totals {
-            *replays.entry(id).or_default() += count.saturating_sub(1);
+            // Keep the first process occurrence separate from an already
+            // captured scheduled/host edge of the same canonical domain.
+            let occupied = preceding_edges
+                .iter()
+                .any(|edge| self.event_info[edge].canonical_id == id);
+            *replays.entry(id).or_default() += count.saturating_sub(u64::from(!occupied));
         }
     }
 
@@ -1983,7 +1989,12 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         let mut edge_replays = host_replays;
-        self.add_process_edge_replays(executor.backend(), &counter_values, &mut edge_replays);
+        self.add_process_edge_replays(
+            executor.backend(),
+            &counter_values,
+            &mut edge_replays,
+            &scheduled_edges,
+        );
         let process_recorded_edges =
             self.process_counter_edges(executor.backend(), &counter_values);
 
@@ -2204,7 +2215,15 @@ impl<B: SimBackend> SimulationState<B> {
                         self.finished = true;
                         return Ok(true);
                     }
-                    self.add_process_edge_replays(executor.backend(), &before, &mut edge_replays);
+                    let mut occupied = marked_bits.clone();
+                    occupied.union_with(&discovered_in_this_step);
+                    occupied.union_with(&ff_body_edges);
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &before,
+                        &mut edge_replays,
+                        &occupied,
+                    );
                     ff_body_edges
                         .union_with(&self.process_counter_edges(executor.backend(), &before));
                 }
@@ -2319,6 +2338,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend(),
                         &inactive_counter_values,
                         &mut edge_replays,
+                        &BitSet::new(),
                     );
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &inactive_counter_values);
@@ -2360,6 +2380,26 @@ impl<B: SimBackend> SimulationState<B> {
                     .collect::<Vec<_>>();
                 if replay.is_empty() {
                     break;
+                }
+                // Completed source domains must not be rediscovered from
+                // their old baseline while an occurrence is replayed.
+                for (signal, id, _) in &self.topo_signals {
+                    if *id == usize::MAX
+                        || !triggered_domains.contains(self.event_info[*id].canonical_id)
+                    {
+                        continue;
+                    }
+                    let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+                    if value {
+                        self.last_clock_values.insert(*id);
+                    } else {
+                        self.last_clock_values.remove(*id);
+                    }
+                    if unknown {
+                        self.unknown_clock_values.insert(*id);
+                    } else {
+                        self.unknown_clock_values.remove(*id);
+                    }
                 }
                 discovered_in_this_step.make_empty();
                 triggered_domains.make_empty();
@@ -2428,6 +2468,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend(),
                         &counter_values,
                         &mut edge_replays,
+                        &BitSet::new(),
                     );
                     let mut driven =
                         self.process_counter_edges(executor.backend(), &counter_values);
