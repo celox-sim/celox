@@ -413,6 +413,7 @@ pub struct NativeProgramImage {
     compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
     compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
     compiled_clock_phase_sensitive_comb: bool,
+    compiled_native_tick_loop: bool,
     required_native_features: u8,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -518,6 +519,9 @@ impl NativeProgramImage {
         self.reflection
             .validate()
             .map_err(|error| format!("invalid design reflection: {error}"))?;
+        if self.options.native_tick_loop != self.compiled_native_tick_loop {
+            return Err("native tick-loop eligibility differs from compiled image".into());
+        }
         if self.code.is_empty() {
             return Err("code image is empty".into());
         }
@@ -1894,6 +1898,23 @@ fn compile_program(
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
+    // Make the compiled ABI and serialized dispatch agree. Fallible phases
+    // must return to the host without crediting a failed loop iteration.
+    let mut effective_options = options.clone();
+    effective_options.x86_options.native_tick_loop &= !sir
+        .sir
+        .eval_comb
+        .iter()
+        .chain(sir.sir.eval_apply_ffs.values().flatten())
+        .chain(
+            compile_tasks
+                .iter()
+                .filter(|task| task.label == "eval_comb_apply_ff")
+                .flat_map(|task| task.units.iter().copied()),
+        )
+        .flat_map(|unit| unit.blocks.values())
+        .any(|block| matches!(block.terminator, celox_sir::SIRTerminator::Error(_)));
+    let options = &effective_options;
     let comb_blocks = sir
         .sir
         .eval_comb
@@ -2361,6 +2382,7 @@ fn compile_program(
                 .iter()
                 .map(|process| process.clocks.clone())
                 .collect(),
+            compiled_native_tick_loop: options.x86_options.native_tick_loop,
             compiled_clock_phase_sensitive_comb: sir
                 .runtime()
                 .runtime_schema
@@ -2411,18 +2433,7 @@ fn compile_program(
             native_memory_size,
             options: NativeRuntimeOptions {
                 four_state: options.four_state,
-                // A generated loop cannot distinguish a failed phase from
-                // a published tick. Run fallible comb and FF phases separately.
-                native_tick_loop: options.x86_options.native_tick_loop
-                    && !sir
-                        .sir
-                        .eval_comb
-                        .iter()
-                        .chain(sir.sir.eval_apply_ffs.values().flatten())
-                        .flat_map(|unit| unit.blocks.values())
-                        .any(|block| {
-                            matches!(block.terminator, celox_sir::SIRTerminator::Error(_))
-                        }),
+                native_tick_loop: options.x86_options.native_tick_loop,
                 native_force_support: options.native_force_support,
                 perf_map: options.x86_options.diagnostics.perf_map,
                 kernel_selection: crate::backend::lanes::kernel_selection(options),
@@ -3639,6 +3650,44 @@ mod process_metadata_tests {
     }
 
     #[test]
+    fn native_loop_eligibility_cannot_be_changed_in_a_checksummed_image() {
+        let source = r#"module Top(clk:input clock,enable:output logic,v:output logic){
+            assign v=if enable ? ~v : 1'd0;
+            always_ff(clk){enable=1;}
+        }"#;
+        let original = crate::Simulator::builder(source, "Top")
+            .true_loop(
+                (Vec::new(), vec!["v".into()]),
+                (Vec::new(), vec!["v".into()]),
+                8,
+            )
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        assert!(!original.options.native_tick_loop);
+        let pure = image();
+        assert!(pure.options.native_tick_loop);
+        for original in [original, pure] {
+            let mut changed = original.clone();
+            changed.options.native_tick_loop = !changed.options.native_tick_loop;
+            // Bypass the writer's validation and regenerate a valid payload
+            // checksum, exercising the reader's attachment boundary directly.
+            let mut bytes = original.to_container_bytes().unwrap();
+            let trailer = bytes.len() - 32;
+            let payload = postcard::to_stdvec(&changed).unwrap();
+            assert_eq!(payload.len(), trailer);
+            bytes[..trailer].copy_from_slice(&payload);
+            let checksum = payload.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+            bytes[trailer + 24..trailer + 32].copy_from_slice(&checksum.to_le_bytes());
+            assert!(
+                matches!(NativeProgramImage::from_container_bytes(&bytes),Err(NativeImageContainerError::InvalidImage(message)) if message.contains("tick-loop"))
+            );
+        }
+    }
+
+    #[test]
     fn default_native_loops_do_not_credit_a_failed_pre_edge_iteration() {
         use crate::backend::SimBackend;
         let source = r#"module Top(clk:input clock,enable:output logic,v:output logic){
@@ -3654,12 +3703,23 @@ mod process_metadata_tests {
             .build_native()
             .unwrap();
         let event = sim.event("clk");
-        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 10);
-        assert_eq!(completed, 1);
-        assert!(result.is_ok());
-        let (completed, result) = sim.backend.eval_comb_apply_ff_many_at(event, 9);
-        assert_eq!(completed, 0);
-        assert!(result.is_err());
+        let bytes = sim
+            .backend
+            .shared_code()
+            .program_image()
+            .to_container_bytes()
+            .unwrap();
+        let image = NativeProgramImage::from_container_bytes(&bytes).unwrap();
+        // Safety: this round-trip image was compiled in this test.
+        let mut loaded = unsafe { NativeBackend::from_image(image) }.unwrap();
+        for backend in [&mut sim.backend, &mut loaded] {
+            let (completed, result) = backend.eval_comb_apply_ff_many_at(event, 10);
+            assert_eq!(completed, 1);
+            assert!(result.is_ok());
+            let (completed, result) = backend.eval_comb_apply_ff_many_at(event, 9);
+            assert_eq!(completed, 0);
+            assert!(result.is_err());
+        }
     }
 
     #[test]

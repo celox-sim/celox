@@ -2284,6 +2284,88 @@ mod clock_failure_progress_tests {
         }
     }
 
+    #[test]
+    fn custom_executors_keep_per_edge_hooks_without_fusion_opt_in() {
+        struct Host<B: SimBackend> {
+            sim: Simulator<B>,
+            staged: Vec<u64>,
+            fired: Vec<u64>,
+        }
+        impl<B: SimBackend> SimulationExecutor for Host<B> {
+            type Backend = B;
+            fn backend(&self) -> &B {
+                &self.sim.backend
+            }
+            fn backend_mut(&mut self) -> &mut B {
+                &mut self.sim.backend
+            }
+            fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_comb(&mut self.sim)
+            }
+            fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_apply_ff_at(&mut self.sim, event)
+            }
+            fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::eval_only_ff_at(&mut self.sim, event)
+            }
+            fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+                SimulationExecutor::apply_ff_at(&mut self.sim, event)
+            }
+            fn stage_external_event(
+                &mut self,
+                _event: B::Event,
+                time: u64,
+            ) -> Result<(), RuntimeErrorCode> {
+                self.staged.push(time);
+                Ok(())
+            }
+            fn fire_external_event(
+                &mut self,
+                _event: B::Event,
+                time: u64,
+            ) -> Result<(), RuntimeErrorCode> {
+                self.fired.push(time);
+                Ok(())
+            }
+            // Intentionally rely on the default capability and tick_many.
+        }
+        fn check<B: SimBackend>(sim: Simulator<B>) {
+            let mut state = simulation_state(&sim);
+            let mut host = Host {
+                sim,
+                staged: Vec::new(),
+                fired: Vec::new(),
+            };
+            while state.next_event_time().is_some_and(|time| time <= 4) {
+                state.step_until(&mut host, 4).unwrap();
+            }
+            assert_eq!(state.ticks(), 3);
+            assert_eq!(host.staged, vec![0, 2, 4]);
+            assert_eq!(host.fired, vec![0, 2, 4]);
+            assert_eq!(host.sim.backend.get_as::<u8>(host.sim.signal("q")), 3);
+        }
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let clk = m.internal("clk", ValueType::bits(1).unwrap()).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let q = m.output("q", word).unwrap();
+        let current = m.read(q).unwrap();
+        let one = m.constant(Constant::two_state(1u8, 8).unwrap());
+        let next = m.binary(BinaryOp::Add, current, one, word).unwrap();
+        m.register(m.whole(q).unwrap(), next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 2).unwrap();
+        let count = m.constant(Constant::two_state(3u8, 64).unwrap());
+        m.process(vec![Statement::ClockCycles { clock: clk, count }])
+            .unwrap();
+        let design = m.finish();
+        let build = || Simulator::from_frontend(design.clone());
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+
     struct FailingExecutor<B: SimBackend> {
         sim: Simulator<B>,
         fail: Option<usize>,
