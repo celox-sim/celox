@@ -3530,6 +3530,68 @@ pub(super) fn fixed_runtime_write_times(
         }
         Some(default.unwrap_or_default())
     }
+    fn selected_branch<'a>(
+        stmt: &'a sv::ir::Stmt,
+        pm: &ProcModule<'_>,
+    ) -> Option<&'a [sv::ir::Stmt]> {
+        match stmt {
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Some(if known_condition(condition, pm)? {
+                then_body
+            } else {
+                else_body
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => selected_case_body(*kind, selector, items, default.as_deref(), pm),
+            _ => None,
+        }
+    }
+    fn jumps_current_loop(stmt: &sv::ir::Stmt) -> bool {
+        use sv::ir::Stmt;
+        match stmt {
+            Stmt::Break | Stmt::Continue | Stmt::Return(_) => true,
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => then_body.iter().chain(else_body).any(jumps_current_loop),
+            Stmt::Case { items, default, .. } => items
+                .iter()
+                .flat_map(|item| &item.body)
+                .chain(default.iter().flatten())
+                .any(jumps_current_loop),
+            // Jumps inside a nested loop belong to that loop.
+            _ => false,
+        }
+    }
+    fn single_pass_body<'a>(
+        body: &'a [sv::ir::Stmt],
+        pm: &ProcModule<'_>,
+    ) -> Option<Vec<&'a sv::ir::Stmt>> {
+        let mut pending: Vec<_> = body.iter().rev().collect();
+        let mut executed = Vec::new();
+        while let Some(stmt) = pending.pop() {
+            if let Some(branch) = selected_branch(stmt, pm) {
+                pending.extend(branch.iter().rev());
+            } else if matches!(stmt, sv::ir::Stmt::Break) {
+                return Some(executed);
+            } else if jumps_current_loop(stmt) {
+                // A continue or unresolved conditional jump can bypass the
+                // terminating break and allow another iteration.
+                return None;
+            } else {
+                executed.push(stmt);
+            }
+        }
+        None
+    }
     fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
         let negated = sv::ir::Expr::Unary {
             op: sv::ir::UnaryOp::LogicNot,
@@ -3774,32 +3836,49 @@ pub(super) fn fixed_runtime_write_times(
     let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
     let mut pending: Vec<_> = stmts.iter().rev().collect();
     while let Some(stmt) = pending.pop() {
-        // Use the same procedural truth as lowering, including known-one
-        // bits alongside X/Z. Unselected statements have no timing effects.
-        if let Stmt::If {
-            condition,
-            then_body,
-            else_body,
-        } = stmt
-            && let Some(selected_then) = known_condition(condition, pm)
-        {
-            pending.extend(
-                if selected_then { then_body } else { else_body }
-                    .iter()
-                    .rev(),
-            );
+        // Share statically selected paths with the loop-exit proof below.
+        if let Some(branch) = selected_branch(stmt, pm) {
+            pending.extend(branch.iter().rev());
             continue;
         }
-        if let Stmt::Case {
+        if let Stmt::Loop {
             kind,
-            selector,
-            items,
-            default,
+            init,
+            condition,
+            body,
+            ..
         } = stmt
-            && let Some(body) = selected_case_body(*kind, selector, items, default.as_deref(), pm)
         {
-            pending.extend(body.iter().rev());
-            continue;
+            let entered = match kind {
+                LoopKind::Forever | LoopKind::DoWhile => true,
+                LoopKind::While => {
+                    condition
+                        .as_ref()
+                        .and_then(|condition| known_condition(condition, pm))
+                        == Some(true)
+                }
+                LoopKind::For => condition
+                    .as_ref()
+                    .is_none_or(|condition| known_condition(condition, pm) == Some(true)),
+                LoopKind::Repeat(count) => {
+                    !expr_calls(count, &|_| true)
+                        && known_loop_value(
+                            count,
+                            pm.variables,
+                            pm.name_to_id,
+                            pm.constants,
+                            pm.parameter_types,
+                        )
+                        .is_some_and(|count| count > 0)
+                }
+            };
+            if entered && let Some(body) = single_pass_body(body, pm) {
+                // Initialization runs once; break skips both the loop step
+                // and its condition recheck, then execution resumes outside.
+                pending.extend(body.into_iter().rev());
+                pending.extend(init.iter().rev());
+                continue;
+            }
         }
         // A zero-trip for still executes its initializer. Analyze those
         // statements normally, without inspecting the unreachable body.
