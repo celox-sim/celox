@@ -68,6 +68,37 @@ minimum safety net, not the definition of validation completeness.
 
 ## CI coverage and cadence
 
+### Code scanning
+
+`.github/workflows/codeql.yml` scans Actions on pull requests that change
+workflow or local action files. Other ordinary PRs and Mergify queue drafts
+do not run this workflow's analysis. Every Sunday at 04:17 UTC, and on manual
+dispatch, it scans Actions, C/C++, JavaScript/TypeScript, Python, and Rust, with
+at most two analyses running concurrently. Compiled languages use CodeQL's
+`none` build mode. There is no push-triggered full scan or merge requirement.
+
+The workflow is inactive until the repository variable
+`CODEQL_ADVANCED_ENABLED` is set to `true`. To replace the existing automatic
+scans after this workflow merges:
+
+1. In repository Settings, switch CodeQL analysis from default to advanced
+   setup, disabling default setup. Keep the existing alerts and their history.
+2. Disable the separate automatic GitHub Code Quality scans in Settings;
+   these are independent of CodeQL default setup and would otherwise continue
+   using runners on PRs and pushes.
+3. Set the repository Actions variable `CODEQL_ADVANCED_ENABLED` to `true`,
+   then manually dispatch `codeql.yml` on `master`.
+4. Confirm that all five analyses upload results and that an Actions-changing
+   PR runs only the Actions analysis. Rust/application-only PRs should not
+   start CodeQL or Code Quality scans.
+
+For rollback, unset `CODEQL_ADVANCED_ENABLED` and re-enable default setup.
+This variable allows the replacement to be reviewed without running both
+setups at once. Until cutover, GitHub's existing automatic scans remain active.
+See GitHub's [advanced setup migration instructions](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/configure-code-scanning/configuring-advanced-setup-for-code-scanning).
+
+### Product checks
+
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
