@@ -129,6 +129,7 @@ fn run<B: SimBackend>(
     // of the same simulator left in the control slots, and every process
     // clock low, as the bytecode testbench does: the first `clk.next()`
     // then counts a real rising edge.
+    let mut reset_clocks = crate::HashSet::default();
     for slots in &sim.program.runtime_schema.processes.clone() {
         for slot in slots.iter() {
             let signal = sim.backend.resolve_signal(slot);
@@ -137,8 +138,31 @@ fn run<B: SimBackend>(
         for clock in &slots.clocks {
             let signal = sim.backend.resolve_signal(&clock.signal);
             sim.backend.set_wide(signal, BigUint::ZERO);
+            reset_clocks.insert(signal);
             sim.dirty = true;
         }
+    }
+    // Component on_init stages connected inputs immediately, including logic
+    // derived from the clocks reset above. Settle that logic before staging.
+    sim.reset_runtime_finish(false);
+    let stage_derived_inputs = testbench.component_bindings().iter().any(|component| {
+        component.connections.iter().any(|connection| {
+            connection.input.as_ref().is_some_and(|input| {
+                input.constant_u64().is_none()
+                    && !connection.input_target.as_ref().is_some_and(|target| {
+                        target.selection.is_none() && reset_clocks.contains(&target.signal)
+                    })
+            })
+        })
+    });
+    // Constants and directly reset clocks already have their startup values.
+    // Avoid running unrelated comb observers when on_init needs no settle:
+    // an init hook may finish the test before those observers should run.
+    if sim.dirty && stage_derived_inputs {
+        if let Err(error) = sim.eval_comb_checked() {
+            return failed(error.to_string());
+        }
+        sim.dirty = false;
     }
     let initial_writes = match sim.components.initialize(
         testbench.components(),
@@ -166,7 +190,6 @@ fn run<B: SimBackend>(
         base: testbench.component_file_base().map(|base| base.to_owned()),
     });
     sim.testbench_events.clear();
-    sim.reset_runtime_finish(false);
 
     // The scheduler samples the clocks it detects edges on from settled
     // state.
