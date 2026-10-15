@@ -1222,7 +1222,6 @@ impl<B: SimBackend> SimulationState<B> {
                                 continue;
                             } else {
                                 let id = clock.event.id();
-                                self.check_clock_generator(id)?;
                                 let tick_clock =
                                     self.tick_clocks.entry(id).or_insert_with(|| TickClock {
                                         event: clock.event,
@@ -1239,6 +1238,9 @@ impl<B: SimBackend> SimulationState<B> {
                                         remaining: count,
                                     },
                                 );
+                                // Retain the activation before validation so
+                                // retries cannot skip the failed suspension.
+                                self.check_clock_generator(id)?;
                             }
                             any_ran = true;
                         }

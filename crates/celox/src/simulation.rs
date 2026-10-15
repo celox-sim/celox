@@ -2315,6 +2315,60 @@ mod clock_provenance_checkpoint_tests {
         m.finish()
     }
     #[test]
+    fn failed_clock_activations_remain_errors_on_retry() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, scheduled: bool) {
+            if scheduled {
+                sim.schedule("clk", 0, 1).unwrap();
+            } else {
+                sim.add_clock("clk", 4, 0);
+            }
+            assert_eq!(sim.step().unwrap(), Some(0));
+            let expected = if scheduled {
+                "already driven by schedule"
+            } else {
+                "already driven by add_clock"
+            };
+            let error = sim.run_until(2).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            let time = sim.time();
+            for _ in 0..2 {
+                let error = sim.step().unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                let error = sim.run_until(20).unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                assert_eq!(sim.time(), time);
+                assert_eq!(sim.ticks(), 0);
+            }
+            let saved = sim.checkpoint().unwrap();
+            sim.restore(&saved).unwrap();
+            let error = sim.step().unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        for scheduled in [false, true] {
+            check(
+                Simulation::from_frontend(design())
+                    .build_interpreter()
+                    .unwrap(),
+                scheduled,
+            );
+            check(
+                Simulation::from_frontend(design())
+                    .build_cranelift()
+                    .unwrap(),
+                scheduled,
+            );
+            check(
+                Simulation::from_frontend(design()).build_wasm().unwrap(),
+                scheduled,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulation::from_frontend(design()).build_native().unwrap(),
+                scheduled,
+            );
+        }
+    }
+    #[test]
     fn earlier_scheduled_drives_conflict_with_delayed_clock_activation() {
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
             sim.schedule("clk", 0, 1).unwrap();
