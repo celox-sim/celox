@@ -670,7 +670,7 @@ impl<B: SimBackend> Simulation<B> {
                 self.state.settle_at(&mut self.simulator, time)?;
             }
         } else {
-            self.state.poll_waiting(&mut self.simulator)?;
+            self.state.poll_waiting_until(&mut self.simulator, time)?;
         }
         Ok(())
     }
@@ -6734,5 +6734,171 @@ mod round57_sdk_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod clean_waiter_settle_review {
+    use super::*;
+    use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
+    use celox_frontend_core::process::ProcessKernelBuilder;
+    use celox_sir::{SIRInstruction, SIROffset, SIRValue};
+
+    fn program() -> crate::ir::LaidOutProgram {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let word = ValueType::bits(8).unwrap();
+        let go = m.input("go", bit).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", word).unwrap();
+        let done = m.output("done", bit).unwrap();
+        let old = m.read(q).unwrap();
+        let input = m.read(go).unwrap();
+        let next = m.binary(BinaryOp::Add, old, input, word).unwrap();
+        m.register(m.whole(q).unwrap(), next, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(4u8, 64).unwrap());
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        m.process(vec![
+            Statement::ClockCycles { clock: clk, count },
+            Statement::Assign {
+                target: m.whole(done).unwrap(),
+                value: one,
+            },
+        ])
+        .unwrap();
+        let (mut program, _) = crate::compile_frontend_to_sir(
+            &m.finish(),
+            &[],
+            &[],
+            false,
+            &Default::default(),
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+        let address = |id| {
+            *program
+                .design
+                .state_objects
+                .keys()
+                .find(|a| {
+                    program
+                        .design
+                        .variable(a)
+                        .is_some_and(|v| v.source_id == crate::ir::SourceVarId(id))
+                })
+                .unwrap()
+        };
+        let go = address(go.index());
+        let done = address(done.index());
+        let mut addresses = Vec::new();
+        let mut intern = |address| {
+            let index = match addresses.iter().position(|a| *a == address) {
+                Some(index) => index,
+                None => {
+                    addresses.push(address);
+                    addresses.len() - 1
+                }
+            };
+            crate::ir::SourceVarId(index as u32)
+        };
+        let slots = program.runtime_schema.processes[0].clone().map(&mut intern);
+        let go = intern(go);
+        let done = intern(done);
+        let stable = |var_id| celox_design::RegionedVarAddrBase {
+            region: celox_design::STABLE_REGION,
+            var_id,
+        };
+        // The SDK has clock waits but no level-wait statement. Build the
+        // combined kernel through the shared frontend process contract.
+        let mut kernel = ProcessKernelBuilder::new(slots);
+        kernel.begin_wait().unwrap();
+        let condition = kernel.builder().alloc_bit(1, false);
+        kernel.builder().emit(SIRInstruction::Load(
+            condition,
+            stable(go),
+            SIROffset::Static(0),
+            1,
+        ));
+        kernel.wake_if(condition);
+        let count = kernel.builder().alloc_bit(64, false);
+        kernel
+            .builder()
+            .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
+        kernel.wait_clock(0, count).unwrap();
+        let one = kernel.builder().alloc_bit(1, false);
+        kernel
+            .builder()
+            .emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        kernel.builder().emit(SIRInstruction::Store(
+            stable(done),
+            SIROffset::Static(0),
+            1,
+            one,
+            Vec::new(),
+            Vec::new(),
+        ));
+        kernel.finish();
+        program.sir.processes[0] = kernel.build().into_map_addr(&mut |addr| {
+            let address = addresses[addr.var_id.0 as usize];
+            crate::ir::RegionedAbsoluteAddr {
+                region: addr.region,
+                instance_id: address.instance_id,
+                var_id: address.var_id,
+            }
+        });
+        program.into_laid_out(false)
+    }
+    fn check<B: SimBackend>(mut simulator: Simulator<B>) {
+        simulator.apply_initial_values();
+        let mut sim = Simulation::new(simulator);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.next_event_time(), None);
+        let go = sim.signal("go");
+        let (pointer, length) = sim.memory_as_mut_ptr();
+        assert!(go.offset < length);
+        unsafe {
+            pointer.add(go.offset).write(1);
+        }
+        assert!(!sim.simulator.dirty);
+        assert!(sim.simulator.pending_host_writes.is_empty());
+        assert!(sim.simulator.backend.get_triggered_bits().is_empty());
+        assert!(!sim.state.has_unsettled_edges(&sim.simulator.backend));
+        sim.settle().unwrap();
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("done")), 0u8.into());
+        sim.run_until(16).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 4u8.into());
+        assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+    }
+    #[test]
+    fn clean_raw_level_waiter_settle_keeps_current_time() {
+        let program = program();
+        let options = crate::SimulatorOptions {
+            emit_triggers: true,
+            ..Default::default()
+        };
+        macro_rules! run {
+            ($backend:expr) => {
+                check(Simulator::with_backend_and_program(
+                    $backend.unwrap(),
+                    program.runtime().clone(),
+                    Vec::new(),
+                ));
+            };
+        }
+        run!(crate::backend::InterpBackend::new(&program, &options));
+        run!(crate::backend::JitBackend::new(&program, &options, None));
+        run!(crate::backend::wasm_runtime::WasmBackend::new(
+            &program, &options
+        ));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        run!(crate::backend::native::NativeBackend::new(
+            &program, &options
+        ));
     }
 }
