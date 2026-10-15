@@ -1517,6 +1517,13 @@ impl<B: SimBackend> SimulationState<B> {
             generated_events.clear();
         }
 
+        let mut edge_replays = host_replays;
+        self.add_process_edge_replays(
+            executor.backend(),
+            &counter_values,
+            &mut edge_replays,
+            &scheduled_edges,
+        );
         let process_recorded_edges = self.counter_edges(executor.backend(), &counter_values);
 
         // Ready processes may activate a clock at this timestamp. Join it
@@ -1727,6 +1734,15 @@ impl<B: SimBackend> SimulationState<B> {
                         self.finished = true;
                         return Ok(true);
                     }
+                    let mut occupied = marked_bits.clone();
+                    occupied.union_with(&discovered_in_this_step);
+                    occupied.union_with(&ff_body_edges);
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &before,
+                        &mut edge_replays,
+                        &occupied,
+                    );
                     ff_body_edges.union_with(&self.counter_edges(executor.backend(), &before));
                 }
 
@@ -1820,6 +1836,12 @@ impl<B: SimBackend> SimulationState<B> {
                     self.run_processes(executor, current_time, ready, &mut delta_rounds)?
                 };
                 if progressed {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &inactive_counter_values,
+                        &mut edge_replays,
+                        &BitSet::new(),
+                    );
                     let mut driven =
                         self.counter_edges(executor.backend(), &inactive_counter_values);
                     recorded_edges.union_with(&driven);
@@ -1854,18 +1876,38 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
-                let replay = host_replays
+                let replay = edge_replays
                     .iter()
                     .filter_map(|(&id, &count)| (count > 0).then_some(id))
                     .collect::<Vec<_>>();
                 if replay.is_empty() {
                     break;
                 }
+                // Completed source domains must not be rediscovered from
+                // their old baseline while an occurrence is replayed.
+                for (signal, id, _) in &self.topo_signals {
+                    if *id == usize::MAX
+                        || !triggered_domains.contains(self.event_info[*id].canonical_id)
+                    {
+                        continue;
+                    }
+                    let (value, unknown) = sample_event_signal(executor.backend(), *signal);
+                    if value {
+                        self.last_clock_values.insert(*id);
+                    } else {
+                        self.last_clock_values.remove(*id);
+                    }
+                    if unknown {
+                        self.unknown_clock_values.insert(*id);
+                    } else {
+                        self.unknown_clock_values.remove(*id);
+                    }
+                }
                 discovered_in_this_step.make_empty();
                 triggered_domains.make_empty();
                 executor.backend_mut().clear_triggered_bits();
                 for id in replay {
-                    *host_replays.get_mut(&id).unwrap() -= 1;
+                    *edge_replays.get_mut(&id).unwrap() -= 1;
                     recorded_edges.insert(id);
                     executor.backend_mut().mark_triggered_bit(id);
                 }
@@ -1919,6 +1961,12 @@ impl<B: SimBackend> SimulationState<B> {
                     return Ok(true);
                 }
                 if any_process_ran {
+                    self.add_process_edge_replays(
+                        executor.backend(),
+                        &counter_values,
+                        &mut edge_replays,
+                        &BitSet::new(),
+                    );
                     let mut driven = self.counter_edges(executor.backend(), &counter_values);
                     recorded_edges.union_with(&driven);
                     for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
@@ -2025,6 +2073,53 @@ impl<B: SimBackend> SimulationState<B> {
             .iter()
             .map(|(_, rises, falls)| (backend.get_as(*rises), backend.get_as(*falls)))
             .collect()
+    }
+
+    fn add_process_edge_replays(
+        &self,
+        backend: &B,
+        before: &[(u32, u32)],
+        replays: &mut BTreeMap<usize, u64>,
+        preceding_edges: &BitSet,
+    ) {
+        let mut counters = BTreeMap::new();
+        for ((id, rises, falls), (old_rises, old_falls)) in
+            self.process_event_counters.iter().zip(before)
+        {
+            let rise = backend.get_as::<u32>(*rises).wrapping_sub(*old_rises) as u64;
+            let fall = backend.get_as::<u32>(*falls).wrapping_sub(*old_falls) as u64;
+            let count = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => fall,
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => rise,
+                _ => rise + fall,
+            };
+            let canonical = self.event_info[*id].canonical_id;
+            let Some(info) = self.event_info.get(canonical) else {
+                continue;
+            };
+            if info.eval_ff_event.is_none()
+                && info.eval_only_event.is_none()
+                && info.apply_event.is_none()
+            {
+                continue;
+            }
+            counters
+                .entry((canonical, *rises, *falls))
+                .and_modify(|n: &mut u64| *n = (*n).max(count))
+                .or_insert(count);
+        }
+        let mut totals = BTreeMap::<usize, u64>::new();
+        for ((id, _, _), count) in counters {
+            *totals.entry(id).or_default() += count;
+        }
+        for (id, count) in totals {
+            // One occurrence fits in the normal trigger set. If an earlier
+            // queued/host edge occupies it, replay the full process delta.
+            let occupied = preceding_edges
+                .iter()
+                .any(|edge| self.event_info[edge].canonical_id == id);
+            *replays.entry(id).or_default() += count.saturating_sub(u64::from(!occupied));
+        }
     }
 
     fn counter_edges(&self, backend: &B, before: &[(u32, u32)]) -> BitSet {
