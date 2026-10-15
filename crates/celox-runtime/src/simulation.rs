@@ -1436,6 +1436,7 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                     if executor.finish_requested(current_time) {
                         self.finish_round = true;
+
                         self.finished = true;
                         return Ok(true);
                     }
@@ -1514,7 +1515,7 @@ impl<B: SimBackend> SimulationState<B> {
                             any_ran = true;
                         }
                         Some(ProcessStatus::Finish) => {
-                            self.finish_round = executor.finish_requested(current_time);
+                            self.finish_round = true;
                             self.waiting.remove(&process);
                             self.done.insert(process);
                             self.finished = true;
