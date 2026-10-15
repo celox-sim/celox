@@ -45,6 +45,17 @@ scopes:
       - release-please-config.json
       - VERSION
 
+# Use the actual change-based CI result, not the PR title or author, to prefer
+# lightweight changes. Scope isolation handles independent running batches.
+priority_rules:
+  - name: Lightweight validated changes first
+    conditions:
+      - check-success = Lint & Format
+      - check-skipped = Rust Test & NAPI Build
+      - check-skipped = JS Test (Ubuntu)
+    priority: high
+    allow_checks_interruption: false
+
 queue_rules:
   - name: integration
     batch_size: 1

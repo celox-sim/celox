@@ -177,3 +177,20 @@ test("PR-policy repairs are independent of Veryl while dependencies and features
       scopes.split("  barrier_files:")[1].includes(`      - ${file}\n`),
     );
 });
+
+test("lightweight queue priority requires actual skipped product checks and successful lint", () => {
+  const priority = queueConfig
+    .split("priority_rules:\n")[1]
+    .split("queue_rules:\n")[0];
+  const conditions = [...priority.matchAll(/^      - (.+)$/gm)].map(
+    (m) => m[1],
+  );
+  assert.deepEqual(conditions, [
+    "check-success = Lint & Format",
+    "check-skipped = Rust Test & NAPI Build",
+    "check-skipped = JS Test (Ubuntu)",
+  ]);
+  assert.match(priority, /priority: high/);
+  assert.match(priority, /allow_checks_interruption: false/);
+  assert.doesNotMatch(priority, /label =|head ~=|title ~=/);
+});
