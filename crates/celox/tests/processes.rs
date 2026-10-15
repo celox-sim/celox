@@ -869,6 +869,9 @@ fn four_state_edges_count_transitions_into_and_out_of_unknown() {
             body.push(Statement::Assign { target, value });
         }
     }
+    // Publish the final sampled edge before terminating. Finish itself must
+    // not execute FF work after the kernel has requested termination.
+    body.push(Statement::Delay { amount: five });
     body.push(Statement::Finish);
     module.process(body).unwrap();
     let artifact = module.finish();
