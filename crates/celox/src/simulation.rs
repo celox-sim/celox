@@ -607,7 +607,7 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         if self.state.poll_waiting(&mut self.simulator)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
         if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
@@ -616,9 +616,13 @@ impl<B: SimBackend> Simulation<B> {
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                return self.state.step(&mut self.simulator);
+                let result = self.state.step(&mut self.simulator)?;
+                return Ok(result.filter(|_| !self.state.is_finished()));
             }
             self.state.settle_at(&mut self.simulator, time)?;
+            if self.state.is_finished() {
+                return Ok(None);
+            }
             if active {
                 return Ok(Some(time));
             }
@@ -699,6 +703,14 @@ impl<B: SimBackend> Simulation<B> {
         self.state.has_waiting_processes()
     }
 
+    /// Whether settled host writes require work at the current time.
+    /// Wait conditions are probed without executing their continuations.
+    pub fn has_pending_host_work(&mut self) -> Result<bool, RuntimeErrorCode> {
+        self.settle_host_writes()?;
+        self.state.probe_waiting(&mut self.simulator)?;
+        Ok(self.state.next_event_time() == Some(self.state.time()))
+    }
+
     /// Run one step at or before `limit`, including processes a host write
     /// woke at the current time. Leave a later event queued.
     pub fn step_until(&mut self, limit: u64) -> Result<Option<u64>, RuntimeErrorCode> {
@@ -713,7 +725,7 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(None);
         }
         if self.state.poll_waiting_until(&mut self.simulator, limit)? {
-            return Ok(Some(self.state.time()));
+            return Ok((!self.state.is_finished()).then_some(self.state.time()));
         }
         if self.state.has_unsettled_host_edges(&self.simulator.backend) {
             let time = self.state.time();
@@ -722,9 +734,13 @@ impl<B: SimBackend> Simulation<B> {
                 .has_unsettled_active_edges(&self.simulator.backend);
             let queued = self.state.next_event_time() == Some(time);
             if queued {
-                return self.state.step_until(&mut self.simulator, limit);
+                let result = self.state.step_until(&mut self.simulator, limit)?;
+                return Ok(result.filter(|_| !self.state.is_finished()));
             }
             self.state.settle_at(&mut self.simulator, time)?;
+            if self.state.is_finished() {
+                return Ok(None);
+            }
             if active {
                 return Ok(Some(time));
             }
@@ -5441,9 +5457,18 @@ mod wait_and_finish_review {
     }
     #[test]
     fn zero_trip_while_preserves_fixed_write_times() {
+        check_zero_trip_loop("while(0)");
+    }
+    #[test]
+    fn zero_trip_repeat_preserves_fixed_write_times() {
+        for control in ["repeat(0)", "repeat(-1)"] {
+            check_zero_trip_loop(control);
+        }
+    }
+    fn check_zero_trip_loop(control: &str) {
         for body in ["q[0]=1;", "begin #7;q[0]=1;end", "begin skipped();end"] {
             let source = format!(
-                "module Child(output bit[1:0]q);task skipped;#7;q[0]=1;endtask initial begin #1;while(0){body} q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+                "module Child(output bit[1:0]q);task skipped;#7;q[0]=1;endtask initial begin #1;{control}{body} q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
             );
             fn check<B: SimBackend>(mut sim: Simulation<B>) {
                 sim.run_until(1).unwrap();
@@ -5637,10 +5662,146 @@ mod sampled_host_review {
         }
     }
     #[test]
+    fn scheduled_batches_preserve_repeated_derived_ff_occurrences() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            // The inverted clock rises once when its initial value settles.
+            assert_eq!(sim.get(sim.signal("falls")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("rises")), 0u8.into());
+            for name in ["a", "b", "c"] {
+                sim.schedule(name, 1, 1).unwrap();
+            }
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("rises")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("falls")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("aliased")), 2u8.into());
+            for name in ["a", "b", "c"] {
+                sim.schedule(name, 2, 0).unwrap();
+            }
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("rises")), 3u8.into());
+            assert_eq!(sim.get(sim.signal("falls")), 4u8.into());
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            for name in ["b", "c"] {
+                sim.schedule(name, 2, 1).unwrap();
+            }
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("rises")), 5u8.into());
+            assert_eq!(sim.get(sim.signal("falls")), 5u8.into());
+            assert_eq!(sim.get(sim.signal("aliased")), 5u8.into());
+        }
+        check_all!(
+            "module Top(input bit a,b,c,output bit[7:0]rises,falls,aliased,ac,bc,cc);always @(posedge a)ac=ac+1;always @(posedge b)bc=bc+1;always @(posedge c)cc=cc+1;wire derived=a^b^c;wire mirror=derived;wire falling=~derived;always @(posedge derived)rises=rises+1;always @(posedge falling)falls=falls+1;always @(posedge mirror)aliased=aliased+1;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn host_readiness_probes_do_not_execute_wait_continuations() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let q = sim.signal("q");
+            let go = sim.signal("go");
+            let noise = sim.signal("noise");
+            sim.modify(|io| io.set(noise, 1u8)).unwrap();
+            assert!(!sim.has_pending_host_work().unwrap());
+            assert_eq!(sim.get(q), 0u8.into());
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            for _ in 0..2 {
+                assert!(sim.has_pending_host_work().unwrap());
+                assert_eq!(sim.get(q), 0u8.into());
+                assert!(!sim.is_finished());
+                assert_eq!(sim.time(), 0);
+            }
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(q), 1u8.into());
+            assert!(sim.is_finished());
+            assert!(!sim.has_pending_host_work().unwrap());
+        }
+        for wait in ["@(posedge go)", "wait(go)"] {
+            let source = format!(
+                "module Top(input bit go,noise,output bit q);initial begin {wait};q=1;$finish;end endmodule"
+            );
+            check_all!(source.as_str(), check);
+        }
+    }
+
+    #[test]
+    fn readiness_probes_recheck_level_conditions_without_latching_them() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            assert!(sim.has_pending_host_work().unwrap());
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            assert!(!sim.has_pending_host_work().unwrap());
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(q), 0u8.into());
+            assert!(!sim.is_finished());
+        }
+        check_all!(
+            "module Top(input bit go,output bit q);initial begin wait(go);q=1;$finish;end endmodule",
+            check
+        );
+    }
+
+    #[test]
     fn sampled_host_waiters_appear_in_next_event_time() {
         check_all!(
             "module Top(input bit go,output bit q);initial @(posedge go)q=1;endmodule",
             check_ready
         );
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod host_finish_step_review {
+    use super::*;
+
+    #[test]
+    fn host_dispatch_reports_finished_without_returning_a_time() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let initial = sim.checkpoint().unwrap();
+            let clk = sim.signal("clk");
+            for bounded in [false, true] {
+                sim.restore(&initial).unwrap();
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                let result = if bounded {
+                    sim.step_until(10)
+                } else {
+                    sim.step()
+                };
+                assert_eq!(result.unwrap(), None);
+                assert!(sim.is_finished());
+                assert_eq!(sim.time(), 0);
+                assert_eq!(sim.step().unwrap(), None);
+            }
+        }
+        for body in [
+            "initial @(posedge clk)$finish;",
+            "always @(posedge clk)$finish;",
+        ] {
+            let source = format!("module Top(input bit clk);{body} endmodule");
+            macro_rules! build {
+                ($method:ident) => {
+                    check(Simulation::new(
+                        Simulator::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("host-finish.sv"))],
+                            "Top",
+                        )
+                        .$method()
+                        .unwrap(),
+                    ));
+                };
+            }
+            build!(build_interpreter);
+            build!(build_cranelift);
+            build!(build_wasm);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            build!(build_native);
+        }
     }
 }
