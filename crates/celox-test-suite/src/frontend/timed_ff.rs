@@ -129,7 +129,7 @@ pub(super) fn gated_continuous(
                     for (offset, end, word) in sv_words(expression) {
                         if after_trivia(&expression[end..]).starts_with('(') {
                             calls = true;
-                        } else if tasks.resolve(source, begin + offset, word).is_some() {
+                        } else if tasks.bare_callable(source, begin + offset, word) {
                             calls = true;
                             bare_calls.push(end);
                         }
@@ -571,6 +571,7 @@ type CallableKey = (String, Option<usize>, Vec<usize>, String);
 #[derive(Default)]
 pub(super) struct TaskTiming {
     tasks: BTreeMap<CallableKey, bool>,
+    values: BTreeMap<String, Vec<(usize, String)>>,
     units: BTreeMap<String, usize>,
     import_clauses: BTreeMap<String, BTreeMap<usize, Vec<(Option<String>, Option<String>)>>>,
     generate_scopes: BTreeMap<String, Vec<(usize, usize)>>,
@@ -791,6 +792,52 @@ impl TaskTiming {
                     })
                     .map_or(offset, |(_, origin)| origin)
                 };
+                let mut values = Vec::new();
+                for node in &tree {
+                    use sv_parser::RefNode;
+                    let identifier = match node {
+                        RefNode::VariableDeclAssignmentVariable(n) => {
+                            RefNode::VariableIdentifier(&n.nodes.0)
+                        }
+                        RefNode::NetDeclAssignment(n) => RefNode::NetIdentifier(&n.nodes.0),
+                        RefNode::ParamAssignment(n) => RefNode::ParameterIdentifier(&n.nodes.0),
+                        RefNode::AnsiPortDeclarationNet(n) => RefNode::PortIdentifier(&n.nodes.1),
+                        RefNode::AnsiPortDeclarationVariable(n) => {
+                            RefNode::PortIdentifier(&n.nodes.1)
+                        }
+                        RefNode::AnsiPortDeclarationParen(n) => RefNode::PortIdentifier(&n.nodes.2),
+                        RefNode::EnumNameDeclaration(n) => RefNode::EnumIdentifier(&n.nodes.0),
+                        RefNode::ListOfPortIdentifiers(n) => {
+                            for (name, _) in n.nodes.0.contents() {
+                                if let Some(RefNode::Locate(locate)) = RefNode::PortIdentifier(name)
+                                    .into_iter()
+                                    .find(|n| matches!(n, RefNode::Locate(_)))
+                                {
+                                    let offset = origin(locate.offset);
+                                    if let Some((_, _, name)) = sv_words(&source[offset..]).first()
+                                    {
+                                        values.push((
+                                            offset,
+                                            name.trim_start_matches('\\').to_owned(),
+                                        ));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    if let Some(RefNode::Locate(locate)) = identifier
+                        .into_iter()
+                        .find(|n| matches!(n, RefNode::Locate(_)))
+                    {
+                        let offset = origin(locate.offset);
+                        if let Some((_, _, name)) = sv_words(&source[offset..]).first() {
+                            values.push((offset, name.trim_start_matches('\\').to_owned()));
+                        }
+                    }
+                }
+                result.values.insert(source.clone(), values);
                 result.instance_types.insert(
                     source.clone(),
                     celox_sv_analyzer::ast::instance_type_sites(&tree)
@@ -941,6 +988,24 @@ impl TaskTiming {
                 return result;
             }
         }
+    }
+
+    fn bare_callable(&self, source: &str, at: usize, name: &str) -> bool {
+        let prefix = source[..at].trim_end();
+        if !prefix.ends_with('.') && !prefix.ends_with("::") {
+            let scope = self.lexical_scope(source, at);
+            let container = container_at(source, at);
+            if self.values.get(source).is_some_and(|values| {
+                values.iter().any(|(offset, value)| {
+                    value == name.trim_start_matches('\\')
+                        && container_at(source, *offset) == container
+                        && scope.starts_with(&self.lexical_scope(source, *offset))
+                })
+            }) {
+                return false;
+            }
+        }
+        self.resolve(source, at, name).is_some()
     }
 
     fn resolve(&self, source: &str, at: usize, name: &str) -> Option<bool> {
