@@ -1,7 +1,7 @@
 name: CI
 
-# No push trigger: the merge queue already validated the exact tree that lands
-# on master or develop. The daily full runs keep those branches' caches warm.
+# Mergify checks each PR in place after updating it with the target branch.
+# Keep merge_group during migration and rollback; landed pushes need no rerun.
 on:
   pull_request:
   merge_group:
@@ -52,11 +52,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
-          RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
-          # Scoping pull request tests reads the workspace graph with
-          # `cargo metadata --no-deps`, which the runner's stable Cargo can
-          # do without installing the pinned toolchain.
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref || format('refs/heads/{0}', github.base_ref) }}
+          MERGIFY_INPLACE: "true"
+          # Keep the classifier usable before the pinned toolchain is installed.
           RUSTUP_TOOLCHAIN: stable
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
@@ -499,8 +497,8 @@ jobs:
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
-      # ARM64 is intentionally deferred on PRs, but must pass in the queue.
-      ARM64_REQUIRED: ${{ github.event_name != 'pull_request' && needs.changes.outputs.rust != 'false' }}
+      # In-place queue validation must include ARM64 on the original PR.
+      ARM64_REQUIRED: ${{ needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
@@ -535,9 +533,9 @@ jobs:
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    # Platform jobs run in merge groups and full runs, not on pull requests.
-    # The required Rust gate enforces this result in merge groups.
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    # Mergify checks the original PR; platform checks must run there too.
+    # The required Rust gate rejects a skipped or failed ARM64 result.
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -574,7 +572,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -610,7 +608,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -697,7 +695,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7

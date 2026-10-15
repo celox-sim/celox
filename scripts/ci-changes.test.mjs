@@ -167,22 +167,18 @@ function runClassifier(
   env,
   cwd = fileURLToPath(new URL("../", import.meta.url)),
 ) {
-  const output = execFileSync(
-    process.execPath,
-    [classifier, base, head],
-    {
-      cwd,
-      env: {
-        ...process.env,
-        FULL_VALIDATION: "",
-        GITHUB_EVENT_NAME: "",
-        MERGE_GROUP_BASE_REF: "",
-        GITHUB_OUTPUT: "",
-        ...env,
-      },
-      encoding: "utf8",
+  const output = execFileSync(process.execPath, [classifier, base, head], {
+    cwd,
+    env: {
+      ...process.env,
+      FULL_VALIDATION: "",
+      GITHUB_EVENT_NAME: "",
+      MERGE_GROUP_BASE_REF: "",
+      GITHUB_OUTPUT: "",
+      ...env,
     },
-  );
+    encoding: "utf8",
+  });
   // The Rust test scope is text, checked by ci-rust-scope.test.mjs.
   return Object.fromEntries(
     output
@@ -226,19 +222,24 @@ test("only master merge groups that change the release manifest are releases", (
       false,
     );
   }
-  for (const event of ["pull_request", "push", "schedule"]) {
+  for (const event of ["push", "schedule"]) {
     assert.equal(
-      isReleaseMergeGroup({ event, baseRef: "refs/heads/master", files: manifest }),
+      isReleaseMergeGroup({
+        event,
+        baseRef: "refs/heads/master",
+        files: manifest,
+      }),
       false,
     );
   }
 });
 
 test("merge groups with an unknown diff are treated as releases", () => {
-  assert.deepEqual(
-    runClassifier("", "", MASTER_GROUP),
-    { ...all, heliodor_arm64: true, release: true },
-  );
+  assert.deepEqual(runClassifier("", "", MASTER_GROUP), {
+    ...all,
+    heliodor_arm64: true,
+    release: true,
+  });
   // Other events still run every path, but without the release gate.
   assert.deepEqual(
     runClassifier("", "", { GITHUB_EVENT_NAME: "pull_request" }),
@@ -287,10 +288,11 @@ test("other merge groups are not releases", () => {
     cwd: root,
     encoding: "utf8",
   }).trim();
-  assert.deepEqual(
-    runClassifier(head, head, MASTER_GROUP),
-    { ...none, heliodor_arm64: false, release: false },
-  );
+  assert.deepEqual(runClassifier(head, head, MASTER_GROUP), {
+    ...none,
+    heliodor_arm64: false,
+    release: false,
+  });
 });
 
 test("Rust-only exclusions do not contain NAPI runtime or build dependencies", () => {
@@ -385,14 +387,6 @@ test("ordinary package version changes exercise JavaScript and NAPI", () => {
 // The files a release pull request changes, as in #1007.
 const releasePullRequestFiles = [...releaseFiles, "Cargo.lock", "Cargo.toml"];
 
-test("Release Please version updates skip product validation", () => {
-  assert.deepEqual(classifyFiles(releaseFiles, { releasePlease: true }), none);
-  assert.deepEqual(
-    classifyFiles(releasePullRequestFiles, { releasePlease: true }),
-    none,
-  );
-});
-
 test("Cargo version bumps outside Release Please keep broad coverage", () => {
   assert.equal(classifyFiles(releasePullRequestFiles).rust, true);
   assert.equal(classifyFiles(["Cargo.lock"]).napi, true);
@@ -456,5 +450,34 @@ test("generic Rust changes do not schedule ARM64 Heliodor on pull requests", () 
       ".github/workflows/codspeed.yml",
     ]),
     false,
+  );
+});
+
+test("in-place master PRs run release gates even with an unknown diff", () => {
+  for (const files of [[".release-please-manifest.json"], null]) {
+    assert.equal(
+      isReleaseMergeGroup({
+        event: "pull_request",
+        baseRef: "refs/heads/master",
+        files,
+      }),
+      true,
+    );
+    assert.equal(
+      isReleaseMergeGroup({
+        event: "pull_request",
+        baseRef: "refs/heads/develop",
+        files,
+      }),
+      false,
+    );
+  }
+  assert.deepEqual(
+    runClassifier("", "", {
+      GITHUB_EVENT_NAME: "pull_request",
+      MERGE_GROUP_BASE_REF: "refs/heads/master",
+      MERGIFY_INPLACE: "true",
+    }),
+    { ...all, heliodor_arm64: true, release: true },
   );
 });

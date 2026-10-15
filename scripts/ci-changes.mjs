@@ -26,20 +26,6 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
-// Release Please also bumps workspace versions in the Cargo manifest and lock.
-// Its pull request can skip product validation because the merge group that
-// cuts the release runs full validation (see isReleaseMergeGroup).
-const RELEASE_PLEASE_FILES = new Set([
-  ".release-please-manifest.json",
-  "CHANGELOG.md",
-  "Cargo.lock",
-  "Cargo.toml",
-  "VERSION",
-  "crates/celox-napi/package.json",
-  "packages/celox/package.json",
-  "packages/vite-plugin/package.json",
-]);
-
 // These crates are consumers or test infrastructure, not runtime/build
 // dependencies of celox-napi. ci-changes.test.mjs checks the workspace graph
 // so adding a dependency cannot silently make this exclusion unsafe.
@@ -105,18 +91,18 @@ export function cutsRelease(files) {
 }
 
 // On master, only the release pull request changes the release manifest, so a
-// merge group carrying it is about to tag a release and gets full validation
+// PR or legacy merge group carrying it gets full validation before merging
 // instead of the change-based subset. Syncing master into develop carries the
 // same change without releasing anything. An undeterminable diff fails open.
 export function isReleaseMergeGroup({ event, baseRef, files }) {
   return (
-    event === "merge_group" &&
+    ["merge_group", "pull_request"].includes(event) &&
     baseRef === "refs/heads/master" &&
     (files === null || cutsRelease(files))
   );
 }
 
-export function classifyFiles(files, { releasePlease = false } = {}) {
+export function classifyFiles(files) {
   const affected = {
     docs: false,
     javascript: false,
@@ -127,13 +113,6 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
   };
 
   const normalizedFiles = files.map((path) => path.replace(/^\.\//, ""));
-  if (
-    releasePlease &&
-    normalizedFiles.length > 0 &&
-    normalizedFiles.every((path) => RELEASE_PLEASE_FILES.has(path))
-  ) {
-    return affected;
-  }
 
   for (const path of normalizedFiles) {
     if (
@@ -269,24 +248,25 @@ if (
     files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
-          ...classifyFiles(files, {
-            releasePlease: process.env.RELEASE_PLEASE_PR === "true",
-          }),
+          ...classifyFiles(files),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
   writeOutputs({
     ...affected,
     release,
     ...rustScopeOutputs(
-      process.env.GITHUB_EVENT_NAME === "pull_request" && !release && affected.rust
+      process.env.GITHUB_EVENT_NAME === "pull_request" &&
+        process.env.MERGIFY_INPLACE !== "true" &&
+        !release &&
+        affected.rust
         ? files
         : null,
     ),
   });
 }
 
-// Pull requests run the Rust tests their changes can affect; merge groups,
-// releases and the daily run keep the whole workspace (see ci-rust-scope.mjs).
+// In-place queue validation, legacy merge groups, releases and daily runs keep
+// the whole workspace. The scope helper remains available outside queue CI.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {
