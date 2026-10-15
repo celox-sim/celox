@@ -213,3 +213,9 @@ sv_backends! {
         @case "timing::negative_repeat_counts_do_not_run_the_body";
     }
 }
+
+sv_backends! {
+    fn staged_wildcard_side_effects_wait_for_setup(sim) {
+        @case "timing::staged_wildcard_side_effects_wait_for_setup";
+    }
+}

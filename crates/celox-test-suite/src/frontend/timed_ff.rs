@@ -406,10 +406,10 @@ pub(super) fn in_macro(source: &str, start: usize, replacement: String) -> Strin
     output
 }
 
-pub(super) fn wildcard_control(source: &str, end: usize, tasks: &TaskTiming) -> bool {
+pub(super) fn wildcard_body(source: &str, end: usize, tasks: &TaskTiming) -> Option<usize> {
     let at = trivia(source, end);
     if source.as_bytes().get(at) != Some(&b'@') {
-        return false;
+        return None;
     }
     let begin = trivia(source, at + 1);
     let event_end = if source.as_bytes().get(begin) == Some(&b'*') {
@@ -419,12 +419,12 @@ pub(super) fn wildcard_control(source: &str, end: usize, tasks: &TaskTiming) -> 
     {
         end
     } else {
-        return false;
+        return None;
     };
-    let Some(body_end) = statement_end(source, event_end) else {
-        return false;
-    };
-    !has_timing(&source[event_end..body_end]) && !tasks.has_timed_call(source, event_end, body_end)
+    let body_end = statement_end(source, event_end)?;
+    (!has_timing(&source[event_end..body_end])
+        && !tasks.has_timed_call(source, event_end, body_end))
+    .then_some(event_end)
 }
 
 fn has_timing(source: &str) -> bool {

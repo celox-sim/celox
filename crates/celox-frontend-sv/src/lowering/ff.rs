@@ -3485,6 +3485,25 @@ pub(super) fn fixed_runtime_write_times(
     expr: &sv::ir::Expr,
     nonblocking: bool,
 ) -> Option<FixedWriteTimes> {
+    fn known_condition(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> Option<bool> {
+        if expr_calls(condition, &|_| true) {
+            return None;
+        }
+        let condition = expr_for_state_mode(condition, pm.four_state);
+        let mut arena = SLTNodeArena::new();
+        let (node, _) = lower_expr_with_context(
+            &condition,
+            pm.variables,
+            pm.name_to_id,
+            pm.constants,
+            pm.parameter_types,
+            &mut arena,
+            None,
+            None,
+        )?;
+        let truth = slt_truth(&mut arena, node).ok()?;
+        slt_bool(&arena, &mut ConstCache::default(), truth)
+    }
     fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
         let negated = sv::ir::Expr::Unary {
             op: sv::ir::UnaryOp::LogicNot,
@@ -3729,6 +3748,22 @@ pub(super) fn fixed_runtime_write_times(
     let mut times = std::collections::BTreeMap::<(u64, u64), usize>::new();
     let mut pending: Vec<_> = stmts.iter().rev().collect();
     while let Some(stmt) = pending.pop() {
+        // Use the same procedural truth as lowering, including known-one
+        // bits alongside X/Z. Unselected statements have no timing effects.
+        if let Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } = stmt
+            && let Some(selected_then) = known_condition(condition, pm)
+        {
+            pending.extend(
+                if selected_then { then_body } else { else_body }
+                    .iter()
+                    .rev(),
+            );
+            continue;
+        }
         // A zero-trip for still executes its initializer. Analyze those
         // statements normally, without inspecting the unreachable body.
         if let Stmt::Loop {

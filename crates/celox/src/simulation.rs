@@ -5503,6 +5503,88 @@ mod wait_and_finish_review {
             );
         }
     }
+    #[test]
+    fn constant_if_preserves_only_the_selected_branch_times() {
+        for four_state in [false, true] {
+            for (condition, selected_then) in [
+                ("1", true),
+                ("0", false),
+                ("128'h80000000000000000000000000000000", true),
+                ("4'bx001", true),
+                ("1'bx", false),
+            ] {
+                for skipped in ["#5;", "begin #7;q[0]=0;end", "skipped();"] {
+                    let selected = "q[0]=1;";
+                    let (then_body, else_body) = if selected_then {
+                        (selected, skipped)
+                    } else {
+                        (skipped, selected)
+                    };
+                    let source = format!(
+                        "module Child(output bit[1:0]q);task skipped;#7;q[0]=0;endtask initial begin #1;if({condition}){then_body} else {else_body} end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule"
+                    );
+                    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+                        sim.run_until(1).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+                        sim.run_until(2).unwrap();
+                        assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+                    }
+                    macro_rules! build {
+                        ($method:ident) => { check(Simulation::new(Simulator::from_sv_sources(vec![(source.as_str(), std::path::Path::new("constant-if.sv"))], "Top").four_state(four_state).$method().unwrap_or_else(|error| panic!("condition={condition}, skipped={skipped}, four_state={four_state}: {error:?}")))); };
+                    }
+                    build!(build_interpreter);
+                    build!(build_cranelift);
+                    build!(build_wasm);
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    build!(build_native);
+                    let coincident = source.replace("#2;q[1]", "#1;q[1]");
+                    assert!(
+                        Simulator::from_sv_sources(
+                            vec![(
+                                coincident.as_str(),
+                                std::path::Path::new("coincident-if.sv")
+                            )],
+                            "Top"
+                        )
+                        .four_state(four_state)
+                        .build_interpreter()
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_constant_if_delays_advance_the_fixed_time() {
+        let source = "module Child(output bit[1:0]q);initial begin #1;if(1)begin #2;q[0]=1;end else #7;end initial begin #4;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child child(.q(q));initial forever begin @(q[0]^q[1]);seen=seen+1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+            sim.run_until(3).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            sim.run_until(4).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 2u8.into());
+        }
+        macro_rules! build {
+            ($method:ident) => {
+                check(Simulation::new(
+                    Simulator::from_sv_sources(
+                        vec![(source, std::path::Path::new("selected-delay.sv"))],
+                        "Top",
+                    )
+                    .$method()
+                    .unwrap(),
+                ));
+            };
+        }
+        build!(build_interpreter);
+        build!(build_cranelift);
+        build!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        build!(build_native);
+    }
+
     fn check_zero_trip_loop(control: &str) {
         for body in ["q[0]=1;", "begin #7;q[0]=1;end", "begin skipped();end"] {
             let source = format!(
