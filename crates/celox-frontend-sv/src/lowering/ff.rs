@@ -46,6 +46,10 @@ pub(super) struct Ff<'p, 'a> {
     /// Read-modify-write views of a variable's working value: alias -> var.
     aliases: HashMap<SourceVarId, SourceVarId>,
     next_alias: u32,
+    /// One persistent RNG shared by every call from this process, including
+    /// calls in inlined subroutines. Bit 32 distinguishes an unseeded state.
+    random: Option<(SourceVarId, String)>,
+    random_seed: u32,
     /// The kernel of a process being lowered. Its builder is `b` while the
     /// body is lowered, and the process reads and writes stable state
     /// directly.
@@ -68,6 +72,7 @@ fn working(var_id: SourceVarId) -> Addr {
 
 impl<'p, 'a> Ff<'p, 'a> {
     pub fn new(m: &'p mut ProcModule<'a>) -> Self {
+        let random_seed = m.next_random_seed();
         let mut element_widths = HashMap::default();
         for (&id, variable) in m.variables.iter() {
             if let Some(width) = unpacked_element_width(variable) {
@@ -88,8 +93,15 @@ impl<'p, 'a> Ff<'p, 'a> {
             unrolled: 0,
             aliases: HashMap::default(),
             next_alias: u32::MAX,
+            random: None,
+            random_seed,
             kernel: None,
         }
+    }
+
+    pub fn with_random_seed(mut self, seed: u32) -> Self {
+        self.random_seed = seed;
+        self
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
@@ -204,6 +216,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         while let Some((name, args)) = calls.pop() {
+            if name == "$urandom" && self.random.is_none() {
+                let (id, name) = self.m.temp("urandom_state", 33, false, false);
+                self.working.insert(id);
+                self.targets.push((id, BitAccess::new(0, 32)));
+                self.random = Some((id, name));
+            }
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -488,10 +506,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
-            ConstExpr::Function { name, args, .. }
-                if self.m.subroutines.contains_key(name)
-                    || self.m.dpi_imports.contains_key(name) =>
-            {
+            ConstExpr::Function { name, args, .. } if self.m.is_callee(name) => {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
@@ -771,6 +786,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call { name, args, .. } if name == "$urandom" => self.urandom(args)?,
             Expr::Call {
                 name,
                 args,
@@ -1023,6 +1039,60 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     // ---------------------------------------------------------------- stores
+
+    /// IEEE 1800-2023 18.13.1/18.14: a deterministic, process-local stream.
+    /// This full-period 32-bit LCG is implementation-defined; tests compare
+    /// repeatability rather than assuming another simulator's sequence.
+    fn urandom(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        if self.random.is_none() {
+            let random = self.m.temp("urandom_state", 33, false, false);
+            self.random = Some(random);
+        }
+        let (id, name) = self.random.clone().expect("a process RNG");
+        let initial = match args.first().and_then(Option::as_ref) {
+            Some(seed) => self.hoist(seed)?,
+            None => Expr::Mux {
+                condition: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Ident(name.clone())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal("33'd0".into())),
+                }),
+                then_expr: Box::new(Expr::Literal(format!("32'd{}", self.random_seed))),
+                else_expr: Box::new(Expr::Ident(name.clone())),
+            },
+        };
+        let next = Expr::Resize {
+            width: 32,
+            signed: false,
+            expr: Box::new(Expr::Binary {
+                left: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Resize {
+                        expr: Box::new(initial),
+                        width: 32,
+                        signed: false,
+                    }),
+                    op: BinaryOp::Mul,
+                    right: Box::new(Expr::Literal("32'd1664525".into())),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal("32'd1013904223".into())),
+            }),
+        };
+        let result = self.eval(&next, Some((32, false)))?;
+        let (temp, temp_name) = self.m.temp("urandom_result", 32, false, false);
+        self.store(temp, SIROffset::Static(0), 32, result);
+        let state = Expr::Concat(vec![
+            Expr::Literal("1'b1".into()),
+            Expr::Ident(temp_name.clone()),
+        ]);
+        let state = self.eval(&state, Some((33, false)))?;
+        self.store(id, SIROffset::Static(0), 33, state);
+        Ok(Expr::Ident(temp_name))
+    }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
         let target = self.target(id);

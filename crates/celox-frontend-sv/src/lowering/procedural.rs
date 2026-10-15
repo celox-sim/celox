@@ -37,6 +37,8 @@ pub(super) struct ProcModule<'a> {
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
     capture_counter: u64,
+    /// Initialization RNG for the static processes of this module instance.
+    random_seed: u32,
     /// Runtime event sites (`$display`, assertions, ...) of the module, by
     /// local site number.
     pub runtime_event_sites: Vec<RuntimeEventSite>,
@@ -137,6 +139,7 @@ impl<'a> ProcModule<'a> {
             created: Vec::new(),
             temp_counter: 0,
             capture_counter: 0,
+            random_seed: 0x4d59_5df4,
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
@@ -341,17 +344,27 @@ impl<'a> ProcModule<'a> {
         self.subroutines.get(name)
     }
 
-    /// Whether an expression calls a user subroutine or a DPI-C import.
+    pub fn next_random_seed(&mut self) -> u32 {
+        self.random_seed = self
+            .random_seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        self.random_seed
+    }
+
+    pub fn is_callee(&self, name: &str) -> bool {
+        name == "$urandom"
+            || self.subroutines.contains_key(name)
+            || self.dpi_imports.contains_key(name)
+    }
+
+    /// Whether an expression contains a call whose evaluation has effects.
     pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
-        lvalue_calls(lvalue, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        lvalue_calls(lvalue, &|name| self.is_callee(name))
     }
 
     pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
-        const_calls(expr, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        const_calls(expr, &|name| self.is_callee(name))
     }
 
     /// The largest subexpressions of `expr` that call a subroutine and also
@@ -362,19 +375,12 @@ impl<'a> ProcModule<'a> {
         other: &sv::ir::ConstExpr,
     ) -> Vec<&'e sv::ir::ConstExpr> {
         let mut shared = Vec::new();
-        shared_calls(
-            expr,
-            other,
-            &|name| self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name),
-            &mut shared,
-        );
+        shared_calls(expr, other, &|name| self.is_callee(name), &mut shared);
         shared
     }
 
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
-        expr_calls(expr, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        expr_calls(expr, &|name| self.is_callee(name))
     }
 
     /// The local index of the extern function `import` links to. Imports

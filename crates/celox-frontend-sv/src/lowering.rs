@@ -2690,6 +2690,11 @@ fn lower_initial_processes(
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
+    // The initialization RNG creates clocked processes before initial
+    // processes. Retain a seed even for a process evaluated statically.
+    for _ in module.ff_processes() {
+        pm.next_random_seed();
+    }
     for process in module.initial_processes() {
         if let Some(condition) = process.condition() {
             let condition =
@@ -2701,6 +2706,7 @@ fn lower_initial_processes(
                 continue;
             }
         }
+        let random_seed = pm.next_random_seed();
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {
@@ -2709,7 +2715,7 @@ fn lower_initial_processes(
                     seed = store;
                 }
             }
-            Err(_) => runtime.push(process),
+            Err(_) => runtime.push((process, random_seed)),
         }
     }
     let created = std::mem::take(&mut pm.created);
@@ -2776,9 +2782,11 @@ fn lower_initial_processes(
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|(process, slots)| {
+        .map(|((process, random_seed), slots)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                kernel: ff::Ff::new(&mut pm)
+                    .with_random_seed(random_seed)
+                    .lower_initial_kernel(process.body(), slots)?,
                 slots,
             })
         })

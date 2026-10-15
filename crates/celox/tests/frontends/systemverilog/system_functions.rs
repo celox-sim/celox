@@ -61,6 +61,52 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
 }
 
 sv_backends! {
+    fn urandom_has_an_unsigned_self_determined_result(sim) {
+        @case "system_functions::urandom_has_an_unsigned_self_determined_result";
+    }
+
+    fn urandom_respects_short_circuits_and_evaluates_indices_once(sim) {
+        @case "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once";
+    }
+
+    fn urandom_checkpoint_restores_the_stream(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, reseed, output int unsigned value);
+                always_ff @(posedge clk) begin
+                    if (reseed) value <= $urandom(17);
+                    else value <= $urandom;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_state.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let reseed = sim.signal("reseed");
+        let value = sim.signal("value");
+        sim.set(reseed, 1u8);
+        sim.tick(clk).unwrap();
+        sim.set(reseed, 0u8);
+        let checkpoint = sim.checkpoint().unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            sim.tick(clk).unwrap();
+            let (value, mask) = sim.get_four_state(value);
+            assert_eq!(mask, 0u8.into());
+            expected.push(value);
+        }
+        sim.restore(&checkpoint).unwrap();
+        for value_expected in expected {
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(value), value_expected);
+        }
+    }
+
+    fn urandom_reseeds_and_shares_the_calling_process_stream(sim) {
+        @case "system_functions::urandom_reseeds_and_shares_the_calling_process_stream";
+    }
+    fn urandom_keeps_process_and_instance_streams_independent(sim) {
+        @case "system_functions::urandom_keeps_process_and_instance_streams_independent";
+    }
+
     fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
 
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
@@ -1511,4 +1557,52 @@ fn dimension_queries_reject_invalid_indices() {
             }
         }
     }
+}
+
+#[test]
+fn urandom_initial_processes_have_separate_default_streams() {
+    let source = r#"
+        module Top(output int unsigned a, b, replay_a, replay_b);
+            function automatic int unsigned draw(); return $urandom(); endfunction
+            initial begin a = draw(); a = draw(); end
+            initial begin b = draw(); b = draw(); end
+            initial begin
+                replay_a = $urandom(123); replay_a = draw();
+                replay_b = $urandom(123); replay_b = draw();
+            end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert_ne!(sim.get(sim.signal("a")), sim.get(sim.signal("b")));
+    assert_eq!(
+        sim.get(sim.signal("replay_a")),
+        sim.get(sim.signal("replay_b"))
+    );
+}
+
+#[test]
+fn urandom_rejects_invalid_seeds_and_constant_value_contexts() {
+    for item in [
+        "always_ff @(posedge clk) y <= $urandom(1, 2);",
+        "always_ff @(posedge clk) y <= $urandom(,);",
+        "always_ff @(posedge clk) y <= $urandom(.seed(1));",
+        "always_ff @(posedge clk) y <= $urandom(int);",
+        "always_ff @(posedge clk) y <= $urandom(1.5);",
+        "int seeds[2]; always_ff @(posedge clk) y <= $urandom(seeds);",
+        "always_comb y = $urandom;",
+        "localparam UNUSED = $urandom; assign y=0;",
+        "localparam UNUSED = 0 && $urandom; assign y=0;",
+    ] {
+        let source = format!("module Top(input logic clk, output int y); {item} endmodule");
+        let error = build_error(&source);
+        assert!(error.contains("urandom"), "{item}: {error}");
+    }
+    // A query inspects the return type without executing the RNG; an
+    // element of an unpacked array is still a valid integral seed.
+    let source = "module Top(input logic clk, output int width, value); int seeds[2]; localparam W=$bits($urandom()); assign width=W; always_ff @(posedge clk) value <= $urandom(seeds[0]); endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("random_query.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("width")), 32u32.into());
 }

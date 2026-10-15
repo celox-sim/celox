@@ -846,6 +846,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
+            ConstExpr::Function { name, .. } if name == "$urandom" => {
+                return Err(unsupported("$urandom called in combinational logic"));
+            }
             ConstExpr::Function { name, args, .. }
                 if self.m.subroutines.contains_key(name)
                     || self.m.dpi_imports.contains_key(name) =>
@@ -1147,6 +1150,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call { name, .. } if name == "$urandom" => {
+                return Err(unsupported("$urandom called in combinational logic"));
+            }
             Expr::Call { name, .. } if self.m.dpi_imports.contains_key(name) => {
                 return Err(unsupported(format!(
                     "DPI-C function `{name}` called in combinational logic"

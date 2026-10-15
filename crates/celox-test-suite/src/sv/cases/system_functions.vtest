@@ -2424,3 +2424,105 @@ endmodule
   (top Top)
   (tick clk)
   (expect_output (bytes 128 255 124 255 1 128 124 32 32 254 124 15 128 195 169 10)))
+
+; IEEE 1800-2023 18.13.1: compare reproducibility, not simulator-specific values.
+(case urandom_reseeds_and_shares_the_calling_process_stream
+  (source "urandom_reseed.sv" #"
+    module Top(input logic clk, enabled, input int seed, output logic ok, unchanged,
+               output int width, output logic unsigned_result);
+      int unsigned a, b, c, replay_b, replay_c;
+      int saved;
+      function automatic int unsigned draw(); return $urandom; endfunction
+      always_ff @(posedge clk) if (enabled) begin
+        saved = seed;
+        a = $urandom(seed); b = draw();
+        width <= $bits($urandom());
+        c = $urandom();
+        void'($urandom(seed)); replay_b = draw(); replay_c = $urandom;
+        ok <= b == replay_b && c == replay_c && a != b && b != c;
+        unchanged <= seed == saved;
+        unsigned_result <= $urandom(seed) >= 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 1))
+  (for value (list 0 1 123 0x80000000 0xffffffff)
+    (modify (set seed value))
+    (tick clk)
+    (assert_eq ok 1)
+    (assert_eq unchanged 1)
+    (assert_eq width 32)
+    (assert_eq unsigned_result 1)))
+
+(case urandom_keeps_process_and_instance_streams_independent
+  (source "urandom_processes.sv" #"
+    module Generator(input logic clk, enabled, reseed, output int unsigned value);
+      always_ff @(posedge clk) if (enabled) begin
+        if (reseed) value <= $urandom(123);
+        else value <= $urandom;
+      end
+    endmodule
+    module Top(input logic clk, a_enabled, b_enabled, reseed, output logic same);
+      int unsigned a, b;
+      Generator first(clk, a_enabled, reseed, a);
+      Generator second(clk, b_enabled, reseed, b);
+      assign same = a == b;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a_enabled 1) (set b_enabled 1) (set reseed 1))
+  (tick clk)
+  (assert_eq same 1)
+  (modify (set reseed 0))
+  (for i (range 0 8)
+    (modify (set a_enabled 1) (set b_enabled 0))
+    (tick clk)
+    (assert_eq same 0)
+    (modify (set a_enabled 0) (set b_enabled 1))
+    (tick clk)
+    (assert_eq same 1)))
+
+(case urandom_respects_short_circuits_and_evaluates_indices_once
+  (source "urandom_evaluation.sv" #"
+    module Top(input logic clk, enabled, output logic ok);
+      int unsigned ignored, second, third, actual;
+      logic [31:0] selected;
+      logic skipped;
+      always_ff @(posedge clk) if (enabled) begin
+        ignored = $urandom(42); second = $urandom; third = $urandom;
+        ignored = $urandom(42);
+        skipped = 0 && $urandom;
+        skipped = 1 || $urandom;
+        ignored = 1 ? 0 : $urandom;
+        selected = 0;
+        selected[$urandom & 31] = 1'b1;
+        actual = $urandom;
+        ok <= actual == third && selected == (32'b1 << (second & 31));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 1))
+  (tick clk)
+  (assert_eq ok 1)
+  (tick clk)
+  (assert_eq ok 1))
+
+(case urandom_has_an_unsigned_self_determined_result
+  (source "urandom_type.sv" #"
+    module Top(input logic clk, enabled, output logic ok, output int width);
+      logic [63:0] wide;
+      always_ff @(posedge clk) if (enabled) begin
+        wide = $urandom;
+        ok <= wide[63:32] == 0 && $urandom() >= 0;
+        width <= $bits($urandom);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set enabled 1))
+  (for i (range 0 8)
+    (tick clk)
+    (assert_eq ok 1)
+    (assert_eq width 32)))

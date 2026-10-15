@@ -71,6 +71,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| 乱数 | `$urandom` はクロックで起動するプロセス、`initial` とそれらから呼ぶサブルーチンで使用可能。任意の整数式によるシードと、プロセスごとに独立した32bit符号なしの乱数列 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -223,3 +224,10 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 interface型から解決します。generic interfaceポートとgenerate内のローカルハンドルも
 対象です。`child.info`のように子module内のinterfaceインスタンスを指定する
 スカラー階層も、インスタンスが展開で消える前に解決します。
+
+`$urandom` は周期が2の32乗の決定的な線形合同法を使います
+（IEEE 1800-2023 18.13.1、18.14）。同じシードで同じ列を再現し、
+シード引数は変更しません。サブルーチン内では呼び出し元プロセスの列を使い、
+乱数状態はチェックポイントの保存・復元に含まれます。
+既定シードと具体的な乱数値は実装依存です。
+定数値を要求する文脈と組み合わせプロセスでは診断を返します。
