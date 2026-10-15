@@ -2939,7 +2939,11 @@ mod other_domain_host_step_review {
                 info,
                 Vec::new(),
             );
-            let mut sim = Simulation { simulator, state };
+            let mut sim = Simulation {
+                simulator,
+                state,
+                pending_host_work: false,
+            };
             sim.set_wide(signal, 1u8.into());
             assert_eq!(sim.step().unwrap(), Some(0));
             assert_eq!(sim.get(sim.signal("count")), 1u8.into());
@@ -3603,7 +3607,11 @@ mod mixed_other_domain_host_review {
                 info,
                 Vec::new(),
             );
-            let mut sim = Simulation { simulator, state };
+            let mut sim = Simulation {
+                simulator,
+                state,
+                pending_host_work: false,
+            };
             sim.set_wide(signal, 1u8.into());
             assert_eq!(sim.step().unwrap(), Some(0));
             assert_eq!(sim.get(sim.signal("count")), 1u8.into());
