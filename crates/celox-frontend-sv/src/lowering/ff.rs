@@ -87,6 +87,59 @@ fn working(var_id: SourceVarId) -> Addr {
     }
 }
 
+// Share case matching with timing analysis so wildcard, range and
+// four-state matching cannot diverge from executable lowering.
+fn case_item_condition(
+    kind: sv::ir::CaseKind,
+    selector: &sv::ir::Expr,
+    labels: &[sv::ir::CaseLabel<sv::ir::Expr>],
+) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    let mut terms = Vec::new();
+    for label in labels {
+        terms.push(match (kind, label) {
+            (sv::ir::CaseKind::Inside, label) => sv::ir::Expr::Inside {
+                expr: Box::new(selector.clone()),
+                items: vec![match label {
+                    sv::ir::CaseLabel::Value(value) => sv::ir::InsideItem::Value(value.clone()),
+                    sv::ir::CaseLabel::Range { low, high } => sv::ir::InsideItem::Range {
+                        low: low.clone(),
+                        high: high.clone(),
+                    },
+                }],
+            },
+            (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: sv::ir::BinaryOp::EqWildcard,
+                    right: Box::new(value.clone()),
+                }),
+                op: sv::ir::BinaryOp::NeCase,
+                right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
+            },
+            (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(selector.clone()),
+                op: if kind == sv::ir::CaseKind::Exact {
+                    sv::ir::BinaryOp::EqCase
+                } else {
+                    sv::ir::BinaryOp::EqWildcard
+                },
+                right: Box::new(value.clone()),
+            },
+            (_, sv::ir::CaseLabel::Range { .. }) => {
+                return Err(unsupported("range label outside case inside"));
+            }
+        });
+    }
+    Ok(terms
+        .into_iter()
+        .reduce(|left, right| sv::ir::Expr::Binary {
+            left: Box::new(left),
+            op: sv::ir::BinaryOp::LogicOr,
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string())))
+}
+
 impl<'p, 'a> Ff<'p, 'a> {
     pub fn new(m: &'p mut ProcModule<'a>) -> Self {
         let mut element_widths = HashMap::default();
@@ -2301,54 +2354,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let join = self.b.new_block();
         let mut any_falls = false;
         for item in items {
-            let mut terms = Vec::new();
-            for label in &item.labels {
-                terms.push(match (kind, label) {
-                    (sv::ir::CaseKind::Inside, label) => sv::ir::Expr::Inside {
-                        expr: Box::new(selector.clone()),
-                        items: vec![match label {
-                            sv::ir::CaseLabel::Value(value) => {
-                                sv::ir::InsideItem::Value(value.clone())
-                            }
-                            sv::ir::CaseLabel::Range { low, high } => sv::ir::InsideItem::Range {
-                                low: low.clone(),
-                                high: high.clone(),
-                            },
-                        }],
-                    },
-                    (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => {
-                        sv::ir::Expr::Binary {
-                            left: Box::new(sv::ir::Expr::Binary {
-                                left: Box::new(selector.clone()),
-                                op: sv::ir::BinaryOp::EqWildcard,
-                                right: Box::new(value.clone()),
-                            }),
-                            op: sv::ir::BinaryOp::NeCase,
-                            right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
-                        }
-                    }
-                    (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
-                        left: Box::new(selector.clone()),
-                        op: if kind == sv::ir::CaseKind::Exact {
-                            sv::ir::BinaryOp::EqCase
-                        } else {
-                            sv::ir::BinaryOp::EqWildcard
-                        },
-                        right: Box::new(value.clone()),
-                    },
-                    (_, sv::ir::CaseLabel::Range { .. }) => {
-                        return Err(unsupported("range label outside case inside"));
-                    }
-                });
-            }
-            let condition = terms
-                .into_iter()
-                .reduce(|left, right| sv::ir::Expr::Binary {
-                    left: Box::new(left),
-                    op: sv::ir::BinaryOp::LogicOr,
-                    right: Box::new(right),
-                })
-                .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string()));
+            let condition = case_item_condition(kind, &selector, &item.labels)?;
             let (truth, constant) = self.eval_truth(&condition)?;
             match constant {
                 Some(false) => continue,
@@ -3504,6 +3510,26 @@ pub(super) fn fixed_runtime_write_times(
         let truth = slt_truth(&mut arena, node).ok()?;
         slt_bool(&arena, &mut ConstCache::default(), truth)
     }
+    fn selected_case_body<'a>(
+        kind: sv::ir::CaseKind,
+        selector: &sv::ir::Expr,
+        items: &'a [sv::ir::CaseItem],
+        default: Option<&'a [sv::ir::Stmt]>,
+        pm: &ProcModule<'_>,
+    ) -> Option<&'a [sv::ir::Stmt]> {
+        // Lowering evaluates the selector even when there are no items.
+        if expr_calls(selector, &|_| true) {
+            return None;
+        }
+        for item in items {
+            let condition = case_item_condition(kind, selector, &item.labels).ok()?;
+            // An unknown earlier match prevents choosing a later item.
+            if known_condition(&condition, pm)? {
+                return Some(&item.body);
+            }
+        }
+        Some(default.unwrap_or_default())
+    }
     fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
         let negated = sv::ir::Expr::Unary {
             op: sv::ir::UnaryOp::LogicNot,
@@ -3762,6 +3788,17 @@ pub(super) fn fixed_runtime_write_times(
                     .iter()
                     .rev(),
             );
+            continue;
+        }
+        if let Stmt::Case {
+            kind,
+            selector,
+            items,
+            default,
+        } = stmt
+            && let Some(body) = selected_case_body(*kind, selector, items, default.as_deref(), pm)
+        {
+            pending.extend(body.iter().rev());
             continue;
         }
         // A zero-trip for still executes its initializer. Analyze those
