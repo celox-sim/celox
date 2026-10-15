@@ -79,6 +79,75 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_interfaces",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "timing::generic_interface_methods_keep_setup_edges",
+      "phase": "compile",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_interfaces",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "timing::inherited_interface_methods_keep_setup_edges",
+      "phase": "compile",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_interfaces",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "timing::interface_modport_methods_keep_setup_edges",
+      "phase": "compile",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::level_sensitive_always_runs_as_a_process",
