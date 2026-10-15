@@ -1308,6 +1308,7 @@ fn process_runtime_events() {
                 let _ = output.write_all(&message);
                 let _ = output.write_all(b"\n");
             }
+            RuntimeEvent::AssertPass { .. } => {}
             RuntimeEvent::AssertFatal { message } => {
                 let mut output = std::io::stderr().lock();
                 let _ = output.write_all(b"fatal assertion failed: ");

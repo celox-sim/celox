@@ -679,7 +679,41 @@ fn test_selected_testbench_destination_out_of_range_is_rejected() {
 }
 
 #[test]
-fn test_expression_testbench_function_selected_destination_is_rejected() {
+fn test_selected_hierarchical_destination_out_of_range_is_rejected() {
+    let code = r#"
+        module Child (clk: input clock, out: output logic<8>) {
+            #[allow(unassign_variable)]
+            var word: logic<8>;
+            always_ff (clk) { out = word; }
+        }
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var out: logic<8>;
+            inst dut: Child (clk, out);
+
+            initial {
+                dut.word[6 +: 4] = 4'hf;
+                $finish();
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "t")
+        .build()
+        .expect_err("out-of-range hierarchical selected destination must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+            assert_eq!(*feature, "testbench selected destination");
+        }
+        other => panic!("expected selected destination geometry error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_expression_testbench_function_selected_destination_runs() {
+    // A part-select store in an expression-form helper runs in the process
+    // kernel; the bytecode interpreter rejected it.
     let code = r#"
         module Driver (source: output logic<8>) {
             assign source = 8'h05;
@@ -704,18 +738,10 @@ fn test_expression_testbench_function_selected_destination_is_rejected() {
         }
     "#;
 
-    let err = Simulator::builder(code, "t")
-        .build()
-        .expect_err("selected destination in an expression helper must be rejected");
-    match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
-            assert_eq!(
-                *feature,
-                "selected destination in expression testbench function"
-            );
-        }
-        other => panic!("expected expression helper selected destination error, got {other:?}"),
-    }
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        celox::TestResult::Pass
+    );
 }
 
 #[test]

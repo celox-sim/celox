@@ -2316,6 +2316,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             arg_widths,
             arg_signed,
             arg_is_string,
+            location: None,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,

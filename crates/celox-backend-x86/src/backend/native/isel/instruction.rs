@@ -345,12 +345,25 @@ pub(super) fn lower_instruction(
                             let chunk_vreg = ctx.alloc_vreg(SpillDesc::sim_state(
                                 *addr, bit_pos, chunk_bits, false,
                             ));
+                            let raw = if matches!(chunk_bits, 8 | 16 | 32 | 64) {
+                                chunk_vreg
+                            } else {
+                                ctx.alloc_vreg(SpillDesc::transient())
+                            };
                             block.push(MInst::Load {
-                                dst: chunk_vreg,
+                                dst: raw,
                                 base: BaseReg::SimState,
                                 offset: chunk_byte_off,
                                 size: chunk_size,
                             });
+                            if raw != chunk_vreg {
+                                ctx.emit_and_imm(
+                                    block,
+                                    chunk_vreg,
+                                    raw,
+                                    mask_for_width(chunk_bits),
+                                );
+                            }
                             chunks.push((chunk_vreg, chunk_bits));
                             bit_pos += chunk_bits;
                             remaining -= chunk_bits;
@@ -370,12 +383,20 @@ pub(super) fn lower_instruction(
                                 let chunk_byte_off = ctx.mask_byte_offset(addr, m_bit_pos);
                                 let chunk_size = ISelContext::op_size_for_width(chunk_bits);
                                 let mv = ctx.alloc_vreg(SpillDesc::transient());
+                                let raw = if matches!(chunk_bits, 8 | 16 | 32 | 64) {
+                                    mv
+                                } else {
+                                    ctx.alloc_vreg(SpillDesc::transient())
+                                };
                                 block.push(MInst::Load {
-                                    dst: mv,
+                                    dst: raw,
                                     base: BaseReg::SimState,
                                     offset: chunk_byte_off,
                                     size: chunk_size,
                                 });
+                                if raw != mv {
+                                    ctx.emit_and_imm(block, mv, raw, mask_for_width(chunk_bits));
+                                }
                                 mchunks.push((mv, chunk_bits));
                                 m_bit_pos += chunk_bits;
                                 m_remaining -= chunk_bits;

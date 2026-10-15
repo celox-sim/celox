@@ -112,6 +112,7 @@ fn register_comb_runtime_event_site<'a>(
             .iter()
             .map(|arg| arg.0.comptime().r#type.is_string())
             .collect(),
+        location: None,
     };
     let id = collector.sites.len() as u32;
     collector.sites.push(site);
@@ -208,7 +209,10 @@ fn collect_system_function_effect(
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::AssertPass,
             active,
             None,
         ) => active,
@@ -227,7 +231,10 @@ fn collect_system_function_effect(
             Some(active)
         }
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::AssertPass,
             _,
             Some(_),
         ) => {

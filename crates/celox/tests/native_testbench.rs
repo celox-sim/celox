@@ -2698,10 +2698,12 @@ fn test_ff_runtime_events_drain_with_per_tick_time() {
             .iter()
             .map(|a| a.message.as_deref())
             .collect::<Vec<_>>(),
+        // `%t` is the scheduler time: the default clock has period 2, and
+        // its first edge is at time 0.
         vec![
-            Some(b"ff time=1".as_slice()),
+            Some(b"ff time=0".as_slice()),
             Some(b"ff time=2".as_slice()),
-            Some(b"ff time=3".as_slice())
+            Some(b"ff time=4".as_slice())
         ],
     );
 }
@@ -2722,9 +2724,11 @@ fn test_assert_format_args_render_current_time_for_percent_t() {
     let detailed = Simulator::builder(code, "t").run_test_detailed().unwrap();
     assert!(!detailed.passed);
     assert_eq!(detailed.assertions.len(), 1);
+    // Three edges of the default clock (period 2) end at time 4; the
+    // process resumes one period later.
     assert_eq!(
         detailed.assertions[0].message.as_deref(),
-        Some(b"time=3".as_slice())
+        Some(b"time=6".as_slice())
     );
 }
 
@@ -2901,7 +2905,10 @@ fn test_run_test_stops_on_ff_fatal_runtime_event() {
             }
         }
     "#;
-    let result = Simulator::builder(code, "t").run_test().unwrap();
+    let result = Simulator::builder(code, "t")
+        .testbench_kernels(false)
+        .run_test()
+        .unwrap();
     assert_eq!(result, TestResult::Fail("ff fatal".to_string()));
 }
 

@@ -9,7 +9,11 @@ pub(crate) fn project_observability(
 ) -> Result<(), celox_frontend_veryl::ParserError> {
     let (sites, read_variables) =
         celox_frontend_veryl::collect_testbench_observability(lookup, source)?;
-    runtime_schema.runtime_event_sites.extend(sites);
+    // Kernels register their own sites; the roots still keep the state the
+    // testbench reads alive.
+    if !source.kernels {
+        runtime_schema.runtime_event_sites.extend(sites);
+    }
     runtime_schema.testbench_read_roots.extend(read_variables);
     Ok(())
 }
@@ -30,7 +34,7 @@ pub(crate) fn compile_semantic_testbench(
 
 #[cfg(all(test, feature = "systemverilog"))]
 mod process_root_tests {
-    use crate::{Simulation, Simulator};
+    use crate::{OptLevel, Simulation, Simulator};
     #[test]
     fn semantic_testbench_projection_preserves_process_counter_roots() {
         let veryl = r#"#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:logic;inst dut:$sv::Pulse(q);initial{clk.next(2);$assert(q==1);$finish();}}"#;
@@ -40,7 +44,8 @@ mod process_root_tests {
             vec![(sv, std::path::Path::new("pulse.sv"))],
             "Top",
         )
-        .optimize(true)
+        .testbench_kernels(false)
+        .opt_level(OptLevel::O2)
         .build_interpreter()
         .unwrap();
         let schema = &sim.program.runtime_schema;

@@ -84,6 +84,9 @@ unsafe extern "C" fn call_method(
             if unsafe { args[0].str_.as_str() } == "hello" {
                 state.value = 7;
                 0
+            } else if unsafe { args[0].str_.as_str() }.is_empty() {
+                state.value = 9;
+                0
             } else {
                 1
             }
@@ -304,7 +307,7 @@ unsafe extern "C" fn clock_call_method(
     name: sys::VrlStr,
     args: *const sys::VrlValue,
     nargs: usize,
-    _ret: *mut sys::VrlValue,
+    ret: *mut sys::VrlValue,
 ) -> i32 {
     let state = unsafe { &mut *state.cast::<ClockState>() };
     let api = unsafe { &*state.api };
@@ -358,6 +361,12 @@ unsafe extern "C" fn clock_call_method(
             unsafe { (api.write_output)(ctx, state.output, &value, std::ptr::null()) };
             0
         }
+        "drive_lying" if args.is_empty() => {
+            let value = 1;
+            unsafe { (api.write_output)(ctx, state.output, &value, std::ptr::null()) };
+            unsafe { write_return(ret, 1, 16) };
+            0
+        }
         "check_clocks" if args.len() == 1 && argument(0) == Some(state.clocks) => 0,
         "stop" if args.is_empty() => {
             unsafe { (api.finish)(ctx) };
@@ -393,6 +402,32 @@ static CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     on_init: clock_init,
     on_reset: hook,
     on_clock: clock_hook,
+    call_method: clock_call_method,
+    on_finish: hook,
+};
+
+unsafe extern "C" fn clock_init_from_clock(state: *mut c_void, ctx: *mut sys::VrlCtx) -> i32 {
+    let state = unsafe { &mut *state.cast::<ClockState>() };
+    let api = unsafe { &*state.api };
+    let clock = unsafe { (api.port_index)(ctx, sys::VrlStr::from_str("clk"), sys::VRL_DIR_CLOCK) };
+    if clock < 0 {
+        return 1;
+    }
+    let mut value = 0;
+    let mut mask = 0;
+    unsafe { (api.read_input)(ctx, clock as u32, &mut value, &mut mask) };
+    unsafe { (api.write_output)(ctx, state.output, &value, &mask) };
+    0
+}
+
+static INIT_CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_clock,
+    destroy: destroy_clock,
+    on_init: clock_init_from_clock,
+    on_reset: hook,
+    on_clock: hook,
     call_method: clock_call_method,
     on_finish: hook,
 };
@@ -750,6 +785,7 @@ fn register_component() {
         celox::register_static_component("celox_param", &COMPONENT);
         celox::register_static_component("celox_clocked", &CLOCK_COMPONENT);
         celox::register_static_component("celox_init_input", &INIT_INPUT_COMPONENT);
+        celox::register_static_component("celox_init_clock", &INIT_CLOCK_COMPONENT);
         celox::register_static_component("celox_wide_clocked", &WIDE_CLOCK_COMPONENT);
         celox::register_static_component("celox_modport", &MODPORT_COMPONENT);
         celox::register_static_component("celox_bad_clock", &BAD_CLOCK_COMPONENT);
@@ -820,6 +856,14 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                         {"name":"q","dir":"output"}
                     ],
                     "params": [{"name":"STEP","type":"value"}]
+                },
+                "celox_init_clock": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"},
+                        {"name":"d","dir":"input"},
+                        {"name":"q","dir":"output"}
+                    ]
                 },
                 "celox_init_input": {
                     "kind": "clocked",
@@ -1037,6 +1081,137 @@ fn connected_clocked_component_stages_inputs_and_applies_outputs() {
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
         TestResult::Pass
     );
+}
+
+#[test]
+fn repeated_kernel_runs_stage_low_clocks_before_component_init() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            var q: logic<8>;
+            inst probe: $comp::celox_init_clock(clk, d: 8'h0, q);
+            inst finisher: $comp::celox_finisher(clk);
+            initial {
+                $assert(q == 0, "on_init must observe a low generated clock: %h", q);
+                clk.next(10);
+                $assert(0, "component must finish on the first rising edge");
+            }
+        }
+    "#;
+    macro_rules! check {
+        ($method:ident) => {{
+            let (_dir, metadata) = component_metadata();
+            let mut sim = Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(true)
+                .$method()
+                .unwrap();
+            let compiled = celox::testbench::compile_initial_testbench(&sim).unwrap();
+            for run in 0..3 {
+                assert_eq!(
+                    celox::testbench::run_compiled_testbench(&mut sim, &compiled),
+                    TestResult::Pass,
+                    "run {run}"
+                );
+            }
+        }};
+    }
+    check!(build_interpreter);
+    check!(build_cranelift);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
+#[test]
+fn repeated_kernel_runs_settle_derived_clock_before_component_init() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            var q: logic<8>;
+            let derived: logic<8> = (clk as u8) + 8'h1;
+            inst probe: $comp::celox_init_input(clk, d: derived, q);
+            inst finisher: $comp::celox_finisher(clk);
+            initial {
+                $assert(q == 1, "on_init must observe a settled derived clock: %h", q);
+                clk.next(10);
+                $assert(0, "component must finish on the first rising edge");
+            }
+        }
+    "#;
+    macro_rules! check {
+        ($method:ident) => {{
+            let (_dir, metadata) = component_metadata();
+            let mut sim = Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(true)
+                .$method()
+                .unwrap();
+            let compiled = celox::testbench::compile_initial_testbench(&sim).unwrap();
+            for run in 0..3 {
+                assert_eq!(
+                    celox::testbench::run_compiled_testbench(&mut sim, &compiled),
+                    TestResult::Pass,
+                    "run {run}"
+                );
+            }
+        }};
+    }
+    check!(build_interpreter);
+    check!(build_cranelift);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
+#[test]
+fn repeated_kernel_runs_deassert_interrupted_reset_before_component_init() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var q: logic<8>;
+            let derived: logic<8> = (rst as u8) + 8'h1;
+            inst probe: $comp::celox_init_input(clk, d: derived, q);
+            inst finisher: $comp::celox_finisher(clk);
+            initial { rst.assert(5); $assert(0, "reset must be interrupted"); }
+            initial {
+                clk.next(10);
+                $assert(0, "component must finish on the first rising edge");
+            }
+        }
+    "#;
+    macro_rules! check {
+        ($method:ident) => {{
+            let (_dir, metadata) = component_metadata();
+            let mut sim = Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(true)
+                .$method()
+                .unwrap();
+            let compiled = celox::testbench::compile_initial_testbench(&sim).unwrap();
+            for run in 0..3 {
+                assert_eq!(
+                    celox::testbench::run_compiled_testbench(&mut sim, &compiled),
+                    TestResult::Pass,
+                    "run {run}"
+                );
+                assert_eq!(
+                    sim.get(sim.signal("q")),
+                    (if run == 0 { 1u8 } else { 2u8 }).into(),
+                    "on_init on run {run}"
+                );
+            }
+        }};
+    }
+    check!(build_interpreter);
+    check!(build_cranelift);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
 }
 
 #[test]
@@ -1686,6 +1861,7 @@ fn component_method_refreshes_inputs_and_applies_outputs_immediately() {
             inst clk: $tb::clock_gen;
             var d: logic<16>;
             var q: logic<16>;
+            let derived: logic<16> = ~q;
             inst component: $comp::celox_clocked #(STEP: 0) (
                 clk,
                 d: d[7:0],
@@ -1697,6 +1873,9 @@ fn component_method_refreshes_inputs_and_applies_outputs_immediately() {
                 component.check_input(8'h34);
                 component.drive(8'h5a);
                 $assert(q == 16'hab5a, "method output must update only the selected destination: %h", q);
+                // The logic derived from the output is settled before the
+                // next statement reads it.
+                $assert(derived == 16'h54a5, "derived logic must see the method output: %h", derived);
                 $finish();
             }
         }
@@ -1827,47 +2006,6 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
         .build()
         .unwrap();
     let testbench = celox::testbench::compile_initial_testbench(&simulator).unwrap();
-    let semantic_reset = simulator
-        .program()
-        .testbench
-        .as_ref()
-        .unwrap()
-        .statements()
-        .iter()
-        .find_map(|statement| match statement {
-            celox_testbench::TestbenchStatement::ResetAssert {
-                reset_signal,
-                clock_event,
-                duration,
-                assert_value,
-                deassert_value,
-                ..
-            } => Some(celox_testbench::TestbenchStatement::ResetAssert {
-                reset_signal: *reset_signal,
-                reset_event: None,
-                clock_event: *clock_event,
-                duration: duration.clone(),
-                period: 2,
-                assert_value: *assert_value,
-                deassert_value: *deassert_value,
-            }),
-            _ => None,
-        })
-        .unwrap();
-    let isolated = celox_testbench::TestbenchProgram::new(vec![semantic_reset]);
-    let bound = celox_runtime::bind_testbench_program(
-        simulator.backend_ref(),
-        isolated,
-        &fxhash::FxHashSet::default(),
-    )
-    .unwrap();
-    assert!(matches!(
-        bound.statements().first(),
-        Some(celox_testbench::TestbenchStatement::ResetAssert {
-            reset_event: None,
-            ..
-        })
-    ));
     assert_eq!(
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
         TestResult::Pass
@@ -2098,7 +2236,9 @@ fn component_finish_request_during_init_skips_testbench_execution() {
         module t {
             inst clk: $tb::clock_gen;
             inst component: $comp::celox_init_finisher (clk);
+            always_comb { $assert(0, "on_init finish must skip initial settling"); }
             initial {
+                clk.next();
                 $assert(0, "on_init finish must skip this statement");
             }
         }
@@ -2908,7 +3048,9 @@ fn component_finish_hook_observes_final_testbench_time() {
             .unwrap(),
         TestResult::Pass
     );
-    assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
+    // The finish hook sees the scheduler time: ten edges of the default
+    // clock (period 2) end at time 18, and the process resumes at 20.
+    assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 20);
     for period in [2, 10] {
         let code = code
             .replace(
@@ -3080,6 +3222,140 @@ fn concurrent_reset_only_replaces_its_own_component_clock_domain() {
         initial { rb.assert(1); }
         initial { a.next(2); $assert(q == 102, "other reset stole clock: %d", q); $finish(); }
     }"#;
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+static VCD_FINISH_CALLS: AtomicUsize = AtomicUsize::new(0);
+unsafe extern "C" fn finish_vcd_registration(_: *mut c_void, _: *mut sys::VrlCtx) -> i32 {
+    VCD_FINISH_CALLS.fetch_add(1, Ordering::Relaxed);
+    0
+}
+static VCD_CLEANUP_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    on_finish: finish_vcd_registration,
+    ..CLOCK_COMPONENT
+};
+
+#[test]
+fn failed_component_vcd_registration_calls_finish_on_each_run() {
+    celox::register_static_component("celox_vcd_cleanup", &VCD_CLEANUP_COMPONENT);
+    VCD_FINISH_CALLS.store(0, Ordering::Relaxed);
+    let (directory, metadata) = component_metadata();
+    let manifest = directory.path().join("component/veryl.manifest.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    json["types"]["celox_vcd_cleanup"] = json["types"]["celox_clocked"].clone();
+    std::fs::write(&manifest, serde_json::to_vec(&json).unwrap()).unwrap();
+    let code = r#"#[test(t)] module t {
+        inst clk: $tb::clock_gen;
+        var d: logic<8>; var q: logic<8>;
+        inst component: $comp::celox_vcd_cleanup #(STEP: 0)(clk,d,q);
+        initial {clk.next();$finish();}
+    }"#;
+    let mut sim = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .vcd(directory.path().join("cleanup.vcd"))
+        .build()
+        .unwrap();
+    // A written header cannot accept newly initialized component signals.
+    sim.dump(0);
+    let tb = celox::testbench::compile_initial_testbench(&sim).unwrap();
+    for expected in 1..=2 {
+        let result = celox::testbench::run_compiled_testbench(&mut sim, &tb);
+        assert!(
+            matches!(result,TestResult::Fail(ref message) if message.contains("component VCD registration failed")),
+            "{result:?}"
+        );
+        assert_eq!(VCD_FINISH_CALLS.load(Ordering::Relaxed), expected);
+    }
+}
+
+#[test]
+fn empty_component_string_arguments_preserve_bytecode_behavior() {
+    register_component();
+    for kernels in [false, true] {
+        let (_dir, metadata) = component_metadata();
+        let code = r#"#[test(t)] module t { var c:$comp::celox_counter;
+            initial { c.set_str(""); var value:u8; value=c.get(); $assert(value==9); $finish(); }
+        }"#;
+        assert_eq!(
+            Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(kernels)
+                .run_test()
+                .unwrap(),
+            TestResult::Pass
+        );
+    }
+}
+
+#[test]
+fn clean_component_calls_do_not_replay_comb_assertions() {
+    register_component();
+    let count = |calls: &str| {
+        let (_dir, metadata) = component_metadata();
+        let code = format!(
+            r#"#[test(t)] module t {{ var c:$comp::celox_counter;
+            always_comb {{ $assert(1,"comb"); }}
+            initial {{ {calls} $finish(); }}
+        }}"#
+        );
+        let result = Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test_detailed()
+            .unwrap();
+        assert!(result.passed, "{result:?}");
+        result
+            .assertions
+            .iter()
+            .filter(|a| a.message.as_deref() == Some(b"comb".as_slice()))
+            .count()
+    };
+    assert_eq!(count("c.get(); c.get();"), count(""));
+}
+
+#[test]
+fn invalid_component_returns_precede_output_assertions() {
+    register_component();
+    for kernels in [false, true] {
+        let (dir, _) = component_metadata();
+        let path = dir.path().join("component/veryl.manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        manifest["types"]["celox_clocked"]["methods"] =
+            serde_json::json!([{"name":"drive_lying","args":[],"ret":"value","ret_width":8}]);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let metadata = veryl_metadata::Metadata::load(dir.path().join("Veryl.toml")).unwrap();
+        let code = r#"#[test(t)] module t {
+          inst clk:$tb::clock_gen;var d:u8;var q:u8;var value:u8;
+          inst c:$comp::celox_clocked #(STEP:0)(clk:clk,d,q);
+          always_comb { $assert(q!=1,"output assertion"); }
+          initial { value=c.drive_lying();$finish(); }
+        }"#;
+        let result = Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .testbench_kernels(kernels)
+            .run_test()
+            .unwrap();
+        assert!(
+            matches!(result,TestResult::Fail(ref message) if message.contains("declares a 8-bit return value but returned 16 bits")),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn component_return_selection_helpers_resume() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"#[test(t)]module t{inst clk:$tb::clock_gen;var c:$comp::celox_counter;var words:u8[2];
+ function index()->u32{clk.next();$assert(1,"index");return 1;}
+ initial{c.set(7);words[index()]=c.get();$assert(words[1]==7);$finish();}}"#;
     assert_eq!(
         Simulator::builder(code, "t")
             .with_metadata(metadata)

@@ -519,3 +519,49 @@ fn a_failed_load_changes_nothing() {
     assert_eq!(target.time(), 10);
     assert_eq!(target.get(b), 3u8.into());
 }
+
+#[test]
+fn timed_state_files_preserve_unknown_edge_detection_baselines() {
+    let code = r#"module Top(clk: input clock, q: output logic<8>) {
+        always_ff(clk) { q += 1; }
+    }"#;
+    for (clock_type, payload, next) in [
+        (celox::ClockType::PosEdge, 1u8, 1u8),
+        (celox::ClockType::NegEdge, 0u8, 0u8),
+    ] {
+        let builder = || {
+            celox::Simulation::builder(code, "Top")
+                .four_state(true)
+                .clock_type(clock_type)
+                .build()
+                .unwrap()
+        };
+        let mut source = builder();
+        let clk = source.signal("clk");
+        let q = source.signal("q");
+        source
+            .modify(|io| {
+                io.set(q, 0u8);
+                io.set(clk, 0u8);
+            })
+            .unwrap();
+        source.settle().unwrap();
+        source
+            .modify(|io| io.set_four_state(clk, payload.into(), 1u8.into()))
+            .unwrap();
+        source.settle().unwrap();
+        let expected = source.get(q) + 1u8;
+        let file = through_bytes(&source.save_state().unwrap());
+        assert_eq!(
+            file.schedule.as_ref().unwrap().unknown_events,
+            Some(vec!["clk".to_owned()])
+        );
+        let mut restored = builder();
+        restored.load_state(&file).unwrap();
+        let clk = restored.signal("clk");
+        let q = restored.signal("q");
+        restored.modify(|io| io.set(clk, next)).unwrap();
+        restored.settle().unwrap();
+        assert_eq!(restored.get(q), expected, "{clock_type:?}");
+    }
+}

@@ -89,7 +89,7 @@ impl fmt::Debug for VariableInfo {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InstancePath(pub Vec<(String, usize)>);
 
 /// Source-language-independent lookup retained for diagnostics and public paths.

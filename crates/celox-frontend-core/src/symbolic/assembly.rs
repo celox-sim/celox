@@ -1444,6 +1444,7 @@ pub fn schedule_symbolic_rtl(
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            testbench_kernels: None,
             process_event_counters,
             active_ff_events: HashSet::default(),
         },

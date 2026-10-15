@@ -383,12 +383,15 @@ struct NativeRuntimeOptions {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct NativeRuntimeSchema {
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
     /// Extern functions the code calls, resolved when the image is attached.
     pub(crate) extern_functions: Vec<celox_design::ExternFunction>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
+    #[serde(serialize_with = "celox_design::serde_sorted::set")]
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
+    #[serde(serialize_with = "celox_design::serde_sorted::set")]
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
@@ -398,6 +401,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     #[serde(default)]
+    pub(crate) testbench_kernels: Option<usize>,
     pub(crate) process_event_counters: Vec<celox_design::ProcessEventCounters<AbsoluteAddr>>,
     pub(crate) active_ff_events: std::collections::BTreeSet<AbsoluteAddr>,
 }
@@ -413,14 +417,21 @@ pub struct NativeProgramImage {
     comb_unit_offsets: Vec<usize>,
     /// Entry offset of each process kernel.
     process_offsets: Vec<usize>,
-    /// Clock-control addresses and byte offsets used to compile each process kernel.
-    compiled_process_clocks: Vec<(AbsoluteAddr, usize)>,
+    /// Control addresses and byte offsets used to compile each process kernel.
+    compiled_process_controls: Vec<Vec<(AbsoluteAddr, usize)>>,
     compiled_process_clock_lists: Vec<Vec<celox_design::ProcessClock<AbsoluteAddr>>>,
     compiled_clock_phase_sensitive_comb: bool,
+    compiled_process_releases: Vec<Vec<celox_design::ProcessRelease<(AbsoluteAddr, usize)>>>,
+    compiled_testbench_kernels: Option<usize>,
+    compiled_process_event_counters: Vec<[(AbsoluteAddr, usize); 3]>,
+    compiled_process_host_requests: Vec<Vec<celox_design::HostRequest<(AbsoluteAddr, usize)>>>,
     compiled_native_tick_loop: bool,
     required_native_features: u8,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    #[serde(serialize_with = "celox_design::serde_sorted::map")]
     apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
@@ -447,6 +458,15 @@ impl NativeProgramImage {
     ) -> Result<(), E> {
         if let Some(testbench) = &mut self.testbench {
             testbench.try_map_paths(&mut map)?;
+        }
+        for site in &mut self.runtime_schema.runtime_event_sites {
+            if let Some(location) = &mut site.location
+                && !location.file.is_empty()
+            {
+                location.file = map(std::path::Path::new(&location.file))?
+                    .to_string_lossy()
+                    .into_owned();
+            }
         }
         Ok(())
     }
@@ -504,6 +524,7 @@ impl NativeProgramImage {
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
+                testbench_kernels: self.runtime_schema.testbench_kernels,
                 process_event_counters: self.runtime_schema.process_event_counters.clone(),
                 active_ff_events: self
                     .runtime_schema
@@ -528,6 +549,16 @@ impl NativeProgramImage {
         }
         if self.code.is_empty() {
             return Err("code image is empty".into());
+        }
+        if self.runtime_schema.testbench_kernels != self.compiled_testbench_kernels {
+            return Err("testbench kernel boundary differs from compiled image".into());
+        }
+        if self
+            .runtime_schema
+            .testbench_kernels
+            .is_some_and(|start| start > self.runtime_schema.processes.len())
+        {
+            return Err("testbench kernel boundary exceeds process count".into());
         }
         let mut entry_offsets = HashSet::default();
         let mut previous_end = 0usize;
@@ -570,21 +601,61 @@ impl NativeProgramImage {
         if self.process_offsets.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their control slots disagree".into());
         }
-        if self.compiled_process_clocks.len() != self.runtime_schema.processes.len()
+        if self.compiled_process_controls.len() != self.runtime_schema.processes.len()
             || self
-                .compiled_process_clocks
+                .compiled_process_controls
                 .iter()
                 .zip(&self.runtime_schema.processes)
-                .any(|((address, offset), process)| {
-                    process.clock != *address || self.layout.offsets.get(address) != Some(offset)
+                .any(|(bindings, process)| {
+                    let addresses = [
+                        process.resume,
+                        process.status,
+                        process.delay,
+                        process.clock,
+                        process.release,
+                    ]
+                    .into_iter()
+                    .chain(process.comb_clean)
+                    .collect::<Vec<_>>();
+                    bindings.len() != addresses.len()
+                        || bindings
+                            .iter()
+                            .zip(addresses)
+                            .any(|((address, offset), expected)| {
+                                *address != expected
+                                    || self.layout.offsets.get(address) != Some(offset)
+                            })
                 })
         {
-            return Err(
-                "process clock control slots disagree with compiled kernel bindings".into(),
-            );
+            return Err("process control slots disagree with compiled kernel bindings".into());
         }
         let mut process_clock_periods = fxhash::FxHashMap::default();
         for process in &self.runtime_schema.processes {
+            if let Some(flag) = process.comb_clean
+                && !self
+                    .design
+                    .state_objects
+                    .get(&flag)
+                    .is_some_and(|metadata| {
+                        metadata.width == 1 && !metadata.is_4state && metadata.array_dims.is_empty()
+                    })
+            {
+                return Err(
+                    "a process combinational-clean flag has an invalid state object".into(),
+                );
+            }
+            if !self
+                .design
+                .state_objects
+                .get(&process.release)
+                .is_some_and(|metadata| {
+                    metadata.width == celox_design::PROCESS_RELEASE_WIDTH
+                        && !metadata.is_4state
+                        && metadata.array_dims.is_empty()
+                })
+            {
+                return Err("a process release control slot has an invalid state object".into());
+            }
             if !self
                 .design
                 .state_objects
@@ -596,6 +667,49 @@ impl NativeProgramImage {
                 })
             {
                 return Err("a process clock control slot has an invalid state object".into());
+            }
+            for release in &process.releases {
+                if !self
+                    .design
+                    .state_objects
+                    .get(&release.signal)
+                    .is_some_and(|m| m.width == 1 && m.array_dims.is_empty())
+                    || release.value > 1
+                    || release
+                        .clock
+                        .is_some_and(|clock| !process.clocks.iter().any(|c| c.signal == clock))
+                {
+                    return Err("a process release has an invalid signal, value or clock".into());
+                }
+            }
+            let valid_host_value = |value: &celox_design::HostValue<_>| {
+                (value.width > 0 || value.is_string)
+                    && self
+                        .design
+                        .state_objects
+                        .get(&value.signal)
+                        .is_some_and(|m| m.width == value.width.max(1) && m.array_dims.is_empty())
+            };
+            for request in &process.host_requests {
+                use celox_design::HostRequest;
+                let valid = match request {
+                    HostRequest::RandomSeed { value, .. } => valid_host_value(value),
+                    HostRequest::RandomGet { result, .. }
+                    | HostRequest::RandomGetSeed { result, .. } => valid_host_value(result),
+                    HostRequest::RandomGetRange {
+                        min, max, result, ..
+                    } => [min, max, result].into_iter().all(valid_host_value),
+                    HostRequest::Component { args, result, .. } => {
+                        args.iter().all(valid_host_value)
+                            && result.as_ref().is_none_or(valid_host_value)
+                    }
+                    HostRequest::FileOpen { path, .. } => valid_host_value(path),
+                    HostRequest::FileWrite { args, .. } => args.iter().all(valid_host_value),
+                    HostRequest::FileFlush { .. } | HostRequest::FileClose { .. } => true,
+                };
+                if !valid {
+                    return Err("a process host request has an invalid state value".into());
+                }
             }
             for clock in &process.clocks {
                 if clock.period < 2
@@ -645,10 +759,86 @@ impl NativeProgramImage {
         {
             return Err("process clock lists disagree with compiled kernel indices".into());
         }
+        if self.compiled_process_releases.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_releases
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| {
+                    let bound = process
+                        .releases
+                        .iter()
+                        .cloned()
+                        .map(|release| {
+                            release.map(|address| {
+                                (
+                                    address,
+                                    self.layout
+                                        .offsets
+                                        .get(&address)
+                                        .copied()
+                                        .unwrap_or(usize::MAX),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    compiled != &bound
+                })
+        {
+            return Err("process releases disagree with compiled release indices".into());
+        }
+        if self.compiled_process_host_requests.len() != self.runtime_schema.processes.len()
+            || self
+                .compiled_process_host_requests
+                .iter()
+                .zip(&self.runtime_schema.processes)
+                .any(|(compiled, process)| {
+                    let bound = process
+                        .host_requests
+                        .iter()
+                        .cloned()
+                        .map(|request| {
+                            request.map(|address| {
+                                (
+                                    address,
+                                    self.layout
+                                        .offsets
+                                        .get(&address)
+                                        .copied()
+                                        .unwrap_or(usize::MAX),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    compiled != &bound
+                })
+        {
+            return Err("process host requests disagree with compiled scratch bindings".into());
+        }
         if self.compiled_clock_phase_sensitive_comb
             != self.runtime_schema.clock_phase_sensitive_comb
         {
             return Err("clock phase sensitivity disagrees with compiled kernels".into());
+        }
+        let counter_bindings = self
+            .runtime_schema
+            .process_event_counters
+            .iter()
+            .map(|counter| {
+                [counter.signal, counter.rises, counter.falls].map(|address| {
+                    (
+                        address,
+                        self.layout
+                            .offsets
+                            .get(&address)
+                            .copied()
+                            .unwrap_or(usize::MAX),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if self.compiled_process_event_counters != counter_bindings {
+            return Err("process edge counters disagree with compiled bindings".into());
         }
         for counters in &self.runtime_schema.process_event_counters {
             if !self.event_map.contains_key(&counters.signal) {
@@ -2372,12 +2562,24 @@ fn compile_program(
             comb_offset,
             comb_unit_offsets,
             process_offsets,
-            compiled_process_clocks: sir
+            compiled_process_controls: sir
                 .runtime()
                 .runtime_schema
                 .processes
                 .iter()
-                .map(|process| (process.clock, layout.offsets[&process.clock]))
+                .map(|process| {
+                    [
+                        process.resume,
+                        process.status,
+                        process.delay,
+                        process.clock,
+                        process.release,
+                    ]
+                    .into_iter()
+                    .chain(process.comb_clean)
+                    .map(|address| (address, layout.offsets[&address]))
+                    .collect()
+                })
                 .collect(),
             compiled_process_clock_lists: sir
                 .runtime()
@@ -2385,6 +2587,49 @@ fn compile_program(
                 .processes
                 .iter()
                 .map(|process| process.clocks.clone())
+                .collect(),
+            compiled_testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
+            compiled_process_event_counters: sir
+                .runtime()
+                .runtime_schema
+                .process_event_counters
+                .iter()
+                .map(|counter| {
+                    [counter.signal, counter.rises, counter.falls].map(|address| {
+                        (
+                            address,
+                            layout.offsets.get(&address).copied().unwrap_or(usize::MAX),
+                        )
+                    })
+                })
+                .collect(),
+            compiled_process_releases: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .releases
+                        .iter()
+                        .cloned()
+                        .map(|release| release.map(|address| (address, layout.offsets[&address])))
+                        .collect()
+                })
+                .collect(),
+            compiled_process_host_requests: sir
+                .runtime()
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|process| {
+                    process
+                        .host_requests
+                        .iter()
+                        .cloned()
+                        .map(|request| request.map(|address| (address, layout.offsets[&address])))
+                        .collect()
+                })
                 .collect(),
             compiled_native_tick_loop: options.x86_options.native_tick_loop,
             compiled_clock_phase_sensitive_comb: sir
@@ -2424,6 +2669,7 @@ fn compile_program(
                     .copied()
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
+                testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
                 process_event_counters: sir.runtime().runtime_schema.process_event_counters.clone(),
                 active_ff_events: sir
                     .runtime()
@@ -3509,6 +3755,188 @@ mod process_metadata_tests {
     }
 
     #[test]
+    fn testbench_boundary_must_match_compiled_boundary() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for start in [
+            0,
+            original.runtime_schema.processes.len(),
+            original.runtime_schema.processes.len() + 1,
+        ] {
+            let mut changed = original.clone();
+            changed.runtime_schema.testbench_kernels = Some(start);
+            assert!(matches!(
+                changed.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
+        }
+        let source =
+            "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{clk.next(2);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        for boundary in [None, Some(original.runtime_schema.processes.len())] {
+            let mut changed = original.clone();
+            changed.runtime_schema.testbench_kernels = boundary;
+            assert!(matches!(
+                changed.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn process_release_and_host_values_are_checked_before_attachment() {
+        let original = image();
+        for kind in 0..5 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes[0];
+            let unknown = if kind == 4 {
+                celox_design::StateAddr {
+                    var_id: celox_design::StateObjectId::from_raw(u32::MAX),
+                    ..slots.delay
+                }
+            } else {
+                slots.delay
+            };
+            match kind {
+                0 => slots.releases.push(celox_design::ProcessRelease {
+                    signal: slots.delay,
+                    value: 0,
+                    clock: None,
+                }),
+                1 => slots.releases.push(celox_design::ProcessRelease {
+                    signal: slots.clocks[0].signal,
+                    value: 0,
+                    clock: Some(slots.delay),
+                }),
+                _ => slots
+                    .host_requests
+                    .push(celox_design::HostRequest::RandomGet {
+                        handle: "test".into(),
+                        result: celox_design::HostValue {
+                            signal: unknown,
+                            width: if kind == 2 { 0 } else { 1 },
+                            signed: false,
+                            is_string: false,
+                        },
+                    }),
+            }
+            assert!(broken.validate().is_err(), "corruption {kind} accepted");
+            assert!(matches!(
+                broken.to_container_bytes(),
+                Err(NativeImageContainerError::InvalidImage(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn emitted_edge_counter_bindings_match_compiled_storage() {
+        let source = "module Counter(clk:input clock,q:output u32){always_ff(clk){q+=1;}}#[test(Top)]module Top{var go:clock;var q:u32;inst dut:Counter(clk:go,q);initial{go=1;go=0;$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        assert!(!original.runtime_schema.process_event_counters.is_empty());
+        let mut broken = original.clone();
+        let counter = &mut broken.runtime_schema.process_event_counters[0];
+        std::mem::swap(&mut counter.rises, &mut counter.falls);
+        assert!(broken.to_container_bytes().is_err());
+    }
+
+    #[test]
+    fn ordered_release_bindings_match_compiled_indices() {
+        let source = "#[test(Top)]module Top{inst clk:$tb::clock_gen;inst a:$tb::reset_gen(clk);inst b:$tb::reset_gen(clk);initial{a.assert(1);b.assert(1);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let mut broken = original.clone();
+        assert_eq!(broken.runtime_schema.processes[0].releases.len(), 2);
+        broken.runtime_schema.processes[0].releases.swap(0, 1);
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn host_request_values_bind_to_compiled_scratch() {
+        let source = "#[test(Top)]module Top{var random:$tb::random::<u32>;var value:u32;initial{value=random.get_range(1,2);$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let mut broken = original.clone();
+        let request = broken.runtime_schema.processes[0]
+            .host_requests
+            .iter_mut()
+            .find(|request| matches!(request, celox_design::HostRequest::RandomGetRange { .. }))
+            .unwrap();
+        if let celox_design::HostRequest::RandomGetRange { min, max, .. } = request {
+            assert_ne!(min.signal, max.signal);
+            min.signal = max.signal;
+        }
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn clean_control_cannot_redirect_to_another_valid_bit() {
+        let source = "#[test(Top)] module Top (spare: output logic) { var source: u32; let derived: u32=source+1; initial {source=1;$assert(derived==2);source=7;} initial {spare=1;$assert(spare==1);spare=0;} }";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        let flag = original.runtime_schema.processes[0].comb_clean.unwrap();
+        let mut broken = original.clone();
+        let address = original.runtime_schema.processes[1].comb_clean.unwrap();
+        assert_ne!(flag, address);
+        broken.runtime_schema.processes[0].comb_clean = Some(address);
+        assert!(broken.to_container_bytes().is_err());
+    }
+    #[test]
+    fn process_release_control_bindings_cannot_be_swapped() {
+        let original = image();
+        original.to_container_bytes().unwrap();
+        for control in 0..5 {
+            let mut broken = original.clone();
+            let slots = &mut broken.runtime_schema.processes;
+            let get = |p: &celox_design::ProcessSlots<AbsoluteAddr>| match control {
+                0 => p.resume,
+                1 => p.status,
+                2 => p.delay,
+                3 => p.clock,
+                _ => p.release,
+            };
+            let a = get(&slots[0]);
+            let b = get(&slots[1]);
+            assert_ne!(a, b);
+            for (p, value) in [(0, b), (1, a)] {
+                match control {
+                    0 => slots[p].resume = value,
+                    1 => slots[p].status = value,
+                    2 => slots[p].delay = value,
+                    3 => slots[p].clock = value,
+                    _ => slots[p].release = value,
+                }
+            }
+            assert!(
+                matches!(
+                    broken.to_container_bytes(),
+                    Err(NativeImageContainerError::InvalidImage(_))
+                ),
+                "control {control}"
+            );
+        }
+    }
+
+    #[test]
     fn process_clock_lists_match_the_compiled_indices() {
         let original = image();
         original.to_container_bytes().unwrap();
@@ -3574,13 +4002,14 @@ mod process_metadata_tests {
     fn process_clock_metadata_is_checked_before_image_attachment() {
         let original = image();
         original.to_container_bytes().unwrap();
-        for corruption in 0..5 {
+        for corruption in 0..6 {
             let mut broken = original.clone();
             let slots = &mut broken.runtime_schema.processes[0];
             match corruption {
                 0 => slots.clocks[0].signal = slots.delay,
                 1 => slots.clocks[0].period = 1,
                 2 => slots.clock = slots.status,
+                5 => slots.comb_clean = Some(slots.delay),
                 4 => {
                     let signal = slots.clocks[0].signal;
                     broken

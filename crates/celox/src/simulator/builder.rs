@@ -281,6 +281,7 @@ fn analyze(
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    testbench_kernels: bool,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
@@ -397,11 +398,20 @@ fn analyze(
     let loop_sources =
         parser::loop_provenance::LoopSourceTable::collect(parsers.iter().map(|x| &x.veryl));
 
-    // Global post-pass1
+    let has_testbench = symbol_table::get_all()
+        .iter()
+        .any(|symbol| matches!(&symbol.kind, SymbolKind::Module(module) if module.test.is_some()));
+    let runtime_functions = if testbench_kernels && has_testbench {
+        celox_frontend_veryl::preserve_terminating_function_calls(parsers.iter().map(|x| &x.veryl))
+    } else {
+        Default::default()
+    };
+    // Resolve constant-function dependencies only after runtime termination
+    // has been classified, so transitive callers retain those effects too.
     errors.append(&mut Analyzer::analyze_post_pass1());
 
-    // Shared context for pass2
     let mut context = Context::default();
+    context.disalbe_const_opt = testbench_kernels && has_testbench;
 
     let mut ir = Ir::default();
 
@@ -418,6 +428,7 @@ fn analyze(
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    errors.retain(|error| !runtime_functions.is_runtime_case_condition(error));
 
     // Veryl reports combinational loops before Celox can apply its path-level
     // false-loop and true-loop authorizations. When the caller supplied such
@@ -472,6 +483,7 @@ fn analyze(
         build_config.reset_type = rt;
     }
     build_config.parallel_lanes = optimize_options.parallel_lanes();
+    build_config.testbench_kernels = testbench_kernels;
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
             &top,
@@ -644,6 +656,7 @@ pub fn compile_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        false,
     )
 }
 
@@ -758,6 +771,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    testbench_kernels: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
     if !artifact.processes().is_empty() {
@@ -789,6 +803,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        testbench_kernels,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -846,6 +861,7 @@ fn compile_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    testbench_kernels: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -867,6 +883,7 @@ fn compile_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        testbench_kernels,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -1040,6 +1057,7 @@ pub fn compile_mixed_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        false,
     )
 }
 
@@ -1071,6 +1089,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    testbench_kernels: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -1092,6 +1111,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        testbench_kernels,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -1152,6 +1172,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    testbench_kernels: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     #[cfg(not(feature = "systemverilog"))]
     {
@@ -1174,6 +1195,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            testbench_kernels,
         )
     }
     #[cfg(feature = "systemverilog")]
@@ -1196,6 +1218,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            testbench_kernels,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -1232,6 +1255,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            testbench_kernels,
         ),
     }
 }
@@ -1294,6 +1318,10 @@ mod host {
         pub allow_always_ff_function_effects: bool,
         /// Where the C functions of DPI-C imports are found.
         pub dpi: crate::DpiSymbols,
+        /// Compile the `initial` blocks of a `#[test]` module into process
+        /// kernels run by the timed scheduler instead of the testbench
+        /// bytecode interpreter.
+        pub testbench_kernels: bool,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1478,6 +1506,7 @@ mod host {
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
                 dpi: crate::DpiSymbols::default(),
+                testbench_kernels: true,
             }
         }
     }
@@ -1614,6 +1643,13 @@ mod host {
         /// for testing Celox's FF lowering semantics.
         pub fn allow_always_ff_function_effects(mut self, enable: bool) -> Self {
             self.options.allow_always_ff_function_effects = enable;
+            self
+        }
+
+        /// Run the `initial` blocks of a `#[test]` module as process kernels
+        /// of the timed scheduler instead of the bytecode interpreter.
+        pub fn testbench_kernels(mut self, enable: bool) -> Self {
+            self.options.testbench_kernels = enable;
             self
         }
 
@@ -2201,6 +2237,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.testbench_kernels,
                     )?
                 }
             } else {
@@ -2223,6 +2260,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    self.options.testbench_kernels,
                 )?
             };
             if let Some(start) = compile_start {
@@ -2256,6 +2294,11 @@ mod host {
             self.options
                 .dpi
                 .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+            // Process kernels run under the timed scheduler, which discovers
+            // the edges they cause through the trigger bits.
+            if !laid_out.runtime().runtime_schema.processes.is_empty() {
+                self.options.emit_triggers = true;
+            }
 
             Ok((
                 laid_out,
@@ -2764,6 +2807,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.testbench_kernels,
                     )
                 }
             } else {
@@ -2786,12 +2830,16 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    self.options.testbench_kernels,
                 )
             };
 
             let sim_res = program_res.and_then(|(program, warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+                if !laid_out.runtime().runtime_schema.processes.is_empty() {
+                    self.options.emit_triggers = true;
+                }
                 if self.vcd_path.is_some() {
                     laid_out.enable_vcd_tracking();
                 }
@@ -3046,6 +3094,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    self.options.testbench_kernels,
                 )?
             };
             let mut laid_out =

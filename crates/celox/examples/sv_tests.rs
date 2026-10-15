@@ -187,7 +187,8 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         for event in sim.drain_runtime_events() {
             match event {
                 celox::RuntimeEvent::Display { message }
-                | celox::RuntimeEvent::AssertContinue { message } => {
+                | celox::RuntimeEvent::AssertContinue { message }
+                | celox::RuntimeEvent::AssertPass { message } => {
                     stdout.write_all(&message).unwrap();
                     stdout.write_all(b"\n").unwrap();
                 }

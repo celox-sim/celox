@@ -61,6 +61,17 @@ pub enum RuntimeEventKind {
     AssertFatal,
     /// `$finish` executed by the design (IEEE 1800-2023 20.2).
     Finish,
+    /// An assertion of a testbench process that held, reported so a test
+    /// run can list every assertion it checked.
+    AssertPass,
+}
+
+/// Where a runtime event site is written, for test reports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// How a runtime event site sizes its formatted arguments.
@@ -86,6 +97,9 @@ pub struct RuntimeEventSite {
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
+    /// The source position of a testbench assertion, for test reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<EventLocation>,
 }
 
 /// A function in the host's C ABI that the design calls, such as a
@@ -235,12 +249,27 @@ pub enum ProcessStatus {
     /// [`ProcessSlots::clock`]. The runtime generates those edges: the clock
     /// toggles every half period from the first wait on it, and the process
     /// resumes one period after the last counted edge, before the edge that
-    /// follows.
+    /// follows. [`ProcessSlots::release`] names a write the runtime makes
+    /// when the wait is over, even if the process is not resumed.
     WaitClock,
+    /// The process needs the host: [`ProcessSlots::delay`] holds the index
+    /// of the [`HostRequest`] among the process's requests. The host serves
+    /// it through the process's scratch state and resumes the process at
+    /// once.
+    Host,
+    /// The process stored to design state and continues with a read of it:
+    /// the runtime settles the combinational logic and resumes the process
+    /// at once, before any other process runs.
+    Settle,
+    /// Return control to drain events without evaluating combinational logic.
+    Yield,
     /// An event occurred while sampling queued drives; resume its body after the batch.
     Ready,
-    /// Resume this process immediately, charging the current time-slot budget.
-    Yield,
+    /// End a sequential testbench after publishing writes and captured edges
+    /// from the current round. No later process or generated clock runs.
+    /// Veryl testbenches use this completion boundary; HDL `$finish` uses
+    /// [`Self::Finish`] and suppresses all subsequent publication.
+    FinishAfterPublication,
 }
 
 impl ProcessStatus {
@@ -255,8 +284,11 @@ impl ProcessStatus {
             Self::Wait => 4,
             Self::Pending => 5,
             Self::WaitClock => 6,
-            Self::Ready => 11,
+            Self::Host => 7,
+            Self::Settle => 8,
             Self::Yield => 10,
+            Self::Ready => 11,
+            Self::FinishAfterPublication => 12,
         }
     }
 
@@ -269,8 +301,11 @@ impl ProcessStatus {
             4 => Some(Self::Wait),
             5 => Some(Self::Pending),
             6 => Some(Self::WaitClock),
-            11 => Some(Self::Ready),
+            7 => Some(Self::Host),
+            8 => Some(Self::Settle),
             10 => Some(Self::Yield),
+            11 => Some(Self::Ready),
+            12 => Some(Self::FinishAfterPublication),
             _ => None,
         }
     }
@@ -294,44 +329,261 @@ impl<A> ProcessClock<A> {
     }
 }
 
+/// A write the runtime makes for a process when a clock wait is over, such
+/// as the release of a reset the process asserted for some cycles. It is
+/// made even when the process is not resumed afterwards.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessRelease<A> {
+    pub signal: A,
+    pub value: u64,
+    /// The clock the released signal is a reset of, when the wait counted
+    /// its edges: a host component in that clock domain takes reset cycles
+    /// while the signal is held.
+    pub clock: Option<A>,
+}
+
+impl<A> ProcessRelease<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessRelease<B> {
+        ProcessRelease {
+            signal: map(self.signal),
+            value: self.value,
+            clock: self.clock.map(&mut map),
+        }
+    }
+}
+
+/// A value a host request passes or returns through the process's scratch
+/// state.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HostValue<A> {
+    pub signal: A,
+    pub width: usize,
+    pub signed: bool,
+    /// The value is the bytes of a string, most significant first.
+    pub is_string: bool,
+}
+
+impl<A> HostValue<A> {
+    pub fn map<B>(self, map: impl FnOnce(A) -> B) -> HostValue<B> {
+        HostValue {
+            signal: map(self.signal),
+            width: self.width,
+            signed: self.signed,
+            is_string: self.is_string,
+        }
+    }
+}
+
+/// What a process asks the host for with [`ProcessStatus::Host`]. Inputs are
+/// read from, and results written to, scratch state of the process.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HostRequest<A> {
+    /// Seed the random stream `handle` from `value`.
+    RandomSeed {
+        handle: String,
+        value: HostValue<A>,
+    },
+    /// A random value of the result's width from the stream `handle`.
+    RandomGet {
+        handle: String,
+        result: HostValue<A>,
+    },
+    /// A random value between `min` and `max` from the stream `handle`.
+    RandomGetRange {
+        handle: String,
+        min: HostValue<A>,
+        max: HostValue<A>,
+        result: HostValue<A>,
+    },
+    /// The seed of the stream `handle`.
+    RandomGetSeed {
+        handle: String,
+        result: HostValue<A>,
+    },
+    /// Call `method` of the external component `instance` with `args`.
+    Component {
+        instance: String,
+        method: String,
+        args: Vec<HostValue<A>>,
+        result: Option<HostValue<A>>,
+        /// The declared width of the result, which the component must
+        /// return exactly.
+        declared_width: Option<usize>,
+        /// Whether a result wider than 64 bits is an error, because the
+        /// expression form of the call carries at most 64 bits.
+        strict: bool,
+    },
+    /// Open a testbench file, replacing any previously open file of this handle.
+    FileOpen {
+        handle: String,
+        path: HostValue<A>,
+        append: bool,
+    },
+    /// Write formatted bytes to an open testbench file, without a newline.
+    FileWrite {
+        handle: String,
+        template: Option<String>,
+        args: Vec<HostValue<A>>,
+    },
+    FileFlush {
+        handle: String,
+    },
+    FileClose {
+        handle: String,
+    },
+}
+
+impl<A> HostRequest<A> {
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> HostRequest<B> {
+        match self {
+            Self::FileOpen {
+                handle,
+                path,
+                append,
+            } => HostRequest::FileOpen {
+                handle,
+                path: path.map(&mut map),
+                append,
+            },
+            Self::FileWrite {
+                handle,
+                template,
+                args,
+            } => HostRequest::FileWrite {
+                handle,
+                template,
+                args: args.into_iter().map(|arg| arg.map(&mut map)).collect(),
+            },
+            Self::FileFlush { handle } => HostRequest::FileFlush { handle },
+            Self::FileClose { handle } => HostRequest::FileClose { handle },
+            Self::RandomSeed { handle, value } => HostRequest::RandomSeed {
+                handle,
+                value: value.map(&mut map),
+            },
+            Self::RandomGet { handle, result } => HostRequest::RandomGet {
+                handle,
+                result: result.map(&mut map),
+            },
+            Self::RandomGetRange {
+                handle,
+                min,
+                max,
+                result,
+            } => HostRequest::RandomGetRange {
+                handle,
+                min: min.map(&mut map),
+                max: max.map(&mut map),
+                result: result.map(&mut map),
+            },
+            Self::RandomGetSeed { handle, result } => HostRequest::RandomGetSeed {
+                handle,
+                result: result.map(&mut map),
+            },
+            Self::Component {
+                instance,
+                method,
+                args,
+                result,
+                declared_width,
+                strict,
+            } => HostRequest::Component {
+                instance,
+                method,
+                args: args.into_iter().map(|arg| arg.map(&mut map)).collect(),
+                result: result.map(|result| result.map(&mut map)),
+                declared_width,
+                strict,
+            },
+        }
+    }
+}
+
 /// State through which one process kernel exchanges control with the runtime.
 ///
 /// A process kernel is a resumable function. On entry it reads `resume` to
 /// find where it stopped; before returning it stores the next resume point,
 /// a [`ProcessStatus`] code in `status` and, for a delay or a clock wait, the
 /// number of time units or edges in `delay`; a clock wait also stores the
-/// index into `clocks` in `clock`. The slots are ordinary two-state state
-/// objects, so checkpoints capture a suspended process.
+/// index into `clocks` in `clock` and, when the wait ends with a write, one
+/// plus the index into `releases` in `release`; a host request stores its
+/// index into `host_requests` in `delay`. The slots are ordinary two-state
+/// state objects, so checkpoints capture a suspended process.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
+    /// Optional two-state flag: no design store since this kernel's last
+    /// combinational settle. Missing flags conservatively require a settle.
+    #[serde(default = "Option::default")]
+    pub comb_clean: Option<A>,
     pub resume: A,
     pub status: A,
     pub delay: A,
     pub clock: A,
+    pub release: A,
     /// The clocks the process may wait on, in the order its kernel numbers
     /// them.
     #[serde(default = "Vec::new")]
     pub clocks: Vec<ProcessClock<A>>,
+    /// The writes a clock wait of the process may end with.
+    #[serde(default = "Vec::new")]
+    pub releases: Vec<ProcessRelease<A>>,
+    /// The host requests the process may make.
+    #[serde(default = "Vec::new")]
+    pub host_requests: Vec<HostRequest<A>>,
 }
 
 impl<A> ProcessSlots<A> {
+    /// Slots for a process without clocks, releases or host requests.
+    pub fn new(resume: A, status: A, delay: A, clock: A, release: A) -> Self {
+        Self {
+            comb_clean: None,
+            resume,
+            status,
+            delay,
+            clock,
+            release,
+            clocks: Vec::new(),
+            releases: Vec::new(),
+            host_requests: Vec::new(),
+        }
+    }
+
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
+            comb_clean: self.comb_clean.map(&mut map),
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),
             clock: map(self.clock),
+            release: map(self.release),
             clocks: self
                 .clocks
                 .into_iter()
                 .map(|clock| clock.map(&mut map))
+                .collect(),
+            releases: self
+                .releases
+                .into_iter()
+                .map(|release| release.map(&mut map))
+                .collect(),
+            host_requests: self
+                .host_requests
+                .into_iter()
+                .map(|request| request.map(&mut map))
                 .collect(),
         }
     }
 
     /// The control slots, without the clock signals.
     pub fn iter(&self) -> impl Iterator<Item = &A> {
-        [&self.resume, &self.status, &self.delay, &self.clock].into_iter()
+        [
+            &self.resume,
+            &self.status,
+            &self.delay,
+            &self.clock,
+            &self.release,
+        ]
+        .into_iter()
+        .chain(self.comb_clean.iter())
     }
 }
 
@@ -341,6 +593,36 @@ pub const PROCESS_STATUS_WIDTH: usize = 8;
 pub const PROCESS_DELAY_WIDTH: usize = 64;
 /// Width of [`ProcessSlots::clock`].
 pub const PROCESS_CLOCK_WIDTH: usize = 32;
+/// Width of [`ProcessSlots::release`].
+pub const PROCESS_RELEASE_WIDTH: usize = 32;
+
+/// Serialize hash maps and sets in key order, so an artifact that embeds
+/// them has one byte representation however the map was built.
+pub mod serde_sorted {
+    use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+    use serde::{Serialize, Serializer};
+
+    pub fn map<K, V, S>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: Ord + Serialize,
+        V: Serialize,
+        S: Serializer,
+    {
+        let mut entries: Vec<(&K, &V)> = map.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        serializer.collect_map(entries)
+    }
+
+    pub fn set<T, S>(set: &HashSet<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Ord + Serialize,
+        S: Serializer,
+    {
+        let mut items: Vec<&T> = set.iter().collect();
+        items.sort();
+        serializer.collect_seq(items)
+    }
+}
 
 pub const PROCESS_EVENT_COUNTER_WIDTH: usize = 32;
 
@@ -400,6 +682,9 @@ pub struct RuntimeSchema<A> {
     pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    /// Index of the first kernel in `processes` that runs a Veryl testbench;
+    /// it and the kernels after it are the testbench's, not the design's.
+    pub testbench_kernels: Option<usize>,
     pub process_event_counters: Vec<ProcessEventCounters<A>>,
     /// FF domains with blocking stores or finish effects in the active region.
     pub active_ff_events: HashSet<A>,
@@ -419,6 +704,7 @@ impl<A> Default for RuntimeSchema<A> {
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),
+            testbench_kernels: None,
             process_event_counters: Vec::new(),
             active_ff_events: HashSet::default(),
         }
@@ -436,12 +722,14 @@ impl<A> Default for RuntimeSchema<A> {
 ))]
 pub struct EventTopology<A> {
     /// Alias event address to the canonical event-domain address.
+    #[serde(serialize_with = "crate::serde_sorted::map")]
     pub aliases: HashMap<A, A>,
     /// Canonical event domains in evaluation order.
     pub ordered_events: Vec<A>,
     /// Canonical clocks whose value may be changed by another event domain.
     pub cascaded_events: BTreeSet<A>,
     /// Canonical asynchronous/synchronous reset to its canonical clock.
+    #[serde(serialize_with = "crate::serde_sorted::map")]
     pub reset_clocks: HashMap<A, A>,
 }
 
@@ -481,6 +769,7 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
     deserialize = "A: Deserialize<'de> + Eq + std::hash::Hash + Ord"
 ))]
 pub struct ElaboratedDesign<A> {
+    #[serde(serialize_with = "crate::serde_sorted::map")]
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,
     pub initial_state: Vec<InitialStateValue<A>>,
@@ -935,6 +1224,7 @@ mod tests {
             template: Some("failed".to_string()),
             sizing: DisplaySizing::Veryl,
             scope: None,
+            location: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

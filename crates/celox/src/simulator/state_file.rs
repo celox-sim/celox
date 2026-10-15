@@ -493,6 +493,7 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|name| !saved_unknown.contains(name.as_str()) || supports_unknown(name))
                 .map(|name| events[name])
                 .collect(),
+            settled_process_edges: Vec::new(),
             captured_edges: record
                 .captured_edges
                 .iter()
@@ -507,11 +508,14 @@ impl<B: SimBackend> Simulator<B> {
                 .collect(),
             // State files are rejected for designs with processes.
             process_wakeups: Vec::new(),
+            budget_blocked_processes: Vec::new(),
             waiting_processes: Vec::new(),
             process_clocks: Vec::new(),
             clock_waits: Vec::new(),
+            pending_releases: Vec::new(),
             done_processes: Vec::new(),
             ticks: 0,
+            tick_budget: None,
             scheduled_clock_time: record.time,
             scheduled_clock_drives: Vec::new(),
             inactive_processes: Vec::new(),

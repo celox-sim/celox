@@ -69,10 +69,6 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
 }
 
 impl<B: SimBackend> SimulationExecutor for Simulator<B> {
-    fn finish_requested(&mut self, _time: u64) -> bool {
-        self.has_pending_runtime_finish()
-    }
-
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -110,10 +106,47 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.apply_ff_at_checked(event)
     }
 
-    fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
-        self.backend
+    fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+        let result = self
+            .backend
             .run_process(index)
-            .map_err(|e| self.decorate_runtime_error(e))
+            .map_err(|e| self.decorate_runtime_error(e));
+        // A kernel testbench's kernels yield before the runtime event ring
+        // could wrap; the events so far leave the ring here.
+        if self.testbench_random.is_some() {
+            let ctx = crate::simulator::RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            };
+            let events = self.collect_sited_runtime_events(ctx);
+            self.testbench_events.extend(events);
+        }
+        result
+    }
+
+    fn process_is_clean(&self, index: usize) -> bool {
+        self.program.runtime_schema.processes[index]
+            .comb_clean
+            .is_some_and(|flag| {
+                self.backend
+                    .get_as::<u8>(self.backend.resolve_signal(&flag))
+                    != 0
+            })
+    }
+
+    fn finish_requested(&mut self, time: u64) -> bool {
+        if self.testbench_random.is_some() {
+            let ctx = crate::simulator::RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            };
+            let events = self.collect_sited_runtime_events(ctx);
+            self.testbench_events.extend(events);
+        }
+        self.testbench_events
+            .iter()
+            .any(|(_, event)| matches!(event, crate::RuntimeEvent::Finish))
+            || self.has_pending_runtime_finish()
     }
 
     fn tick_many(&mut self, event: B::Event, count: u64) -> (u64, Result<(), RuntimeErrorCode>) {
@@ -142,13 +175,46 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.vcd_writer.is_none()
             && !self.components.has_scheduled_components()
             && self.program.runtime_schema.comb_observers.is_empty()
+            // Design events must return to the scheduler to drain the ring.
+            && self.program.runtime_schema.runtime_event_sites.iter().all(|site|site.location.is_some())
             && !self
                 .program
                 .runtime_schema
                 .runtime_event_sites
                 .iter()
                 .any(|site| matches!(site.kind, celox_design::RuntimeEventKind::Finish))
+
             && !self.program.runtime_schema.clock_phase_sensitive_comb
+    }
+
+    fn host_request_changes_design(&self, process: usize, request: usize) -> bool {
+        self.program
+            .runtime_schema
+            .processes
+            .get(process)
+            .and_then(|process| process.host_requests.get(request))
+            .is_none_or(|request| {
+                matches!(request, celox_design::HostRequest::Component { .. }) && self.dirty
+            })
+    }
+
+    fn host_request(
+        &mut self,
+        process: usize,
+        request: usize,
+        time: u64,
+    ) -> Result<bool, RuntimeErrorCode> {
+        // Keep output observable before the following host-side effect, while
+        // retaining assertion/finish events for the runner's normal drain.
+        if self.testbench_random.is_some() {
+            crate::testbench::kernels::forward_pending_output(self);
+        }
+        crate::testbench::kernels::serve_host_request(self, process, request, time).map_err(
+            |message| RuntimeErrorCode::Runtime {
+                message,
+                signals: Vec::new(),
+            },
+        )
     }
 
     fn stage_external_event(
@@ -165,13 +231,54 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         event: B::Event,
         timestamp: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        let writes = self
-            .components
-            .fire(event.id(), timestamp)
-            .map_err(|message| RuntimeErrorCode::Runtime {
-                message,
-                signals: Vec::new(),
-            })?;
+        // A testbench holds its resets through releases; while one is
+        // asserted, its components take reset cycles.
+        if !self.program.runtime_schema.processes.is_empty() {
+            for reset_event in self.components.reset_event_ids() {
+                let address = self.backend.id_to_addr_slice()[reset_event];
+                let releases = self
+                    .program
+                    .runtime_schema
+                    .processes
+                    .iter()
+                    .flat_map(|slots| &slots.releases)
+                    .filter(|release| release.signal == address);
+                // Prefer the firing domain; a single-domain component can
+                // also inherit a held reset on its derived clock.
+                let release = releases
+                    .clone()
+                    .find(|release| {
+                        release.clock.is_some_and(|clock| {
+                            self.backend
+                                .resolve_event_opt(&clock)
+                                .is_some_and(|clock| clock.id() == event.id())
+                        })
+                    })
+                    .or_else(|| releases.into_iter().next());
+                let Some(release) = release else {
+                    continue;
+                };
+                let signal = self.backend.resolve_signal(&address);
+                if self.backend.get(signal) == release.value.into() {
+                    continue;
+                }
+                match release
+                    .clock
+                    .and_then(|clock| self.backend.resolve_event_opt(&clock))
+                {
+                    Some(clock) => self
+                        .components
+                        .begin_reset_clock_cycles(clock.id(), Some(reset_event)),
+                    None => self.components.begin_reset_cycles(Some(reset_event)),
+                }
+            }
+        }
+        let fired = self.components.fire(event.id(), timestamp);
+        self.components.end_reset_cycles();
+        let writes = fired.map_err(|message| RuntimeErrorCode::Runtime {
+            message,
+            signals: Vec::new(),
+        })?;
         for write in writes {
             write.apply(&mut self.backend);
             self.dirty = true;
@@ -188,6 +295,9 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
 // ── Backend-specific constructors ───────────────────────────────────
 
 impl Simulation {
+    /// Build a scheduler for design processes. Veryl `#[test]` kernels run
+    /// through [`crate::testbench::run_compiled_testbench`], which initializes
+    /// their random, file and component services.
     pub fn builder<'a>(code: &'a str, top: &'a str) -> crate::SimulatorBuilder<'a, Simulation> {
         crate::SimulatorBuilder::<Simulation>::new(code, top)
     }
@@ -222,7 +332,15 @@ impl Simulation {
 
 // ── Generic methods available for any backend ───────────────────────
 
+/// Scheduler state used by a testbench runner, including its kernels.
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
+    simulation_state_with_process_count(simulator, simulator.program.runtime_schema.processes.len())
+}
+
+fn simulation_state_with_process_count<B: SimBackend>(
+    simulator: &Simulator<B>,
+    process_count: usize,
+) -> SimulationState<B> {
     let num_events = simulator.backend.num_events();
     let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
         .program
@@ -297,10 +415,21 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         .runtime_schema
         .processes
         .iter()
+        .take(process_count)
         .map(|slots| ProcessRefs {
             status: simulator.backend.resolve_signal(&slots.status),
             delay: simulator.backend.resolve_signal(&slots.delay),
             clock: simulator.backend.resolve_signal(&slots.clock),
+            release: simulator.backend.resolve_signal(&slots.release),
+            releases: slots
+                .releases
+                .iter()
+                .map(|release| celox_runtime::ProcessReleaseRef {
+                    signal: simulator.backend.resolve_signal(&release.signal),
+                    event: simulator.backend.resolve_event_opt(&release.signal),
+                    value: release.value,
+                })
+                .collect(),
             clocks: slots
                 .clocks
                 .iter()
@@ -351,7 +480,12 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
 
 impl<B: SimBackend> Simulation<B> {
     pub(crate) fn new(simulator: Simulator<B>) -> Self {
-        let state = simulation_state(&simulator);
+        let process_count = simulator
+            .program
+            .runtime_schema
+            .testbench_kernels
+            .unwrap_or(simulator.program.runtime_schema.processes.len());
+        let state = simulation_state_with_process_count(&simulator, process_count);
         Self {
             simulator,
             state,
@@ -497,7 +631,7 @@ impl<B: SimBackend> Simulation<B> {
             self.state.finish();
         } else if was_dirty && !self.simulator.dirty && !self.state.is_finished() {
             self.state
-                .sample_waiting_events(&mut self.simulator)
+                .sample_waiting_events(&mut self.simulator, self.state.time())
                 .unwrap();
             self.state.capture_host_edges(&self.simulator.backend);
         }
@@ -822,7 +956,12 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     fn has_processes(&self) -> bool {
-        !self.simulator.program.runtime_schema.processes.is_empty()
+        self.simulator
+            .program
+            .runtime_schema
+            .testbench_kernels
+            .unwrap_or(self.simulator.program.runtime_schema.processes.len())
+            != 0
     }
 
     /// Whether a process of the design requested the end of the simulation.
@@ -837,8 +976,8 @@ impl<B: SimBackend> Simulation<B> {
         self.state.time()
     }
 
-    /// Rising edges of the clocks processes wait on that the simulation has
-    /// run so far.
+    /// Completed process-clock rounds. Coincident rising edges count as
+    /// one tick against the shared testbench budget.
     pub fn ticks(&self) -> u64 {
         self.state.ticks()
     }
@@ -883,7 +1022,8 @@ impl<B: SimBackend> Simulation<B> {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
         }
-        self.state.sample_waiting_events(&mut self.simulator)?;
+        self.state
+            .sample_waiting_events(&mut self.simulator, self.state.time())?;
         self.state.capture_host_edges(&self.simulator.backend);
         self.pending_host_work = false;
         Ok(())
@@ -2772,6 +2912,35 @@ mod rtl_finish_backend_tests {
 }
 
 #[cfg(test)]
+mod tick_budget_snapshot_tests {
+    use super::*;
+    #[test]
+    fn restoring_a_checkpoint_restores_the_remaining_tick_budget() {
+        let code =
+            "#[test(Top)]module Top{inst clk:$tb::clock_gen;initial{clk.next(3);$finish();}}";
+        let simulator = Simulator::builder(code, "Top").build_interpreter().unwrap();
+        // This budget belongs to a testbench run, whose scheduler includes
+        // its kernels. Ordinary Simulation constructors leave them inactive.
+        let state = simulation_state(&simulator);
+        let mut sim = Simulation {
+            simulator,
+            state,
+            pending_host_work: false,
+        };
+        sim.state.set_tick_budget(Some(1));
+        let saved = sim.checkpoint().unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert!(sim.state.tick_budget_spent());
+        sim.restore(&saved).unwrap();
+        assert!(!sim.state.tick_budget_spent());
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert!(sim.state.tick_budget_spent());
+    }
+}
+
+#[cfg(test)]
 mod finish_clock_batch_tests {
     use super::*;
     use crate::frontend_sdk::{BinaryOp, Constant, Edge, ModuleBuilder, Statement, ValueType};
@@ -3112,8 +3281,8 @@ mod pending_generated_clock_tests {
         sim.step().unwrap();
         assert_eq!(sim.get(sim.signal("qa")), 1u8.into());
         assert_eq!(sim.get(sim.signal("qb")), 0u8.into());
-        // B rose once at time zero; both A and B rise at time four.
-        assert_eq!(sim.ticks(), 3);
+        // Coincident rising edges count as one completed clock round.
+        assert_eq!(sim.ticks(), 2);
     }
     #[test]
     fn pending_rises_share_pre_edge_state_with_new_clocks() {
@@ -3270,6 +3439,77 @@ mod scheduled_pulse_tests {
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_resume_review_tests {
+    use super::*;
+    use crate::frontend_sdk::{Constant, Edge, ModuleBuilder, Statement, ValueType};
+    fn design() -> crate::frontend_sdk::FrontendArtifact {
+        let mut m = ModuleBuilder::new("Top").unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let clk = m.internal("clk", bit).unwrap();
+        let q = m.output("q", bit).unwrap();
+        let done = m.output("done", bit).unwrap();
+        let delayed = m.output("delayed", bit).unwrap();
+        for signal in [q, done, delayed] {
+            m.set_initial(signal, Constant::two_state(0u8, 1).unwrap())
+                .unwrap();
+        }
+        let one = m.constant(Constant::two_state(1u8, 1).unwrap());
+        let q_target = m.whole(q).unwrap();
+        m.register(q_target, one, clk, Edge::Posedge, None, None)
+            .unwrap();
+        m.clock_period(clk, 4).unwrap();
+        let count = m.constant(Constant::two_state(1u8, 64).unwrap());
+        let delay = m.constant(Constant::two_state(4u8, 64).unwrap());
+        let done_target = m.whole(done).unwrap();
+        let delayed_target = m.whole(delayed).unwrap();
+        m.process(vec![
+            Statement::ClockCycles { clock: clk, count },
+            Statement::Assign {
+                target: done_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+        m.process(vec![
+            Statement::Delay { amount: delay },
+            Statement::Assign {
+                target: delayed_target,
+                value: one,
+            },
+        ])
+        .unwrap();
+        m.finish()
+    }
+    fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.state.set_tick_budget(Some(1));
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.ticks(), 1);
+        assert_eq!(sim.get(sim.signal("done")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("delayed")), 0u8.into());
+        assert!(!sim.is_finished());
+        let blocked = sim.checkpoint().unwrap();
+        for budget in [Some(1), None] {
+            sim.restore(&blocked).unwrap();
+            sim.state.set_tick_budget(budget);
+            sim.run_until(4).unwrap();
+            assert!(sim.state.all_processes_done());
+            assert_eq!(sim.get(sim.signal("delayed")), 1u8.into());
+            assert_eq!(sim.ticks(), 1);
+            assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        }
+    }
+    #[test]
+    fn exhausted_budgets_preserve_clock_resumptions_and_unrelated_delays() {
+        let build = || Simulator::from_frontend(design());
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
 
@@ -4375,6 +4615,62 @@ mod host_finish_edge_review_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(Simulation::new(build().build_native().unwrap()), bounded);
         }
+    }
+}
+
+#[cfg(test)]
+mod ordinary_simulation_testbench_scope_tests {
+    use super::*;
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn ordinary_simulation_keeps_design_processes_active() {
+        let veryl = r#"#[test(Top)]module Top{var q:logic;var r:$tb::random::<u8>;var marker:u8;inst dut:$sv::Worker(q);initial{marker=r.get_range(5,5);$finish();}}"#;
+        let sv = "module Worker(output bit q);initial begin #1;q=1;end endmodule";
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("marker")), 0u8.into());
+            assert!(!sim.is_finished());
+        }
+        let build = || {
+            Simulator::from_mixed_sources(
+                vec![(veryl, std::path::Path::new("top.veryl"))],
+                vec![(sv, std::path::Path::new("worker.sv"))],
+                "Top",
+            )
+        };
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
+    }
+
+    #[test]
+    fn ordinary_simulation_does_not_start_testbench_host_requests() {
+        let code = r#"#[test(Top)]module Top{var r:$tb::random::<u8>;var marker:u8;initial{r.seed(7);marker=r.get_range(5,5);$assert(marker==5);$finish();}}"#;
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            assert_eq!(sim.step().unwrap(), None);
+            sim.run_until(10).unwrap();
+            assert_eq!(sim.get(sim.signal("marker")), 0u8.into());
+            assert!(!sim.is_finished());
+            let tb = crate::testbench::compile_initial_testbench(&sim.simulator).unwrap();
+            assert_eq!(
+                crate::testbench::run_compiled_testbench(&mut sim.simulator, &tb),
+                crate::TestResult::Pass
+            );
+            assert_eq!(
+                sim.simulator.get(sim.simulator.signal("marker")),
+                5u8.into()
+            );
+        }
+        check(Simulation::builder(code, "Top").build().unwrap());
+        let build = || Simulator::builder(code, "Top").testbench_kernels(true);
+        check(Simulation::new(build().build_interpreter().unwrap()));
+        check(Simulation::new(build().build_cranelift().unwrap()));
+        check(Simulation::new(build().build_wasm().unwrap()));
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(Simulation::new(build().build_native().unwrap()));
     }
 }
 
@@ -6637,6 +6933,113 @@ mod sampled_host_review {
     }
 }
 
+#[cfg(test)]
+mod zero_release_review {
+    use super::*;
+
+    // Veryl reset.assert(0) deliberately holds for one cycle. Exercise the
+    // lower-level kernel contract by reporting a zero-count release from
+    // an actual compiled kernel, then delegate the rest to the real backend.
+    struct ZeroRelease<'a, B: SimBackend> {
+        sim: &'a mut Simulator<B>,
+        controls: Vec<(SignalRef, SignalRef, SignalRef)>,
+    }
+    impl<B: SimBackend> SimulationExecutor for ZeroRelease<'_, B> {
+        type Backend = B;
+        fn backend(&self) -> &B {
+            &self.sim.backend
+        }
+        fn backend_mut(&mut self) -> &mut B {
+            &mut self.sim.backend
+        }
+        fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_comb(self.sim)
+        }
+        fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_apply_ff_at(self.sim, event)
+        }
+        fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::eval_only_ff_at(self.sim, event)
+        }
+        fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::apply_ff_at(self.sim, event)
+        }
+        fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
+            SimulationExecutor::run_process(self.sim, index, time)?;
+            let (status, delay, release) = self.controls[index];
+            if self.sim.backend.get_as::<u8>(status)
+                == celox_design::ProcessStatus::WaitClock.code()
+                && self.sim.backend.get_as::<u32>(release) != 0
+            {
+                self.sim.backend.set(delay, 0u64);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn zero_count_releases_capture_edges_before_the_continuation_restores_them() {
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let rst = sim.signal("rst");
+            sim.modify(|io| io.set(rst, 1u8)).unwrap();
+            sim.eval_comb().unwrap();
+            let mut state = simulation_state(&sim);
+            let controls = sim
+                .program
+                .runtime_schema
+                .processes
+                .iter()
+                .map(|slots| {
+                    (
+                        sim.backend.resolve_signal(&slots.status),
+                        sim.backend.resolve_signal(&slots.delay),
+                        sim.backend.resolve_signal(&slots.release),
+                    )
+                })
+                .collect();
+            let mut executor = ZeroRelease {
+                sim: &mut sim,
+                controls,
+            };
+            while state.next_event_time().is_some_and(|time| time <= 10) {
+                state.step(&mut executor).unwrap();
+            }
+            let count = sim.signal("count");
+            assert_eq!(sim.get(count), 1u8.into());
+            assert_eq!(sim.get(rst), 0u8.into());
+        }
+        let code = r#"
+        module Counter(clk: input clock, count: output logic<8>) {
+            always_ff(clk) { count += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen #(period: 10);
+            inst rst: $tb::reset_gen(clk);
+            var gate: logic;
+            let released: '_ clock = ~rst & gate;
+            var count: logic<8>;
+            inst dut: Counter(clk: released, count);
+            initial { gate = 1; rst.assert(1); gate = 0; clk.next(1); }
+        }"#;
+        macro_rules! build {
+            ($method:ident) => {
+                check(
+                    Simulator::builder(code, "Top")
+                        .testbench_kernels(true)
+                        .reset_type(crate::ResetType::AsyncHigh)
+                        .$method()
+                        .unwrap(),
+                );
+            };
+        }
+        build!(build_interpreter);
+        build!(build_cranelift);
+        build!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        build!(build_native);
+    }
+}
+
 #[cfg(all(test, feature = "systemverilog"))]
 mod host_finish_step_review {
     use super::*;
@@ -7018,7 +7421,7 @@ mod clean_waiter_settle_review {
             kernel
                 .builder()
                 .emit(SIRInstruction::Imm(count, SIRValue::new(4u8)));
-            kernel.wait_clock(0, count).unwrap();
+            kernel.wait_clock(0, count, None).unwrap();
             let one = kernel.builder().alloc_bit(1, false);
             kernel
                 .builder()
@@ -7068,7 +7471,7 @@ mod clean_waiter_settle_review {
         fn apply_ff_at(&mut self, e: B::Event) -> Result<(), RuntimeErrorCode> {
             SimulationExecutor::apply_ff_at(&mut self.sim, e)
         }
-        fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+        fn run_process(&mut self, index: usize, time: u64) -> Result<(), RuntimeErrorCode> {
             let slots = &self.sim.program.runtime_schema.processes[index];
             let mode = self
                 .sim
@@ -7086,7 +7489,7 @@ mod clean_waiter_settle_review {
                     });
                 }
             }
-            SimulationExecutor::run_process(&mut self.sim, index)
+            SimulationExecutor::run_process(&mut self.sim, index, time)
         }
     }
     #[test]

@@ -1,3 +1,4 @@
+mod partial_load;
 mod shifts;
 mod strided;
 

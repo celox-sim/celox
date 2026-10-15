@@ -106,6 +106,13 @@ mod host {
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
+        /// The random number generators of a running kernel testbench.
+        pub(crate) testbench_random: Option<crate::testbench::RandomTable>,
+        pub(crate) testbench_files: Option<crate::testbench::kernels::FileTable>,
+        /// Runtime events of a running kernel testbench the executor took
+        /// out of the ring when a kernel yielded, until the runner drains
+        /// them.
+        pub(crate) testbench_events: Vec<(Option<usize>, RuntimeEvent)>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_finish_state: Arc<Mutex<RuntimeFinishState>>,
         runtime_event_drain_active: Arc<AtomicBool>,
@@ -148,6 +155,10 @@ mod host {
         },
         /// The design executed `$finish`. The host decides whether to stop.
         Finish,
+        /// An assertion of a testbench process held.
+        AssertPass {
+            message: Vec<u8>,
+        },
         Missed {
             count: u64,
         },
@@ -351,6 +362,45 @@ mod host {
         }
     }
 
+    pub(crate) fn render_host_message<B: SimBackend>(
+        sim: &Simulator<B>,
+        template: Option<String>,
+        args: &[celox_design::HostValue<celox_design::StateAddr>],
+        time: u64,
+    ) -> Vec<u8> {
+        let values = args
+            .iter()
+            .map(|arg| {
+                let signal = sim.backend.resolve_signal(&arg.signal);
+                let (value, mask) = sim.backend.get_four_state(signal);
+                RuntimeEventArgValue {
+                    values: value.to_u64_digits(),
+                    masks: mask.to_u64_digits(),
+                    width: arg.width,
+                    signed: arg.signed,
+                    is_string: arg.is_string,
+                }
+            })
+            .collect::<Vec<_>>();
+        render_runtime_event_message(
+            &RuntimeEventSite {
+                kind: RuntimeEventKind::Write,
+                template,
+                sizing: DisplaySizing::Veryl,
+                scope: None,
+                arg_widths: Vec::new(),
+                arg_signed: Vec::new(),
+                arg_is_string: Vec::new(),
+                location: None,
+            },
+            &values,
+            RuntimeFormatContext {
+                tb_time: Some(time),
+                scope: None,
+            },
+        )
+    }
+
     fn render_runtime_event_message(
         site: &RuntimeEventSite,
         args: &[RuntimeEventArgValue],
@@ -370,6 +420,12 @@ mod host {
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return b"assertion failed".to_vec();
+                    }
+                    'x'
+                }
+                RuntimeEventKind::AssertPass => {
+                    if args.is_empty() {
+                        return b"assertion passed".to_vec();
                     }
                     'x'
                 }
@@ -465,6 +521,7 @@ mod host {
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
                     RuntimeEventKind::Finish => RuntimeEvent::Finish,
+                    RuntimeEventKind::AssertPass => RuntimeEvent::AssertPass { message },
                 })
             }
         }
@@ -697,6 +754,9 @@ mod host {
                 warnings,
                 components: Default::default(),
                 component_simulation: None,
+                testbench_random: None,
+                testbench_files: None,
+                testbench_events: Vec::new(),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_finish_state: Arc::new(Mutex::new(RuntimeFinishState::default())),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
@@ -884,6 +944,38 @@ mod host {
             self.collect_formatted_runtime_events(ctx)
         }
 
+        /// Collect already-published events with their sites. Scheduler callers
+        /// settle explicitly; collecting after an execution error must not retry
+        /// the failed combinational evaluation.
+        pub(crate) fn collect_sited_runtime_events(
+            &mut self,
+            ctx: RuntimeFormatContext<'_>,
+        ) -> Vec<(Option<usize>, RuntimeEvent)> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+            );
+            if self.runtime_event_read_seq.load(Ordering::Acquire) == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
+            self.collect_backend_runtime_events()
+                .into_iter()
+                .filter_map(|raw| {
+                    let site = match &raw {
+                        RawRuntimeEvent::Event { site_id, .. } => Some(*site_id),
+                        RawRuntimeEvent::Missed { .. } => None,
+                    };
+                    let event = render_raw_runtime_event(
+                        raw,
+                        &self.program.runtime_schema.runtime_event_sites,
+                        ctx,
+                    )?;
+                    Some((site, event))
+                })
+                .collect()
+        }
+
         fn eval_comb_for_runtime_event_drain(&mut self) -> Result<(), RuntimeErrorCode> {
             let (result, _) = self.eval_comb_capturing_events();
             self.check_comb_backend_result(result)?;
@@ -1004,7 +1096,7 @@ mod host {
             finish.requested
         }
 
-        pub(super) fn reset_runtime_finish(&self, finished: bool) {
+        pub(crate) fn reset_runtime_finish(&self, finished: bool) {
             let mut finish = self.runtime_finish_state.lock().unwrap();
             let offset = celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET;
             if let Some(buffer) = self.backend.runtime_event_buffer() {

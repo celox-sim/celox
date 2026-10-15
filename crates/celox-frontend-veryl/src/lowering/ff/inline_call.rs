@@ -543,7 +543,7 @@ impl<'a> FfParser<'a> {
     }
 }
 
-fn collect_statement_variables(statements: &[Statement], out: &mut HashSet<VarId>) {
+pub(crate) fn collect_statement_variables(statements: &[Statement], out: &mut HashSet<VarId>) {
     for statement in statements {
         match statement {
             Statement::Assign(assign) => {
@@ -593,10 +593,15 @@ fn collect_statement_variables(statements: &[Statement], out: &mut HashSet<VarId
             }
             Statement::SystemFunctionCall(call) => collect_system_call_variables(call, out),
             Statement::FunctionCall(call) => collect_call_variables(call, out),
-            Statement::TbMethodCall(_)
-            | Statement::Break
-            | Statement::Unsupported(_)
-            | Statement::Null => {}
+            Statement::TbMethodCall(tb) => {
+                for expr in crate::lowering::process::expressions::statement_inputs(statement) {
+                    collect_expression_variables(expr, out);
+                }
+                if let Some(destination) = tb.ret.as_deref() {
+                    collect_destination_variables(destination, out);
+                }
+            }
+            Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
     }
 }
