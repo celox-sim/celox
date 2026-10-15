@@ -5,12 +5,12 @@ import test from "node:test";
 const read = (path) =>
   readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("queue stays in place so original PR checks validate the merge", () => {
+test("queue runs parallel batches with mandatory full validation", () => {
   const config = read(".mergify.yml");
-  assert.match(config, /max_parallel_checks: 1/);
-  assert.match(config, /batch_size: 1/);
+  assert.match(config, /max_parallel_checks: 5/);
+  assert.match(config, /batch_size: 5/);
   assert.match(config, /max_checks_retries: 0/);
-  assert.doesNotMatch(config, /^\s+merge_conditions:/m);
+  assert.match(config, /merge_conditions:\n\s+- check-success = Queue validation\n\s+- check-success = Conventional Commit title/);
   assert.match(config, /merge_method: merge/);
   assert.match(config, /update_method: merge/);
   assert.match(config, /title: pr-title\n\s+body: empty\n\s+trailers: \[\]/);
