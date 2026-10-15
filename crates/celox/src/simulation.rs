@@ -3726,6 +3726,44 @@ mod wait_and_finish_review {
             check_zero_trip_loop(control);
         }
     }
+    #[test]
+    fn zero_trip_for_preserves_fixed_write_times() {
+        for control in [
+            "for(int i=0;i<0;i++)",
+            "for(int i=2;i<1;i++)",
+            "for(int i=0;i>1;i--)",
+        ] {
+            check_zero_trip_loop(control);
+        }
+        // The initializer creates a real same-activation pulse even though
+        // the loop body is skipped. It must remain in the write summary.
+        let source = "module Child(output bit[1:0]q);initial begin #1;for(q=1;q<0;q++)#5;q=0;end initial begin #2;q[1]=1;end endmodule module Top;wire[1:0]q;Child child(.q(q));initial forever @(q[0]^q[1]);endmodule";
+        assert!(
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("for-init.sv"))], "Top")
+                .build_interpreter()
+                .is_err()
+        );
+    }
+    #[test]
+    fn zero_trip_for_proofs_respect_initializer_width_and_comparison_sign() {
+        for declaration_and_loop in [
+            "bit i;initial begin #1;for(i=2;i<1;i++)#5;q[0]=1;end",
+            "integer i;initial begin #1;for(i=-1;i>32'd1;i--)#5;q[0]=1;end",
+        ] {
+            let source = format!(
+                "module Child(output bit[1:0]q);{declaration_and_loop} initial begin #2;q[1]=1;end endmodule module Top;wire[1:0]q;Child child(.q(q));initial forever @(q[0]^q[1]);endmodule"
+            );
+            let result = Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("for-types.sv"))],
+                "Top",
+            )
+            .build_interpreter();
+            assert!(
+                result.is_err(),
+                "must not discard a potentially suspending loop: {declaration_and_loop}"
+            );
+        }
+    }
     fn check_zero_trip_loop(control: &str) {
         for body in ["q[0]=1;", "begin #7;q[0]=1;end", "begin skipped();end"] {
             let source = format!(
@@ -4006,6 +4044,67 @@ mod sampled_host_review {
             "module Top(input bit go,output bit q);initial begin wait(go);q=1;$finish;end endmodule",
             check
         );
+    }
+
+    #[test]
+    fn process_counter_deltas_preserve_repeated_ff_occurrences() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, queued: bool, value: u64, driver: &str) {
+            sim.run_until(0).unwrap();
+            if queued {
+                sim.schedule("d", 1, value).unwrap();
+            }
+            sim.schedule("clk", 1, 1).unwrap();
+            sim.run_until(1).unwrap();
+            let expected = if queued { 3u8 } else { 2u8 };
+            assert_eq!(
+                sim.get(sim.signal("count")),
+                expected.into(),
+                "queued={queued}, driver={driver}"
+            );
+            assert_eq!(sim.get(sim.signal("clock_count")), 1u8.into());
+        }
+        for (edge, initial, value) in [("posedge", 0, 1), ("negedge", 1, 0)] {
+            let writes = format!("d={initial};d={value};d={initial};d={value};");
+            for driver in [
+                format!("initial begin #1;{writes}end"),
+                format!("initial begin #1;#0;{writes}end"),
+                format!("always @(posedge clk)begin {writes}end"),
+                format!(
+                    "bit wake;always @(posedge clk)wake<=1;initial begin wait(wake);{writes}end"
+                ),
+            ] {
+                let source = format!(
+                    "module Top(input bit clk,output bit[7:0]count,clock_count);bit d={initial};always @(posedge clk)clock_count=clock_count+1;always @({edge} d)count=count+1;initial @({edge} d);{driver} endmodule"
+                );
+                for queued in [false, true] {
+                    macro_rules! build {
+                        ($method:ident) => {
+                            check(
+                                Simulation::new(
+                                    Simulator::from_sv_sources(
+                                        vec![(
+                                            source.as_str(),
+                                            std::path::Path::new("counter-delta.sv"),
+                                        )],
+                                        "Top",
+                                    )
+                                    .$method()
+                                    .unwrap(),
+                                ),
+                                queued,
+                                value,
+                                &driver,
+                            );
+                        };
+                    }
+                    build!(build_interpreter);
+                    build!(build_cranelift);
+                    build!(build_wasm);
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    build!(build_native);
+                }
+            }
+        }
     }
 
     #[test]
