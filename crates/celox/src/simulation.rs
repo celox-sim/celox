@@ -2102,6 +2102,13 @@ mod clock_failure_progress_tests {
     }
 
     fn module_design(on_rising: bool) -> (ModuleBuilder, crate::frontend_sdk::SignalId) {
+        module_design_with_failure(on_rising, true)
+    }
+
+    fn module_design_with_failure(
+        on_rising: bool,
+        after_first_rise: bool,
+    ) -> (ModuleBuilder, crate::frontend_sdk::SignalId) {
         let bit = ValueType::bits(1).unwrap();
         let word = ValueType::bits(32).unwrap();
         let mut m = ModuleBuilder::new("Progress").unwrap();
@@ -2139,7 +2146,11 @@ mod clock_failure_progress_tests {
         let count = m.read(count).unwrap();
         let zero = m.constant(Constant::two_state(0u8, 32).unwrap());
         let nonzero = m.binary(BinaryOp::NotEqual, count, zero, bit).unwrap();
-        let active = m.binary(BinaryOp::And, active, nonzero, bit).unwrap();
+        let active = if after_first_rise {
+            m.binary(BinaryOp::And, active, nonzero, bit).unwrap()
+        } else {
+            active
+        };
         let previous = m.read(v).unwrap();
         let toggled = m.unary(UnaryOp::BitNot, previous, bit).unwrap();
         let zero = m.constant(Constant::two_state(0u8, 1).unwrap());
@@ -2189,6 +2200,87 @@ mod clock_failure_progress_tests {
             check(builder().build_wasm().unwrap(), on_rising);
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check(builder().build_native().unwrap(), on_rising);
+        }
+    }
+
+    #[test]
+    fn escaped_memory_preserves_unpublished_generated_phase_retries() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, on_rising: bool) {
+            let clock = sim.signal("clk");
+            let (pointer, length) = sim.memory_as_mut_ptr();
+            assert!(clock.offset < length);
+            if !on_rising {
+                sim.run_until(0).unwrap();
+            }
+            sim.set_wide(sim.signal("bad"), 1u8.into());
+            let time = if on_rising { 0 } else { 2 };
+            let error = sim.run_until(time).unwrap_err().to_string();
+            assert!(!error.contains("direct host write"), "{error}");
+            assert_eq!(sim.ticks(), u64::from(!on_rising));
+            // Merely obtaining the pointer does not invalidate a retained
+            // scheduler drive, even before that drive is published.
+            let checkpoint = sim.checkpoint().unwrap();
+            for step in [true, false] {
+                sim.restore(&checkpoint).unwrap();
+                let parts = sim.state.export_schedule(&sim.simulator.backend);
+                sim.state.import_schedule(parts);
+                let error = sim.run_until(time).unwrap_err().to_string();
+                assert!(!error.contains("direct host write"), "{error}");
+                sim.set_wide(sim.signal("bad"), 0u8.into());
+                if step {
+                    assert_eq!(sim.step_until(time).unwrap(), Some(time));
+                } else {
+                    sim.run_until(time).unwrap();
+                }
+                sim.run_until(2).unwrap();
+                assert_eq!(
+                    sim.get(sim.signal("count")),
+                    1u32.into(),
+                    "rising={on_rising}, step={step}"
+                );
+                assert_eq!(sim.get(sim.signal("falls")), 1u32.into());
+                assert_eq!(sim.ticks(), 1);
+                sim.run_until(4).unwrap();
+                assert_eq!(sim.get(sim.signal("count")), 2u32.into());
+                assert_eq!(sim.ticks(), 2);
+            }
+            sim.restore(&checkpoint).unwrap();
+            // A real pointer write back to the OLD sampling baseline must
+            // still be rejected while the generated drive is pending.
+            unsafe {
+                pointer.add(clock.offset).write(u8::from(!on_rising));
+            }
+            assert!(matches!(
+                sim.checkpoint(),
+                Err(CheckpointError::UntrackedHostClockWrite)
+            ));
+            let error = sim.step_until(time).unwrap_err().to_string();
+            assert!(error.contains("direct host write"), "{error}");
+            sim.restore(&checkpoint).unwrap();
+            sim.set_wide(sim.signal("bad"), 0u8.into());
+            sim.run_until(4).unwrap();
+            assert_eq!(sim.ticks(), 2);
+        }
+        for on_rising in [true, false] {
+            let build = || {
+                Simulator::from_frontend(module_design_with_failure(on_rising, false).0.finish())
+                    .true_loop(
+                        (Vec::new(), vec!["v".into()]),
+                        (Vec::new(), vec!["v".into()]),
+                        8,
+                    )
+            };
+            check(
+                Simulation::new(build().build_interpreter().unwrap()),
+                on_rising,
+            );
+            check(
+                Simulation::new(build().build_cranelift().unwrap()),
+                on_rising,
+            );
+            check(Simulation::new(build().build_wasm().unwrap()), on_rising);
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(Simulation::new(build().build_native().unwrap()), on_rising);
         }
     }
 
@@ -2273,6 +2365,11 @@ mod clock_failure_progress_tests {
         let falls = executor.sim.signal("falls");
         assert_eq!(executor.backend().get_as::<u32>(falls), 0);
         assert_eq!(state.next_event_time(), Some(2));
+        assert!(
+            state
+                .escaped_host_clock_writes(executor.backend())
+                .is_empty()
+        );
         executor.fail = None;
         assert_eq!(state.step_until(&mut executor, 2).unwrap(), Some(2));
         assert_eq!(executor.backend().get_as::<u32>(falls), 1);
@@ -3551,10 +3648,12 @@ mod normalizing_fall_review_tests {
         m.finish()
     }
     fn check<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.memory_as_mut_ptr();
         assert_eq!(sim.get(sim.signal("clk")), 1u8.into());
         sim.set_wide(sim.signal("enable"), 1u8.into());
         assert!(sim.run_until(0).is_err());
         assert_eq!(sim.ticks(), 0);
+        sim.checkpoint().unwrap();
         let parts = sim.state.export_schedule(&sim.simulator.backend);
         assert_eq!(parts.process_clocks[0].falling_edge, Some(0));
         assert_eq!(sim.get(sim.signal("q")), 1u8.into());
