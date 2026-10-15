@@ -2660,6 +2660,10 @@ impl<'p, 'a> Ff<'p, 'a> {
         // step leaves its variable unchanged would never end; it stops the
         // simulation with an error instead.
         self.b.switch_to_block(latch);
+        if self.kernel.is_some() {
+            self.with_kernel(ProcessKernelBuilder::yield_events)
+                .map_err(kernel_error)?;
+        }
         let progress = match kind {
             sv::ir::LoopKind::For => canonical_for_loop(init, condition, step)
                 .and_then(|canonical| Some((canonical.var.clone(), self.m.id(&canonical.var)?))),
@@ -3328,7 +3332,7 @@ pub(super) fn runtime_watched_write_count(
             if exits {
                 return true;
             }
-            if !stmt_may_fall_through(stmt) {
+            if !runtime_stmt_may_fall_through(stmt, pm) {
                 return false;
             }
         }
@@ -3500,7 +3504,7 @@ pub(super) fn runtime_watched_write_count(
                     _ => effects,
                 };
             result = result.then(next);
-            if !stmt_may_fall_through(stmt)
+            if !runtime_stmt_may_fall_through(stmt, pm)
                 || matches!(stmt,Stmt::Wait(condition) if known_condition(condition,pm)==Some(false))
             {
                 break;
@@ -3567,6 +3571,76 @@ fn selected_branch<'a>(stmt: &'a sv::ir::Stmt, pm: &ProcModule<'_>) -> Option<&'
         _ => None,
     }
 }
+/// Reachable statements under the same typed constant selection as lowering.
+pub(super) fn walk_reachable<'a>(
+    stmts: &'a [sv::ir::Stmt],
+    pm: &ProcModule<'_>,
+    visit: &mut impl FnMut(&'a sv::ir::Stmt),
+) {
+    use sv::ir::Stmt;
+    for stmt in stmts {
+        if let Some(branch) = selected_branch(stmt, pm) {
+            walk_reachable(branch, pm, visit);
+        } else {
+            visit(stmt);
+            match stmt {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    walk_reachable(then_body, pm, visit);
+                    walk_reachable(else_body, pm, visit);
+                }
+                Stmt::Case { items, default, .. } => {
+                    for item in items {
+                        walk_reachable(&item.body, pm, visit);
+                    }
+                    if let Some(body) = default {
+                        walk_reachable(body, pm, visit);
+                    }
+                }
+                Stmt::Loop {
+                    init, body, step, ..
+                } => {
+                    walk_reachable(init, pm, visit);
+                    walk_reachable(body, pm, visit);
+                    walk_reachable(step, pm, visit);
+                }
+                _ => {}
+            }
+        }
+        if !runtime_stmt_may_fall_through(stmt, pm) {
+            break;
+        }
+    }
+}
+
+fn runtime_stmt_may_fall_through(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> bool {
+    if let Some(branch) = selected_branch(stmt, pm) {
+        return branch
+            .iter()
+            .all(|stmt| runtime_stmt_may_fall_through(stmt, pm));
+    }
+    let body_falls = |body: &[sv::ir::Stmt]| {
+        body.iter()
+            .all(|stmt| runtime_stmt_may_fall_through(stmt, pm))
+    };
+    match stmt {
+        sv::ir::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_falls(then_body) || body_falls(else_body),
+        sv::ir::Stmt::Case { items, default, .. } => {
+            default.as_ref().is_none_or(|body| body_falls(body))
+                || items.iter().any(|item| body_falls(&item.body))
+        }
+        sv::ir::Stmt::Wait(condition) if known_condition(condition, pm) == Some(false) => false,
+        _ => stmt_may_fall_through(stmt),
+    }
+}
+
 /// Exact times for a straight-line initial activation with constant delays.
 /// Other control flow retains the conservative activation summary above.
 pub(super) fn fixed_runtime_write_times(
@@ -4354,7 +4428,7 @@ pub(super) fn watched_write_count(
         );
         count += call_count * call_evaluations;
         total = (total + count).min(2);
-        if !stmt_may_fall_through(stmt) {
+        if !runtime_stmt_may_fall_through(stmt, pm) {
             break;
         }
     }

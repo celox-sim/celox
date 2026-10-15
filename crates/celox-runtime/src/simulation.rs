@@ -1593,6 +1593,13 @@ impl<B: SimBackend> SimulationState<B> {
                     match ProcessStatus::from_code(status) {
                         Some(ProcessStatus::Yield) => {
                             self.waiting.remove(&process);
+                            if let Err(error) = count_delta_pass(delta_rounds) {
+                                self.process_wakeups.push(Reverse((current_time, process)));
+                                for process in remaining {
+                                    self.process_wakeups.push(Reverse((current_time, process)));
+                                }
+                                return Err(error);
+                            }
                             any_ran = true;
                             continue;
                         }
@@ -1955,7 +1962,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
         // Early settling can expose a derived edge that a later source store
         // or awakened process restores. Capture every update we settle early.
-        let capture_batch_edges = events_to_process.len() > 1;
+        let capture_batch_edges = events_to_process.len() > 1 || !host_edges.is_empty();
         let mut batch_edge_counts = BTreeMap::<usize, u64>::new();
         for event in &events_to_process {
             let settle_update = capture_batch_edges

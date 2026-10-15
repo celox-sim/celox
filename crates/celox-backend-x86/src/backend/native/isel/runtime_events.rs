@@ -304,6 +304,16 @@ pub(super) fn lower_runtime_event_write(
         RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
     };
 
+    if ctx.layout.runtime_event_site_layouts[site_id as usize].is_finish {
+        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+        block.push(MInst::LoadImm { dst: one, value: 1 });
+        block.push(MInst::ReleaseStorePtr {
+            ptr: event_ptr,
+            offset: celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET as i32,
+            src: one,
+            size: OpSize::S64,
+        });
+    }
     let seq_v = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::LoadPtr {
         dst: seq_v,

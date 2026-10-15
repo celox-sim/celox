@@ -6,8 +6,8 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-// Version 31 records compiled native tick-loop eligibility.
-const CONTAINER_VERSION: u16 = 31;
+// Version 32 records the out-of-band runtime finish latch.
+const CONTAINER_VERSION: u16 = 32;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

@@ -1366,6 +1366,13 @@ fn publish_tb_assert_event<B: SimBackend>(
         return;
     }
     let event_ptr = event_ptr_const as *mut u8;
+    if site_layout.is_finish {
+        store_u64_release(
+            event_ptr,
+            celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET,
+            1,
+        );
+    }
     let seq = load_u64_acquire(event_ptr_const, 0);
     let slot = (seq as usize) & (capacity - 1);
     let slot_base = RUNTIME_EVENT_HEADER_SIZE + slot * slot_size;

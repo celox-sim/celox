@@ -319,3 +319,9 @@ sv_backends! { fn constant_child_case_exit_keeps_one_write(sim) {
 sv_backends! { fn four_state_child_if_keeps_one_write(sim) {
     @case "timing::four_state_child_if_keeps_one_write";
 } }
+
+sv_backends! {fn selected_child_dependency_ignores_unreachable_reads(sim) { @case "timing::selected_child_dependency_ignores_unreachable_reads"; } }
+
+sv_backends! {fn selected_child_loop_exit_ignores_unreachable_suffix(sim) { @case "timing::selected_child_loop_exit_ignores_unreachable_suffix"; } }
+
+sv_backends! {fn finite_process_loop_preserves_continuation_values(sim) { @case "timing::finite_process_loop_preserves_continuation_values"; } }
