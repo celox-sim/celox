@@ -863,7 +863,12 @@ mod event_yield_settle_tests {
     #[test]
     fn round60_output_visibility_and_release_settle() {
         const CHILD: &str = "CELOX_ROUND60_OUTPUT_CHILD";
-        if std::env::var_os(CHILD).is_none() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test subprocess marker only; no simulator diagnostics are read"
+        )]
+        let child = std::env::var_os(CHILD).is_some();
+        if !child {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "testbench::kernels::event_yield_settle_tests::round60_output_visibility_and_release_settle", "--nocapture"])
                 .env(CHILD, "1").output().unwrap();
