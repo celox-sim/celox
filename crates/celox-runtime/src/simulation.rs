@@ -2012,6 +2012,7 @@ impl<B: SimBackend> SimulationState<B> {
             && (!ready_processes.is_empty() || !self.waiting.is_empty())
         {
             executor.eval_comb()?;
+            comb_current = true;
         }
         for (id, count) in batch_edge_counts {
             // The first occurrence is already in scheduled_edges, unless a

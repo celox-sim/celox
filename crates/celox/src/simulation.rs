@@ -201,6 +201,11 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         request: usize,
         time: u64,
     ) -> Result<bool, RuntimeErrorCode> {
+        // Keep output observable before the following host-side effect, while
+        // retaining assertion/finish events for the runner's normal drain.
+        if self.testbench_random.is_some() {
+            crate::testbench::kernels::forward_pending_output(self);
+        }
         crate::testbench::kernels::serve_host_request(self, process, request, time).map_err(
             |message| RuntimeErrorCode::Runtime {
                 message,

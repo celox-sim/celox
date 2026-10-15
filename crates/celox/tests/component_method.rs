@@ -1167,6 +1167,54 @@ fn repeated_kernel_runs_settle_derived_clock_before_component_init() {
 }
 
 #[test]
+fn repeated_kernel_runs_deassert_interrupted_reset_before_component_init() {
+    register_component();
+    let code = r#"
+        #[test(t)] module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var q: logic<8>;
+            let derived: logic<8> = (rst as u8) + 8'h1;
+            inst probe: $comp::celox_init_input(clk, d: derived, q);
+            inst finisher: $comp::celox_finisher(clk);
+            initial { rst.assert(5); $assert(0, "reset must be interrupted"); }
+            initial {
+                clk.next(10);
+                $assert(0, "component must finish on the first rising edge");
+            }
+        }
+    "#;
+    macro_rules! check {
+        ($method:ident) => {{
+            let (_dir, metadata) = component_metadata();
+            let mut sim = Simulator::builder(code, "t")
+                .with_metadata(metadata)
+                .testbench_kernels(true)
+                .$method()
+                .unwrap();
+            let compiled = celox::testbench::compile_initial_testbench(&sim).unwrap();
+            for run in 0..3 {
+                assert_eq!(
+                    celox::testbench::run_compiled_testbench(&mut sim, &compiled),
+                    TestResult::Pass,
+                    "run {run}"
+                );
+                assert_eq!(
+                    sim.get(sim.signal("q")),
+                    (if run == 0 { 1u8 } else { 2u8 }).into(),
+                    "on_init on run {run}"
+                );
+            }
+        }};
+    }
+    check!(build_interpreter);
+    check!(build_cranelift);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
+#[test]
 fn component_on_init_observes_connected_inputs() {
     register_component();
     let (_dir, metadata) = component_metadata();

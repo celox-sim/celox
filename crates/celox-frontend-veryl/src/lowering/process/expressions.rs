@@ -424,25 +424,31 @@ impl BlockLowering<'_> {
             .builder()
             .seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.kernel.builder().switch_to_block(full);
+        let full_reaches_join = self.scan_expression_clocks(rhs, &mut HashSet::default(), false);
         let right = self.expression(rhs)?;
-        let left = self.saved_expression(lhs);
-        let builder = self.kernel.builder();
-        let value = builder.alloc_logic(1);
-        builder.emit(SIRInstruction::Binary(
-            value,
-            left,
-            if is_and {
-                BinaryOp::LogicAnd
-            } else {
-                BinaryOp::LogicOr
-            },
-            right,
-        ));
-        self.save_expression(expr, value)?;
-        self.dirty |= dirty_before;
-        self.kernel
-            .builder()
-            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        if full_reaches_join {
+            let left = self.saved_expression(lhs);
+            let builder = self.kernel.builder();
+            let value = builder.alloc_logic(1);
+            builder.emit(SIRInstruction::Binary(
+                value,
+                left,
+                if is_and {
+                    BinaryOp::LogicAnd
+                } else {
+                    BinaryOp::LogicOr
+                },
+                right,
+            ));
+            self.save_expression(expr, value)?;
+            self.kernel
+                .builder()
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        } else {
+            // expression() leaves an unreachable block after a finishing call.
+            self.kernel.builder().seal_block(SIRTerminator::Return);
+        }
+        self.dirty = dirty_before || (full_reaches_join && self.dirty);
         self.kernel.builder().switch_to_block(join);
         self.parser.clear_register_cache();
         Ok(self.saved_expression(expr))
@@ -480,12 +486,17 @@ impl BlockLowering<'_> {
         });
         let dirty_before = self.dirty;
         self.kernel.builder().switch_to_block(yes_block);
+        let yes_reaches_join = self.scan_expression_clocks(yes, &mut HashSet::default(), false);
         let result = self.expression(yes)?;
-        self.save_expression(expr, result)?;
-        let yes_dirty = self.dirty;
-        self.kernel
-            .builder()
-            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        let yes_dirty = yes_reaches_join && self.dirty;
+        if yes_reaches_join {
+            self.save_expression(expr, result)?;
+            self.kernel
+                .builder()
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        } else {
+            self.kernel.builder().seal_block(SIRTerminator::Return);
+        }
         self.kernel.builder().switch_to_block(decide);
         self.dirty = dirty_before;
         let condition = self.saved_expression(cond);
@@ -500,29 +511,46 @@ impl BlockLowering<'_> {
             false_block: (unknown, Vec::new()),
         });
         self.kernel.builder().switch_to_block(no_block);
+        let no_reaches_join = self.scan_expression_clocks(no, &mut HashSet::default(), false);
         let result = self.expression(no)?;
-        self.save_expression(expr, result)?;
-        let no_dirty = self.dirty;
-        self.kernel
-            .builder()
-            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        let no_dirty = no_reaches_join && self.dirty;
+        if no_reaches_join {
+            self.save_expression(expr, result)?;
+            self.kernel
+                .builder()
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        } else {
+            self.kernel.builder().seal_block(SIRTerminator::Return);
+        }
         self.kernel.builder().switch_to_block(unknown);
         self.dirty = dirty_before;
-        for child in [yes, no] {
+        let mut unknown_reaches_join = true;
+        for (child, reaches) in [(yes, yes_reaches_join), (no, no_reaches_join)] {
             let value = self.expression(child)?;
+            if !reaches {
+                unknown_reaches_join = false;
+                break;
+            }
             self.save_expression(child, value)?;
         }
-        let values = [cond, yes, no]
-            .into_iter()
-            .map(|child| (child.token_range(), self.saved_expression(child)))
-            .collect();
-        let result = self.parse_with_values(expr, values)?;
-        self.save_expression(expr, result)?;
-        self.kernel
-            .builder()
-            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        let unknown_dirty = unknown_reaches_join && self.dirty;
+        if unknown_reaches_join {
+            let values = [cond, yes, no]
+                .into_iter()
+                .map(|child| (child.token_range(), self.saved_expression(child)))
+                .collect();
+            let result = self.parse_with_values(expr, values)?;
+            self.save_expression(expr, result)?;
+            self.kernel
+                .builder()
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        } else {
+            self.kernel.builder().seal_block(SIRTerminator::Return);
+        }
         self.kernel.builder().switch_to_block(join);
-        self.dirty |= yes_dirty || no_dirty;
+        // The unknown path evaluates both arms in order; a terminating arm
+        // never contributes a continuation to this join.
+        self.dirty = dirty_before || yes_dirty || no_dirty || unknown_dirty;
         self.parser.clear_register_cache();
         Ok(self.saved_expression(expr))
     }

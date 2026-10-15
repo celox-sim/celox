@@ -129,16 +129,29 @@ fn run<B: SimBackend>(
     // of the same simulator left in the control slots, and every process
     // clock low, as the bytecode testbench does: the first `clk.next()`
     // then counts a real rising edge.
-    let mut reset_clocks = crate::HashSet::default();
+    let restarting = sim.program.runtime_schema.processes.iter().any(|slots| {
+        sim.backend
+            .get_as::<u8>(sim.backend.resolve_signal(&slots.status))
+            != 0
+    });
+    let mut reset_signals = crate::HashSet::default();
     for slots in &sim.program.runtime_schema.processes.clone() {
         for slot in slots.iter() {
             let signal = sim.backend.resolve_signal(slot);
             sim.backend.set_wide(signal, BigUint::ZERO);
         }
+        // A previous run may have finished while another process held a
+        // reset. The old scheduler's pending release does not survive a run.
+        for release in slots.releases.iter().filter(|_| restarting) {
+            let signal = sim.backend.resolve_signal(&release.signal);
+            sim.backend.set_wide(signal, release.value.into());
+            reset_signals.insert(signal);
+            sim.dirty = true;
+        }
         for clock in &slots.clocks {
             let signal = sim.backend.resolve_signal(&clock.signal);
             sim.backend.set_wide(signal, BigUint::ZERO);
-            reset_clocks.insert(signal);
+            reset_signals.insert(signal);
             sim.dirty = true;
         }
     }
@@ -150,12 +163,12 @@ fn run<B: SimBackend>(
             connection.input.as_ref().is_some_and(|input| {
                 input.constant_u64().is_none()
                     && !connection.input_target.as_ref().is_some_and(|target| {
-                        target.selection.is_none() && reset_clocks.contains(&target.signal)
+                        target.selection.is_none() && reset_signals.contains(&target.signal)
                     })
             })
         })
     });
-    // Constants and directly reset clocks already have their startup values.
+    // Constants and directly restored control signals already have startup values.
     // Avoid running unrelated comb observers when on_init needs no settle:
     // an init hook may finish the test before those observers should run.
     if sim.dirty && stage_derived_inputs {
@@ -359,6 +372,20 @@ fn drain<B: SimBackend>(
         }
     }
     drained
+}
+
+pub(crate) fn forward_pending_output<B: SimBackend>(sim: &mut Simulator<B>) {
+    sim.testbench_events.retain(|(_, event)| match event {
+        RuntimeEvent::Display { message } => {
+            forward_display(message, true);
+            false
+        }
+        RuntimeEvent::Write { message } => {
+            forward_display(message, false);
+            false
+        }
+        _ => true,
+    });
 }
 
 /// Serve host request `request` of process `process` at `time`.
@@ -575,6 +602,7 @@ mod event_yield_settle_tests {
         combs: usize,
         fused: u64,
         combs_before_edge: Option<usize>,
+        combs_at_finish: Option<usize>,
     }
     impl<B: SimBackend> SimulationExecutor for CountingExecutor<B> {
         type Backend = B;
@@ -619,6 +647,15 @@ mod event_yield_settle_tests {
             SimulationExecutor::run_process(&mut self.sim, index, time)?;
             let slot = self.sim.program.runtime_schema.processes[index].status;
             let signal = self.sim.backend.resolve_signal(&slot);
+            if matches!(
+                celox_design::ProcessStatus::from_code(self.sim.backend.get_as(signal)),
+                Some(
+                    celox_design::ProcessStatus::Finish
+                        | celox_design::ProcessStatus::FinishAfterPublication
+                )
+            ) {
+                self.combs_at_finish = Some(self.combs);
+            }
             if celox_design::ProcessStatus::from_code(self.sim.backend.get_as(signal))
                 == Some(celox_design::ProcessStatus::Settle)
             {
@@ -653,6 +690,7 @@ mod event_yield_settle_tests {
             combs: 0,
             fused: 0,
             combs_before_edge: None,
+            combs_at_finish: None,
         };
         for _ in 0..10000 {
             if state.step(&mut executor).unwrap().is_none() || state.is_finished() {
@@ -660,6 +698,218 @@ mod event_yield_settle_tests {
             }
         }
         panic!("process did not finish");
+    }
+    #[test]
+    fn round60_terminating_expression_branches_do_not_dirty_the_join() {
+        fn count<B: SimBackend>(sim: Simulator<B>) -> usize {
+            let mut state = crate::simulation::simulation_state(&sim);
+            let mut executor = CountingExecutor {
+                sim,
+                settles: 0,
+                combs: 0,
+                fused: 0,
+                combs_before_edge: None,
+                combs_at_finish: None,
+            };
+            for _ in 0..20 {
+                if state.step(&mut executor).unwrap().is_none() || state.is_finished() {
+                    break;
+                }
+            }
+            assert!(state.is_finished());
+            assert_eq!(
+                executor
+                    .sim
+                    .backend
+                    .get_as::<u8>(executor.sim.signal("derived")),
+                1
+            );
+            executor.combs
+        }
+        let source = |expression: &str| {
+            format!(
+                "#[test(Top)]module Top(cond:input logic){{var value:u8;var derived:u8;always_comb{{derived=value;}}function stop()->u8{{value=2;$finish();return 0;}}initial{{value=1;$assert(({expression})==0);$assert(derived==1);$finish();}}}}"
+            )
+        };
+        // Compare reachable generated control flow with an otherwise identical
+        // terminating helper that makes no design write. Runtime clean flags
+        // can suppress the redundant settle, masking the bad compile-time join.
+        let branches = |source: &str| {
+            let compilation = Simulator::builder(source, "Top")
+                .testbench_kernels(true)
+                .trace_post_optimized_sir()
+                .build_with_trace();
+            compilation.res.unwrap();
+            let program = compilation.trace.post_optimized_sir.unwrap();
+            assert!(
+                !program.sir.processes.is_empty(),
+                "inspect actual testbench kernels"
+            );
+            program
+                .sir
+                .processes
+                .iter()
+                .flat_map(|p| p.blocks.values())
+                .filter(|block| matches!(block.terminator, celox_sir::SIRTerminator::Branch { .. }))
+                .count()
+        };
+        for expr in [
+            "if cond ? stop() : 8'd0",
+            "cond && (stop()!=0)",
+            "!( !cond || (stop()!=0))",
+        ] {
+            let writing = source(expr);
+            let clean = writing.replace("value=2;", "");
+            assert_eq!(
+                branches(&writing),
+                branches(&clean),
+                "unreachable writes add a settle guard at {expr}"
+            );
+        }
+        macro_rules! check {
+            ($build:ident) => {{
+                let active = source("if !cond ? stop() : 8'd0")
+                    .replace("value=2;$finish();return 0;", "value=2;return 0;")
+                    .replace("$assert(derived==1)", "$assert(derived==2)");
+                let mut sim = Simulator::builder(&active, "Top").$build().unwrap();
+                let tb = crate::testbench::compile_initial_testbench(&sim).unwrap();
+                assert_eq!(
+                    crate::testbench::run_compiled_testbench(&mut sim, &tb),
+                    TestResult::Pass
+                );
+
+                let baseline = count(Simulator::builder(&source("8'd0"), "Top").$build().unwrap());
+                for expr in [
+                    "if cond ? stop() : 8'd0",
+                    "cond && (stop()!=0)",
+                    "!( !cond || (stop()!=0))",
+                ] {
+                    assert_eq!(
+                        count(Simulator::builder(&source(expr), "Top").$build().unwrap()),
+                        baseline,
+                        "{expr}"
+                    );
+                }
+            }};
+        }
+        check!(build_interpreter);
+        check!(build_cranelift);
+        check!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check!(build_native);
+    }
+    #[test]
+    fn round60_release_reuses_completed_settle() {
+        fn check<B: SimBackend>(sim: Simulator<B>, writing: bool) {
+            let mut state = crate::simulation::simulation_state(&sim);
+            let mut executor = CountingExecutor {
+                sim,
+                settles: 0,
+                combs: 0,
+                fused: 0,
+                combs_before_edge: None,
+                combs_at_finish: None,
+            };
+            for _ in 0..20 {
+                if state.step(&mut executor).unwrap().is_none() || state.is_finished() {
+                    break;
+                }
+            }
+            assert!(state.is_finished());
+            let before_finish = executor.combs_at_finish.expect("finish continuation ran");
+            if writing {
+                assert!(
+                    executor.combs > before_finish,
+                    "a design write still needs settling"
+                );
+            } else {
+                assert_eq!(
+                    executor.combs, before_finish,
+                    "clean finish must reuse the release settle"
+                );
+            }
+        }
+        for writing in [false, true] {
+            let source = format!(
+                "#[test(Top)]module Top{{inst clk:$tb::clock_gen;inst rst:$tb::reset_gen(clk);var value:u8;var derived:u8;always_comb{{derived=value;}}initial{{rst.assert(1);{}$finish();}}}}",
+                if writing { "value=1;" } else { "" }
+            );
+            check(
+                Simulator::builder(&source, "Top")
+                    .build_interpreter()
+                    .unwrap(),
+                writing,
+            );
+            check(
+                Simulator::builder(&source, "Top")
+                    .build_cranelift()
+                    .unwrap(),
+                writing,
+            );
+            check(
+                Simulator::builder(&source, "Top").build_wasm().unwrap(),
+                writing,
+            );
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            check(
+                Simulator::builder(&source, "Top").build_native().unwrap(),
+                writing,
+            );
+        }
+    }
+    // A child process captures real flushed stderr bytes, including file host
+    // effects; inspecting the event queue alone cannot establish visibility.
+    #[cfg(unix)]
+    #[test]
+    fn round60_output_visibility_and_release_settle() {
+        const CHILD: &str = "CELOX_ROUND60_OUTPUT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "testbench::kernels::event_yield_settle_tests::round60_output_visibility_and_release_settle", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{stderr}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert_eq!(stderr.matches("before|host|after\n").count(), 4, "{stderr}");
+            assert_eq!(stderr.matches("release-clean\n").count(), 4, "{stderr}");
+            assert_eq!(stderr.matches("release-write=0\n").count(), 4, "{stderr}");
+            assert_eq!(stderr.matches("release-write=1\n").count(), 4, "{stderr}");
+            return;
+        }
+        fn execute<B: SimBackend>(mut sim: Simulator<B>) {
+            let tb = crate::testbench::compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                crate::testbench::run_compiled_testbench(&mut sim, &tb),
+                TestResult::Pass
+            );
+        }
+        let ordered = r#"#[test(Top)] module Top {var f:$tb::file;initial {f.open("/dev/stderr");$write("before|");f.write("host|");f.flush();$display("after");f.close();$assert(1==1);$finish();}}"#;
+        let release = |writing: bool| {
+            format!(
+                r#"#[test(Top)] module Top {{inst clk:$tb::clock_gen;inst rst:$tb::reset_gen(clk);var value:u8;var armed:logic;always_comb {{if armed && (rst as u8)!=0 {{ {} }} }}initial {{armed=1;rst.assert(1);{}$finish();}}}}"#,
+                if writing {
+                    r#"$display("release-write=%d",value);"#
+                } else {
+                    r#"$display("release-clean");"#
+                },
+                if writing { "value=1;" } else { "" }
+            )
+        };
+        macro_rules! check {
+            ($build:ident) => {{
+                for source in [ordered.to_owned(), release(false), release(true)] {
+                    execute(Simulator::builder(&source, "Top").$build().unwrap());
+                }
+            }};
+        }
+        check!(build_interpreter);
+        check!(build_cranelift);
+        check!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check!(build_native);
     }
     #[test]
     fn clean_random_host_requests_preserve_settled_design_state() {
@@ -676,6 +926,7 @@ mod event_yield_settle_tests {
                 combs: 0,
                 fused: 0,
                 combs_before_edge: None,
+                combs_at_finish: None,
             };
             state.step(&mut executor).unwrap();
             assert!(state.is_finished());
@@ -817,6 +1068,7 @@ mod event_yield_settle_tests {
                 combs: 0,
                 fused: 0,
                 combs_before_edge: None,
+                combs_at_finish: None,
             };
             state.step(&mut executor).unwrap();
             assert!(state.is_finished());
@@ -982,6 +1234,7 @@ mod event_yield_settle_tests {
             combs: 0,
             fused: 0,
             combs_before_edge: None,
+            combs_at_finish: None,
         };
         for _ in 0..steps {
             if state.step(&mut executor).unwrap().is_none() {
@@ -1097,6 +1350,7 @@ mod event_yield_settle_tests {
                 combs: 0,
                 fused: 0,
                 combs_before_edge: None,
+                combs_at_finish: None,
             };
             for run in 1..=256 {
                 // Restart control slots as the public runner does, retaining
