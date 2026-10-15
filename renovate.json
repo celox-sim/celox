@@ -211,6 +211,15 @@
         "lydite/conformance/veryl/analyzer-probe/Cargo.toml"
       ],
       "enabled": false
+    },
+    {
+      "description": "The Veryl conformance workspace lists generated-suite, which run_ci.sh generates, so Renovate cannot update its Cargo.lock and a manifest bump breaks the --locked build. Update these manifests and the lockfile together by hand.",
+      "matchFileNames": [
+        "lydite/conformance/veryl/Cargo.toml",
+        "lydite/conformance/veryl/capture-macros/Cargo.toml",
+        "lydite/conformance/veryl/harness/Cargo.toml"
+      ],
+      "enabled": false
     }
   ],
   "nix": {
