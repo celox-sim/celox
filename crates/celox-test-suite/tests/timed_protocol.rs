@@ -127,15 +127,22 @@ fn callable_instance_connections_wait_for_staged_inputs() {
 (case callable_instance_inputs_wait_for_staged_values
  (source "instance-connection-effects.sv" #"
  module Child #(parameter W=8)(input bit[W-1:0]value,output wire[W-1:0]seen);assign seen=value;endmodule
- module Top(input bit[7:0]go,output wire[7:0]a,b);
+ module Top(input bit[7:0]go,output wire[7:0]a,b,output wire[15:0]broadcast,distributed,ordered_array,signed_array);
  function automatic bit[1:0]checked(input bit[7:0]value);if(!value)$fatal(1,"early instance connection");return value;endfunction
  Child #(.W(8)) named(.value(checked(go)+2'd3),.seen(a));
  Child #(8) ordered(checked(go)+2'd3,b);
+ function automatic bit[7:0]broadcast_value(input bit[7:0]value);if(!value)$fatal(1,"early array broadcast");return value+8'd3;endfunction
+ function automatic bit[15:0]distributed_value(input bit[7:0]value);if(!value)$fatal(1,"early array distribution");return {value+8'd1,value};endfunction
+ function automatic bit signed[7:0]negative_value(input bit[7:0]value);if(!value)$fatal(1,"early signed broadcast");return -value;endfunction
+ Child #(8) bn[1:0](.value(broadcast_value(go)),.seen(broadcast));
+ Child #(8) dn[0:1](.value(distributed_value(go)),.seen(distributed));
+ Child #(8) dp[1:0](distributed_value(go),ordered_array);
+ Child #(8) sn[1:0](negative_value(go),signed_array);
  initial begin #2;$finish;end
  endmodule
  "#)
- (top Top)(set go 1)(run_until 0)(assert_eq a 4)(assert_eq b 4)
- (set go 2)(run_until 1)(assert_eq a 5)(assert_eq b 5))
+ (top Top)(set go 1)(run_until 0)(assert_eq a 4)(assert_eq b 4)(assert_eq broadcast 1028)(assert_eq distributed 513)(assert_eq ordered_array 513)(assert_eq signed_array 65535)
+ (set go 2)(run_until 1)(assert_eq a 5)(assert_eq b 5)(assert_eq broadcast 1285)(assert_eq distributed 770)(assert_eq ordered_array 770)(assert_eq signed_array 65278))
 
 "##;
     let case = load_group("connections.vtest", text, no_std_library)[0];
@@ -160,6 +167,37 @@ fn callable_instance_connections_wait_for_staged_inputs() {
     );
     let log = std::fs::read(root.join("verilator/protocol.log")).unwrap();
     celox_test_suite::script::sv::check_output(&log, &[]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires Icarus, Verilator and a C++ compiler"]
+fn typed_continuous_drivers_preserve_enum_assignment_type() {
+    let text = r##"(group protocol (category sequential))
+    (case typed_driver (source "typed-driver.sv" #"
+    module Top(input bit go,output wire a,b);
+    typedef enum logic {LOW,HIGH} level_t;
+    function automatic level_t checked(input bit value); if(!value)$fatal(1,"early enum driver");return HIGH;endfunction
+    wire level_t first=checked(go);
+    wire level_t second;assign second=checked(go);
+    assign a=first;assign b=second;initial #2 $finish;
+    endmodule"#)(top Top)(set go 1)(run_until 0)(assert_eq a 1)(assert_eq b 1))"##;
+    let case = load_group("typed.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/typed-driver-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut icarus =
+        celox_test_suite::icarus::Icarus::build_script(&frontend, case, &root.join("icarus"))
+            .unwrap();
+    let mut verilator = celox_test_suite::verilator::Verilator::build_script(
+        &frontend,
+        case,
+        &root.join("verilator"),
+    )
+    .unwrap();
+    assert!(icarus.run_testbench().is_ok());
+    assert!(verilator.run_testbench().is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -192,5 +230,30 @@ fn dynamic_const_initializers_are_rejected_before_tool_invocation() {
         verilator.is::<celox_test_suite::script::sv::Unsupported>(),
         "{verilator}"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires Verilator and a C++ compiler; Icarus lacks unpacked function returns"]
+fn unpacked_continuous_drivers_preserve_destination_shape() {
+    let text = r##"(group protocol (category sequential))
+    (case unpacked_driver (source "unpacked-driver.sv" #"
+    module Child(input bit[7:0]go,output wire[7:0]a,b);
+    typedef logic[7:0] pair_t[0:1];
+    function automatic pair_t checked(input bit[7:0]value); if(!value)$fatal(1,"early array driver");return '{value,value+8'd1};endfunction
+    wire logic[7:0] first[0:1]=checked(go);
+    wire pair_t second;assign second=checked(go);
+    assign a=first[0]+first[1];assign b=second[0]+second[1];initial #2 $finish;
+    endmodule
+    module Top(input bit[7:0]go,output wire[7:0]a,b);Child c(go,a,b);endmodule"#)(top Top)(set go 1)(run_until 0)(assert_eq a 3)(assert_eq b 3)
+    (set go 2)(run_until 1)(assert_eq a 5)(assert_eq b 5))"##;
+    let case = load_group("unpacked.vtest", text, no_std_library)[0];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/unpacked-driver-protocol")
+        .join(std::process::id().to_string());
+    let frontend = celox_test_suite::sv::verification::SvFrontend;
+    let mut verilator =
+        celox_test_suite::verilator::Verilator::build_script(&frontend, case, &root).unwrap();
+    assert!(verilator.run_testbench().is_ok());
     std::fs::remove_dir_all(root).unwrap();
 }

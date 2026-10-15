@@ -32,10 +32,7 @@ pub(super) fn rewrites(
         let mut replacements = Vec::new();
         let mut drivers = String::new();
         for instance in module.nodes.2.contents() {
-            // Array connections have separate broadcast/distribution rules.
-            if !instance.nodes.0.nodes.1.is_empty() {
-                continue;
-            }
+            let array = !instance.nodes.0.nodes.1.is_empty();
             let Some(connections) = &instance.nodes.1.nodes.1 else {
                 continue;
             };
@@ -97,7 +94,16 @@ pub(super) fn rewrites(
                     }
                     suffix += 1;
                 };
-                drivers.push_str(&format!("reg [$bits({instance_name} .{port} )-1:0] {name};\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package));
+                // Preserve the actual's self-determined width for instance
+                // arrays: one port width broadcasts, the aggregate width
+                // distributes (IEEE 1800-2023 23.3.3.5). A scalar connection
+                // instead supplies its port's assignment context.
+                let width = if array {
+                    expression.clone()
+                } else {
+                    format!("{instance_name} .{port} ")
+                };
+                drivers.push_str(&format!("reg [$bits({width} )-1:0] {name};\nalways_comb begin if ({}::started) {name} = {expression}; end\n", names.package));
                 replacements.push((begin, finish, name));
             }
         }
