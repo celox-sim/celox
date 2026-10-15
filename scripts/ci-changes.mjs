@@ -26,9 +26,7 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
-// Release Please also bumps workspace versions in the Cargo manifest and lock.
-// Its pull request can skip product validation because the merge group that
-// cuts the release runs full validation (see isReleaseMergeGroup).
+// Version-only release PRs defer product validation to the queue draft.
 const RELEASE_PLEASE_FILES = new Set([
   ".release-please-manifest.json",
   "CHANGELOG.md",
@@ -105,12 +103,12 @@ export function cutsRelease(files) {
 }
 
 // On master, only the release pull request changes the release manifest, so a
-// merge group carrying it is about to tag a release and gets full validation
+// PR or legacy merge group carrying it gets full validation before merging
 // instead of the change-based subset. Syncing master into develop carries the
 // same change without releasing anything. An undeterminable diff fails open.
 export function isReleaseMergeGroup({ event, baseRef, files }) {
   return (
-    event === "merge_group" &&
+    ["merge_group", "pull_request"].includes(event) &&
     baseRef === "refs/heads/master" &&
     (files === null || cutsRelease(files))
   );
@@ -127,6 +125,7 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
   };
 
   const normalizedFiles = files.map((path) => path.replace(/^\.\//, ""));
+
   if (
     releasePlease &&
     normalizedFiles.length > 0 &&
@@ -260,7 +259,9 @@ if (
   const files = scheduledFull
     ? null
     : changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  const release = isReleaseMergeGroup({
+  const queue = process.env.QUEUE_VALIDATION === "true" ||
+    (process.env.QUEUE_VALIDATION !== "false" && process.env.GITHUB_EVENT_NAME !== "pull_request");
+  const release = queue && isReleaseMergeGroup({
     event: process.env.GITHUB_EVENT_NAME,
     baseRef: process.env.MERGE_GROUP_BASE_REF,
     files,
@@ -269,24 +270,26 @@ if (
     files === null || release
       ? { ...ALL_AFFECTED, heliodor_arm64: true }
       : {
-          ...classifyFiles(files, {
-            releasePlease: process.env.RELEASE_PLEASE_PR === "true",
-          }),
+          ...classifyFiles(files, { releasePlease: !queue && process.env.RELEASE_PLEASE_PR === "true" }),
           heliodor_arm64: affectsHeliodorArm64(files),
         };
   writeOutputs({
+    queue,
     ...affected,
     release,
     ...rustScopeOutputs(
-      process.env.GITHUB_EVENT_NAME === "pull_request" && !release && affected.rust
+      process.env.GITHUB_EVENT_NAME === "pull_request" &&
+        !queue &&
+        !release &&
+        affected.rust
         ? files
         : null,
     ),
   });
 }
 
-// Pull requests run the Rust tests their changes can affect; merge groups,
-// releases and the daily run keep the whole workspace (see ci-rust-scope.mjs).
+// Queue drafts, legacy merge groups, releases and daily runs keep
+// the whole workspace. The scope helper remains available outside queue CI.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {

@@ -42,6 +42,7 @@ test("guards the repository setting that exposes the title to release automation
     /run: node scripts\/check-release-repository-settings\.mjs/,
   );
   assert.match(workflow, /run: node scripts\/check-pr-release-impact\.mjs/);
+  assert.match(workflow, /PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
   assert.match(workflow, /permissions:\n  contents: read\n  pull-requests: read/);
   assert.match(
     workflow,
@@ -49,7 +50,7 @@ test("guards the repository setting that exposes the title to release automation
   );
   assert.match(
     workflow,
-    /Validate pull request commit release impact\n\s+if: github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.ref == github\.event\.repository\.default_branch/,
+    /Validate pull request commit release impact\n\s+if: github\.event_name == 'pull_request_target' && !startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\) && github\.event\.pull_request\.base\.ref == github\.event\.repository\.default_branch/,
   );
   assert.match(
     workflow,

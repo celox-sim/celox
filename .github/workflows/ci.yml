@@ -1,7 +1,7 @@
 name: CI
 
-# No push trigger: the merge queue already validated the exact tree that lands
-# on master or develop. The daily full runs keep those branches' caches warm.
+# Ordinary PRs run focused checks; queue draft PRs run pre-merge validation.
+# Keep merge_group during migration and rollback; landed pushes need no rerun.
 on:
   pull_request:
   merge_group:
@@ -28,6 +28,7 @@ jobs:
     env:
       STABLE_LANE: ${{ github.ref_name == 'master' || github.base_ref == 'master' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
+      queue: ${{ steps.classify.outputs.queue }}
       docs: ${{ steps.classify.outputs.docs }}
       release: ${{ steps.classify.outputs.release }}
       javascript: ${{ steps.classify.outputs.javascript }}
@@ -52,11 +53,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           FULL_VALIDATION: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref || format('refs/heads/{0}', github.base_ref) }}
           RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--master--components--celox' && github.event.pull_request.head.repo.full_name == github.repository }}
-          # Scoping pull request tests reads the workspace graph with
-          # `cargo metadata --no-deps`, which the runner's stable Cargo can
-          # do without installing the pinned toolchain.
+          QUEUE_VALIDATION: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          # Keep the classifier usable before the pinned toolchain is installed.
           RUSTUP_TOOLCHAIN: stable
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
@@ -67,7 +67,7 @@ jobs:
   docs:
     name: Docs Build
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.docs == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -88,7 +88,7 @@ jobs:
   lint:
     name: Lint & Format
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true') }}
     runs-on: ubuntu-latest
     env:
       VERYL_LANE: ${{ (github.ref_name == 'develop' || github.base_ref == 'develop' || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'detect' || 'stable' }}
@@ -176,7 +176,7 @@ jobs:
   rust-tests:
     name: Rust Tests
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -268,7 +268,7 @@ jobs:
     needs: changes
     # Scheduled and manual runs compare even when change detection fails. A
     # merge group that cuts a release also compares before it can merge.
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.release == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -355,7 +355,7 @@ jobs:
   sv-tests:
     name: sv-tests conformance
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -394,7 +394,7 @@ jobs:
   napi-linux:
     name: NAPI Build (Linux x64)
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -436,7 +436,7 @@ jobs:
   napi-wasm:
     name: NAPI WASM Build & Test
     needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -492,15 +492,15 @@ jobs:
   rust:
     name: Rust Test & NAPI Build
     needs: [changes, rust-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust }}
       RUST_RESULT: ${{ needs.rust-tests.result }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
-      # ARM64 is intentionally deferred on PRs, but must pass in the queue.
-      ARM64_REQUIRED: ${{ github.event_name != 'pull_request' && needs.changes.outputs.rust != 'false' }}
+      # Platform coverage is mandatory in queue and full validation runs.
+      ARM64_REQUIRED: ${{ needs.changes.outputs.queue != 'false' && needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
       NAPI_REQUIRED: ${{ needs.changes.outputs.napi }}
       NATIVE_RESULT: ${{ needs.napi-linux.result }}
@@ -535,9 +535,8 @@ jobs:
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
-    # Platform jobs run in merge groups and full runs, not on pull requests.
-    # The required Rust gate enforces this result in merge groups.
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    # Full platform checks run once in the queue, not on every PR push.
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -574,7 +573,7 @@ jobs:
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -610,7 +609,7 @@ jobs:
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
     needs: changes
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -651,7 +650,7 @@ jobs:
   js-ubuntu:
     name: JS Test (Ubuntu)
     needs: [changes, napi-linux]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -697,7 +696,7 @@ jobs:
   js-windows:
     name: JS Test (Windows)
     needs: [changes, napi-windows]
-    if: always() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -729,7 +728,7 @@ jobs:
   playground-browser:
     name: Playground Browser Test
     needs: [changes, napi-wasm]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -769,13 +768,43 @@ jobs:
         timeout-minutes: 5
         run: pnpm --filter @celox-sim/playground exec playwright test
 
-  # Full runs are not merge gates, so a failure must reach someone. Keep one
-  # issue per branch open while full CI fails and close it once it passes.
+  queue-validation:
+    name: Queue validation
+    needs: [changes, lint, rust, napi-windows, napi-linux-arm64, js-ubuntu, js-windows, playground-browser, docs]
+    if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' }}
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require successful pre-merge validation
+        run: |
+          node --input-type=module -e '
+            const jobs = JSON.parse(process.env.NEEDS);
+            const changed = jobs.changes.outputs;
+            const required = {
+              docs: changed.docs === "true",
+              lint: [changed.rust, changed.javascript, changed.scripts].includes("true"),
+              rust: [changed.rust, changed.napi].includes("true"),
+              "napi-windows": changed.napi === "true",
+              "napi-linux-arm64": changed.napi_arm64 === "true",
+              "js-ubuntu": changed.javascript === "true",
+              "js-windows": changed.javascript === "true",
+              "playground-browser": [changed.napi, changed.javascript].includes("true"),
+            };
+            if (Object.entries(required).some(([name, required]) => required && jobs[name].result !== "success") ||
+                jobs.changes.result !== "success" || jobs.changes.outputs.queue !== "true" ||
+                Object.values(jobs).some(job => !["success", "skipped"].includes(job.result))) {
+              process.exit(1);
+            }
+          '
+
+  # Report daily/manual runs independently of merge queue validation.
   report-full-validation:
     name: Report full validation
     needs:
       [
         changes,
+        queue-validation,
         docs,
         lint,
         rust-tests,
@@ -791,7 +820,7 @@ jobs:
         js-windows,
         playground-browser,
       ]
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop')
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

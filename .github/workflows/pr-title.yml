@@ -20,18 +20,48 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Validate pull request title
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request_target' && !startsWith(github.head_ref, 'mergify/merge-queue/')
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: node scripts/check-pr-title.mjs "$PR_TITLE"
 
       - name: Validate pull request commit release impact
-        if: github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch
+        if: github.event_name == 'pull_request_target' && !startsWith(github.head_ref, 'mergify/merge-queue/') && github.event.pull_request.base.ref == github.event.repository.default_branch
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/check-pr-release-impact.mjs
+
+      # Batch source is data only. Execute validators from the trusted checkout.
+      - name: Check out the queue tree for metadata
+        if: github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'mergify/merge-queue/')
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: queue-tree
+          persist-credentials: false
+
+      - name: Install queue metadata reader
+        if: github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'mergify/merge-queue/')
+        uses: Mergifyio/setup-cli@v2
+        with:
+          mergify_cli_version: 2026.10.5
+
+      - name: Read queue metadata
+        if: github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'mergify/merge-queue/')
+        working-directory: queue-tree
+        run: mergify ci queue-info > "$RUNNER_TEMP/mergify-queue.json"
+
+      - name: Validate queued pull request titles and release impact
+        if: github.event_name == 'pull_request_target' && startsWith(github.head_ref, 'mergify/merge-queue/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGIFY_METADATA_FILE: ${{ runner.temp }}/mergify-queue.json
+        run: node scripts/check-mergify-batch.mjs
 
       - name: Revalidate merge group release impact
         if: github.event_name == 'merge_group' && github.event.merge_group.base_ref == format('refs/heads/{0}', github.event.repository.default_branch)

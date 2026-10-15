@@ -40,12 +40,11 @@ produce a patch version while the changelog still displays a title containing
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
-at 03:00 UTC, the release workflow first tries to add that pull request directly
-to the merge queue. If requirements are still pending, it enables auto-merge and
-retries until GitHub accepts the pull request. It succeeds only after observing a
-merge queue entry; required-check failures or a queue timeout therefore remain
-visible as a failed workflow. If there are no releasable changes, the run is a
-no-op.
+(and on manual dispatch), the release workflow adds `merge-ready` and waits for
+Mergify's `queued` acknowledgment. A timeout or `dequeued` result fails the job.
+`release:hold` prevents queueing and merging; a hold observed while waiting also
+removes `merge-ready`. The release PR runs full CI and external comparisons
+before it can merge, including after Mergify updates it with the target branch.
 
 The commit that introduces this policy is the release-history baseline. Earlier
 commits after `v0.1.34` are intentionally not retroactively classified; release
@@ -170,13 +169,13 @@ git dependencies.
 
 `develop` is a non-release compatibility overlay: the latest `master` plus the
 changes needed by the last Veryl HEAD revision that passed CI. **Sync Develop**
-opens `master` to `develop` pull requests and enables auto-merge. Ordinary Celox
+opens synchronization pull requests targeting `develop` and adds `merge-ready`. Ordinary Celox
 features and fixes belong on `master`, never only on `develop`, so the overlay is
 disposable and can be rebuilt after a Veryl release.
 
 **Veryl HEAD Integration** creates `integration/veryl-head` from `develop`, pins
 all Veryl crates to one exact upstream `master` commit, and opens a pull request
-back to `develop`. Passing rolls auto-merge. A failing roll remains open and is
+back to `develop`. Passing rolls merge through Mergify. A failing roll remains open and is
 not replaced by the next scheduled run, making the compatibility regression an
 actionable pull request that a maintainer can take over. The integration branch
 is temporary and must never target `master`.
@@ -223,8 +222,7 @@ Each job mints a short-lived, repository-scoped installation token; never store
 an installation token itself because it expires. Actions write access lets the
 release workflow dispatch the crate publisher at the verified release tag;
 Workflows write access lets automation update workflow files. The weekly queue
-job uses this token so adding a pull request to the queue starts the required
-`merge_group` checks. The Veryl HEAD and vendored-metadata workflows use the
+job uses this token to label the release pull request for Mergify. The Veryl HEAD and vendored-metadata workflows use the
 same mechanism so generated branch pushes start normal CI. Using the default
 `GITHUB_TOKEN` for these events would prevent their follow-up workflows from
 running.
@@ -232,8 +230,8 @@ running.
 The App has Issues write permission for Release Please's status labels. The
 weekly workflow still identifies the release pull request by the exact
 `release-please--branches--master--components--celox` branch from this repository.
-It rechecks the `release:hold` label while waiting and disables auto-merge or
-removes an existing queue entry before returning when the release is held.
+It rechecks `release:hold` while waiting and removes the Mergify queue request
+when held. It also clears any legacy GitHub auto-merge or queue entry.
 
 Configure merge commits with `merge_commit_title=PR_TITLE`; use
 `merge_commit_message=BLANK` because Release Please only needs the title. This
@@ -242,8 +240,8 @@ squash and rebase merges so every permitted path has the same message contract.
 The **Conventional Commit title** check verifies these repository settings, each
 title, and the release impact of the pull request's commits. Protect `master` and
 `develop` and require that check and the normal CI checks; do not allow those
-checks to be bypassed by automation. Enable repository auto-merge so dependency
-rolls, lane synchronization, and weekly releases can queue checked pull requests.
+checks to be bypassed by automation. Disable GitHub native auto-merge after migration. Dependency rolls, lane
+synchronization, and weekly releases request the Mergify queue with `merge-ready`.
 Allow the automation token to create `develop` on first use and force-update the
 disposable `integration/veryl-head` branch; never grant a force-push exception on
 `master` or `develop`.
@@ -252,3 +250,28 @@ Do not create a `CARGO_REGISTRY_TOKEN` repository or environment secret. The
 only manually created crates.io credential in this process is the short-expiry
 bootstrap token, which must be revoked after the initial crate names are
 created.
+
+
+## Mergify migration
+
+The root `.mergify.yml` uses one PR per batch and one check slot, `merge` for
+both updating and merging, and PR-title/empty-body commit messages. GitHub's
+required checks are injected into the queue and remain enforced by GitHub.
+Mergify has no ruleset bypass. Ordinary PRs require an explicit queue request.
+Renovate labels only its previously auto-mergeable update categories; the
+NAPI/Emnapi compatibility group still requires manual review.
+
+Roll out the CI/configuration change through the existing GitHub queue first,
+then bring it into `develop`. Only when both branches contain the new CI:
+
+1. Create the `merge-ready`, `queued`, and `dequeued` labels.
+2. Disable existing native auto-merge requests and repository native auto-merge.
+3. Remove only the `merge_queue` rule from the `master` and `develop` rulesets.
+   Retain strict required status checks, their GitHub Actions integration IDs,
+   non-fast-forward protection, and all other existing rules.
+4. Request Mergify queueing on a small PR and verify the CI, merge method and
+   final commit message. Restore the saved rulesets if queueing fails.
+
+Rollback restores the saved GitHub `merge_queue` rules and native auto-merge
+setting. Do not revert the expanded PR checks while Mergify can still merge.
+See the [official migration guide](https://docs.mergify.com/migrate/github-merge-queue/).

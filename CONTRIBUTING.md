@@ -68,32 +68,35 @@ minimum safety net, not the definition of validation completeness.
 
 ## CI coverage and cadence
 
-Pull requests and merge groups use `scripts/ci-changes.mjs` to select jobs.
-Each change is validated where it matters rather than repeatedly:
+Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
+by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
+legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
+workspace when Rust is affected. Mergify checks up to five batches concurrently,
+with up to five PRs per batch and no delay waiting to fill a batch.
+The `Queue validation` merge condition requires those pre-merge checks to pass;
+ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
+same coverage on its next push. Unrelated paths may still skip jobs.
 
-- Pull requests run the Linux jobs (lint, Rust tests, Linux and WASI NAPI, JS
-  on Ubuntu, Playground). Windows NAPI/JS and the ARM64 NAPI and backend jobs
-  are skipped there, which their required checks accept, and run in the merge
-  group instead. `Rust Test & NAPI Build` requires the ARM64 backend job to
-  succeed in merge groups when Rust checks are selected; only pull requests
-  and changes that do not need Rust checks may skip it. Dispatch `ci.yml` on
-  a branch to run platform checks before queueing.
-- Pull requests run only the Rust tests their changes can affect
-  (`scripts/ci-rust-scope.mjs`):
-    - A library change runs its package and every package that depends on it.
-    - A change to one integration test file runs only that test binary.
-    - A backend or frontend crate that only one variant of celox's
-      `all_backends!` tests uses runs only that variant, plus the tests that
-      are not generated per variant. For example, `celox-backend-x86` runs
-      `native` and `native_parallel`, and `celox-frontend-sv` runs `sv` and the
-      `systemverilog` binary.
-    - Manifests, the lockfile, the toolchain, shared test data and CI changes
-      run the whole workspace.
-
-  Merge groups and the daily run always run the whole workspace.
-- The merge group validates the exact tree that lands, so pushes to `master` and
-  `develop` do not run CI again. Daily full runs keep those branches' build
-  caches current for pull requests.
+- Enable both Merge Queue and Workflow Automation in Mergify; the latter runs
+  the label-based queue rule.
+- Version-only Release Please PRs defer product tests to the queue, where the
+  release manifest change requires full validation including external suites.
+- Add `merge-ready` to request automatic queueing, or comment `@mergifyio queue`
+  for an ordinary PR. A failed queue entry receives `dequeued`; investigate it,
+  remove that label, and request queueing again. There is no automatic retry loop.
+- To cancel an automatic merge request, remove `merge-ready`, then comment
+  `@mergifyio dequeue`. Removing the label alone does not remove a queued PR.
+- The release PR requires `merge-ready` from the weekly release workflow and
+  must not carry `release:hold`. Dependency rolls and lane synchronization use
+  the same queue request label.
+- Queue draft title checks validate the original PRs and their release impact,
+  using the release policy from the exact batch tree.
+- GitHub's strict up-to-date setting must be off for draft-PR queues: Mergify
+  validates the combined tree instead of updating every original PR. Required
+  status checks remain enabled. Keep the `Queue validation` merge condition.
+- `merge_group` remains supported for rollback to GitHub's native queue.
+- The queue validates the tree before it lands, so pushes to `master` and
+  `develop` do not run CI again. Daily full runs keep those branches' caches warm.
 - `sync-develop.yml` opens or updates the master-to-develop synchronization pull
   request once a day (22:07 UTC) rather than on every master push. Dispatch it
   to sync sooner.
@@ -127,7 +130,7 @@ uses the finer behavior-based matrix above.
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Weekly, and on pull requests with relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
-| Merge groups that cut a release | A `master` merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` merge group whose diff cannot be determined is treated the same way. |
+| Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 
 Full runs have a separate concurrency group so ordinary pushes cannot cancel
 them. Scheduled and dispatched full runs on `master` and `develop` end with
