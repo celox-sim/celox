@@ -831,6 +831,28 @@ mod event_yield_settle_tests {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check_backend!(build_native, code);
         }
+        let pulse = "module Counter(clk:input clock,count:output u8){always_ff(clk){count+=1;}}#[test(Top)]module Top{inst clk:$tb::clock_gen;var q:u8;var enable:logic;let gated:'_ clock=q[0] & enable;var count:u8;inst c:$comp::settled_writer(clk,q);inst dut:Counter(clk:gated,count);initial{enable=1;c.drive(1);enable=0;clk.next(1);$assert(count==1,\"component edge lost\");$finish();}}";
+        macro_rules! check_pulse {
+            ($build:ident) => {{
+                let metadata =
+                    veryl_metadata::Metadata::load(dir.path().join("Veryl.toml")).unwrap();
+                let mut sim = Simulator::builder(pulse, "Top")
+                    .with_metadata(metadata)
+                    .testbench_kernels(true)
+                    .$build()
+                    .unwrap();
+                let tb = super::super::compile_initial_testbench(&sim).unwrap();
+                assert_eq!(
+                    super::super::run_compiled_testbench_to_finish(&mut sim, &tb),
+                    TestResult::Pass
+                );
+            }};
+        }
+        check_pulse!(build_interpreter);
+        check_pulse!(build_cranelift);
+        check_pulse!(build_wasm);
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check_pulse!(build_native);
     }
 
     #[test]

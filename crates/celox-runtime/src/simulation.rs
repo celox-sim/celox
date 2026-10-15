@@ -1473,37 +1473,11 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                         Some(ProcessStatus::Settle) => {
                             executor.eval_comb()?;
-                            let mut seen = BitSet::new();
-                            for ((signal, id, canonical), before) in
-                                self.topo_signals.iter().zip(before_signals)
-                            {
-                                if *id == usize::MAX || *canonical == usize::MAX {
-                                    continue;
-                                }
-                                let info = &self.event_info[*canonical];
-                                if info.eval_ff_event.is_none()
-                                    && info.eval_only_event.is_none()
-                                    && info.apply_event.is_none()
-                                {
-                                    continue;
-                                }
-                                let after = sample_event_signal(executor.backend(), *signal);
-                                let active = match self.domain_kinds[*id] {
-                                    Some(
-                                        DomainKind::ClockPosedge
-                                        | DomainKind::ClockNegedge
-                                        | DomainKind::ResetAsyncHigh
-                                        | DomainKind::ResetAsyncLow,
-                                    ) => self.edge_triggers(*id, before, after),
-                                    _ => before != after,
-                                };
-                                if active
-                                    && !counter_recorded.contains(*canonical)
-                                    && seen.insert(*canonical)
-                                {
-                                    *self.settled_process_edges.entry(*canonical).or_default() += 1;
-                                }
-                            }
+                            self.record_process_settle_edges(
+                                executor.backend(),
+                                &before_signals,
+                                &counter_recorded,
+                            );
                             self.sample_waiting_events(executor, current_time)?;
                             *comb_current = true;
                             if executor.finish_requested(current_time) {
@@ -1608,7 +1582,15 @@ impl<B: SimBackend> SimulationState<B> {
                         Some(ProcessStatus::Host) => {
                             let request: u64 = executor.backend().get_as(refs.delay);
                             self.waiting.remove(&process);
+                            let before_host = self
+                                .topo_signals
+                                .iter()
+                                .map(|(signal, _, _)| {
+                                    sample_event_signal(executor.backend(), *signal)
+                                })
+                                .collect::<Vec<_>>();
                             if !executor.host_request(process, request as usize, current_time)? {
+                                self.finish_round = true;
                                 self.done.insert(process);
                                 self.finished = true;
                                 return Ok(true);
@@ -1616,7 +1598,19 @@ impl<B: SimBackend> SimulationState<B> {
                             // A host may leave design writes outside this
                             // kernel's store instrumentation that need settling.
                             if executor.host_request_changes_design(process, request as usize) {
-                                *comb_current = false;
+                                executor.eval_comb()?;
+                                *comb_current = true;
+                            }
+                            self.record_process_settle_edges(
+                                executor.backend(),
+                                &before_host,
+                                &BitSet::new(),
+                            );
+                            self.sample_waiting_events(executor, current_time)?;
+                            if executor.finish_requested(current_time) {
+                                self.finish_round = true;
+                                self.finished = true;
+                                return Ok(true);
                             }
                             any_ran = true;
                             continue;
@@ -1635,6 +1629,42 @@ impl<B: SimBackend> SimulationState<B> {
                 return Ok(progressed);
             }
             progressed = true;
+        }
+    }
+
+    fn record_process_settle_edges(
+        &mut self,
+        backend: &B,
+        before: &[(bool, bool)],
+        counter_recorded: &BitSet,
+    ) {
+        let mut seen = BitSet::new();
+        for ((signal, id, canonical), before) in
+            self.topo_signals.iter().zip(before.iter().copied())
+        {
+            if *id == usize::MAX || *canonical == usize::MAX {
+                continue;
+            }
+            let info = &self.event_info[*canonical];
+            if info.eval_ff_event.is_none()
+                && info.eval_only_event.is_none()
+                && info.apply_event.is_none()
+            {
+                continue;
+            }
+            let after = sample_event_signal(backend, *signal);
+            let active = match self.domain_kinds[*id] {
+                Some(
+                    DomainKind::ClockPosedge
+                    | DomainKind::ClockNegedge
+                    | DomainKind::ResetAsyncHigh
+                    | DomainKind::ResetAsyncLow,
+                ) => self.edge_triggers(*id, before, after),
+                _ => before != after,
+            };
+            if active && !counter_recorded.contains(*canonical) && seen.insert(*canonical) {
+                *self.settled_process_edges.entry(*canonical).or_default() += 1;
+            }
         }
     }
 
