@@ -379,7 +379,12 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)?;
+        if self.state.is_finished() {
+            self.simulator
+                .restore_without_evaluation(&checkpoint.simulator)?;
+        } else {
+            self.simulator.restore(&checkpoint.simulator)?;
+        }
         self.pending_host_work = checkpoint.pending_host_work;
         Ok(())
     }
@@ -4333,6 +4338,119 @@ mod pr1158_merge_regressions {
             r#"module Top(input bit a,output bit q);always_comb begin q=a;if(a)$display("late");end initial $finish;endmodule"#,
             check
         );
+    }
+    #[test]
+    fn finished_checkpoint_restore_keeps_outputs_and_diagnostics_frozen_with_drain() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            // Also exercise a live restore before the terminal snapshot.
+            let live = sim.checkpoint().unwrap();
+            sim.run_until(0).unwrap();
+            assert!(sim.is_finished());
+            let mut drain = sim.simulator.runtime_event_drain();
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            let finished = sim.checkpoint().unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            if let Some(drain) = &mut drain {
+                drain.drain();
+            } else {
+                sim.drain_runtime_events();
+            }
+            for _ in 0..2 {
+                sim.restore(&finished).unwrap();
+                assert!(sim.is_finished());
+                assert_eq!(sim.get(a), 1u8.into());
+                assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+                assert_eq!(sim.step().unwrap(), None);
+                let events = if let Some(drain) = &mut drain {
+                    drain.drain()
+                } else {
+                    sim.drain_runtime_events()
+                };
+                assert!(events.is_empty(), "restore emitted diagnostics: {events:?}");
+            }
+            sim.restore(&live).unwrap();
+            assert!(!sim.is_finished());
+            assert_eq!(sim.get(a), 0u8.into());
+            sim.run_until(0).unwrap();
+            assert!(sim.is_finished());
+            sim.restore(&finished).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        }
+        backends!(
+            r#"module Top(input bit a,output bit q);always_comb begin q=a;if(a)$display("late");end initial $finish;endmodule"#,
+            check
+        );
+    }
+    #[test]
+    fn finished_state_file_matches_state_and_optional_combinational_values() {
+        const SOURCE: &str = "module Top(input bit go,output bit q,derived);assign derived=q;always_comb begin q=go;if(go)$finish;end endmodule";
+        fn check<B: SimBackend>(mut target: Simulation<B>) {
+            let mut source = Simulation::new(
+                Simulator::from_sv_sources(
+                    vec![(SOURCE, std::path::Path::new("finished-state-file.sv"))],
+                    "Top",
+                )
+                .four_state(target.simulator.backend.layout().four_state)
+                .opt_level(crate::OptLevel::O0)
+                .build_interpreter()
+                .unwrap(),
+            );
+            let go = source.signal("go");
+            source.modify(|io| io.set(go, 1u8)).unwrap();
+            source.eval_comb().unwrap();
+            assert!(source.is_finished());
+            source.modify(|io| io.set(go, 0u8)).unwrap();
+            let original = source.save_state().unwrap();
+            for variant in 0..3 {
+                let mut file = original.clone();
+                match variant {
+                    0 => {}
+                    1 => file.objects.retain(|object| object.path != "derived"),
+                    _ => {
+                        file.objects
+                            .iter_mut()
+                            .find(|object| object.path == "derived")
+                            .unwrap()
+                            .width += 1
+                    }
+                }
+                let mut bytes = Vec::new();
+                file.write_to(&mut bytes).unwrap();
+                let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+                target.load_state(&file).unwrap();
+                assert!(target.is_finished());
+                assert_eq!(target.get(target.signal("go")), 0u8.into());
+                assert_eq!(target.get(target.signal("q")), 1u8.into());
+                if variant == 0 {
+                    assert_eq!(target.get(target.signal("derived")), 1u8.into());
+                }
+                assert_eq!(target.step().unwrap(), None);
+            }
+            for missing in [false, true] {
+                let mut file = original.clone();
+                if missing {
+                    file.objects.retain(|object| object.path != "go");
+                } else {
+                    file.objects
+                        .iter_mut()
+                        .find(|object| object.path == "go")
+                        .unwrap()
+                        .width += 1;
+                }
+                assert!(matches!(
+                    target.load_state(&file),
+                    Err(StateError::Mismatch(_))
+                ));
+                assert!(target.is_finished());
+                assert_eq!(target.get(target.signal("q")), 1u8.into());
+            }
+            target.eval_comb().unwrap();
+            assert_eq!(target.get(target.signal("q")), 0u8.into());
+        }
+        backends!(SOURCE, check);
     }
     #[test]
     fn physical_clock_aliases_do_not_duplicate_host_occurrences() {

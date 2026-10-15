@@ -3,8 +3,8 @@
 //! Unlike a [`super::Checkpoint`], a [`StateFile`] identifies every state
 //! object by its path, so it can move between simulators built with different
 //! backends, optimization levels or memory layouts. Only objects that hold
-//! state across evaluations must match; combinational objects are recomputed
-//! after loading.
+//! state across evaluations must match. Matching combinational values are
+//! restored when available and recomputed unless the saved simulation finished.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -156,8 +156,10 @@ impl StateSchema {
     /// path. Every object that holds state in this design must be present
     /// with the same width; otherwise nothing is written and the differences
     /// are returned. Saved combinational values are written too, as starting
-    /// points for combinational loops. The caller must re-evaluate
-    /// combinational logic.
+    /// points for combinational loops. Missing or differently sized combinational
+    /// objects are optional. The caller re-evaluates combinational logic unless
+    /// the saved simulation finished, in which case matching terminal values stay
+    /// frozen.
     pub fn load<B: SimBackend>(
         &self,
         backend: &mut B,
@@ -176,12 +178,7 @@ impl StateSchema {
         let mut seeds = Vec::new();
         let mut writes = Vec::new();
         for object in &self.objects {
-            if object.role == StateRole::Comb
-                && !file
-                    .schedule
-                    .as_ref()
-                    .is_some_and(|schedule| schedule.finished)
-            {
+            if object.role == StateRole::Comb {
                 if let Some(saved) = saved.get(object.path.as_str())
                     && saved.width == object.signal.width
                 {

@@ -156,6 +156,17 @@ impl<B: SimBackend> Simulator<B> {
     /// the restored values as changes at the next dump; to record a rewound
     /// simulation, continue in a new file with [`Self::switch_vcd`].
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        self.restore_without_evaluation(checkpoint)?;
+        self.settle_dirty_for_runtime_event_drain();
+        Ok(())
+    }
+
+    /// Restore the stored image without running combinational logic. A finished
+    /// Simulation uses this to preserve its terminal outputs and diagnostics.
+    pub(crate) fn restore_without_evaluation(
+        &mut self,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
         let fingerprint = self.state_fingerprint();
         checkpoint
@@ -169,7 +180,6 @@ impl<B: SimBackend> Simulator<B> {
             writer.rescan();
         }
         self.dirty = true;
-        self.settle_dirty_for_runtime_event_drain();
         Ok(())
     }
 
