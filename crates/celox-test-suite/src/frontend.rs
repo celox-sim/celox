@@ -1,5 +1,6 @@
 //! What a suite supplies to build its designs with an external simulator.
 
+mod timed_connections;
 mod timed_ff;
 mod timed_initializers;
 
@@ -284,11 +285,14 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
     let mut output = String::new();
     let mut previous = 0;
     let initializers = timed_initializers::rewrites(source, names)?;
+    let connections = timed_connections::rewrites(source, names, tasks)?;
     for (start, end, word) in sv_words(source) {
         if start < previous {
             continue;
         }
-        if let Some((body_end, replacement)) = initializers.get(&start) {
+        if let Some((body_end, replacement)) =
+            initializers.get(&start).or_else(|| connections.get(&start))
+        {
             output.push_str(&source[previous..start]);
             output.push_str(&timed_ff::in_macro(source, start, replacement.clone()));
             previous = *body_end;

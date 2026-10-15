@@ -2,7 +2,7 @@
 use super::*;
 use sv_parser::{NodeEvent, RefNode, SyntaxTree};
 
-fn span(tree: &SyntaxTree, node: RefNode<'_>) -> Option<(usize, usize)> {
+pub(super) fn span(tree: &SyntaxTree, node: RefNode<'_>) -> Option<(usize, usize)> {
     let origin = |offset| {
         tree.get_origin(&sv_parser::Locate {
             offset,
@@ -26,14 +26,13 @@ fn span(tree: &SyntaxTree, node: RefNode<'_>) -> Option<(usize, usize)> {
     range
 }
 
-fn expression_calls(
-    expr: &celox_sv_analyzer::ir::Expr,
-    calls: &mut std::collections::BTreeSet<String>,
-) {
+type Calls = std::collections::BTreeSet<(String, Vec<bool>)>;
+
+fn expression_calls(expr: &celox_sv_analyzer::ir::Expr, calls: &mut Calls) {
     use celox_sv_analyzer::ir::Expr;
     match expr {
         Expr::Call { name, args, .. } => {
-            calls.insert(name.clone());
+            calls.insert((name.clone(), args.iter().map(Option::is_some).collect()));
             for arg in args.iter().flatten() {
                 expression_calls(arg, calls);
             }
@@ -71,75 +70,110 @@ fn expression_calls(
     }
 }
 
-fn effectful_functions(source: &str) -> std::collections::BTreeSet<String> {
+fn effectful_functions(
+    ir: &celox_sv_analyzer::ir::Ir,
+) -> std::collections::BTreeSet<(String, String)> {
     use celox_sv_analyzer::ir::Stmt;
     let mut functions = BTreeMap::new();
-    if let Ok(ir) = celox_sv_analyzer::analyze_source(source, Path::new("timed.sv")) {
-        for module in ir.modules() {
-            for subroutine in module
-                .declaration_subroutines()
-                .iter()
-                .chain(module.subroutines())
-            {
-                let mut local_names = subroutine
-                    .params
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect::<std::collections::BTreeSet<_>>();
-                local_names.insert(subroutine.name.clone());
-                local_names.extend(subroutine.return_var.iter().cloned());
-                for statement in &subroutine.body {
-                    statement.walk(&mut |stmt| {
-                        if let Stmt::Local { name, .. } = stmt {
-                            local_names.insert(name.clone());
-                        }
-                    });
-                }
-                let mut effect = subroutine.params.iter().any(|p| p.direction.is_written());
-                let mut calls = std::collections::BTreeSet::new();
-                for statement in &subroutine.body {
-                    statement.walk(&mut |stmt| match stmt {
-                        Stmt::SystemTask { .. } => effect = true,
-                        Stmt::Assign { lhs, .. } => effect |= !local_names.contains(lhs.name()),
-                        Stmt::AssignConcat { parts, .. } => {
-                            effect |= parts.iter().any(|lhs| !local_names.contains(lhs.name()))
-                        }
-                        Stmt::Call { name, .. } => {
-                            calls.insert(name.clone());
-                        }
-                        _ => {}
-                    });
-                    let _ = statement.clone().map(
-                        &mut |expr| {
-                            expression_calls(&expr, &mut calls);
-                            expr
-                        },
-                        &mut |lhs| lhs,
-                    );
-                }
-                functions
-                    .entry(subroutine.name.clone())
-                    .or_insert((effect, calls));
-            }
-        }
-    }
-    loop {
-        let known = functions
+    for module in ir.modules() {
+        for subroutine in module
+            .declaration_subroutines()
             .iter()
-            .filter(|(_, (effect, _))| *effect)
-            .map(|(name, _)| name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut changed = false;
-        for (effect, calls) in functions.values_mut() {
-            if !*effect && calls.iter().any(|name| known.contains(name)) {
-                *effect = true;
-                changed = true;
+            .chain(module.subroutines())
+        {
+            let mut local_names = subroutine
+                .params
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            local_names.insert(subroutine.name.clone());
+            local_names.extend(subroutine.return_var.iter().cloned());
+            for statement in &subroutine.body {
+                statement.walk(&mut |stmt| {
+                    if let Stmt::Local { name, .. } = stmt {
+                        local_names.insert(name.clone());
+                    }
+                });
             }
-        }
-        if !changed {
-            return known;
+            let mut effect = subroutine.params.iter().any(|p| p.direction.is_written());
+            let mut calls = std::collections::BTreeSet::new();
+            let defaults = subroutine
+                .params
+                .iter()
+                .map(|param| {
+                    let mut calls = Calls::new();
+                    if let Some(default) = &param.default {
+                        expression_calls(default, &mut calls);
+                    }
+                    calls
+                })
+                .collect();
+            for statement in &subroutine.body {
+                statement.walk(&mut |stmt| match stmt {
+                    Stmt::SystemTask { .. } => effect = true,
+                    Stmt::Assign { lhs, .. } => effect |= !local_names.contains(lhs.name()),
+                    Stmt::AssignConcat { parts, .. } => {
+                        effect |= parts.iter().any(|lhs| !local_names.contains(lhs.name()))
+                    }
+                    Stmt::Call { name, args, .. } => {
+                        calls.insert((name.clone(), args.iter().map(Option::is_some).collect()));
+                    }
+                    _ => {}
+                });
+                let _ = statement.clone().map(
+                    &mut |expr| {
+                        expression_calls(&expr, &mut calls);
+                        expr
+                    },
+                    &mut |lhs| lhs,
+                );
+            }
+            functions
+                .entry((module.name().to_owned(), subroutine.name.clone()))
+                .or_insert((effect, calls, defaults));
         }
     }
+    type Effects = BTreeMap<(String, String), (bool, Calls, Vec<Calls>)>;
+    fn reaches_effect(
+        functions: &Effects,
+        module: &str,
+        name: &str,
+        provided: &[bool],
+        visiting: &mut std::collections::BTreeSet<(String, String, Vec<bool>)>,
+    ) -> bool {
+        let key = (module.to_owned(), name.to_owned(), provided.to_vec());
+        if !visiting.insert(key.clone()) {
+            return false;
+        }
+        let result = functions
+            .get(&(module.to_owned(), name.to_owned()))
+            .is_some_and(|(effect, calls, defaults)| {
+                *effect
+                    || calls
+                        .iter()
+                        .chain(
+                            defaults
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| {
+                                    !provided.get(*index).copied().unwrap_or(false)
+                                })
+                                .flat_map(|(_, calls)| calls),
+                        )
+                        .any(|(callee, supplied)| {
+                            reaches_effect(functions, module, callee, supplied, visiting)
+                        })
+            });
+        visiting.remove(&key);
+        result
+    }
+    functions
+        .keys()
+        .filter(|(module, name)| {
+            reaches_effect(&functions, module, name, &[], &mut Default::default())
+        })
+        .cloned()
+        .collect()
 }
 
 // Ask the declaration analyzer whether a value can be elaborated, while
@@ -181,13 +215,20 @@ fn elaboration_constant(
         format!("{}{probe}{}", &source[..start], &source[start..])
     };
     celox_sv_analyzer::analyze_source(&candidate, Path::new("timed.sv")).is_ok_and(|ir| {
-        ir.modules()
-            .iter()
-            .flat_map(|module| module.signals())
-            .any(|signal| {
-                signal.name().rsplit('.').next() == Some(guard.as_str())
-                    && signal.r#type().resolved_width() == Some(1)
-            })
+        // Inspect the probe's resolved calls in its declaring module and
+        // generate scope. A constant evaluator may ignore side effects;
+        // effectful bodies or omitted defaults still require staged execution.
+        let effects = effectful_functions(&ir);
+        ir.modules().iter().any(|module| {
+            let effectful = effects.iter().any(|(owner, name)| {
+                owner == module.name() && name.rsplit('.').next() == Some(function.as_str())
+            });
+            !effectful
+                && module.signals().iter().any(|signal| {
+                    signal.name().rsplit('.').next() == Some(guard.as_str())
+                        && signal.r#type().resolved_width() == Some(1)
+                })
+        })
     })
 }
 
@@ -204,7 +245,6 @@ pub(super) fn rewrites(
         return Ok(result);
     }
     let tree = celox_sv_analyzer::syntax::parse_source(source, Path::new("timed.sv"))?;
-    let effects = effectful_functions(source);
     let mut scopes = Vec::new();
     let mut records = Vec::new();
     let mut used_names = sv_words(source)
@@ -330,13 +370,7 @@ pub(super) fn rewrites(
                 .collect::<Vec<_>>();
             // Keep constant initialization before FF listeners are armed;
             // moving an already-high clock into setup would invent an edge.
-            let effectful_call = sv_words(expression).iter().any(|(_, end, name)| {
-                effects.contains(*name) && after_trivia(&expression[*end..]).starts_with('(')
-            });
-            if !effectful_call
-                && (literal_expression
-                    || elaboration_constant(source, start, end, expression, &seeds))
-            {
+            if literal_expression || elaboration_constant(source, start, end, expression, &seeds) {
                 let scope = *scopes
                     .last()
                     .ok_or("constant initializer outside module scope")?;

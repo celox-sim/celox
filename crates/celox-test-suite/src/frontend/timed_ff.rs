@@ -71,6 +71,34 @@ fn parens(source: &str, begin: usize) -> Option<usize> {
     }
     None
 }
+// Resolve callable operands while preserving ordinary value references.
+pub(super) fn gated_rhs(
+    source: &str,
+    begin: usize,
+    end: usize,
+    tasks: &TaskTiming,
+) -> Option<String> {
+    let expression = &source[begin..end];
+    let mut calls = false;
+    let mut bare_calls = Vec::new();
+    for (offset, end, word) in sv_words(expression) {
+        if after_trivia(&expression[end..]).starts_with('(') {
+            calls = true;
+        } else if tasks.bare_callable(source, begin + offset, word) {
+            calls = true;
+            bare_calls.push(end);
+        }
+    }
+    if !calls {
+        return None;
+    }
+    let mut expression = expression.to_owned();
+    for end in bare_calls.into_iter().rev() {
+        expression.insert_str(end, " ()");
+    }
+    Some(expression)
+}
+
 // Icarus evaluates function operands in a continuous ternary eagerly. Use
 // a procedural gate and retain the original net driver (and its delays and
 // strengths). The temporary has the destination's packed assignment width.
@@ -123,25 +151,7 @@ pub(super) fn gated_continuous(
             }
             b',' | b';' if depth == 0 => {
                 if let Some(begin) = rhs.take() {
-                    let expression = &source[begin..at];
-                    let mut calls = false;
-                    let mut bare_calls = Vec::new();
-                    for (offset, end, word) in sv_words(expression) {
-                        if after_trivia(&expression[end..]).starts_with('(') {
-                            calls = true;
-                        } else if tasks.bare_callable(source, begin + offset, word) {
-                            calls = true;
-                            bare_calls.push(end);
-                        }
-                    }
-                    // Both external tools require parentheses for a resolved
-                    // zero-argument function in an expression. Normalize only
-                    // callable identifiers; ordinary variable drivers stay live.
-                    let mut expression = expression.to_owned();
-                    for end in bare_calls.into_iter().rev() {
-                        expression.insert_str(end, " ()");
-                    }
-                    if calls {
+                    if let Some(expression) = gated_rhs(source, begin, at, tasks) {
                         let lhs = lhs_name.take()?;
                         let mut suffix = at;
                         let name = loop {
@@ -571,6 +581,8 @@ type CallableKey = (String, Option<usize>, Vec<usize>, String);
 #[derive(Default)]
 pub(super) struct TaskTiming {
     tasks: BTreeMap<CallableKey, bool>,
+    pub(super) ports: BTreeMap<String, Vec<String>>,
+    pub(super) inputs: BTreeMap<String, std::collections::BTreeSet<String>>,
     values: BTreeMap<String, Vec<(usize, String)>>,
     units: BTreeMap<String, usize>,
     import_clauses: BTreeMap<String, BTreeMap<usize, Vec<(Option<String>, Option<String>)>>>,
@@ -777,6 +789,39 @@ impl TaskTiming {
                 .into_iter()
                 .map(|(key, types)| (key, types.into_iter().collect()))
                 .collect();
+        }
+        if let Ok(packages) = celox_sv_analyzer::analyze_packages(&paths) {
+            for source in sources {
+                if let Ok(interfaces) =
+                    celox_sv_analyzer::source_module_interfaces(source, Path::new("timed.sv"))
+                {
+                    for (name, interface) in interfaces {
+                        if let Ok(ir) = celox_sv_analyzer::analyze_source_module_with_packages(
+                            source,
+                            Path::new("timed.sv"),
+                            &name,
+                            &Default::default(),
+                            &packages,
+                        ) {
+                            for module in ir.modules() {
+                                result.inputs.insert(
+                                    module.name().to_owned(),
+                                    module
+                                        .ports()
+                                        .iter()
+                                        .filter(|port| {
+                                            port.direction()
+                                                == celox_sv_analyzer::ir::PortDirection::Input
+                                        })
+                                        .map(|port| port.name().to_owned())
+                                        .collect(),
+                                );
+                            }
+                        }
+                        result.ports.insert(name, interface.ports);
+                    }
+                }
+            }
         }
         let mut records = Vec::new();
         for (index, source) in sources.iter().enumerate() {
