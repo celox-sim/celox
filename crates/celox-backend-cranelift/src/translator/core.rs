@@ -612,6 +612,14 @@ impl SIRTranslator {
             (write_block, done_block)
         });
 
+        if self.layout.runtime_event_site_layouts[site_id as usize].is_finish {
+            let flag = state.builder.ins().iadd_imm_s(
+                event_ptr,
+                celox_state_layout::RUNTIME_EVENT_FINISH_OFFSET as i64,
+            );
+            let one = state.builder.ins().iconst(types::I64, 1);
+            state.builder.ins().atomic_store(MemFlags::new(), one, flag);
+        }
         let write_seq_addr = event_ptr;
         let seq = state
             .builder

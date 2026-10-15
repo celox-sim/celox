@@ -15,6 +15,7 @@ use celox_runtime::{
 pub struct SimulationCheckpoint<B: SimBackend = crate::DefaultBackend> {
     simulator: Checkpoint,
     schedule: SimulationSnapshot<B>,
+    pending_host_work: bool,
 }
 
 impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
@@ -22,6 +23,7 @@ impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
         Self {
             simulator: self.simulator.clone(),
             schedule: self.schedule.clone(),
+            pending_host_work: self.pending_host_work,
         }
     }
 }
@@ -55,6 +57,7 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
+    pending_host_work: bool,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
@@ -301,7 +304,11 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
 impl<B: SimBackend> Simulation<B> {
     pub(crate) fn new(simulator: Simulator<B>) -> Self {
         let state = simulation_state(&simulator);
-        Self { simulator, state }
+        Self {
+            simulator,
+            state,
+            pending_host_work: false,
+        }
     }
 
     /// Returns warnings emitted during compilation.
@@ -314,6 +321,7 @@ impl<B: SimBackend> Simulation<B> {
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
+            pending_host_work: self.pending_host_work,
         })
     }
 
@@ -352,6 +360,7 @@ impl<B: SimBackend> Simulation<B> {
         // current values may belong to a still-pending write and cannot be
         // substituted for those historical baselines.
         self.state.import_schedule(parts);
+        self.pending_host_work = false;
         Ok(())
     }
 
@@ -373,7 +382,9 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)
+        self.simulator.restore(&checkpoint.simulator)?;
+        self.pending_host_work = checkpoint.pending_host_work;
+        Ok(())
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.
@@ -410,6 +421,9 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     fn synchronize_runtime_finish(&mut self, was_dirty: bool) {
+        if !self.simulator.dirty {
+            self.pending_host_work = false;
+        }
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
         } else if was_dirty && !self.simulator.dirty && !self.state.is_finished() {
@@ -470,6 +484,7 @@ impl<B: SimBackend> Simulation<B> {
     {
         let was_dirty = self.simulator.dirty;
         let result = self.simulator.modify(f);
+        self.pending_host_work = true;
         self.synchronize_runtime_finish(was_dirty);
         result
     }
@@ -749,7 +764,12 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Returns the time of the next scheduled event, if any.
     pub fn next_event_time(&self) -> Option<u64> {
-        self.state.next_event_time()
+        if self.pending_host_work && self.state.has_waiting_processes() && !self.state.is_finished()
+        {
+            Some(self.state.time())
+        } else {
+            self.state.next_event_time()
+        }
     }
 
     /// Directly execute combinational logic evaluation.
@@ -760,6 +780,7 @@ impl<B: SimBackend> Simulation<B> {
         }
         self.state.sample_waiting_events(&mut self.simulator)?;
         self.state.capture_host_edges(&self.simulator.backend);
+        self.pending_host_work = false;
         Ok(())
     }
 
@@ -4926,5 +4947,199 @@ mod round57_sdk_tests {
         check(Simulation::new(build().build_wasm().unwrap()));
         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         check(Simulation::new(build().build_native().unwrap()));
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod round62_review_tests {
+    use super::*;
+    macro_rules! backends {
+        ($source:expr, $check:ident) => {{
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![($source, std::path::Path::new("review62.sv"))],
+                    "Top",
+                )
+            };
+            $check(Simulation::new(build().build_interpreter().unwrap()));
+            $check(Simulation::new(build().build_cranelift().unwrap()));
+            $check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            $check(Simulation::new(build().build_native().unwrap()));
+        }};
+    }
+    #[test]
+    fn selected_hierarchy_dependencies_skip_dead_reads() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+        }
+        for branch in [
+            "if(1)q=0;else q=a;",
+            "case(1'b1)1'b1:q=0;default:q=a;endcase",
+            "case(1'b1)1'b1:q=0;default:q=read_a();endcase",
+        ] {
+            let source = format!(
+                "module Child(input bit a,output bit q);function bit read_a();return a;endfunction always_comb begin {branch} end endmodule module Top(output bit[7:0]seen);bit a;wire q;Child c(a,q);initial begin #1;a=1;a=0;end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn selected_loop_exit_discards_unreachable_suffix() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        }
+        for exit in [
+            "if(1)break;",
+            "case(1)1:break;default:;endcase",
+            "if(1)continue;",
+        ] {
+            let repeat = if exit.contains("continue") { 1 } else { 2 };
+            let source = format!(
+                "module Child(input bit clk,output bit q);always @(posedge clk)repeat({repeat})begin q=~q;{exit} q=~q;end endmodule module Top(output bit[7:0]seen);bit clk;wire q;Child c(clk,q);initial begin #1;clk=1;end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn captured_host_edge_and_single_queued_edge_both_publish() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clk = sim.signal("clk");
+            for value in [1u8, 0u8] {
+                sim.modify(|io| io.set(clk, value)).unwrap();
+                sim.eval_comb().unwrap();
+            }
+            sim.schedule("clk", 0, 1).unwrap();
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 2u8.into());
+        }
+        backends!(
+            "module Top(input bit clk,output bit[7:0]q);always @(posedge clk)q=q+1;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn next_event_time_exposes_unsampled_rust_host_write() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.next_event_time(), None);
+            let clean = sim.checkpoint().unwrap();
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            let pending = sim.checkpoint().unwrap();
+            sim.restore(&clean).unwrap();
+            assert_eq!(sim.next_event_time(), None);
+            sim.restore(&pending).unwrap();
+            for _ in 0..2 {
+                assert_eq!(sim.next_event_time(), Some(0));
+                assert_eq!(sim.time(), 0);
+            }
+            assert_eq!(sim.step().unwrap(), Some(0));
+            assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+            assert_eq!(sim.next_event_time(), None);
+        }
+        backends!(
+            "module Top(input bit go,output bit q);initial begin @(posedge go);q=1;end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn budget_checks_resume_same_process_before_other_work() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 4u8.into());
+            assert_eq!(sim.get(sim.signal("seen")), 4u8.into());
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("done")), 1u8.into());
+        }
+        backends!(
+            "module Top(output bit[7:0]q,seen,output bit done);initial begin repeat(4)q++;#1;done=1;end initial seen=q;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn finish_survives_overwritten_runtime_event_records() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.run_until(1).unwrap();
+            assert!(sim.is_finished(), "overflow lost the finish request");
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            let events = sim.drain_runtime_events();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, crate::RuntimeEvent::Missed { .. })),
+                "must overflow the actual runtime ring"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, crate::RuntimeEvent::Finish)),
+                "finish must have been overwritten to exercise the independent latch"
+            );
+        }
+        backends!(
+            "module Top(input bit go,output bit q);bit armed;always_comb begin armed=go;if(go)$finish;end always_comb if(armed)repeat(1030)$display(\"noise\");initial begin #1;q=1;end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn non_suspending_process_loops_report_delta_limit() {
+        // Run the actual kernels in a child so a regression cannot hang the test runner.
+        const CHILD: &str = "CELOX_ROUND62_KERNEL_CHILD";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "isolated kernel hang regression marker"
+        )]
+        let child = std::env::var_os(CHILD).is_some();
+        if !child {
+            let mut child=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","simulation::round62_review_tests::non_suspending_process_loops_report_delta_limit","--nocapture"])
+                .env(CHILD,"1").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("non-suspending kernel hung instead of returning a bounded error");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            for _ in 0..2 {
+                let error = sim.run_until(0).unwrap_err().to_string();
+                assert!(error.contains("delta limit"), "{error}");
+                assert_eq!(sim.next_event_time(), Some(0));
+            }
+        }
+        for body in [
+            "always wait(1'b1);",
+            "always begin if(1)wait(1);else #1;end",
+            "always wait(go);",
+            "initial forever begin if(go)continue;#1;end",
+        ] {
+            let source = format!("module Top(input bit go);{body} endmodule");
+            fn arm<B: SimBackend>(mut sim: Simulation<B>) {
+                let go = sim.signal("go");
+                sim.modify(|io| io.set(go, 1u8)).unwrap();
+                check(sim);
+            }
+            backends!(&source, arm);
+        }
     }
 }

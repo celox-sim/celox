@@ -232,6 +232,8 @@ pub enum ProcessStatus {
     Pending,
     /// An event occurred while sampling queued drives; resume its body after the batch.
     Ready,
+    /// Resume this process immediately, charging the current time-slot budget.
+    Yield,
 }
 
 impl ProcessStatus {
@@ -246,6 +248,7 @@ impl ProcessStatus {
             Self::Wait => 4,
             Self::Pending => 5,
             Self::Ready => 11,
+            Self::Yield => 10,
         }
     }
 
@@ -258,6 +261,7 @@ impl ProcessStatus {
             4 => Some(Self::Wait),
             5 => Some(Self::Pending),
             11 => Some(Self::Ready),
+            10 => Some(Self::Yield),
             _ => None,
         }
     }
