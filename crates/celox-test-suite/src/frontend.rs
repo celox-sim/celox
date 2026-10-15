@@ -1,6 +1,7 @@
 //! What a suite supplies to build its designs with an external simulator.
 
 mod timed_ff;
+mod timed_initializers;
 
 use crate::process::write_if_changed;
 use crate::script::ScriptCase;
@@ -156,15 +157,19 @@ pub(crate) fn stage(
 const TIMED_CONTROL: &str = r#"package celox_suite_timed_control;
   bit started = 0;
   bit setup_started = 0;
+  bit initializing = 0;
+  function automatic void celox_suite_begin_initializers();
+    initializing = 1;
+  endfunction
   function automatic void celox_suite_begin_setup();
     setup_started = 1;
   endfunction
   bit finished = 0;
   function automatic void celox_suite_start_design();
-    started = 1;
+    if (!finished) started = 1;
   endfunction
   function automatic void celox_suite_finish_design(input int code = 1);
-    if (!started) return;
+    if (!started && !initializing) return;
     finished = 1;
     case (code)
       0: $finish(0);
@@ -179,6 +184,7 @@ struct TimedNames {
     package: String,
     start: String,
     setup: String,
+    initialize: String,
     finish: String,
 }
 
@@ -203,11 +209,18 @@ fn timed_names(sources: &[String]) -> TimedNames {
             package: name("celox_suite_timed_control"),
             start: name("celox_suite_start_design"),
             setup: name("celox_suite_begin_setup"),
+            initialize: name("celox_suite_begin_initializers"),
             finish: name("celox_suite_finish_design"),
         };
-        if [&names.package, &names.start, &names.finish, &names.setup]
-            .into_iter()
-            .all(|name| !words.contains(name.as_str()))
+        if [
+            &names.package,
+            &names.start,
+            &names.finish,
+            &names.setup,
+            &names.initialize,
+        ]
+        .into_iter()
+        .all(|name| !words.contains(name.as_str()))
         {
             return names;
         }
@@ -235,6 +248,7 @@ impl TimedNames {
                     &self.package
                 }
                 "celox_suite_begin_setup" if tail.starts_with('(') => &self.setup,
+                "celox_suite_begin_initializers" if tail.starts_with('(') => &self.initialize,
                 "celox_suite_start_design" if tail.starts_with('(') => &self.start,
                 "celox_suite_finish_design" if tail.starts_with('(') => &self.finish,
                 _ => continue,
@@ -269,8 +283,15 @@ fn timed_source(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) 
 fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming) -> Result<String> {
     let mut output = String::new();
     let mut previous = 0;
+    let initializers = timed_initializers::rewrites(source, names)?;
     for (start, end, word) in sv_words(source) {
         if start < previous {
+            continue;
+        }
+        if let Some((body_end, replacement)) = initializers.get(&start) {
+            output.push_str(&source[previous..start]);
+            output.push_str(&timed_ff::in_macro(source, start, replacement.clone()));
+            previous = *body_end;
             continue;
         }
         if matches!(
@@ -320,7 +341,10 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
             } else {
                 format!("{}();", names.finish)
             };
-            let replacement = format!("begin if ({}::started) {call} end ", names.package);
+            let replacement = format!(
+                "begin if ({0}::started || {0}::initializing) {call} end ",
+                names.package
+            );
             output.push_str(&source[previous..start]);
             output.push_str(&timed_ff::in_macro(source, start, replacement));
             previous = body_end;

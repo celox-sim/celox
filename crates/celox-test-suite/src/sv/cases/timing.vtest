@@ -1161,3 +1161,54 @@ endmodule"#)
 (case direct_blocking_ff_woken_waiters_sample_before_continuations
  (source "direct-blocking-ff-waiter-sampling.sv" #"module Top(output bit a,b);bit clk;bit enable=1;bit go;always_ff @(posedge clk)go=1;initial begin #1;clk=1;end initial begin @(posedge(go&enable));a=1;enable=0;end initial begin @(posedge(go&enable));b=1;end endmodule"#)
  (top Top)(run_until 1)(assert_eq a 1)(assert_eq b 1))
+
+(case variable_initializers_observe_staged_inputs_before_initial_blocks
+ (source "staged-variable-initializers.sv" #"module Top(input bit a,output wire seen);bit saved=a;assign seen=saved;initial begin #2;$finish;end endmodule"#)
+ (top Top)(set a 1)(run_until 0)(assert_eq seen 1)(run_to_finish))
+
+(case constant_variable_initializers_do_not_invent_clock_edges
+ (source "constant-initializer-edges.sv" #"
+ module Top(output bit literal_seen,parameter_seen,function_seen,copy_seen);
+ parameter bit HIGH=1;
+ function automatic bit high_value();return 1;endfunction
+ bit literal_clock=1,parameter_clock=HIGH,function_clock=high_value();
+ bit copied_clock=literal_clock;
+ always_ff @(posedge literal_clock)literal_seen=1;
+ always_ff @(posedge parameter_clock)parameter_seen=1;
+ always_ff @(posedge function_clock)function_seen=1;
+ always_ff @(posedge copied_clock)copy_seen=1;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(run_until 0)(assert_eq literal_seen 0)(assert_eq parameter_seen 0)(assert_eq function_seen 0)(assert_eq copy_seen 0)
+ (run_to_finish))
+
+(case variable_initializer_dependencies_and_automatic_locals_preserve_order
+ (source "staged-variable-initializers.sv" #"
+ module Top(input bit[7:0]a,output wire[7:0]saved_value,next_value,copied_value,generated_value,output bit[7:0]initial_value,later_value);
+ bit[7:0] saved=a,next_saved=saved+1;
+ bit[7:0] copied=saved;
+ if(1)begin:g bit[7:0] generated=a;assign generated_value=generated;end
+ assign saved_value=saved,next_value=next_saved,copied_value=copied;
+ function automatic bit[7:0] echo(input bit[7:0] value);
+   bit[7:0] local_copy=value;
+   return local_copy;
+ endfunction
+ initial begin initial_value=saved;#1;later_value=echo(a);#1;$finish;end
+ endmodule
+ "#)
+ (top Top)(set a 1)(run_until 0)(assert_eq saved_value 1)(assert_eq next_value 2)(assert_eq copied_value 1)(assert_eq generated_value 1)(assert_eq initial_value 1)
+ (set a 2)(run_until 1)(assert_eq saved_value 1)(assert_eq next_value 2)(assert_eq copied_value 1)(assert_eq generated_value 1)(assert_eq later_value 2)
+ (run_to_finish)(expect_output ""))
+
+(case variable_initializer_finish_prevents_procedural_start
+ (source "initializer-finish.sv" #"
+ module Top(output wire seen);
+ function automatic bit stop_now();$finish;return 1;endfunction
+ function automatic bit finish_now();return stop_now();endfunction
+ bit saved=finish_now();
+ assign seen=saved;
+ initial $fatal(1,"procedure ran after initializer finish");
+ endmodule
+ "#)
+ (top Top)(run_to_finish)(assert_eq seen 0)(expect_output ""))
