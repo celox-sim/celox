@@ -80,6 +80,17 @@
         "stronger_than_sv": false,
         "tag_reasons": {},
         "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_extends_signed_seed_values at 2623:5: assert_eq ff_ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_extends_signed_seed_values",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
       }
     ],
     "icarus": [
@@ -115,6 +126,17 @@
         "stronger_than_sv": false,
         "tag_reasons": {},
         "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_extends_signed_seed_values",
+        "phase": "execute",
+        "status": "runtime_error",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
       }
     ]
   },
@@ -130,5 +152,24 @@
     "generated_cpp": "a = VL_RANDOM_I(); b = VL_RANDOM_I(); ignored = VL_URANDOM_SEEDED_II(0x00000011U); third = VL_RANDOM_I(); selected |= 1U << ((VL_RANDOM_I() + VL_RANDOM_I()) & 31); actual = VL_RANDOM_I();",
     "source_order": "seed = 17; ignored = $urandom(seed); a = $urandom; b = $urandom; third = $urandom; seed = 17; ignored = $urandom(seed); selected = 0; selected[($urandom() + $urandom()) & 31] = 1; actual = $urandom;",
     "finding": "The generated code removes/reorders seeded calls before reference draws. The two calls in the select remain distinct; the mismatch is the existing seeded-statement-order disagreement. Original assertions are retained."
+  },
+  "signed_seed_observation": {
+    "standard": "IEEE 1800-2023 18.13.1: any integral seed expression, with int seed formal",
+    "case": "system_functions::urandom_extends_signed_seed_values",
+    "source": "module Top;\n      function automatic logic check_seed(input logic [7:0] raw);\n        logic signed [7:0] narrow;\n        logic [7:0] unsigned_narrow;\n        int extended, unsigned_extended;\n        int unsigned a, b, c, d;\n        narrow = raw; unsigned_narrow = raw;\n        extended = int'(narrow); unsigned_extended = int'(unsigned_narrow);\n        a = $urandom(narrow); b = $urandom(extended);\n        c = $urandom(unsigned_narrow); d = $urandom(unsigned_extended);\n        return a == b && c == d;\n      endfunction\n      initial begin\n        for (int i = 1; i < 256; i++) begin\n          if (!check_seed(i)) $fatal(1, \"seed extension mismatch at %0d\", i);\n        end\n        $display(\"nonzero_seed_extension=1\");\n        $finish;\n      end\nendmodule\n",
+    "expected_nonzero_probe": "nonzero_seed_extension=1",
+    "verilator_nonzero_probe": {
+      "compile_exit_code": 0,
+      "run_exit_code": 0,
+      "output": "nonzero_seed_extension=1\n- <repro>/signed_seed.sv:18: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 0s; walltime 0.000 s; speed 0.000 s/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    },
+    "icarus_nonzero_probe": {
+      "compile_exit_code": 0,
+      "compile_output": "",
+      "run_exit_code": 1,
+      "run_output": "Error: <repro>/signed_seed.sv:9: $urandom's seed variable is less than 32 bits  (8).\nError: <repro>/signed_seed.sv:10: $urandom's seed variable is less than 32 bits  (8).\n"
+    },
+    "icarus_shared_diagnostic": "Error: <case>/source_0.sv:10: $urandom's seed variable is less than 32 bits  (8).\nError: <case>/source_0.sv:11: $urandom's seed variable is less than 32 bits  (8).\n",
+    "finding": "The shared case retains all 256 input bit patterns, including zero. Verilator fails the zero input through its existing zero-seed entropy behavior; its generated C++ uses VL_EXTENDS_II(32,8,narrow) for the signed seed and zero extension for the unsigned seed. The standalone check passes all 255 nonzero patterns. Icarus rejects both narrow seed variables before executing the shared assertions."
   }
 }

@@ -60,7 +60,84 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
     }
 }
 
+const URANDOM_SKIPPED_INITIAL_SOURCE: &str = r#"
+    module Top(input int seed, output int unsigned value, reference);
+      initial $display("skipped initial");
+      always_comb value = $urandom(seed);
+      always_comb reference = $urandom(17);
+    endmodule
+"#;
+
+#[test]
+fn urandom_comb_skipped_initials_work_on_interpreter_and_tiered() {
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let value = sim.signal("value");
+        assert_ne!(sim.get(value), 0u8.into());
+        let seed = sim.signal("seed");
+        sim.modify(|io| io.set(seed, 17u8)).unwrap();
+        assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+    let builder = || {
+        Simulator::from_sv_sources(
+            vec![(
+                URANDOM_SKIPPED_INITIAL_SOURCE,
+                Path::new("random_skipped_initial.sv"),
+            )],
+            "Top",
+        )
+        .four_state(true)
+    };
+    check(builder().build_interpreter().unwrap());
+    check(builder().build_tiered().unwrap());
+}
+
+#[test]
+fn urandom_initial_extends_signed_seed_values() {
+    let mut sim = initial_simulation(
+        r#"
+        module Top(output logic ok);
+          byte narrow;
+          int wide;
+          int unsigned a, b;
+          initial begin
+            ok = 1;
+            for (int i = -128; i < 128; i++) begin
+              narrow = i; wide = i;
+              a = $urandom(narrow); b = $urandom(wide);
+              ok &= a == b;
+            end
+          end
+        endmodule
+    "#,
+    );
+    sim.step().unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), 1u8.into());
+}
+
 sv_backends! {
+    fn urandom_comb_runs_when_untimed_initials_are_skipped(sim) {
+        @setup { let source = URANDOM_SKIPPED_INITIAL_SOURCE; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_skipped_initial.sv"))], "Top").four_state(true);
+        let value = sim.signal("value");
+        let seed = sim.signal("seed");
+        assert_ne!(sim.get(value), 0u8.into());
+        sim.modify(|io| io.set(seed, 17u8)).unwrap();
+        assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
+        let saved = sim.checkpoint().unwrap();
+        let first = sim.get(value);
+        sim.modify(|io| io.set(seed, 23u8)).unwrap();
+        assert_ne!(sim.get(value), first);
+        sim.restore(&saved).unwrap();
+        sim.eval_comb().unwrap();
+        assert_eq!(sim.get(value), first);
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn urandom_extends_signed_seed_values(sim) {
+        @case "system_functions::urandom_extends_signed_seed_values";
+    }
+
     fn urandom_comb_executes_in_statement_order(sim) {
         @case "system_functions::urandom_comb_executes_in_statement_order";
     }

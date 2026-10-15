@@ -658,6 +658,25 @@ mod host {
             program: RuntimeProgram,
             warnings: Vec<CompilationWarning>,
         ) -> Self {
+            let mut sim = Self::with_backend_and_program_for_simulation(backend, program, warnings);
+            // Simulator does not execute initial kernels. Release combinational
+            // time-zero gates that would otherwise wait forever for them.
+            for process in &sim.program.runtime_schema.processes {
+                let status = sim.backend.resolve_signal(&process.status);
+                if sim.backend.get_as::<u8>(status) == 0 {
+                    sim.backend
+                        .set(status, celox_design::ProcessStatus::Done.code());
+                }
+            }
+            sim
+        }
+
+        /// Construct the engine before a timed scheduler starts initial kernels.
+        pub(crate) fn with_backend_and_program_for_simulation(
+            backend: B,
+            program: RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+        ) -> Self {
             let mut sim = Self {
                 backend,
                 program,

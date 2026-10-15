@@ -1061,6 +1061,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 else_expr: Box::new(Expr::Ident(name.clone())),
             },
         };
+        // The int seed formal preserves a narrow signed operand's sign bits
+        // before its 32-bit representation becomes unsigned RNG state.
+        let seed_signed = self.expr_signed(&initial);
         let next = Expr::Resize {
             width: 32,
             signed: false,
@@ -1069,7 +1072,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     left: Box::new(Expr::Resize {
                         expr: Box::new(initial),
                         width: 32,
-                        signed: false,
+                        signed: seed_signed,
                     }),
                     op: BinaryOp::Mul,
                     right: Box::new(Expr::Literal("32'd1664525".into())),

@@ -2596,3 +2596,29 @@ endmodule
   (tick clk)
   (assert_eq ff_ok 1)
   (assert_eq comb_ok 1))
+
+; IEEE 1800-2023 18.13.1: convert the seed to int using its source signedness.
+(case urandom_extends_signed_seed_values
+  (source "urandom_signed_seed.sv" #"
+    module Top(input logic clk, input logic [7:0] bits, output logic ff_ok, comb_ok);
+      function automatic logic check_seed(input logic [7:0] raw);
+        logic signed [7:0] narrow;
+        logic [7:0] unsigned_narrow;
+        int extended, unsigned_extended;
+        int unsigned a, b, c, d;
+        narrow = raw; unsigned_narrow = raw;
+        extended = int'(narrow); unsigned_extended = int'(unsigned_narrow);
+        a = $urandom(narrow); b = $urandom(extended);
+        c = $urandom(unsigned_narrow); d = $urandom(unsigned_extended);
+        return a == b && c == d;
+      endfunction
+      always_ff @(posedge clk) ff_ok <= check_seed(bits);
+      always_comb comb_ok = check_seed(bits);
+    endmodule
+  "#)
+  (top Top)
+  (for value (range 0 256)
+    (modify (set bits value))
+    (tick clk)
+    (assert_eq ff_ok 1)
+    (assert_eq comb_ok 1)))
