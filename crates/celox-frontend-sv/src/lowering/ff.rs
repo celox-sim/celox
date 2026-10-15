@@ -488,6 +488,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
+        self.eval_const_in_context(expr, None)
+    }
+
+    fn eval_const_in_context(
+        &mut self,
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+    ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
         if self.m.calls(expr) {
             return Ok(None);
         }
@@ -500,8 +508,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.constants,
             self.m.parameter_types,
             &mut arena,
-            None,
-            None,
+            context.map(|(width, _)| width),
+            context.map(|(_, signed)| signed),
         ) else {
             return Ok(None);
         };
@@ -2442,18 +2450,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let id = self.m.id(&canonical.var).expect("loop variable");
         let (width, signed) = (self.m.var(id).width, self.m.var(id).signed);
         let start_signed = self.expr_signed(&canonical.start);
-        let Some((mut start, start_width)) = self.eval_const(&canonical.start)? else {
+        let Some((start, _)) =
+            self.eval_const_in_context(&canonical.start, Some((width, start_signed)))?
+        else {
             return Ok(None);
         };
-        // The initializer widens to the loop variable by its own signedness.
-        if start_signed
-            && start_width > 0
-            && start_width < width
-            && start.bit(start_width as u64 - 1)
-        {
-            start |= ((BigUint::from(1u8) << width) - BigUint::from(1u8))
-                ^ ((BigUint::from(1u8) << start_width) - BigUint::from(1u8));
-        }
         let Some(condition) = condition else {
             return Ok(None);
         };
@@ -2484,7 +2485,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             if values.len() + self.unrolled > MAX_UNROLLED_ITERATIONS {
                 break None;
             }
-            let Some((next, _)) = self.eval_const(step_rhs)? else {
+            let Some((next, _)) =
+                self.eval_const_in_context(step_rhs, Some((width, self.expr_signed(step_rhs))))?
+            else {
                 break None;
             };
             value = next & &mask;
@@ -3435,9 +3438,20 @@ pub(super) fn runtime_watched_write_count(
                         step,
                     } => {
                         let exits = exits_loop(stmts);
-                        let trips = loop_trip_cap(kind, init, condition.as_ref(), step, &|expr| {
-                            eval(pm, expr)
-                        })
+                        let trips = loop_trip_cap(
+                            kind,
+                            init,
+                            condition.as_ref(),
+                            step,
+                            stmts,
+                            &LoopConstContext::new(
+                                pm.variables,
+                                pm.name_to_id,
+                                pm.constants,
+                                pm.parameter_types,
+                                pm.four_state,
+                            ),
+                        )
                         .min(if exits { 1 } else { 2 });
                         let mut loop_writes = body(init, pm, expr, active, nonblocking);
                         let mut cycle = body(stmts, pm, expr, active, nonblocking);
@@ -3704,51 +3718,22 @@ pub(super) fn fixed_runtime_write_times(
         step: &[sv::ir::Stmt],
         pm: &ProcModule<'_>,
     ) -> bool {
-        let Some(loop_) = canonical_for_loop(init, condition, step) else {
-            return false;
-        };
-        if expr_calls(&loop_.start, &|_| true) || expr_calls(&loop_.end, &|_| true) {
-            return false;
-        }
-        let eval = |expr| {
-            known_loop_value(
-                expr,
+        // Entry and trip-count proofs must use the same typed comparison;
+        // independently evaluating a narrow bound loses its operand context.
+        loop_trip_cap(
+            &sv::ir::LoopKind::For,
+            init,
+            condition,
+            step,
+            &[],
+            &LoopConstContext::new(
                 pm.variables,
                 pm.name_to_id,
                 pm.constants,
                 pm.parameter_types,
-            )
-        };
-        let (Some(start), Some(end), Some(id)) =
-            (eval(&loop_.start), eval(&loop_.end), pm.id(&loop_.var))
-        else {
-            return false;
-        };
-        let variable = pm.var(id);
-        if !(1..=64).contains(&variable.width) {
-            return false;
-        }
-        let (low, high) = if variable.signed {
-            let half = 1i128 << (variable.width - 1);
-            (-half, half - 1)
-        } else {
-            (0, (1i128 << variable.width) - 1)
-        };
-        // Prove only comparisons whose integer values survive assignment
-        // coercion and the comparison's signed/unsigned conversion.
-        if !(low..=high).contains(&start)
-            || !(low..=high).contains(&end)
-            || (variable.signed && start < 0 && !pm.expr_signed(&loop_.end))
-        {
-            return false;
-        }
-        match loop_.compare {
-            sv::ir::BinaryOp::Lt => start >= end,
-            sv::ir::BinaryOp::Le => start > end,
-            sv::ir::BinaryOp::Gt => start <= end,
-            sv::ir::BinaryOp::Ge => start < end,
-            _ => false,
-        }
+                pm.four_state,
+            ),
+        ) == 0
     }
     fn bounded_for(
         init: &[sv::ir::Stmt],
@@ -4247,15 +4232,20 @@ pub(super) fn watched_write_count(
                 step,
                 body,
             } => {
-                let trips = loop_trip_cap(kind, init, condition.as_ref(), step, &|expr| {
-                    known_loop_value(
-                        expr,
+                let trips = loop_trip_cap(
+                    kind,
+                    init,
+                    condition.as_ref(),
+                    step,
+                    body,
+                    &LoopConstContext::new(
                         pm.variables,
                         pm.name_to_id,
                         pm.constants,
                         pm.parameter_types,
-                    )
-                });
+                        pm.four_state,
+                    ),
+                );
                 call_evaluations = loop_condition_eval_cap(kind, trips);
                 watched_write_count(init, pm, expr, visiting, nonblocking)
                     + trips

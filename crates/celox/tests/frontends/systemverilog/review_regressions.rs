@@ -7611,6 +7611,10 @@ sv_backends! {
         @case "review_regressions::run_time_for_condition_uses_the_relational_operand_context";
     }
 
+    fn for_assignment_context_and_wrapping_preserve_iterations(sim) {
+        @case "review_regressions::for_assignment_context_and_wrapping_preserve_iterations";
+    }
+
     fn size_of_a_type_uses_the_dimension_argument(sim) {
         @case "review_regressions::size_of_a_type_uses_the_dimension_argument";
     }
