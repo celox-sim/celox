@@ -2175,3 +2175,100 @@ fn plain_output_selectors_see_the_callee_final_design_write() {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     check(build().build_native().unwrap());
 }
+
+#[test]
+fn reentrant_output_selectors_preserve_outer_formals() {
+    let source = "#[test(Top)]module Top{var words:u32[2];function give(v:input u32,o:output u32){o=v;}function index()->u32{var tmp:u32;give(9,tmp);return 0;}initial{give(7,words[index()]);$assert(words[0]==7);$finish();}}";
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+    let build = || Simulator::builder(source, "Top");
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}
+
+#[test]
+fn helper_termination_hides_unreachable_loop_breaks() {
+    for (helper, body) in [
+        ("function stop(){$finish();}", "stop();break;"),
+        (
+            "var seed:u32;function stop()->u32{$finish();return seed;}",
+            "if stop()==seed {break;}",
+        ),
+    ] {
+        let source = format!(
+            "#[test(Top)]module Top{{inst clk:$tb::clock_gen;{helper}initial{{for i in 0..1{{{body}}}clk.next();}}}}"
+        );
+        fn check<B: SimBackend>(mut sim: Simulator<B>) {
+            let clk = sim.signal("clk");
+            sim.set(clk, 1u8);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+            assert_eq!(sim.get(clk), 1u8.into());
+        }
+        let build = || Simulator::builder(&source, "Top").testbench_kernels(true);
+        check(build().build_interpreter().unwrap());
+        check(build().build_cranelift().unwrap());
+        check(build().build_wasm().unwrap());
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        check(build().build_native().unwrap());
+    }
+}
+
+#[test]
+fn recorded_pulses_join_the_first_generated_clock_batch() {
+    let source = "#[test(Top)]module Top{inst clk:$tb::clock_gen #(period:4);var go:clock;var source:u32;var sampled:u32;always_ff(go){source=1;}always_ff(clk){sampled=source;}initial{go=1;go=0;clk.next(1);$assert(source==1);$assert(sampled==0);$finish();}}";
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+    let build = || Simulator::builder(source, "Top").testbench_kernels(true);
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}
+
+#[test]
+fn reentrant_output_snapshots_keep_all_masks_and_return_across_waits() {
+    let source = "#[test(Top)]module Top(words:output logic<16>,other:output logic<8>,result:output logic<8>){inst clk:$tb::clock_gen;function give(v:input logic<8>,a:output logic<8>,b:output logic<8>)->logic<8>{a=v;b=~v;return v;}function index()->u32{var a:logic<8>;var b:logic<8>;var r:logic<8>;r=give(8'h09,a,b);clk.next(1);return 0;}initial{words=0;result=give(8'b10xz0101,words[index()+:8],other);$finish();}}";
+    fn check<B: SimBackend>(mut sim: Simulator<B>) {
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        for (name, value, mask) in [
+            ("words", 0xa5u32, 0x30u32),
+            ("other", 0x7a, 0x30),
+            ("result", 0xa5, 0x30),
+        ] {
+            assert_eq!(
+                sim.get_four_state(sim.signal(name)),
+                (value.into(), mask.into()),
+                "{name}"
+            );
+        }
+    }
+    let build = || {
+        Simulator::builder(source, "Top")
+            .four_state(true)
+            .testbench_kernels(true)
+    };
+    check(build().build_interpreter().unwrap());
+    check(build().build_cranelift().unwrap());
+    check(build().build_wasm().unwrap());
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check(build().build_native().unwrap());
+}

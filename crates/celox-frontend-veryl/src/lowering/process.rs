@@ -163,7 +163,7 @@ pub(crate) fn declare_storage(
                     name(&format!("{}@{slot}", need.purpose)),
                     None,
                     need.width,
-                    need.purpose == "file_arg",
+                    matches!(need.purpose, "file_arg" | "function_output"),
                 );
                 (need, id)
             })
@@ -392,25 +392,6 @@ fn constant_nonempty_range(range: &ForRange) -> bool {
     matches!((start, end), (ForBound::Const(..), ForBound::Const(..)))
         && !constant_empty_range(range)
 }
-fn contains_loop_break(statements: &[Statement]) -> bool {
-    for statement in statements {
-        if matches!(statement, Statement::Break) {
-            return true;
-        }
-        if !matches!(statement, Statement::For(_))
-            && expressions::statement_bodies(statement)
-                .iter()
-                .any(|body| contains_loop_break(body))
-        {
-            return true;
-        }
-        if matches!(statement,Statement::SystemFunctionCall(call) if matches!(call.kind,SystemFunctionKind::Finish))
-        {
-            break;
-        }
-    }
-    false
-}
 
 /// How a `for` loop compares and steps, following the testbench
 /// interpreter: the counter is kept at its own width, bounds compare in
@@ -527,6 +508,45 @@ fn function_body(
         Some(index) => function.get_function(index),
         None => function.get_function(&[]),
     }
+}
+
+// Output selectors can reenter the completed callee. Preserve its outgoing
+// values (and expression result) before evaluating any selector calls.
+fn output_snapshot_formals(
+    call: &veryl_analyzer::ir::FunctionCall,
+    body: &FunctionBody,
+) -> Vec<VarId> {
+    if !call.outputs.values().flatten().any(|destination| {
+        expressions::selection(&destination.index, &destination.select)
+            .into_iter()
+            .any(expressions::has_call)
+    }) {
+        return Vec::new();
+    }
+    let mut formals = call
+        .outputs
+        .iter()
+        .filter_map(|(path, _)| body.arg_map.get(path).copied())
+        .chain(body.ret)
+        .collect::<Vec<_>>();
+    formals.sort();
+    formals.dedup();
+    formals
+}
+
+fn collect_output_scratch(
+    ir: &Module,
+    call: &veryl_analyzer::ir::FunctionCall,
+    body: &FunctionBody,
+    needs: &mut Vec<ScratchNeed>,
+) -> Result<(), ParserError> {
+    for formal in output_snapshot_formals(call, body) {
+        needs.push(ScratchNeed {
+            purpose: "function_output",
+            width: resolve_total_width(ir, &ir.variables[&formal])?.max(1),
+        });
+    }
+    Ok(())
 }
 
 fn collect_expression_storage(
@@ -707,6 +727,7 @@ fn collect_scratch_needs(
             if active.insert(function_key(call)) {
                 if let Some(body) = function_body(&ir.functions, call) {
                     collect_scratch_needs(ir, &body.statements, active, needs)?;
+                    collect_output_scratch(ir, call, &body, needs)?;
                 }
                 active.remove(&function_key(call));
             }
@@ -746,6 +767,7 @@ fn collect_scratch_needs(
                     && let Some(body) = function_body(&ir.functions, call)
                 {
                     collect_scratch_needs(ir, &body.statements, active, needs)?;
+                    collect_output_scratch(ir, call, &body, needs)?;
                     active.remove(&function_key(call));
                 }
             }
@@ -1411,6 +1433,89 @@ impl<'a> BlockLowering<'a> {
         self.scan_clocks(statements, &mut active, true);
     }
 
+    fn contains_loop_break(
+        &mut self,
+        statements: &[Statement],
+        active: &mut HashSet<FunctionKey>,
+    ) -> bool {
+        for statement in statements {
+            if matches!(statement, Statement::Break) {
+                return true;
+            }
+            // The call scanner follows input/body/copy-back order. A break
+            // inside a callee or nested loop does not exit this loop.
+            if let Statement::FunctionCall(call) = statement {
+                if !self.scan_call_clocks(call, active, false) {
+                    return false;
+                }
+                continue;
+            }
+            if let Statement::Case(stmt) = statement {
+                if !self.scan_expression_clocks(&stmt.case_target, active, false) {
+                    return false;
+                }
+                let found = if let Some(body) = selected_case_body(stmt) {
+                    self.contains_loop_break(body, active)
+                } else {
+                    self.contains_case_break(stmt, 0, active)
+                };
+                if found {
+                    return true;
+                }
+            } else {
+                for expr in expressions::statement_inputs(statement) {
+                    if !self.scan_expression_clocks(expr, active, false) {
+                        return false;
+                    }
+                }
+                let found = match statement {
+                    Statement::For(_) => false,
+                    Statement::If(stmt) => match constant_truth(&stmt.cond) {
+                        Some(true) => self.contains_loop_break(&stmt.true_side, active),
+                        Some(false) => self.contains_loop_break(&stmt.false_side, active),
+                        None => {
+                            self.contains_loop_break(&stmt.true_side, active)
+                                || self.contains_loop_break(&stmt.false_side, active)
+                        }
+                    },
+                    _ => expressions::statement_bodies(statement)
+                        .iter()
+                        .any(|body| self.contains_loop_break(body, active)),
+                };
+                if found {
+                    return true;
+                }
+            }
+            if !self.scan_clocks(std::slice::from_ref(statement), active, false) {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn contains_case_break(
+        &mut self,
+        stmt: &veryl_analyzer::ir::CaseStatement,
+        arm: usize,
+        active: &mut HashSet<FunctionKey>,
+    ) -> bool {
+        let Some(case_arm) = stmt.arms.get(arm) else {
+            return self.contains_loop_break(&stmt.default, active);
+        };
+        let condition = case_arm_condition_expr(&stmt.case_target, &case_arm.patterns);
+        if !self.scan_expression_clocks(&condition, active, false) {
+            return false;
+        }
+        match constant_truth(&condition) {
+            Some(true) => self.contains_loop_break(&case_arm.body, active),
+            Some(false) => self.contains_case_break(stmt, arm + 1, active),
+            None => {
+                self.contains_loop_break(&case_arm.body, active)
+                    || self.contains_case_break(stmt, arm + 1, active)
+            }
+        }
+    }
+
     fn scan_clocks(
         &mut self,
         statements: &[Statement],
@@ -1492,7 +1597,7 @@ impl<'a> BlockLowering<'a> {
                     let continues = self.scan_clocks(&stmt.body, active, declare);
                     if !continues
                         && constant_nonempty_range(&stmt.range)
-                        && !contains_loop_break(&stmt.body)
+                        && !self.contains_loop_break(&stmt.body, active)
                     {
                         return false;
                     }
@@ -1740,6 +1845,28 @@ impl<'a> BlockLowering<'a> {
         let address = self.scratch_addr(id);
         let builder = self.kernel.builder();
         let reg = builder.alloc_bit(width, signed);
+        builder.emit(SIRInstruction::Load(
+            reg,
+            address,
+            SIROffset::Static(0),
+            width,
+        ));
+        reg
+    }
+
+    fn load_output_scratch(
+        &mut self,
+        id: SourceVarId,
+        width: usize,
+        signed: bool,
+        two_state: bool,
+    ) -> RegisterId {
+        if two_state {
+            return self.load_scratch(id, width, signed);
+        }
+        let address = self.scratch_addr(id);
+        let builder = self.kernel.builder();
+        let reg = builder.alloc_logic(width);
         builder.emit(SIRInstruction::Load(
             reg,
             address,
@@ -2751,7 +2878,7 @@ impl<'a> BlockLowering<'a> {
         self.parser.clear_register_cache();
         if matches!(body_flow, Flow::Ended)
             && constant_nonempty_range(&stmt.range)
-            && !contains_loop_break(&stmt.body)
+            && !self.contains_loop_break(&stmt.body, &mut HashSet::default())
         {
             // The exit is unreachable for this known nonempty terminating body.
             self.kernel.finish();
@@ -3147,6 +3274,17 @@ impl<'a> BlockLowering<'a> {
         if let Flow::Ended = flow {
             return Ok(Flow::Ended);
         }
+        let mut outgoing = HashMap::default();
+        for formal in output_snapshot_formals(call, &body) {
+            let variable = &self.ir.variables[&formal];
+            let width = resolve_total_width(self.ir, variable)?.max(1);
+            let signed = variable.r#type.signed;
+            let two_state = variable.r#type.is_2state();
+            let (_, slot) = self.take_scratch("function_output", width)?;
+            let value = self.load_var(formal)?;
+            self.store_scratch(slot, width, value);
+            outgoing.insert(formal, (slot, width, signed, two_state));
+        }
         for path in &paths {
             let Some(destinations) = call
                 .outputs
@@ -3157,13 +3295,23 @@ impl<'a> BlockLowering<'a> {
             };
             if let Some(&formal) = body.arg_map.get(path) {
                 for destination in destinations {
-                    if let Flow::Ended =
-                        self.copy_back(destination, |this| this.load_var(formal))?
-                    {
+                    let snapshot = outgoing.get(&formal).copied();
+                    if let Flow::Ended = self.copy_back(destination, |this| match snapshot {
+                        Some((slot, width, signed, two_state)) => {
+                            Ok(this.load_output_scratch(slot, width, signed, two_state))
+                        }
+                        None => this.load_var(formal),
+                    })? {
                         return Ok(Flow::Ended);
                     }
                 }
             }
+        }
+        if let Some(formal) = body.ret
+            && let Some(&(slot, width, signed, two_state)) = outgoing.get(&formal)
+        {
+            let value = self.load_output_scratch(slot, width, signed, two_state);
+            self.store(&self.destination(formal, call.comptime.token), value)?;
         }
         Ok(Flow::Continue)
     }

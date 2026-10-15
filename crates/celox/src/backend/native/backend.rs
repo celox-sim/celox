@@ -419,6 +419,7 @@ pub struct NativeProgramImage {
     compiled_clock_phase_sensitive_comb: bool,
     compiled_process_releases: Vec<Vec<celox_design::ProcessRelease<(AbsoluteAddr, usize)>>>,
     compiled_testbench_kernels: Option<usize>,
+    compiled_process_event_counters: Vec<[(AbsoluteAddr, usize); 3]>,
     compiled_process_host_requests: Vec<Vec<celox_design::HostRequest<(AbsoluteAddr, usize)>>>,
     required_native_features: u8,
     #[serde(serialize_with = "celox_design::serde_sorted::map")]
@@ -810,6 +811,26 @@ impl NativeProgramImage {
             != self.runtime_schema.clock_phase_sensitive_comb
         {
             return Err("clock phase sensitivity disagrees with compiled kernels".into());
+        }
+        let counter_bindings = self
+            .runtime_schema
+            .process_event_counters
+            .iter()
+            .map(|counter| {
+                [counter.signal, counter.rises, counter.falls].map(|address| {
+                    (
+                        address,
+                        self.layout
+                            .offsets
+                            .get(&address)
+                            .copied()
+                            .unwrap_or(usize::MAX),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if self.compiled_process_event_counters != counter_bindings {
+            return Err("process edge counters disagree with compiled bindings".into());
         }
         for counters in &self.runtime_schema.process_event_counters {
             if !self.event_map.contains_key(&counters.signal) {
@@ -2543,6 +2564,20 @@ fn compile_program(
                 .map(|process| process.clocks.clone())
                 .collect(),
             compiled_testbench_kernels: sir.runtime().runtime_schema.testbench_kernels,
+            compiled_process_event_counters: sir
+                .runtime()
+                .runtime_schema
+                .process_event_counters
+                .iter()
+                .map(|counter| {
+                    [counter.signal, counter.rises, counter.falls].map(|address| {
+                        (
+                            address,
+                            layout.offsets.get(&address).copied().unwrap_or(usize::MAX),
+                        )
+                    })
+                })
+                .collect(),
             compiled_process_releases: sir
                 .runtime()
                 .runtime_schema
@@ -3781,6 +3816,22 @@ mod process_metadata_tests {
                 Err(NativeImageContainerError::InvalidImage(_))
             ));
         }
+    }
+
+    #[test]
+    fn emitted_edge_counter_bindings_match_compiled_storage() {
+        let source = "module Counter(clk:input clock,q:output u32){always_ff(clk){q+=1;}}#[test(Top)]module Top{var go:clock;var q:u32;inst dut:Counter(clk:go,q);initial{go=1;go=0;$finish();}}";
+        let original = crate::Simulator::builder(source, "Top")
+            .testbench_kernels(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        original.to_container_bytes().unwrap();
+        assert!(!original.runtime_schema.process_event_counters.is_empty());
+        let mut broken = original.clone();
+        let counter = &mut broken.runtime_schema.process_event_counters[0];
+        std::mem::swap(&mut counter.rises, &mut counter.falls);
+        assert!(broken.to_container_bytes().is_err());
     }
 
     #[test]
