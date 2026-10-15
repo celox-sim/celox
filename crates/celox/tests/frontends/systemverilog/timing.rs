@@ -271,3 +271,19 @@ sv_backends! { fn false_wait_preserves_separate_hierarchical_write_times(sim) {
 sv_backends! { fn always_timed_task_without_inline_timing_executes(sim) {
     @case "timing::always_timed_task_without_inline_timing_executes";
 } }
+
+sv_backends! { fn initializer_function_effects_are_scoped_to_each_module(sim) {
+    @case "timing::initializer_function_effects_are_scoped_to_each_module";
+} }
+
+sv_backends! { fn initializer_default_argument_effects_run_during_initialization(sim) {
+    @case "timing::initializer_default_argument_effects_run_during_initialization";
+} }
+
+sv_backends! { fn continuous_zero_argument_function_tracks_global_reads(sim) {
+    @case "timing::continuous_zero_argument_function_tracks_global_reads";
+} }
+
+sv_backends! { fn initializer_explicit_arguments_skip_effectful_defaults(sim) {
+    @case "timing::initializer_explicit_arguments_skip_effectful_defaults";
+} }
