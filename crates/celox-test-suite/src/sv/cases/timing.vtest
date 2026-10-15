@@ -1243,3 +1243,59 @@ endmodule"#)
 (case always_timed_task_without_inline_timing_executes
  (source "always_timed_task_without_inline_timing_executes.sv" #"module Top(output bit q);task tick;#1;q=~q;endtask always tick();endmodule"#)
  (top Top)(run_until 1)(assert_eq q 1)(run_until 2)(assert_eq q 0)(run_until 3)(assert_eq q 1))
+
+
+(case initializer_function_effects_are_scoped_to_each_module
+ (source "initializer-module-effects.sv" #"
+ module Effectful(output bit value);
+ function automatic bit high_value();$display("effectful");return 0;endfunction
+ initial begin #1;value=high_value();end
+ endmodule
+ module Pure(output bit seen);
+ function automatic bit high_value();return 1;endfunction
+ bit clk=high_value();
+ always_ff @(posedge clk)seen=1;
+ endmodule
+ module Top(output wire seen,output wire value);
+ Effectful effectful(.value(value));Pure pure_unit(.seen(seen));
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(run_until 0)(assert_eq seen 0)(run_to_finish)(expect_output "effectful\n"))
+
+(case initializer_default_argument_effects_run_during_initialization
+ (source "initializer-default-effects.sv" #"
+ module Top(output wire seen);
+ function automatic bit stop_now();$finish;return 1;endfunction
+ function automatic bit wrapper(input bit x=stop_now());return x;endfunction
+ bit saved=wrapper();
+ assign seen=saved;
+ initial $fatal(1,"initial ran after default argument finish");
+ endmodule
+ "#)
+ (top Top)(run_to_finish)(assert_eq seen 0)(expect_output ""))
+
+(case continuous_zero_argument_function_tracks_global_reads
+ (source "continuous-function-dependencies.sv" #"
+ module Top(input bit[7:0]go,output wire[7:0]y,z);
+ function automatic bit[7:0]checked();if(go==0)$fatal(1,"early zero-argument call");return go;endfunction
+ assign y=checked();
+ wire[7:0]other=checked();assign z=other;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(set go 1)(run_until 0)(assert_eq y 1)(assert_eq z 1)
+ (set go 2)(run_until 1)(assert_eq y 2)(assert_eq z 2)(run_to_finish)(expect_output ""))
+
+
+(case initializer_explicit_arguments_skip_effectful_defaults
+ (source "initializer-explicit-default.sv" #"
+ module Top(output bit seen);
+ function automatic bit side_effect();$fatal(1,"unused default ran");return 0;endfunction
+ function automatic bit wrapper(input bit value=side_effect());return value;endfunction
+ bit clk=wrapper(1);
+ always_ff @(posedge clk)seen=1;
+ initial begin #2;$finish;end
+ endmodule
+ "#)
+ (top Top)(run_until 0)(assert_eq seen 0)(run_to_finish)(expect_output ""))
