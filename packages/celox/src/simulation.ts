@@ -459,16 +459,17 @@ export class Simulation<P = Record<string, unknown>> {
 		}
 		const max = opts.maxSteps;
 		let steps = 0;
+		let pollHost =
+			needsHostPoll && (this._handle.hasPendingHostWork?.() ?? true);
 		const queued = this._handle.nextEventTime();
 		if (
 			this._handle.time() === endTime &&
-			!needsHostPoll &&
+			!pollHost &&
 			(queued == null || queued > endTime)
 		) {
 			this._state.dirty = false;
 			return;
 		}
-		let pollHost = needsHostPoll;
 		while (true) {
 			const nextEventTime = this._handle.nextEventTime();
 			if (!pollHost && (nextEventTime == null || nextEventTime > endTime))
