@@ -104,11 +104,10 @@
         "digest"
       ],
       "minimumReleaseAge": "3 days",
-      "automerge": true,
-      "automergeType": "pr",
-      "platformAutomerge": true,
+      "automerge": false,
       "labels": [
-        "dependencies"
+        "dependencies",
+        "merge-ready"
       ]
     },
     {
@@ -129,11 +128,10 @@
         "digest"
       ],
       "minimumReleaseAge": "3 days",
-      "automerge": true,
-      "automergeType": "pr",
-      "platformAutomerge": true,
+      "automerge": false,
       "labels": [
-        "dependencies"
+        "dependencies",
+        "merge-ready"
       ]
     },
     {
@@ -149,12 +147,11 @@
       "commitMessageTopic": "Rust toolchain",
       "rangeStrategy": "replace",
       "minimumReleaseAge": "3 days",
-      "automerge": true,
-      "automergeType": "pr",
-      "platformAutomerge": true,
+      "automerge": false,
       "labels": [
         "dependencies",
-        "rust"
+        "rust",
+        "merge-ready"
       ],
       "separateMajorMinor": false,
       "separateMinorPatch": false
@@ -169,9 +166,11 @@
       "semanticCommitType": "fix",
       "semanticCommitScope": "veryl",
       "minimumReleaseAge": "3 days",
-      "automerge": true,
-      "automergeType": "pr",
-      "platformAutomerge": true
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "merge-ready"
+      ]
     },
     {
       "matchManagers": [

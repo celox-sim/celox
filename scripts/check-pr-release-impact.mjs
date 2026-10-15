@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { parseConventionalPrTitle } from "./check-pr-title.mjs";
 
 const NO_RELEASE_TYPES = new Set([
@@ -38,6 +36,20 @@ export function releasePolicyFromFiles(versionText, configText) {
     preMajor: Number.parseInt(version[1], 10) === 0,
     bumpPatchForMinorPreMajor,
   };
+}
+
+// Read policy data from the exact tree being validated, while executing only
+// this trusted validator from the default branch. In-place queues have no
+// later merge_group check to catch a policy change carried by the PR itself.
+export async function loadReleasePolicy(repository, ref, loadFile = loadRepositoryFile) {
+  if (!/^[0-9a-f]{40}$/.test(ref ?? "")) {
+    throw new Error("An exact commit SHA is required for release policy validation");
+  }
+  const [version, config] = await Promise.all([
+    loadFile(repository, "VERSION", ref),
+    loadFile(repository, "release-please-config.json", ref),
+  ]);
+  return releasePolicyFromFiles(version, config);
 }
 
 // Release Please's parser accepts any non-whitespace type casing, optional
@@ -381,6 +393,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const repository = process.env.GITHUB_REPOSITORY;
   const number = process.env.PR_NUMBER;
   const title = process.env.PR_TITLE;
+  const pullRequestHeadSha = process.env.PR_HEAD_SHA;
   const mergeGroupSha = process.env.MERGE_GROUP_SHA;
   const mergeGroupHeadRef = process.env.MERGE_GROUP_HEAD_REF;
   const mergeGroupBaseRef = process.env.MERGE_GROUP_BASE_REF;
@@ -395,25 +408,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     pullRequestMode === mergeGroupMode
   ) {
     console.error(
-      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE or MERGE_GROUP_HEAD_REF/MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
+      "GITHUB_REPOSITORY and GH_TOKEN plus exactly one of PR_NUMBER/PR_TITLE/PR_HEAD_SHA or MERGE_GROUP_HEAD_REF/MERGE_GROUP_SHA/MERGE_GROUP_BASE_REF are required",
     );
     process.exit(1);
   }
 
-  const [versionText, configText] = pullRequestMode
-    ? [
-        readFileSync("VERSION", "utf8"),
-        readFileSync("release-please-config.json", "utf8"),
-      ]
-    : await Promise.all([
-        loadRepositoryFile(repository, "VERSION", mergeGroupSha),
-        loadRepositoryFile(
-          repository,
-          "release-please-config.json",
-          mergeGroupSha,
-        ),
-      ]);
-  const options = releasePolicyFromFiles(versionText, configText);
+  const options = await loadReleasePolicy(
+    repository,
+    pullRequestMode ? pullRequestHeadSha : mergeGroupSha,
+  );
   const pullRequests = pullRequestMode
     ? [{ number: Number.parseInt(number, 10), title }]
     : await loadMergeGroupPullRequests(
