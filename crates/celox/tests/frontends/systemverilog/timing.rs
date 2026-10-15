@@ -259,3 +259,15 @@ sv_backends! { fn variable_initializer_finish_prevents_procedural_start(sim) {
 sv_backends! { fn escaped_continuous_destinations_preserve_identifier_terminators(sim) {
     @case "timing::escaped_continuous_destinations_preserve_identifier_terminators";
 } }
+
+sv_backends! { fn repeated_active_edges_share_one_nba_batch(sim) {
+    @case "timing::repeated_active_edges_share_one_nba_batch";
+} }
+
+sv_backends! { fn false_wait_preserves_separate_hierarchical_write_times(sim) {
+    @case "timing::false_wait_preserves_separate_hierarchical_write_times";
+} }
+
+sv_backends! { fn always_timed_task_without_inline_timing_executes(sim) {
+    @case "timing::always_timed_task_without_inline_timing_executes";
+} }

@@ -1231,3 +1231,15 @@ endmodule"#)
  "#)
  (top Top)(set go 1)(run_until 0)(assert_eq y 1)(assert_eq z 1)
  (run_to_finish)(expect_output ""))
+
+(case repeated_active_edges_share_one_nba_batch
+ (source "repeated_active_edges_share_one_nba_batch.sv" #"module Top(output bit[7:0]q);bit d;initial begin #1;d=1;d=0;d=1;end always @(posedge d)q<=q+1;endmodule"#)
+ (top Top)(run_until 1)(assert_eq q 1))
+
+(case false_wait_preserves_separate_hierarchical_write_times
+ (source "false_wait_preserves_separate_hierarchical_write_times.sv" #"module Child(output bit[1:0]v);initial begin #1;v[0]=1;wait(0);end initial begin #2;v[1]=1;end endmodule module Top(output bit[7:0]q);wire[1:0]v;Child c(.v(v));initial forever begin @(v[0]^v[1]);q++;end endmodule"#)
+ (top Top)(run_until 1)(assert_eq q 1)(run_until 2)(assert_eq q 2))
+
+(case always_timed_task_without_inline_timing_executes
+ (source "always_timed_task_without_inline_timing_executes.sv" #"module Top(output bit q);task tick;#1;q=~q;endtask always tick();endmodule"#)
+ (top Top)(run_until 1)(assert_eq q 1)(run_until 2)(assert_eq q 0)(run_until 3)(assert_eq q 1))
