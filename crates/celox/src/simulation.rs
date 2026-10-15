@@ -3784,3 +3784,89 @@ mod level_wait_scheduling_review {
         check(Simulation::new(build().build_native().unwrap()));
     }
 }
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod sampled_host_review {
+    use super::*;
+    fn check_count<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        let clk = sim.signal("clk");
+        for value in [1u8, 0, 1] {
+            sim.modify(|io| io.set(clk, value)).unwrap();
+            sim.eval_comb().unwrap();
+        }
+        let checkpoint = sim.checkpoint().unwrap();
+        let saved = sim.save_state().unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+        sim.load_state(&saved).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+        sim.restore(&checkpoint).unwrap();
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("count")), 2u8.into());
+    }
+    fn check_ready<B: SimBackend>(mut sim: Simulation<B>) {
+        sim.run_until(0).unwrap();
+        let go = sim.signal("go");
+        sim.modify(|io| io.set(go, 1u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        assert_eq!(sim.next_event_time(), Some(0));
+        let checkpoint = sim.checkpoint().unwrap();
+        let parts = sim.state.export_schedule(&sim.simulator.backend);
+        sim.state.import_schedule(parts);
+        assert_eq!(sim.next_event_time(), Some(0));
+        sim.run_until(0).unwrap();
+        sim.restore(&checkpoint).unwrap();
+        assert_eq!(sim.next_event_time(), Some(0));
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+        assert_eq!(sim.next_event_time(), None);
+    }
+    macro_rules! check_all {
+        ($source:expr, $check:ident) => {{
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![($source, std::path::Path::new("host-capture.sv"))],
+                    "Top",
+                )
+            };
+            $check(Simulation::new(build().build_interpreter().unwrap()));
+            $check(Simulation::new(build().build_cranelift().unwrap()));
+            $check(Simulation::new(build().build_wasm().unwrap()));
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            $check(Simulation::new(build().build_native().unwrap()));
+        }};
+    }
+    #[test]
+    fn host_evaluations_preserve_repeated_ff_occurrences_and_checkpoints() {
+        check_all!(
+            "module Top(input bit clk,output bit[7:0]count);always @(posedge clk)count=count+1;endmodule",
+            check_count
+        );
+    }
+    #[test]
+    fn signed_negative_repeat_counts_do_not_enter_the_body() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+        }
+        for declaration in [
+            "integer n=-1",
+            "integer n=-2",
+            "logic signed[127:0]n=128'sh80000000000000000000000000000001",
+        ] {
+            let source = format!(
+                "module Top(output bit q);{declaration};initial begin #1;repeat(n)begin q=1;break;end end endmodule"
+            );
+            check_all!(source.as_str(), check);
+        }
+    }
+    #[test]
+    fn sampled_host_waiters_appear_in_next_event_time() {
+        check_all!(
+            "module Top(input bit go,output bit q);initial @(posedge go)q=1;endmodule",
+            check_ready
+        );
+    }
+}
