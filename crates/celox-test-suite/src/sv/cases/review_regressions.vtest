@@ -595,3 +595,32 @@
   (assert_eq t2 6)
   (assert_eq t3 16)
   (assert_eq d 10))
+
+
+(case for_assignment_context_and_wrapping_preserve_iterations
+  ; Assignment context is applied before the first comparison and each step;
+  ; relational operands retain their own width and signedness (11.8.2, 12.7.1).
+  (source "for_assignment_context.sv" #"
+    module Top(input bit clk,
+      output bit [7:0] up, down, context_count, mixed, once_count);
+      always @(posedge clk) begin
+        up=0;
+        for(bit[1:0]i=3;i<4;i++) begin up++;if(i==0)break;end
+        down=0;
+        for(bit signed[2:0]i=-4;i>=-4;i--) begin down++;if(i>0)break;end
+        context_count=0;
+        for(bit[7:0]i=2'd3+2'd1;i<1;i++) context_count++;
+        mixed=0;
+        for(bit signed[1:0]i=-1;i<32'd1;i++) mixed++;
+        once_count=0;
+        for(bit signed[2:0]i=-2;i<-1;i++) once_count++;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (tick clk)
+  (assert_eq up 2)
+  (assert_eq down 2)
+  (assert_eq context_count 0)
+  (assert_eq mixed 0)
+  (assert_eq once_count 1))
