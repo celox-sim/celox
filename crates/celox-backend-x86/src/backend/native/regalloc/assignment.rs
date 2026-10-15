@@ -191,6 +191,21 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // Express them as an allocation barrier instead of saving all seven
         // unconditionally in the emitter, including on the common empty-
         // bitmap path.
+        // A region with many summary words walks them in a loop indexed
+        // by R10 and bounded by R11.
+        MInst::SparseCommit {
+            summary_word_count, ..
+        } if *summary_word_count > SPARSE_UNROLLED_SUMMARY_WORDS => &[
+            PhysReg::RAX,
+            PhysReg::RCX,
+            PhysReg::RDX,
+            PhysReg::RSI,
+            PhysReg::RDI,
+            PhysReg::R8,
+            PhysReg::R9,
+            PhysReg::R10,
+            PhysReg::R11,
+        ],
         MInst::SparseCommit { .. } => &[
             PhysReg::RAX,
             PhysReg::RCX,

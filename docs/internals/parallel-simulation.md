@@ -118,20 +118,26 @@ Optimization and identity aliasing run before code generation, so the
 concurrency plan is computed from the final SIR and the finished layout
 (`celox_sir_opt::parallel`):
 
-- reads are exact physical byte ranges, so aliased objects compare by storage;
+- reads are exact physical bit ranges, so aliased objects compare by storage;
   element-strided arrays are resolved per element slot;
-- a write records its exact bytes for read/write ordering and, for
+- a write records its exact bits for read/write ordering and, for
   write/write ordering, every byte its code generator may store
   (`CodegenFootprint`). Native code writes a static field in parts of at most
   eight bytes and rounds the last part up to 1, 2, 4, or 8 bytes. Cranelift
   rounds a field within one word written from a narrow register the same
   way, and otherwise writes whole 8-byte words. Dynamically addressed writes
-  cover their whole home and a few bytes past it;
+  cover their whole home and a few bytes past it. A widened store only
+  writes back bits it does not own unchanged, so a read of other bits in the
+  same byte needs no order, while two writes of one byte stay ordered;
 - the runtime-event ring, comb-capture flags, and trigger bytes are
   serialized as whole resources; waveform notification bytes need no order,
   since generated code only ever sets them to one;
 - units that store and commit sparse state never share a task, because one
-  native function containing both commits every active sparse object.
+  native function containing both commits every active sparse object. A task
+  that only commits scans the object's dirty-summary bitmap instead; x86-64
+  native code walks a large bitmap in a loop that skips four clear words per
+  test, so a memory of several megabytes does not add a long straight-line
+  scan to the end of its lane.
 
 Each task records only non-redundant waits as `(lane, completed task count)`
 pairs; a wait implies everything its producer task waited for.
