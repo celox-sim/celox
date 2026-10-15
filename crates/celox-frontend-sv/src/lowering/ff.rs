@@ -3600,11 +3600,34 @@ pub(super) fn walk_reachable<'a>(
                     }
                 }
                 Stmt::Loop {
-                    init, body, step, ..
+                    kind,
+                    init,
+                    condition,
+                    body,
+                    step,
                 } => {
+                    // Initializers and the header execute even when the body
+                    // is unreachable. Use the same typed entry proof as the
+                    // write summary; an unproven count remains conservative.
                     walk_reachable(init, pm, visit);
-                    walk_reachable(body, pm, visit);
-                    walk_reachable(step, pm, visit);
+                    let trips = loop_trip_cap(
+                        kind,
+                        init,
+                        condition.as_ref(),
+                        step,
+                        body,
+                        &LoopConstContext::new(
+                            pm.variables,
+                            pm.name_to_id,
+                            pm.constants,
+                            pm.parameter_types,
+                            pm.four_state,
+                        ),
+                    );
+                    if trips != 0 {
+                        walk_reachable(body, pm, visit);
+                        walk_reachable(step, pm, visit);
+                    }
                 }
                 _ => {}
             }
