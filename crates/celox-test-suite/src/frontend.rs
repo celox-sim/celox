@@ -273,6 +273,17 @@ fn timed_content(source: &str, names: &TimedNames, tasks: &timed_ff::TaskTiming)
         if start < previous {
             continue;
         }
+        if matches!(
+            word,
+            "assign" | "wire" | "tri" | "tri0" | "tri1" | "wand" | "wor" | "triand" | "trior"
+        ) && let Some((body_end, replacement)) =
+            timed_ff::gated_continuous(source, start, end, names)
+        {
+            output.push_str(&source[previous..start]);
+            output.push_str(&timed_ff::in_macro(source, start, replacement));
+            previous = body_end;
+            continue;
+        }
         if word == "always_ff" || (word == "always" && timed_ff::edge_control(source, end, tasks)) {
             let (replacement_start, body_end, replacement) =
                 timed_ff::gated(source, start, end, names, tasks)?;
