@@ -71,8 +71,23 @@ minimum safety net, not the definition of validation completeness.
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
-workspace when Rust is affected. Mergify checks up to five batches concurrently,
-with up to five PRs per batch, waiting at most one minute to collect them.
+workspace when Rust is affected. Mergify checks up to five batches concurrently
+across three queue rules, using serial mode to preserve combined-tree validation
+between categories targeting the same base branch:
+
+| Queue | PR heads | Batch size | Maximum collection wait |
+| --- | --- | --- | --- |
+| `dependencies` | `renovate/*`, except Veryl updates | 5 | 1 minute |
+| `changes` | Other heads: features, fixes, CI, and manual dependency updates | 3 | 1 minute |
+| `integration` | `integration/*`, `renovate/veryl-crates`, `upgrade/veryl-*`, the Release Please branch, and legacy `master` sync PRs | 1 | None |
+
+The head conditions are mutually exclusive, including for explicit queue
+commands. The existing `merge-ready` rule selects the matching queue without
+changing which PRs may auto-merge; manual-review dependency groups still require
+an explicit merge request. All three queues retain the same GitHub protections,
+queue validation, title checks, release hold, and release authorization gate.
+These categories control batching, not independence or separate runner capacity.
+
 The separate lydite proof/editor gates run on queue drafts rather than ordinary
 PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
 The `Queue validation` merge condition requires those pre-merge checks to pass;

@@ -5,20 +5,103 @@ import test from "node:test";
 const read = (path) =>
   readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("queue runs parallel batches with mandatory full validation", () => {
-  const config = read(".mergify.yml");
-  assert.match(config, /max_parallel_checks: 5/);
-  assert.match(config, /batch_size: 5/);
-  assert.match(config, /max_checks_retries: 0/);
-  assert.match(config, /merge_conditions:\n\s+- check-success = Queue validation\n\s+- check-success = Conventional Commit title/);
-  assert.match(config, /merge_method: merge/);
-  assert.match(config, /update_method: merge/);
-  assert.match(config, /title: pr-title\n\s+body: empty\n\s+trailers: \[\]/);
-  assert.match(config, /branch_protection_injection_mode: queue/);
-  assert.match(config, /- -label = release:hold/);
-  assert.match(
-    config,
-    /head != release-please--branches--master--components--celox\n\s+- label = merge-ready/,
+const queueConfig = read(".mergify.yml");
+const queues = queueConfig
+  .split("queue_rules:\n")[1]
+  .split("\npull_request_rules:")[0]
+  .split(/^  - name: /m)
+  .slice(1)
+  .map((block) => ({ name: block.split("\n")[0], block }));
+
+test("all queue categories preserve combined-tree validation and merge protections", () => {
+  assert.match(queueConfig, /mode: serial/);
+  assert.match(queueConfig, /max_parallel_checks: 5/);
+  assert.deepEqual(
+    queues.map((queue) => queue.name),
+    ["integration", "dependencies", "changes"],
+  );
+  for (const { name, block } of queues) {
+    const size = { integration: 1, dependencies: 5, changes: 3 }[name];
+    assert.match(block, new RegExp(`batch_size: ${size}\\b`));
+    assert.match(
+      block,
+      new RegExp(
+        `batch_max_wait_time: ${name === "integration" ? "0 seconds" : "1 minute"}`,
+      ),
+    );
+    for (const pattern of [
+      /max_checks_retries: 0/,
+      /checks_timeout: 3 hours/,
+      /merge_conditions:\n\s+- check-success = Queue validation\n\s+- check-success = Conventional Commit title/,
+      /merge_method: merge/,
+      /update_method: merge/,
+      /title: pr-title\n\s+body: empty\n\s+trailers: \[\]/,
+      /branch_protection_injection_mode: queue/,
+      /- base ~= \^\(master\|develop\)\$/,
+      /- -draft/,
+      /- -label = release:hold/,
+      /head != release-please--branches--master--components--celox\n\s+- label = merge-ready/,
+    ])
+      assert.match(block, pattern, name);
+  }
+  const rule = queueConfig.split("\npull_request_rules:")[1];
+  assert.match(rule, /label = merge-ready/);
+  assert.match(rule, /- -label = dequeued/);
+  assert.match(rule, /queue: \{\}/);
+});
+
+test("real branch conventions route to exactly one category", () => {
+  // Evaluate the head predicates from the actual configuration, including
+  // exclusions. Common admission guards are checked separately above.
+  function categories(head) {
+    return queues
+      .filter(({ block }) =>
+        [...block.matchAll(/^      - (-?)head ~= (.+)$/gm)].every(
+          ([, negative, pattern]) =>
+            new RegExp(pattern).test(head) !== Boolean(negative),
+        ),
+      )
+      .map(({ name }) => name);
+  }
+  const examples = {
+    integration: [
+      "integration/veryl-head",
+      "integration/master-to-develop",
+      "renovate/veryl-crates",
+      "upgrade/veryl-0.22",
+      "release-please--branches--master--components--celox",
+      "master",
+    ],
+    dependencies: [
+      "renovate/syn-ecosystem",
+      "renovate/rust-1.x",
+      "renovate/typescript-7.x",
+      "renovate/napi-rs-emnapi-compatibility",
+      "renovate/veryl-crates-extra",
+    ],
+    changes: [
+      "feature/1123-veryl-kernels",
+      "fix/parser",
+      "ci/mergify-queue-categories",
+      "upgrade/other",
+      "feature/master",
+      "master-extra",
+      "manual-dependency-update",
+    ],
+  };
+  for (const [expected, heads] of Object.entries(examples)) {
+    for (const head of heads)
+      assert.deepEqual(categories(head), [expected], head);
+  }
+  assert.ok(
+    read(".github/workflows/sync-develop.yml").includes(
+      "SYNC_BRANCH: integration/master-to-develop",
+    ),
+  );
+  assert.ok(
+    read(".github/workflows/veryl-head.yml").includes(
+      "--head integration/veryl-head",
+    ),
   );
 });
 
