@@ -94,7 +94,7 @@ pub trait SimulationExecutor {
     /// Whether clock waits may be served by fused ticks, which skip the
     /// clock signal's own edges and the host's per-edge hooks.
     fn fused_ticks_allowed(&self) -> bool {
-        true
+        false
     }
 
     /// Whether a served request leaves design writes needing a settle.

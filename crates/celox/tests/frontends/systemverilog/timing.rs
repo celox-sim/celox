@@ -219,3 +219,16 @@ sv_backends! {
         @case "timing::staged_wildcard_side_effects_wait_for_setup";
     }
 }
+
+sv_backends! {
+    fn staged_continuous_side_effects_wait_for_setup(sim) {
+        @case "timing::staged_continuous_side_effects_wait_for_setup";
+    }
+
+}
+
+sv_backends! {
+    fn continuous_call_drivers_preserve_assignment_context(sim) {
+        @case "timing::continuous_call_drivers_preserve_assignment_context";
+    }
+}
