@@ -17,10 +17,9 @@
 //!   commit raises while the clock is high is a further edge. Each domain
 //!   fires at most once per phase.
 //!
-//! A tick does not leave the event's signal changed. A clock that reacts to
-//! the event's signal returning to its inactive level, such as `~clk`, runs
-//! after the active edge's rounds, as the other half of the clock cycle the
-//! tick stands for.
+//! A tick is the event's active edge only and does not change the event's
+//! signal. Domains that react to the signal's opposite edge, such as one
+//! clocked by `~clk` or by a falling `clk & en`, do not run on a tick.
 //!
 //! What an event can reach is computed when the simulator is built
 //! ([`celox_design::EventTopology::derived_events`] and
@@ -510,15 +509,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor.eval_comb()?;
         // The commit may move a gate, as the nonblocking updates after the
         // edge do; that is a further edge of the gated clock.
-        self.rounds(executor, scratch, Phase::Active)?;
-
-        // The return to the inactive level.
-        self.sample_domains(executor.backend(), scratch);
-        for (index, domain) in self.gated.iter().enumerate() {
-            let level = self.gate_level(executor.backend(), domain, Phase::Active);
-            scratch.flags[base + index] = flags(level, false);
-        }
-        self.rounds(executor, scratch, Phase::Inactive)
+        self.rounds(executor, scratch, Phase::Active)
     }
 
     /// Gates without programs: settle the design with the levers at each
@@ -570,18 +561,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor.eval_comb()?;
         self.rounds(executor, scratch, Phase::Active)?;
 
-        self.sample_domains(executor.backend(), scratch);
-        for (index, domain) in self.gated.iter().enumerate() {
-            let level = event_level(executor.backend(), domain.derived.signal) != 0;
-            scratch.flags[base + index] = flags(level, false);
-        }
-        for &(signal, active) in &self.levers {
-            executor.backend_mut().set(signal, active ^ 1);
-        }
-        executor.eval_comb()?;
-        self.rounds(executor, scratch, Phase::Inactive)?;
-
-        // Leave the levers as they were, unknown bits included.
+        // Leave the levers as they were, unknown bits included. Only the
+        // active edge is ticked: the return of a lever fires nothing.
         let mut restored = false;
         for (index, &(signal, _)) in self.levers.iter().enumerate() {
             let value = num_bigint::BigUint::from(scratch.flags[saved + 2 * index]);
@@ -707,8 +688,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
     }
 }
 
-/// Which level of its source a gated clock is judged at: the source's active
-/// level during the edge's rounds, its inactive level after the return.
+/// Which level of its source a gated clock is judged at: its active level
+/// at and after the edge, its inactive level before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Active,

@@ -872,7 +872,8 @@ mod process_tests {
     /// enable from before the edge (here a register of `clk`'s own domain)
     /// and its domain reads the state from before `clk`'s domain commits; an
     /// edge raising `en` raises the gate after the commit, a further edge
-    /// that reads the committed state. `~clk` rises on the return of `clk`. Timed steps and
+    /// that reads the committed state. `~clk` rises when `clk` falls, which
+    /// the timed steps drive and a tick, the active edge only, does not. Timed steps and
     /// event-based ticks agree on every backend, in both state modes; the
     /// four-state ticks judge the gate by settling the design.
     #[test]
@@ -960,17 +961,20 @@ mod process_tests {
                     sim.modify(|io| io.set(en_in, enable)).unwrap();
                     let clk_before = sim.get_four_state(sim.signal("clk"));
                     sim.tick(clk).unwrap();
-                    let observed = observe(&mut sim);
+                    let mut observed = observe(&mut sim);
                     assert_eq!(
                         sim.get_four_state(sim.signal("clk")),
                         clk_before,
                         "a tick leaves clk as it was"
                     );
+                    // A tick is not a falling edge of `clk`: `~clk` stays put.
+                    observed[3] = 0;
                     observed
                 })
                 .collect()
         }
         let want = expected();
+        let want_ticked: Vec<_> = want.iter().map(|&[a, b, c, _]| [a, b, c, 0]).collect();
         for four_state in [false, true] {
             let build = || {
                 crate::Simulator::builder(CODE, "Top")
@@ -986,7 +990,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_interpreter().unwrap()),
-                want,
+                want_ticked,
                 "{}",
                 context("interp tick")
             );
@@ -998,7 +1002,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_cranelift().unwrap()),
-                want,
+                want_ticked,
                 "{}",
                 context("cranelift tick")
             );
@@ -1010,7 +1014,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_wasm().unwrap()),
-                want,
+                want_ticked,
                 "{}",
                 context("wasm tick")
             );
@@ -1022,7 +1026,7 @@ mod process_tests {
             );
             assert_eq!(
                 ticked(build().build_tiered().unwrap()),
-                want,
+                want_ticked,
                 "{}",
                 context("tiered tick")
             );
@@ -1039,7 +1043,7 @@ mod process_tests {
                 );
                 assert_eq!(
                     ticked(build().build_native().unwrap()),
-                    want,
+                    want_ticked,
                     "{}",
                     context("native tick")
                 );

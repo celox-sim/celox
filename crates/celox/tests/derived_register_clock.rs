@@ -388,10 +388,11 @@ module Top (
     assert_eq!(run_ticks(&mut untimed, 6), expected, "Simulator::tick");
 }
 
-/// A clock that is high while `clk` is low has its rising edge when the tick
-/// returns `clk` to its inactive level.
+/// `~clk` rises when `clk` falls: the timed simulation, which drives both
+/// levels of `clk`, runs its domain once per cycle, while a tick is the
+/// active edge of `clk` only and does not run it.
 #[test]
-fn an_inverted_clock_fires_once_per_tick() {
+fn an_inverted_clock_runs_on_the_falling_edge_only() {
     let code = r#"
 module Top (
     clk: input '_ clock,
@@ -406,14 +407,27 @@ module Top (
     assign cnt2 = b;
 }
 "#;
+    let mut timed = Simulation::builder(code, "Top").build().unwrap();
+    let cnt2 = timed.signal("cnt2");
+    for (port, time, value) in [("rst", 0, 1), ("clk", 0, 1), ("rst", 1, 0), ("rst", 2, 1)] {
+        timed.schedule(port, time, value).unwrap();
+        timed.step().unwrap();
+    }
+    for cycle in 0..4u64 {
+        timed.schedule("clk", 10 + cycle * 20, 0).unwrap();
+        timed.step().unwrap();
+        assert_eq!(timed.get(cnt2), (cycle + 1).into(), "falling edge {cycle}");
+        timed.schedule("clk", 20 + cycle * 20, 1).unwrap();
+        timed.step().unwrap();
+        assert_eq!(timed.get(cnt2), (cycle + 1).into(), "rising edge {cycle}");
+    }
+
     let mut sim = Simulator::builder(code, "Top").build().unwrap();
     let (clk, rst, cnt2) = (sim.event("clk"), sim.signal("rst"), sim.signal("cnt2"));
-    sim.modify(|io| io.set(rst, 0u8)).unwrap();
-    sim.tick(clk).unwrap();
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
-    for ticks in 1..=4u8 {
+    for _ in 0..4 {
         sim.tick(clk).unwrap();
-        assert_eq!(sim.get(cnt2), ticks.into());
+        assert_eq!(sim.get(cnt2), 0u8.into(), "a tick is not a falling edge");
     }
 }
 

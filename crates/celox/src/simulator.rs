@@ -1324,9 +1324,13 @@ mod host {
         /// is judged from the state before the edge and its domain evaluates
         /// together with the event's own; domains clocked from state the
         /// tick changes, such as a register bit, a divider or a gate whose
-        /// enable the commit raises, run after the commit, transitively. Clocks that rise when the event's signal
-        /// returns to its inactive level, such as `~clk`, run last, as the
-        /// second half of the cycle. The event's signal is left unchanged.
+        /// enable the commit raises, run after the commit, transitively.
+        ///
+        /// Only the active edge is ticked, and the event's signal is left
+        /// unchanged. Domains that react to the opposite edge of the event's
+        /// signal, such as one clocked by `~clk` or by a falling `clk & en`,
+        /// do not run; drive the signal's levels with the timed
+        /// [`crate::Simulation`] for them.
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
             if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
                 return self.tick_derived(event);

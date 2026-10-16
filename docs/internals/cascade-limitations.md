@@ -59,7 +59,8 @@ while `clk` is still high, `gated` rises after the commit; that is a further
 edge, handled in the cascade rounds below, and its domain reads the committed
 state. A gate that falls after the commit is a falling edge in the same way.
 When `clk` returns low, clocks such as `~clk` or a falling edge of `gated` are
-judged from the state the rising edge left, as a separate instant.
+judged from the state the rising edge left, as a separate instant of the timed
+`Simulation`.
 
 Veryl's own simulator holds a gate's enable for the whole edge, like a
 clock-gating cell, and does not report the rise after the commit. Celox does
@@ -106,10 +107,10 @@ moves. `Simulator::tick_events` does
 the same for coincident events, and the native testbench's `clock.next()` and
 the N-API `tick` use the same mechanism.
 
-A tick stands for one clock cycle without simulation time. Clocks that react
-to the event's signal returning to its inactive level, such as `~clk`, run
-after the active edge's rounds and read the state they left, as the second half
-of the cycle. A tick does not change the event's signal.
+A tick is the event's active edge only, without simulation time, and does not
+change the event's signal. Domains that react to the signal's opposite edge,
+such as one clocked by `~clk` or by a falling edge of `clk & en`, do not run on
+a tick; the timed `Simulation`, which drives both levels of a clock, runs them.
 
 Which derived domains an event can reach is computed once when the design is
 built, together with a small program for each gate where its combinational
