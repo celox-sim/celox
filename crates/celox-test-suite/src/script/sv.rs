@@ -214,7 +214,16 @@ pub fn check_output(log: &[u8], sources: &[String]) -> Result<(), String> {
     }
     let finishing = format!("\n{FINISHING_MARKER}\n");
     let (log, finishing_at) = match find(log, finishing.as_bytes()) {
-        Some(at) => ([&log[..at], &log[at + finishing.len()..]].concat(), at),
+        // The simulator's notice follows the marker on a line of its own;
+        // drop it before splicing, or it would join a partial last line.
+        Some(at) => (
+            [
+                &log[..at],
+                &design_output(&log[at + finishing.len()..], sources)[..],
+            ]
+            .concat(),
+            at,
+        ),
         None => (log.to_vec(), log.len()),
     };
     let log = log.as_slice();
@@ -1238,6 +1247,16 @@ mod tests {
         assert_eq!(check_output(finishing.as_bytes(), &sources), Ok(()));
         let late = format!("\n@suite finishing\n{notice}a\n@suite output 62 here\n\n@suite end\n");
         assert!(check_output(late.as_bytes(), &sources).is_err());
+    }
+
+    #[test]
+    fn a_partial_line_before_run_to_finish_keeps_the_notice_apart() {
+        let sources = vec!["/stage/source_0.sv".to_string()];
+        let notice = "/stage/source_0.sv:3: $finish called at 5 (1ns)\n";
+        let log = format!(
+            "partial\n@suite finishing\n{notice}\n@suite output 7061727469616c here\n\n@suite end\n"
+        );
+        assert_eq!(check_output(log.as_bytes(), &sources), Ok(()));
     }
 
     #[test]

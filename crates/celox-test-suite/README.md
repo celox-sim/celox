@@ -253,7 +253,10 @@ it generates itself, advances time with `run_until` and `run_to_finish` and
 checks the design's output with `expect_output`. Design delays count time
 units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
 and `timeprecision` declarations, and `resetall`, are rejected consistently by
-the Celox and external adapters. `tick` cannot be mixed with timed operations.
+the Celox and external adapters, with each simulator's predefined macros
+applied. A timed design has no `final` procedures: they would run in an
+arbitrary order relative to the checks after `run_to_finish`. `tick` cannot be
+mixed with timed operations.
 
 A timed script begins with `run_until` or `run_to_finish`; the parser rejects
 any other first statement. Time zero starts the design's `initial` and
@@ -262,7 +265,8 @@ the standard leaves open relative to the testbench, so a timed case never
 depends on host inputs written before them: every input keeps its fresh value
 (zero, or X with four-state) until time zero has been drained. Drive stimulus
 after the first `run_until`, or generate it in the design. For the same
-reason the design does not call `$finish` at time zero.
+reason the design does not call `$finish` at time zero, and the target of the
+first `run_until` does not read the design.
 
 After that, reads, output collection and `eval` settle processes due at the
 current timestamp without advancing time. External scripted adapters use an

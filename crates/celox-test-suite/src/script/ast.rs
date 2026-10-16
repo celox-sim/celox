@@ -303,6 +303,14 @@ impl ScriptCase {
 
 /// `(run_to_finish)` is a top-level statement, at most once, and only
 /// checks follow it: after the design has finished, nothing can drive it.
+fn reads_design(expr: &Expr) -> bool {
+    match expr {
+        Expr::Get(_) => true,
+        Expr::Op(_, operands) => operands.iter().any(reads_design),
+        Expr::Literal(_) | Expr::Var(_) => false,
+    }
+}
+
 fn validate_finish(body: &[Stmt]) -> Result<(), ScriptError> {
     let mut finished = false;
     for stmt in body {
@@ -904,6 +912,17 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
                     "a timed case begins with run_until or run_to_finish",
                 );
             }
+            // Adapters evaluate that first target at different points of
+            // time zero, so it must not depend on the design.
+            if let Some(first) = case.body.first()
+                && let StmtKind::RunUntil(time) = &first.kind
+                && reads_design(time)
+            {
+                return error(
+                    first.pos,
+                    "the first run_until target cannot read the design",
+                );
+            }
         }
         validate_finish(&case.body)?;
         parsed.push(case);
@@ -1034,5 +1053,25 @@ mod timing_mode_tests {
         }
         let text = "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) (run_until 0) (set a 1) (run_to_finish))";
         assert!(group(text).is_ok());
+    }
+
+    #[test]
+    fn the_first_run_until_target_does_not_read_the_design() {
+        for (body, ok) in [
+            ("(run_until (get y))", false),
+            ("(run_until (+ 1 (get y)))", false),
+            ("(run_until (+ 1 2)) (run_until (get y))", true),
+        ] {
+            let text = format!(
+                "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) {body})"
+            );
+            match group(&text) {
+                Ok(_) => assert!(ok, "{body}"),
+                Err(error) => {
+                    assert!(!ok, "{body}: {error}");
+                    assert!(error.message.contains("cannot read the design"), "{error}");
+                }
+            }
+        }
     }
 }

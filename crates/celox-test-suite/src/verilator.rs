@@ -41,7 +41,14 @@ impl Verilator {
             top,
             testbench,
             edges,
-        } = stage(frontend, design, directory, script, &[])?;
+        } = stage(
+            frontend,
+            design,
+            directory,
+            script,
+            // Predefined by Verilator, and by `--timing`.
+            &["VERILATOR", "VERILATOR_TIMING"],
+        )?;
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
             include_bytes!("vpi_bits.hpp"),

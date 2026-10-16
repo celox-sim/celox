@@ -40,6 +40,11 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
                 "explicit time scales and resetall are not supported in timed shared cases".into(),
             );
         }
+        // Final procedures run in an unspecified order relative to the
+        // testbench's checks after run_to_finish (IEEE 1800-2023 9.2.3).
+        if sv_words(text).iter().any(|(_, _, word)| *word == "final") {
+            return Err("final procedures are not supported in timed shared cases".into());
+        }
     }
     Ok(())
 }
@@ -122,6 +127,14 @@ mod tests {
             assert!(validate_timed_design(&design(source)).is_err());
         }
         let source = "// `timescale 10ns/1ps\nmodule Top; bit timescale; initial $display(\"timeunit 10ns\"); endmodule";
+        assert!(validate_timed_design(&design(source)).is_ok());
+    }
+
+    #[test]
+    fn final_procedures_are_rejected() {
+        let source = "module Top; bit done; final done = 1; endmodule";
+        assert!(validate_timed_design(&design(source)).is_err());
+        let source = "module Top; initial $display(\"final\"); endmodule";
         assert!(validate_timed_design(&design(source)).is_ok());
     }
     #[test]
