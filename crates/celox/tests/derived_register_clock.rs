@@ -687,3 +687,104 @@ fn a_systemverilog_child_clock_into_a_vector_bit() {
         check_sv(&source, 8, &want);
     }
 }
+
+/// Drives `clk` low and high four times and checks that `cnt` counts the
+/// falling edges only.
+fn check_falling_edges(mut timed: Simulation) {
+    let cnt = timed.signal("cnt");
+    for (port, time, value) in [("rst", 0, 1), ("clk", 0, 1), ("rst", 1, 0), ("rst", 2, 1)] {
+        timed.schedule(port, time, value).unwrap();
+        timed.step().unwrap();
+    }
+    for cycle in 0..4u64 {
+        timed.schedule("clk", 10 + cycle * 20, 0).unwrap();
+        timed.step().unwrap();
+        assert_eq!(timed.get(cnt), (cycle + 1).into(), "falling edge {cycle}");
+        timed.schedule("clk", 20 + cycle * 20, 1).unwrap();
+        timed.step().unwrap();
+        assert_eq!(timed.get(cnt), (cycle + 1).into(), "rising edge {cycle}");
+    }
+}
+
+/// A whole copy of `clk` sensed at its falling edge does not join `clk`'s
+/// rising domain.
+#[test]
+fn a_clock_copy_sensed_at_the_falling_edge_runs_on_the_falling_edge() {
+    check_falling_edges(
+        Simulation::builder(
+            r#"
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    cnt: output logic<8>,
+) {
+    var c: '_ clock_negedge;
+    var b: logic<8>;
+    assign c = clk;
+    always_ff (c, rst) {
+        if_reset { b = 0; } else { b = b + 8'd1; }
+    }
+    assign cnt = b;
+}
+"#,
+            "Top",
+        )
+        .build()
+        .unwrap(),
+    );
+}
+
+/// The same for a child clock port sensed at the falling edge.
+#[test]
+fn a_falling_edge_child_clock_port_runs_on_the_falling_edge() {
+    check_falling_edges(
+        Simulation::builder(
+            r#"
+module Child (
+    clk: input '_ clock_negedge,
+    rst: input '_ reset_async_low,
+    cnt: output logic<8>,
+) {
+    var b: logic<8>;
+    always_ff (clk, rst) {
+        if_reset { b = 0; } else { b = b + 8'd1; }
+    }
+    assign cnt = b;
+}
+
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    cnt: output logic<8>,
+) {
+    var a: logic<8>;
+    always_ff (clk, rst) {
+        if_reset { a = 0; } else { a = a + 8'd1; }
+    }
+    inst u: Child (clk, rst, cnt);
+}
+"#,
+            "Top",
+        )
+        .build()
+        .unwrap(),
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_systemverilog_clock_copy_sensed_at_the_falling_edge() {
+    let source = "module Top(input logic clk, input logic rst, output logic [7:0] cnt);
+           logic c;
+           logic [7:0] a;
+           assign c = clk;
+           always_ff @(posedge clk or negedge rst) if (!rst) a <= 0; else a <= a + 1;
+           always_ff @(negedge c or negedge rst) if (!rst) cnt <= 0; else cnt <= cnt + 1;
+         endmodule";
+    let path = std::path::Path::new("derived_register_clock.sv");
+    check_falling_edges(
+        Simulation::from_sv_sources(vec![(source, path)], "Top")
+            .build()
+            .unwrap(),
+    );
+}
