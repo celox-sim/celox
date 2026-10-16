@@ -205,7 +205,8 @@ Commit `flake.lock` together with environment changes. When updating Rust,
 update the rust-overlay revision in `flake.nix` and regenerate `flake.lock`
 with `nix flake update rust-overlay` if its locked revision predates the release.
 Renovate groups the explicitly pinned rust-overlay revision with Rust version
-updates in one PR. Other Nix inputs remain manually managed. The CI lint job
+updates in one PR. The mbx input is updated by the workflow described below;
+other Nix inputs remain manually managed. The CI lint job
 also evaluates the locked flake for both Linux architectures and builds its
 Rust toolchain check without allowing lockfile updates, so a Rust update that
 is not supported by the pinned overlay fails CI before merge.
@@ -214,6 +215,15 @@ lockfile as needed; no Nix version or hash update is required. Verify with
 `nix develop --command pnpm --version` (also from a workspace package directory).
 mbx comes from [tignear/nix-packages](https://github.com/tignear/nix-packages).
 Run `nix flake update nix-packages` to update its pinned package definition.
+The `Update mbx` workflow checks that input daily at 05:37 UTC and can also
+be dispatched manually. It validates the updated flake and mbx executable,
+then opens or updates `automation/update-mbx` against the default branch.
+Only `flake.lock` is included in the PR; other flake inputs stay pinned.
+The workflow uses the existing release GitHub App credentials so its PR
+triggers normal CI. PR and merge-queue checks build and run the pinned mbx
+package on both x86_64 and ARM64 Linux. Updates are proposed as PRs for review;
+the workflow does not merge them automatically. Upstream package-definition
+updates can produce a PR even when the mbx version is unchanged.
 
 The shell pins development tools, not the complete host OS or all build inputs.
 Use the committed Cargo/pnpm lockfiles and locked dependency installation for
