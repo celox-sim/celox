@@ -134,14 +134,9 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
              endmodule"
         );
         let path = std::path::Path::new("overhead.sv");
-        let mut sim =
-            match Simulation::from_sv_sources(vec![(source.as_str(), path)], "Top").build() {
-                Ok(sim) => sim,
-                Err(error) => {
-                    eprintln!("{name}: {error}");
-                    continue;
-                }
-            };
+        let mut sim = Simulation::from_sv_sources(vec![(source.as_str(), path)], "Top")
+            .build()
+            .unwrap();
         sim.schedule("rst", 0, 1).unwrap();
         sim.step().unwrap();
         sim.schedule("rst", 1, 0).unwrap();
