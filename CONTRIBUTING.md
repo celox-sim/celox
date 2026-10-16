@@ -151,9 +151,12 @@ This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
 See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
-The separate lydite proof/editor gates run on queue drafts rather than ordinary
-PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
-The `Queue validation` merge condition requires those pre-merge checks to pass;
+The separate lydite documentation, editor, and Celox replay checks run on queue
+drafts rather than ordinary PRs; develop pushes, weekly runs, and manual dispatch
+remain enabled. The expensive `veryl-fv` and `veryl-proof-corpus` jobs run only
+weekly (Monday at 03:41 UTC / 12:41 JST) or on manual dispatch, never on queue
+drafts or develop pushes. These separate lydite checks are not merge requirements.
+The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
 same coverage on its next push. Unrelated paths may still skip jobs.
 
@@ -208,7 +211,7 @@ uses the finer behavior-based matrix above.
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Weekly, and on pull requests with relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. |
+| Weekly Monday at 03:41 UTC (12:41 JST), or manual dispatch | All `lydite.yml` checks, including Veryl formal verification and proof/mutation corpus gates. The two Veryl jobs run only at this cadence; documentation, editor, and Celox replay checks also run on queue drafts and develop pushes with relevant changes. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 

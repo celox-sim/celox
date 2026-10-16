@@ -5,8 +5,8 @@ name: lydite
 # linted, and unit-tested by ci.yml; this workflow runs lydite's own gates.
 
 on:
-  # Queue drafts run these gates on combined changes. Ordinary PRs skip all
-  # jobs; the weekly run catches drift between merges.
+  # Queue drafts run editor/replay checks on combined changes. Ordinary PRs
+  # skip all jobs; the expensive Veryl proof gates run only weekly or manually.
   push:
     branches: [develop]
     paths:
@@ -121,7 +121,7 @@ jobs:
           retention-days: 14
 
   veryl-fv:
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
@@ -147,7 +147,7 @@ jobs:
           retention-days: 14
 
   veryl-proof-corpus:
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-26.04
     # Cold builds plus the sequential proof/mutation gates can exceed one hour.
     timeout-minutes: 120
