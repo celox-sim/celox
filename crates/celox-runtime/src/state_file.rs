@@ -29,6 +29,7 @@
 //!     update count u32, then per update:
 //!       target str | lsb u64 | width u64 | value bytes | mask bytes
 //!     counted count u32, then per signal: signal str | 3 × counter u32
+//!     write count u32, then per host write: signal str | value bytes | mask bytes
 //!     host pending u8 | finished u8
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
@@ -112,6 +113,9 @@ pub struct ProcessRecord {
     /// Counter values each counted domain last triggered on, by counted
     /// signal, in changes/rises/falls order.
     pub domain_counters: Vec<(String, [u32; 3])>,
+    /// Values the host wrote to waited signals that the next step has yet
+    /// to show the waits, in write order: signal, value and mask bytes.
+    pub host_writes: Vec<(String, Vec<u8>, Vec<u8>)>,
     /// The host changed state the next step settles at the current time.
     pub host_pending: bool,
     /// A process finished the simulation.
@@ -477,6 +481,12 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()
             w.write_all(&counter.to_le_bytes())?;
         }
     }
+    put_len(w, processes.host_writes.len())?;
+    for (signal, value, mask) in &processes.host_writes {
+        put_str(w, signal)?;
+        put_bytes(w, value)?;
+        put_bytes(w, mask)?;
+    }
     w.write_all(&[processes.host_pending as u8, processes.finished as u8])
 }
 
@@ -544,6 +554,9 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
     let domain_counters = (0..get_u32(r)?)
         .map(|_| Ok((get_str(r)?, [get_u32(r)?, get_u32(r)?, get_u32(r)?])))
         .collect::<Result<_, StateFileError>>()?;
+    let host_writes = (0..get_u32(r)?)
+        .map(|_| Ok((get_str(r)?, get_len_bytes(r)?, get_len_bytes(r)?)))
+        .collect::<Result<_, StateFileError>>()?;
     Ok(ProcessRecord {
         wakeups,
         waiters,
@@ -551,6 +564,7 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
         inactive,
         nba_queue,
         domain_counters,
+        host_writes,
         host_pending: get_flag(r)?,
         finished: get_flag(r)?,
     })
@@ -670,6 +684,7 @@ mod tests {
                         mask: vec![2],
                     }],
                     domain_counters: vec![("clk".into(), [1, 2, 3])],
+                    host_writes: vec![("go".into(), vec![1], vec![])],
                     host_pending: true,
                     finished: false,
                 },
@@ -684,8 +699,8 @@ mod tests {
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
         // Version 1 ends after the high events: drop the empty process
-        // section (six counts and two flags).
-        bytes.truncate(bytes.len() - (6 * 4 + 2));
+        // section (seven counts and two flags).
+        bytes.truncate(bytes.len() - (7 * 4 + 2));
         bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }

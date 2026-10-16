@@ -495,8 +495,57 @@ impl<B: SimBackend> Simulator<B> {
                 .zip(&state.domain_counters)
                 .map(|(signal, counters)| (path(signal), *counters))
                 .collect(),
+            host_writes: Vec::new(),
             host_pending: parts.host_pending,
             finished: parts.finished,
+        }
+    }
+
+    /// The host writes a timed simulation has yet to show its waits, by
+    /// signal path.
+    pub(crate) fn name_host_writes(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        let schema = self.state_schema();
+        self.host_watch
+            .log()
+            .iter()
+            .filter_map(|(signal, (value, mask))| {
+                let object = schema
+                    .objects
+                    .iter()
+                    .find(|object| object.signal.offset == signal.offset)?;
+                Some((object.path.clone(), value.to_bytes_le(), mask.to_bytes_le()))
+            })
+            .collect()
+    }
+
+    /// Resolve logged host writes, or the signal names this design does not
+    /// declare.
+    pub(crate) fn resolve_host_writes(
+        &self,
+        writes: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> Result<Vec<(SignalRef, celox_runtime::timing::Value)>, StateError> {
+        let schema = self.state_schema();
+        let mut unknown = Vec::new();
+        let resolved = writes
+            .iter()
+            .filter_map(|(path, value, mask)| {
+                let object = schema.objects.iter().find(|object| &object.path == path);
+                if object.is_none() {
+                    unknown.push(path.clone());
+                }
+                Some((
+                    object?.signal,
+                    (BigUint::from_bytes_le(value), BigUint::from_bytes_le(mask)),
+                ))
+            })
+            .collect();
+        if unknown.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(StateError::Mismatch(StateMismatch {
+                unknown_names: unknown,
+                ..Default::default()
+            }))
         }
     }
 

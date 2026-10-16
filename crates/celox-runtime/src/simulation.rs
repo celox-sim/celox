@@ -215,6 +215,9 @@ struct Round {
     /// Event-signal values before and after a process run.
     before: Vec<u8>,
     after: Vec<u8>,
+    /// Event ids a pulse of several publications triggered; like counted
+    /// triggers they survive settling and bypass the stable-edge test.
+    occurrences: BitSet,
     /// Event ids whose level change gates combinationally derived clocks,
     /// not yet judged.
     gating_sources: Vec<usize>,
@@ -229,6 +232,7 @@ impl Round {
         self.scheduled_trigger_ids.make_empty();
         self.track_stable_edges = track_stable_edges;
         self.counted_triggered.make_empty();
+        self.occurrences.make_empty();
         self.gating_sources.clear();
         self.edge_approved.make_empty();
         self.deferred.clear();
@@ -490,19 +494,21 @@ impl<B: SimBackend> SimulationState<B> {
         ready
     }
 
-    /// Run process `process` until it suspends or ends, and file it where
-    /// it resumes.
+    /// Run process `process` once and file it where it resumes. Returns
+    /// whether it resumes at once (a queued nonblocking assignment or a
+    /// yield), in which case the caller checks the state before running it
+    /// again: the return separates the writes before and after it.
     fn run_process<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         process: usize,
         returns: &mut u64,
-    ) -> Result<(), Halt>
+    ) -> Result<bool, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        loop {
+        {
             executor.run_process(process)?;
             let status: u8 = executor.backend().get_as(self.processes[process].status);
             let delay = || -> u64 { executor.backend().get_as(self.processes[process].delay) };
@@ -530,16 +536,16 @@ impl<B: SimBackend> SimulationState<B> {
                     self.queue_nba(executor.backend_mut(), process, site)?;
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
-                    continue;
+                    return Ok(true);
                 }
                 Some(ProcessStatus::Yield) => {
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
-                    continue;
+                    return Ok(true);
                 }
                 None => return Err(SimulatorErrorCode::InternalError.into()),
             }
-            return Ok(());
+            Ok(false)
         }
     }
 
@@ -888,29 +894,39 @@ impl<B: SimBackend> SimulationState<B> {
         }
         self.event_values(executor.backend(), &mut round.before);
         while let Some(process) = self.process_state.ready.pop_first() {
-            self.run_process(executor, current_time, process, returns)?;
-            // Each run is a separate update of the event signals, so a pulse
-            // across two processes is an edge.
-            self.event_values(executor.backend(), &mut round.after);
-            for (((_, id, _), &old), &new) in self
-                .topo_signals
-                .iter()
-                .zip(&round.before)
-                .zip(&round.after)
-            {
-                if *id != usize::MAX && old != new {
-                    round.transitions.push((*id, new != 0));
+            loop {
+                let again = self.run_process(executor, current_time, process, returns)?;
+                // Each run is a separate update of the event signals, so a
+                // pulse across two runs is an edge.
+                self.record_transitions(executor.backend(), round);
+                // Before the next run, its edges must be seen. After the last
+                // one, the check following the settle sees them: a settle
+                // does not write what processes write.
+                if again || !self.process_state.ready.is_empty() {
+                    self.observe_driven(executor.backend());
                 }
-            }
-            std::mem::swap(&mut round.before, &mut round.after);
-            // Before the next process runs, its edges must be seen. After
-            // the last one, the check following the settle sees them: a
-            // settle does not write what processes write.
-            if !self.process_state.ready.is_empty() {
-                self.observe_driven(executor.backend());
+                if !again {
+                    break;
+                }
             }
         }
         Ok(true)
+    }
+
+    /// Record the event signals that changed since `round.before`.
+    fn record_transitions(&self, backend: &B, round: &mut Round) {
+        self.event_values(backend, &mut round.after);
+        for (((_, id, _), &old), &new) in self
+            .topo_signals
+            .iter()
+            .zip(&round.before)
+            .zip(&round.after)
+        {
+            if *id != usize::MAX && old != new {
+                round.transitions.push((*id, new != 0));
+            }
+        }
+        std::mem::swap(&mut round.before, &mut round.after);
     }
 
     /// Evaluate the triggered domains before an inactive region runs. Their
@@ -1063,7 +1079,12 @@ impl<B: SimBackend> SimulationState<B> {
         if deferred.is_empty() {
             return Ok(Vec::new());
         }
-        if deferred.iter().any(|(_, image)| image.is_some()) {
+        let superseded = deferred.iter().any(|(_, image)| image.is_some());
+        if superseded {
+            // A domain publishes several evaluations, each an update of its
+            // outputs: waits and event domains see each one.
+            self.event_values(executor.backend(), &mut round.before);
+            round.transitions.clear();
             let live = working_image(executor.backend());
             for (id, image) in &deferred {
                 if let Some(image) = image {
@@ -1071,6 +1092,8 @@ impl<B: SimBackend> SimulationState<B> {
                     if let Some(event) = self.event_info[*id].apply_event {
                         executor.apply_ff_at(event)?;
                     }
+                    self.record_transitions(executor.backend(), round);
+                    self.observe_driven(executor.backend());
                 }
             }
             restore_working_image(executor.backend_mut(), &live);
@@ -1084,7 +1107,42 @@ impl<B: SimBackend> SimulationState<B> {
                 applied.push(id);
             }
         }
+        if superseded {
+            self.record_transitions(executor.backend(), round);
+            let transitions = std::mem::take(&mut round.transitions);
+            self.mark_occurrences(executor.backend_mut(), round, &transitions);
+            round.transitions = transitions;
+            round.transitions.clear();
+        }
         Ok(applied)
+    }
+
+    /// Mark the domains that edges among `transitions` trigger, even if the
+    /// signals end at their old values, and keep them marked through the
+    /// settles of this round.
+    fn mark_occurrences(&self, backend: &mut B, round: &mut Round, transitions: &[(usize, bool)]) {
+        let mut previous = None::<(usize, bool)>;
+        for &(id, is_nonzero) in transitions {
+            let was_nonzero = previous
+                .filter(|(last, _)| *last == id)
+                .map_or(self.last_clock_values.contains(id), |(_, value)| value);
+            previous = Some((id, is_nonzero));
+            let triggered = match self.domain_kinds[id] {
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                    !was_nonzero && is_nonzero
+                }
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    was_nonzero && !is_nonzero
+                }
+                _ => was_nonzero != is_nonzero,
+            };
+            if triggered {
+                round.occurrences.insert(id);
+                round.scheduled_trigger_ids.insert(id);
+                round.track_stable_edges = true;
+                backend.mark_triggered_bit(id);
+            }
+        }
     }
 
     /// The process phase of a round: the active and inactive regions before
@@ -1379,6 +1437,7 @@ impl<B: SimBackend> SimulationState<B> {
                     // must have the requested stable edge before its FFs run.
                     if info.is_cascaded
                         && !round.counted_triggered.contains(id)
+                        && !round.occurrences.contains(id)
                         && !round.edge_approved.contains(id)
                         && !self.stable_edge_triggered(executor.backend(), id)
                     {
@@ -1458,6 +1517,9 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.eval_comb()?;
                 if round.track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                    for id in round.occurrences.iter() {
+                        executor.backend_mut().mark_triggered_bit(id);
+                    }
                 }
                 if !self.counted.is_empty() {
                     self.mark_counted_domains(executor.backend_mut(), &mut round);

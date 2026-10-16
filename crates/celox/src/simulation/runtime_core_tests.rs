@@ -865,3 +865,175 @@ fn processes_leave_the_flip_flop_path_of_a_time_slot_unchanged() {
         check(threads);
     }
 }
+
+/// A domain evaluated twice before the NBA region publishes 1 and then 0
+/// to `q`: a process waiting for any change of `q` sees the pulse although
+/// `q` ends at its old value.
+fn republished(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Republished", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let data = d.internal("data", 1, 0);
+    let q = d.output("q", 1, 0);
+    let changes = d.output("changes", 8, 0);
+    let read = d.read(data);
+    d.register(q, read, clk, Edge::Posedge);
+    let body = vec![
+        d.delay(1),
+        d.set(data, 1),
+        d.set(clk, 1),
+        d.inactive_delay(0),
+        d.set(clk, 0),
+        d.set(data, 0),
+        d.inactive_delay(0),
+        d.set(clk, 1),
+    ];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(q, EventEdge::Change), d.increment(changes)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn every_publication_of_a_domain_is_an_update() {
+    for four_state in [false, true] {
+        let artifact = republished(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Republished", |sim| {
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "q"), 0);
+            assert_eq!(
+                value(&mut sim, "changes"),
+                1,
+                "q was 1 between the publications"
+            );
+        });
+    }
+}
+
+/// A queued nonblocking assignment returns to the runtime between the two
+/// writes of `clk`; the pulse is still an edge for waits and registers.
+fn pulse_around_nba(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("PulseAroundNba", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let r = d.internal("r", 8, 0);
+    let waits = d.output("waits", 8, 0);
+    let ffs = d.output("ffs", 8, 0);
+    d.counter(ffs, clk);
+    let one = d.constant(1, 8);
+    let two = d.constant(2, 8);
+    // Two sites assign `r`, so both go through the queue.
+    let body = vec![
+        d.delay(1),
+        d.set(clk, 1),
+        d.nonblocking(r, one),
+        d.set(clk, 0),
+        d.nonblocking(r, two),
+    ];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(clk, EventEdge::Posedge), d.increment(waits)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn a_pulse_around_a_queued_nonblocking_assignment_is_an_edge() {
+    for four_state in [false, true] {
+        let artifact = pulse_around_nba(four_state);
+        on_every_backend!(builder(&artifact, four_state), "PulseAroundNba", |sim| {
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "r"), 2);
+            assert_eq!(value(&mut sim, "waits"), 1);
+            assert_eq!(value(&mut sim, "ffs"), 1);
+        });
+    }
+}
+
+#[test]
+fn host_write_pulses_survive_checkpoints_and_state_files() {
+    // A pulse written by the host and saved before the step that shows it
+    // to the waits.
+    let artifact = waiting(false);
+    on_every_backend!(builder(&artifact, false), "Waiting", |sim| {
+        let go = sim.signal("go");
+        sim.modify(|io| io.set(go, 0u8)).unwrap();
+        sim.run_until(1).unwrap();
+        sim.modify(|io| {
+            io.set(go, 1u8);
+            io.set(go, 0u8);
+        })
+        .unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let file = sim.save_state().unwrap();
+        sim.run_until(2).unwrap();
+        assert_eq!(value(&mut sim, "wakes"), 1);
+        sim.restore(&saved).unwrap();
+        sim.run_until(2).unwrap();
+        assert_eq!(
+            value(&mut sim, "wakes"),
+            1,
+            "restored with the pending pulse"
+        );
+        sim.load_state(&file).unwrap();
+        assert_eq!(value(&mut sim, "wakes"), 0);
+        sim.run_until(2).unwrap();
+        assert_eq!(value(&mut sim, "wakes"), 1, "loaded with the pending pulse");
+    });
+}
+
+#[test]
+fn loading_a_finished_state_freezes_the_simulation() {
+    let artifact = finishing(false);
+    on_every_backend!(builder(&artifact, false), "Finishing", |sim| {
+        let clk = sim.signal("clk");
+        sim.modify(|io| io.set(clk, 0u8)).unwrap();
+        let start = sim.save_state().unwrap();
+        sim.run_until(10).unwrap();
+        assert!(sim.is_finished());
+        let finished = sim.save_state().unwrap();
+        sim.load_state(&start).unwrap();
+        assert!(!sim.is_finished());
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 5u8)).unwrap();
+        assert_eq!(
+            value(&mut sim, "a"),
+            5,
+            "an unfinished state accepts writes"
+        );
+        sim.load_state(&finished).unwrap();
+        assert!(sim.is_finished());
+        sim.modify(|io| io.set(a, 7u8)).unwrap();
+        assert_eq!(value(&mut sim, "a"), 1, "a finished state is frozen");
+    });
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn finish_during_a_direct_settle_ends_the_simulation() {
+    const SOURCE: &str = r#"
+module Top(input logic go, output logic [7:0] y);
+    always_comb begin
+        y = go ? 8'd1 : 8'd0;
+        if (go) $finish;
+    end
+endmodule
+"#;
+    let build = || {
+        Simulator::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
+            .emit_triggers()
+    };
+    on_every_backend!(build(), "Top", |sim| {
+        let go = sim.signal("go");
+        sim.modify(|io| io.set(go, 0u8)).unwrap();
+        sim.eval_comb().unwrap();
+        assert!(!sim.is_finished());
+        sim.modify(|io| io.set(go, 1u8)).unwrap();
+        sim.eval_comb().unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.next_event_time(), None);
+        sim.modify(|io| io.set(go, 0u8)).unwrap();
+        assert_eq!(value(&mut sim, "y"), 1, "frozen at the finish");
+    });
+}

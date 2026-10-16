@@ -16,6 +16,9 @@ use celox_runtime::{
 pub struct SimulationCheckpoint<B: SimBackend = crate::DefaultBackend> {
     simulator: Checkpoint,
     schedule: SimulationSnapshot<B>,
+    /// Host writes of waited signals the next step has yet to show the
+    /// waits.
+    host_writes: Vec<(SignalRef, celox_runtime::timing::Value)>,
 }
 
 impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
@@ -23,6 +26,7 @@ impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
         Self {
             simulator: self.simulator.clone(),
             schedule: self.schedule.clone(),
+            host_writes: self.host_writes.clone(),
         }
     }
 }
@@ -422,6 +426,7 @@ impl<B: SimBackend> Simulation<B> {
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
+            host_writes: self.simulator.host_watch.log().to_vec(),
         })
     }
 
@@ -430,7 +435,9 @@ impl<B: SimBackend> Simulation<B> {
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
         let mut file = self.simulator.save_state()?;
         let parts = self.state.export_schedule(&self.simulator.backend);
-        file.schedule = Some(self.simulator.name_schedule(parts));
+        let mut record = self.simulator.name_schedule(parts);
+        record.processes.host_writes = self.simulator.name_host_writes();
+        file.schedule = Some(record);
         Ok(file)
     }
 
@@ -441,8 +448,13 @@ impl<B: SimBackend> Simulation<B> {
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
         let parts = self.simulator.resolve_schedule(record)?;
+        let host_writes = self
+            .simulator
+            .resolve_host_writes(&record.processes.host_writes)?;
         self.simulator.load_state(file)?;
         self.state.import_schedule(parts);
+        self.simulator.host_watch.set_log(host_writes);
+        self.simulator.frozen = self.state.is_finished();
         Ok(())
     }
 
@@ -464,17 +476,32 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)
+        self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator
+            .host_watch
+            .set_log(checkpoint.host_writes.clone());
+        Ok(())
+    }
+
+    /// A `$finish` that flip-flop or combinational code executed outside a
+    /// step, during a direct settle, read or dump, ends the simulation too.
+    fn sync_finish(&mut self) {
+        if !self.state.is_finished() && self.simulator.take_runtime_finish() {
+            self.state.finish(&mut self.simulator);
+        }
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         self.simulator.dump(timestamp);
+        self.sync_finish();
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
-        self.simulator.try_dump(timestamp)
+        let result = self.simulator.try_dump(timestamp);
+        self.sync_finish();
+        result
     }
 
     /// See [`Simulator::switch_vcd`].
@@ -493,19 +520,23 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
-        self.simulator.get(signal)
+        let value = self.simulator.get(signal);
+        self.sync_finish();
+        value
     }
 
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
-    /// A write that changes an event signal or a signal a process waits on
-    /// is an update of the current time: the next [`Self::step`] or
-    /// [`Self::run_until`] settles the current time before advancing.
+    /// A write that changes an event signal, and any write in a design with
+    /// processes, is an update of the current time: the next [`Self::step`]
+    /// or [`Self::run_until`] settles the current time before advancing.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
-        self.simulator.modify(f)?;
+        let result = self.simulator.modify(f);
+        self.sync_finish();
+        result?;
         let logged = self.simulator.host_watch.has_log();
         self.state.note_host_writes(&self.simulator.backend, logged);
         Ok(())
@@ -624,7 +655,9 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.simulator.eval_comb()
+        let result = self.simulator.eval_comb();
+        self.sync_finish();
+        result
     }
 
     /// Returns a raw pointer to the backend memory and its total size in bytes.

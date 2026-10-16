@@ -152,6 +152,16 @@ impl HostWatch {
         }
     }
 
+    /// The logged values of waited signals, in write order.
+    pub fn log(&self) -> &[(SignalRef, Value)] {
+        &self.log
+    }
+
+    /// Replace the log, as when returning to a saved state.
+    pub fn set_log(&mut self, log: Vec<(SignalRef, Value)>) {
+        self.log = log;
+    }
+
     /// Take the logged values of waited signals, in write order.
     pub fn take_log(&mut self) -> Vec<(SignalRef, Value)> {
         std::mem::take(&mut self.log)
