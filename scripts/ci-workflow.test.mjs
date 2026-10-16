@@ -221,7 +221,7 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   const lint = job("lint");
   assert.match(
     lint,
-    /name: Check CI runtime dependency exclusions and test scopes\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs scripts\/ci-rust-scope\.test\.mjs/,
+    /name: Check CI runtime dependency exclusions and test scopes\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs scripts\/ci-rust-scope\.test\.mjs scripts\/ci-lydite-changes\.test\.mjs/,
   );
 });
 
