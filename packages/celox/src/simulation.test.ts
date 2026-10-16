@@ -65,6 +65,18 @@ function createMockNative(opts?: {
 			view.setUint8(4, view.getUint8(2));
 			currentTime = endTime;
 		}),
+		runUntilBounded: vi
+			.fn()
+			.mockImplementation((endTime: number, maxSteps: number) => {
+				let steps = 0;
+				while (nextScheduledTime != null && nextScheduledTime <= endTime) {
+					if (steps >= maxSteps) return false;
+					handle.step();
+					steps++;
+				}
+				handle.runUntil(endTime);
+				return true;
+			}),
 		step: vi.fn().mockImplementation(processNextEvent),
 		time: vi.fn().mockImplementation(() => currentTime),
 		nextEventTime: vi.fn().mockImplementation(() => nextScheduledTime),

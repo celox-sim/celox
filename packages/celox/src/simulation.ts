@@ -437,9 +437,9 @@ export class Simulation<P = Record<string, unknown>> {
 	 * Run the simulation until the given time.
 	 * Processes all scheduled events up to and including `endTime`.
 	 *
-	 * When `maxSteps` is provided, steps are counted in TS and a
-	 * `SimulationTimeoutError` is thrown if the budget is exhausted before
-	 * reaching `endTime`. Without `maxSteps` the fast Rust path is used.
+	 * When `maxSteps` is provided, the Rust run loop takes at most that many
+	 * steps and a `SimulationTimeoutError` is thrown if the budget is
+	 * exhausted before reaching `endTime`.
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
@@ -451,29 +451,18 @@ export class Simulation<P = Record<string, unknown>> {
 			return;
 		}
 		const max = opts.maxSteps;
-		let steps = 0;
-		if (this._handle.time() >= endTime) {
-			return;
+		// Nothing is due before the target: keep pending inputs for lazy
+		// evaluation.
+		if (this._handle.time() >= endTime) return;
+		if (!this._handle.runUntilBounded(endTime, max)) {
+			// A step took the pending inputs unless none was allowed.
+			if (max > 0) this._state.dirty = false;
+			throw new SimulationTimeoutError(
+				`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
+				this._handle.time(),
+				max,
+			);
 		}
-		while (true) {
-			const nextEventTime = this._handle.nextEventTime();
-			if (nextEventTime == null || nextEventTime > endTime) break;
-			if (steps >= max) {
-				throw new SimulationTimeoutError(
-					`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
-					this._handle.time(),
-					steps,
-				);
-			}
-			const t = this._handle.step();
-			if (t == null) break;
-			this._state.dirty = false;
-			steps++;
-		}
-		// Match the native fast path: after all events due by endTime have been
-		// processed, advance the clock exactly to endTime without consuming a
-		// later event, and perform the native path's final dump.
-		this._handle.runUntil(endTime);
 		this._state.dirty = false;
 	}
 

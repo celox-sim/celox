@@ -199,6 +199,11 @@ export interface NativeSimulationHandle {
 	addClock(eventId: number, period: number, initialDelay: number): void;
 	schedule(eventId: number, time: number, value: number): void;
 	runUntil(endTime: number): void;
+	/**
+	 * Advance until `endTime` taking at most `maxSteps` steps; `false` when
+	 * the steps ran out first, at the time of the last step.
+	 */
+	runUntilBounded(endTime: number, maxSteps: number): boolean;
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
