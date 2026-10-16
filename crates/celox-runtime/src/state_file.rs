@@ -36,7 +36,9 @@
 //! bytes: byte length u32 | little-endian bytes
 //! ```
 //!
-//! Version 1 files, which have no process section, still load.
+//! Version 1 files, which have no process section, still load. A file whose
+//! processes have nothing to record is written as version 1, which older
+//! builds read too.
 
 use std::io::{self, Read, Write};
 
@@ -192,7 +194,12 @@ impl StateFile {
     pub fn write_to(&self, mut writer: impl Write) -> io::Result<()> {
         let w = &mut writer;
         w.write_all(MAGIC)?;
-        put_u16(w, VERSION)?;
+        let processes = self
+            .schedule
+            .as_ref()
+            .map(|schedule| &schedule.processes)
+            .filter(|processes| **processes != ProcessRecord::default());
+        put_u16(w, if processes.is_some() { VERSION } else { 1 })?;
         let mut flags = 0;
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
@@ -241,7 +248,9 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
-            put_processes(w, &schedule.processes)?;
+            if let Some(processes) = processes {
+                put_processes(w, processes)?;
+            }
         }
         Ok(())
     }
@@ -693,15 +702,16 @@ mod tests {
     }
 
     #[test]
-    fn reads_version_1_files_without_processes() {
+    fn files_without_process_state_are_version_1() {
         let mut file = sample();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 2u16.to_le_bytes());
         file.schedule.as_mut().unwrap().processes = ProcessRecord::default();
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
-        // Version 1 ends after the high events: drop the empty process
-        // section (seven counts and two flags).
-        bytes.truncate(bytes.len() - (7 * 4 + 2));
-        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        // Version 1 ends after the high events.
+        assert_eq!(bytes[8..10], 1u16.to_le_bytes());
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 
