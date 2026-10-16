@@ -1385,9 +1385,10 @@ fn a_pulse_across_two_waves_of_a_slot_is_an_edge() {
     }
 }
 
-/// Processes that keep resuming at one time, through `#0` or by waking
-/// each other, exhaust the slot's budget instead of hanging a step.
-fn zero_time_loops(four_state: bool) -> [FrontendArtifact; 2] {
+/// Processes that keep resuming at one time, through `#0`, by waking each
+/// other or in a loop without a timing control, exhaust the slot's budget
+/// instead of hanging a step.
+fn zero_time_loops(four_state: bool) -> [FrontendArtifact; 3] {
     let mut d = Design::new("InactiveLoop", four_state);
     let body = vec![
         d.delay(1),
@@ -1415,18 +1416,30 @@ fn zero_time_loops(four_state: bool) -> [FrontendArtifact; 2] {
     d.module.process(body).unwrap();
     let body = vec![d.delay(1), d.set(ping, 1)];
     d.module.process(body).unwrap();
-    [inactive, d.finish()]
+    let ping_pong = d.finish();
+
+    let mut d = Design::new("Spin", four_state);
+    let count = d.output("count", 8, 0);
+    let body = vec![
+        d.delay(1),
+        Statement::Forever {
+            body: vec![d.increment(count)],
+        },
+    ];
+    d.module.process(body).unwrap();
+    [inactive, ping_pong, d.finish()]
 }
 
 #[test]
 fn zero_time_loops_exhaust_the_slot_budget() {
     for four_state in [false, true] {
-        for (artifact, top) in zero_time_loops(four_state)
-            .into_iter()
-            .zip(["InactiveLoop", "PingPong"])
+        for (artifact, top) in
+            zero_time_loops(four_state)
+                .into_iter()
+                .zip(["InactiveLoop", "PingPong", "Spin"])
         {
             on_every_backend!(builder(&artifact, four_state), top, |sim| {
-                sim.state.set_slot_budgets(256, 1 << 24);
+                sim.state.set_slot_budgets(256, 256);
                 sim.run_until(0).unwrap();
                 let error = sim.run_until(5).unwrap_err();
                 assert!(
@@ -1434,6 +1447,7 @@ fn zero_time_loops_exhaust_the_slot_budget() {
                         &error,
                         crate::RuntimeErrorCode::Runtime { message, .. }
                             if message.contains("does not settle")
+                                || message.contains("does not suspend")
                     ),
                     "{error}"
                 );

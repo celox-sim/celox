@@ -1154,6 +1154,21 @@ fn store_assignment(
 
 /// Lower `statements` at the kernel's open block. Returns whether control
 /// can continue after them; if not, no block is left open.
+/// Whether `statements` always suspend the process: a loop around them
+/// returns to the runtime in each iteration. A level wait whose condition
+/// holds does not suspend.
+fn always_suspends(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::Delay { .. } | Statement::InactiveDelay { .. } | Statement::WaitEvent { .. }
+        )
+    })
+}
+
+/// Lower `statements` into `kernel`. A loop whose body may not suspend
+/// yields at the end of each iteration, so that the runtime charges it
+/// against the time slot's budget instead of spinning in the kernel.
 fn lower_statements(
     lowering: &mut ProcessLowering<'_, '_>,
     kernel: &mut ProcessKernelBuilder,
@@ -1211,6 +1226,9 @@ fn lower_statements(
                 });
                 builder.switch_to_block(body_block);
                 if lower_statements(lowering, kernel, body)? {
+                    if !always_suspends(body) {
+                        kernel.yield_now()?;
+                    }
                     kernel
                         .builder()
                         .seal_block(SIRTerminator::Jump(header, Vec::new()));
@@ -1223,6 +1241,9 @@ fn lower_statements(
                 builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
                 builder.switch_to_block(header);
                 if lower_statements(lowering, kernel, body)? {
+                    if !always_suspends(body) {
+                        kernel.yield_now()?;
+                    }
                     kernel
                         .builder()
                         .seal_block(SIRTerminator::Jump(header, Vec::new()));
