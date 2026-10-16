@@ -129,7 +129,26 @@ static PLI_INT32 start(p_cb_data) {
     return commands(nullptr);
 }
 
+static PLI_INT32 resume_settle(p_cb_data cb) {
+    s_vpi_value value{}; value.format = vpiIntVal; value.value.integer = 1;
+    vpi_put_value(reinterpret_cast<vpiHandle>(cb->user_data), &value, nullptr, vpiNoDelay);
+    return 0;
+}
+static PLI_INT32 request_settle(PLI_BYTE8*) {
+    vpiHandle call = vpi_handle(vpiSysTfCall, nullptr);
+    vpiHandle args = vpi_iterate(vpiArgument, call);
+    vpiHandle ready = vpi_scan(args);
+    s_vpi_time time{}; time.type = vpiSimTime;
+    s_cb_data cb{}; cb.reason = cbReadWriteSynch; cb.cb_rtn = resume_settle;
+    cb.time = &time; cb.user_data = reinterpret_cast<PLI_BYTE8*>(ready);
+    vpi_register_cb(&cb);
+    return 0;
+}
 static void register_suite() {
+    s_vpi_systf_data settle{}; settle.type = vpiSysTask;
+    settle.tfname = const_cast<char*>("$celox_suite_settle"); settle.calltf = request_settle;
+    vpi_register_systf(&settle);
+
     s_vpi_systf_data finish{};
     finish.type = vpiSysTask;
     finish.tfname = const_cast<char*>("$celox_suite_finish");
