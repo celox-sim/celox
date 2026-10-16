@@ -411,6 +411,8 @@ impl<B: SimBackend> SimulationState<B> {
         match self.step_time(executor) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
+                // The waveform records the state at the finish.
+                executor.finish_timed_step(self.scheduler.time);
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }
@@ -785,9 +787,14 @@ impl<B: SimBackend> SimulationState<B> {
     /// signal triggers, against the values of the last settled round.
     #[inline]
     fn mark_scheduled_edges(&self, backend: &mut B, round: &mut Round, values: &[(usize, bool)]) {
-        for &(id, is_nonzero) in values {
+        for (index, &(id, is_nonzero)) in values.iter().enumerate() {
             round.track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
+            // A signal written again compares with its preceding value.
+            let was_nonzero = values[..index]
+                .iter()
+                .rev()
+                .find(|(earlier, _)| *earlier == id)
+                .map_or_else(|| self.last_clock_values.contains(id), |(_, value)| *value);
             if was_nonzero != is_nonzero
                 && self
                     .combinational_derived
@@ -1057,6 +1064,13 @@ impl<B: SimBackend> SimulationState<B> {
         if updates.is_empty() {
             return false;
         }
+        // Several updates may pulse an event signal: each is an update the
+        // event domains see, not only the final value.
+        let several = updates.len() > 1;
+        if several {
+            self.event_values(executor.backend(), &mut round.before);
+            round.transitions.clear();
+        }
         for update in updates {
             let backend = executor.backend_mut();
             let merged = update.merge_into(&read(backend, update.target));
@@ -1068,6 +1082,15 @@ impl<B: SimBackend> SimulationState<B> {
                     backend.set_wide(target, merged.0);
                 }
             });
+            if several {
+                self.record_transitions(executor.backend(), round);
+            }
+        }
+        if several {
+            let transitions = std::mem::take(&mut round.transitions);
+            self.mark_occurrences(executor.backend_mut(), round, &transitions);
+            round.transitions = transitions;
+            round.transitions.clear();
         }
         round.track_stable_edges = true;
         true
@@ -1235,6 +1258,7 @@ impl<B: SimBackend> SimulationState<B> {
                 Ok(Some(time))
             }
             Err(Halt::Finish) => {
+                executor.finish_timed_step(time);
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }

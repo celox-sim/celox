@@ -1453,6 +1453,17 @@ fn lower_comb_processes(
             }
         }
         targets.sort_unstable_by_key(|atom| (atom.id, atom.access.lsb, atom.access.msb));
+        // One path per range the process drives, however often it writes it.
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for target in targets {
+            match merged.last_mut() {
+                Some(last) if last.id == target.id && target.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(target.access.msb);
+                }
+                _ => merged.push(target),
+            }
+        }
+        let targets = merged;
         let written: HashSet<SourceVarId> = targets.iter().map(|atom| atom.id).collect();
         let mut reads = HashSet::default();
         statement_sources(artifact, process.body(), &mut reads)?;

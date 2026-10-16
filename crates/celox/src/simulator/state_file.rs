@@ -599,10 +599,25 @@ impl<B: SimBackend> Simulator<B> {
                 .filter(|site| site.process == index)
                 .collect::<Vec<_>>();
             let site = usize::try_from(waiter.site).ok();
-            if !site
-                .and_then(|site| sites.get(site))
-                .is_some_and(|site| site.terms.len() == waiter.baselines.len())
-            {
+            // Each baseline has the kind of its term: a counter for a
+            // counted signal, a value otherwise.
+            let counted = |signal: &crate::AbsoluteAddr| {
+                self.program
+                    .runtime_schema
+                    .watches
+                    .iter()
+                    .any(|watch| watch.signal == *signal)
+            };
+            if !site.and_then(|site| sites.get(site)).is_some_and(|site| {
+                site.terms.len() == waiter.baselines.len()
+                    && site
+                        .terms
+                        .iter()
+                        .zip(&waiter.baselines)
+                        .all(|((signal, _), baseline)| {
+                            counted(signal) == matches!(baseline, BaselineRecord::Counter(_))
+                        })
+            }) {
                 unknown.push(format!("{} wait site {}", waiter.process, waiter.site));
                 continue;
             }

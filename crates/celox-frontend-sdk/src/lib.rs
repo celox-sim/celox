@@ -1609,17 +1609,24 @@ fn collect_process_targets(statements: &[Statement], targets: &mut Vec<SignalSli
     }
 }
 
-/// The distinct slices a combinational process assigns.
+/// The ranges a combinational process drives: the slices it assigns, with
+/// overlapping or adjacent slices of one signal merged, since one process is
+/// one driver however many times it writes a bit.
 fn comb_process_targets(statements: &[Statement]) -> Vec<SignalSlice> {
     let mut targets = Vec::new();
     collect_process_targets(statements, &mut targets);
-    let mut distinct: Vec<SignalSlice> = Vec::new();
+    targets.sort_by_key(|target| (target.signal, target.lsb));
+    let mut merged: Vec<SignalSlice> = Vec::new();
     for target in targets {
-        if !distinct.contains(&target) {
-            distinct.push(target);
+        match merged.last_mut() {
+            Some(last) if last.signal == target.signal && target.lsb <= last.lsb + last.width => {
+                let end = (last.lsb + last.width).max(target.lsb + target.width);
+                last.width = end - last.lsb;
+            }
+            _ => merged.push(target),
         }
     }
-    distinct
+    merged
 }
 
 fn validate_comb_body(statements: &[Statement]) -> Result<(), BuildError> {
@@ -1852,6 +1859,34 @@ mod tests {
             }]),
             Err(BuildError::ProcessDriverConflict { .. })
         ));
+    }
+
+    #[test]
+    fn a_combinational_process_may_overwrite_part_of_its_own_target() {
+        let byte = ValueType::bits(8).unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Override").unwrap();
+        let a = module.input("a", byte).unwrap();
+        let low = module.input("low", bit).unwrap();
+        let y = module.output("y", byte).unwrap();
+        let read_a = module.read(a).unwrap();
+        let read_low = module.read(low).unwrap();
+        let whole = module.whole(y).unwrap();
+        let first = module.slice(y, 0, 1).unwrap();
+        module
+            .comb_process(vec![
+                Statement::Assign {
+                    target: whole,
+                    value: read_a,
+                },
+                Statement::Assign {
+                    target: first,
+                    value: read_low,
+                },
+            ])
+            .unwrap();
+        let artifact = module.finish();
+        FrontendArtifact::from_json(&artifact.to_json().unwrap()).unwrap();
     }
 
     #[test]

@@ -1106,3 +1106,163 @@ fn state_files_reject_queued_assignments_outside_their_target() {
         Err(crate::StateError::Mismatch(_))
     ));
 }
+
+/// Two processes write a high clock low and then high again in one slot:
+/// the second write is a positive edge although the clock ends where it
+/// started.
+fn low_then_high(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("LowThenHigh", four_state);
+    let clk = d.internal("clk", 1, 1);
+    let ffs = d.output("ffs", 8, 0);
+    d.counter(ffs, clk);
+    let body = vec![d.delay(1), d.set(clk, 0)];
+    d.module.process(body).unwrap();
+    let body = vec![d.delay(1), d.set(clk, 1)];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn a_signal_written_again_compares_with_its_preceding_value() {
+    for four_state in [false, true] {
+        let artifact = low_then_high(four_state);
+        on_every_backend!(builder(&artifact, four_state), "LowThenHigh", |sim| {
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "clk"), 1);
+            assert_eq!(value(&mut sim, "ffs"), 1);
+        });
+    }
+}
+
+/// `clk <= 1; clk <= 0;` from a low clock pulses it in the NBA region.
+fn nba_pulse(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("NbaPulse", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let ffs = d.output("ffs", 8, 0);
+    d.counter(ffs, clk);
+    let one = d.constant(1, 1);
+    let zero = d.constant(0, 1);
+    let body = vec![
+        d.delay(1),
+        d.nonblocking(clk, one),
+        d.nonblocking(clk, zero),
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn queued_nonblocking_pulses_trigger_flip_flops() {
+    for four_state in [false, true] {
+        let artifact = nba_pulse(four_state);
+        on_every_backend!(builder(&artifact, four_state), "NbaPulse", |sim| {
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "clk"), 0);
+            assert_eq!(value(&mut sim, "ffs"), 1);
+        });
+    }
+}
+
+/// A combinational process overwrites part of what it assigned.
+fn comb_override(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("CombOverride", four_state);
+    let a = d.input("a", 8);
+    let low = d.input("low", 1);
+    let y = d.output("y", 8, 0);
+    let read_a = d.read(a);
+    let read_low = d.read(low);
+    let first = d.module.slice(y, 0, 1).unwrap();
+    let body = vec![
+        d.assign(y, read_a),
+        Statement::Assign {
+            target: first,
+            value: read_low,
+        },
+    ];
+    d.module.comb_process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn comb_processes_may_overwrite_their_own_targets() {
+    for four_state in [false, true] {
+        let artifact = comb_override(four_state);
+        on_every_backend!(builder(&artifact, four_state), "CombOverride", |sim| {
+            let a = sim.signal("a");
+            let low = sim.signal("low");
+            sim.modify(|io| {
+                io.set(a, 0xf0u8);
+                io.set(low, 1u8);
+            })
+            .unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "y"), 0xf1);
+        });
+    }
+}
+
+#[test]
+fn the_waveform_records_the_finish() {
+    let artifact = finishing(false);
+    let path = std::env::temp_dir().join(format!("celox-finish-{}.vcd", std::process::id()));
+    let mut sim = Simulation::new(
+        builder(&artifact, false)
+            .vcd(&path)
+            .build_interpreter()
+            .unwrap(),
+    );
+    let clk = sim.signal("clk");
+    sim.modify(|io| io.set(clk, 0u8)).unwrap();
+    sim.add_clock("clk", 2, 1);
+    sim.run_until(20).unwrap();
+    assert!(sim.is_finished());
+    sim.flush_vcd().unwrap();
+    let vcd = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).ok();
+    let last = vcd.lines().rfind(|line| line.starts_with('#'));
+    assert_eq!(last, Some("#4"), "{vcd}");
+}
+
+#[test]
+fn state_files_reject_baselines_of_the_wrong_kind() {
+    let artifact = waiting(false);
+    let mut sim = Simulation::new(builder(&artifact, false).build_interpreter().unwrap());
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 0u8)).unwrap();
+    sim.run_until(1).unwrap();
+    let mut file = sim.save_state().unwrap();
+    let waiters = &mut file.schedule.as_mut().unwrap().processes.waiters;
+    assert_eq!(waiters.len(), 1);
+    // `go` is not counted: its wait compares values.
+    waiters[0].baselines = vec![celox_runtime::BaselineRecord::Counter(0)];
+    assert!(matches!(
+        sim.load_state(&file),
+        Err(crate::StateError::Mismatch(_))
+    ));
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn saving_state_after_a_finishing_write_records_the_finish() {
+    const SOURCE: &str = r#"
+module Top(input logic go, output logic [7:0] y);
+    always_comb begin
+        y = go ? 8'd1 : 8'd0;
+        if (go) $finish;
+    end
+endmodule
+"#;
+    let mut sim = Simulation::new(
+        Simulator::from_sv_sources(vec![(SOURCE, std::path::Path::new("finish.sv"))], "Top")
+            .emit_triggers()
+            .build_interpreter()
+            .unwrap(),
+    );
+    let go = sim.signal("go");
+    sim.modify(|io| io.set(go, 0u8)).unwrap();
+    sim.run_until(0).unwrap();
+    sim.modify(|io| io.set(go, 1u8)).unwrap();
+    let file = sim.save_state().unwrap();
+    assert!(sim.is_finished());
+    assert!(file.schedule.unwrap().processes.finished);
+}

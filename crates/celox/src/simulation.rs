@@ -434,6 +434,8 @@ impl<B: SimBackend> Simulation<B> {
     /// simulation time, clocks and pending events by name.
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
         let mut file = self.simulator.save_state()?;
+        // Settling for the file may have executed a `$finish`.
+        self.sync_finish();
         let parts = self.state.export_schedule(&self.simulator.backend);
         let mut record = self.simulator.name_schedule(parts);
         record.processes.host_writes = self.simulator.name_host_writes();
