@@ -1,0 +1,162 @@
+//! Shared timing-control cases: `#delay`, `@(event)` and `wait` in
+//! processes, driven through the timed `Simulation`.
+//!
+//! Every exclusion names what Celox lacks for the case, so the change that
+//! adds it removes the exclusion. `Simulation` builds only the default
+//! (native) backend, so the other backends are excluded for every case.
+
+macro_rules! timed_cases {
+    () => {};
+    (
+        $(#[$attr:meta])*
+        fn $name:ident = $case:literal;
+        $($rest:tt)*
+    ) => {
+        mod $name {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            $(#[$attr])*
+            fn native() {
+                crate::suite::run_case($case, "native");
+            }
+
+            #[test]
+            #[ignore = "a timed Simulation builds only the default backend"]
+            fn cranelift() {
+                crate::suite::run_case($case, "cranelift");
+            }
+
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            #[test]
+            #[ignore = "a timed Simulation builds only the default backend"]
+            fn native_parallel() {
+                crate::suite::run_case($case, "native-parallel");
+            }
+
+            #[test]
+            #[ignore = "a timed Simulation builds only the default backend"]
+            fn cranelift_parallel() {
+                crate::suite::run_case($case, "cranelift-parallel");
+            }
+
+            #[test]
+            #[ignore = "a timed Simulation builds only the default backend"]
+            fn wasm() {
+                crate::suite::run_case($case, "wasm");
+            }
+        }
+        timed_cases! { $($rest)* }
+    };
+}
+
+timed_cases! {
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn any_change_waits_wake_on_every_value_change = "timing::any_change_waits_wake_on_every_value_change";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn wait_statements_block_until_their_condition_holds = "timing::wait_statements_block_until_their_condition_holds";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn level_sensitive_always_runs_as_a_process = "timing::level_sensitive_always_runs_as_a_process";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn processes_wake_each_other_at_the_same_time = "timing::processes_wake_each_other_at_the_same_time";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88); a timed Simulation has no four-state read"]
+    fn four_state_edges_count_transitions_through_unknown = "timing::four_state_edges_count_transitions_through_unknown";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88); a timed Simulation has no four-state read"]
+    fn unknown_delays_and_conditions_count_as_zero_and_false = "timing::unknown_delays_and_conditions_count_as_zero_and_false";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn direct_reads_settle_waiting_processes = "timing::direct_reads_settle_waiting_processes";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn output_reads_settle_waiting_processes = "timing::output_reads_settle_waiting_processes";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn run_until_drains_target_time_before_later_writes = "timing::run_until_drains_target_time_before_later_writes";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn repeated_settles_do_not_advance_design_time = "timing::repeated_settles_do_not_advance_design_time";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn run_to_finish_has_no_simulated_time_deadline = "timing::run_to_finish_has_no_simulated_time_deadline";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn blocking_ff_stores_are_visible_before_inactive_work = "timing::blocking_ff_stores_are_visible_before_inactive_work";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn mixed_ff_stores_keep_their_active_and_nba_values = "timing::mixed_ff_stores_keep_their_active_and_nba_values";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn printed_finish_notice_is_design_output = "timing::printed_finish_notice_is_design_output";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn combinational_finish_ends_timed_execution = "timing::combinational_finish_ends_timed_execution";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn inactive_time_directives_do_not_change_scheduler_units = "timing::inactive_time_directives_do_not_change_scheduler_units";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn blocking_concatenation_publishes_one_event_update = "timing::blocking_concatenation_publishes_one_event_update";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn finite_active_feedback_preserves_convergence = "timing::finite_active_feedback_preserves_convergence";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn pure_function_rhs_preserves_distinct_write_times = "timing::pure_function_rhs_preserves_distinct_write_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn conditional_writes_preserve_distinct_activation_times = "timing::conditional_writes_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn case_writes_preserve_distinct_activation_times = "timing::case_writes_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_repeat_writes_preserve_distinct_activation_times = "timing::constant_repeat_writes_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn separate_comb_assignments_preserve_selected_dependencies = "timing::separate_comb_assignments_preserve_selected_dependencies";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_for_writes_preserve_distinct_activation_times = "timing::constant_for_writes_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn untimed_tasks_preserve_distinct_activation_times = "timing::untimed_tasks_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn untimed_task_copyback_preserves_distinct_activation_times = "timing::untimed_task_copyback_preserves_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn statically_satisfied_waits_preserve_distinct_activation_times = "timing::statically_satisfied_waits_preserve_distinct_activation_times";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn nba_woken_waiters_sample_before_continuations = "timing::nba_woken_waiters_sample_before_continuations";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn negative_repeat_counts_do_not_run_the_body = "timing::negative_repeat_counts_do_not_run_the_body";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn blocking_ff_woken_waiters_sample_before_continuations = "timing::blocking_ff_woken_waiters_sample_before_continuations";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn direct_blocking_ff_woken_waiters_sample_before_continuations = "timing::direct_blocking_ff_woken_waiters_sample_before_continuations";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_variable_initializers_do_not_invent_clock_edges = "timing::constant_variable_initializers_do_not_invent_clock_edges";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn repeated_active_edges_share_one_nba_batch = "timing::repeated_active_edges_share_one_nba_batch";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn false_wait_preserves_separate_hierarchical_write_times = "timing::false_wait_preserves_separate_hierarchical_write_times";
+    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    fn always_timed_task_without_inline_timing_executes = "timing::always_timed_task_without_inline_timing_executes";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_comb_if_discards_unreachable_pulse_branch = "timing::constant_comb_if_discards_unreachable_pulse_branch";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_child_ff_case_discards_unreachable_pulse_arm = "timing::constant_child_ff_case_discards_unreachable_pulse_arm";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_child_loop_exit_keeps_one_write = "timing::constant_child_loop_exit_keeps_one_write";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn constant_child_case_exit_keeps_one_write = "timing::constant_child_case_exit_keeps_one_write";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn four_state_child_if_keeps_one_write = "timing::four_state_child_if_keeps_one_write";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn selected_child_dependency_ignores_unreachable_reads = "timing::selected_child_dependency_ignores_unreachable_reads";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn selected_child_loop_exit_ignores_unreachable_suffix = "timing::selected_child_loop_exit_ignores_unreachable_suffix";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn finite_process_loop_preserves_continuation_values = "timing::finite_process_loop_preserves_continuation_values";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn zero_trip_child_dependencies_ignore_body_and_step = "timing::zero_trip_child_dependencies_ignore_body_and_step";
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
+    fn cross_file_package_initializers_keep_static_clock_baseline = "timing::cross_file_package_initializers_keep_static_clock_baseline";
+    fn initial_blocks_run_at_time_zero = "timing::initial_blocks_run_at_time_zero";
+    #[ignore = "a host write to a clock does not trigger its flip-flops in a timed Simulation"]
+    fn host_edges_after_time_zero_clock_flip_flops = "timing::host_edges_after_time_zero_clock_flip_flops";
+}

@@ -3,6 +3,7 @@
 use crate::process::write_if_changed;
 use crate::script::ScriptCase;
 use crate::script::sv::{DesignInfo, TESTBENCH_TOP, testbench as generate_testbench};
+use crate::script::timed::validate_timed_design_with_defines;
 use crate::verification::{EmissionError, panic_message};
 use crate::{Design, Expectation, Result};
 use std::collections::BTreeMap;
@@ -11,6 +12,11 @@ use std::path::{Path, PathBuf};
 
 /// The module that instantiates the top with a rejection case's parameters.
 const PARAMETERS_TOP: &str = "celox_suite_parameters";
+
+/// The time scale a timed design is compiled with: a script time unit is
+/// 1 ns, and the generated testbench settles without advancing time. The
+/// directive persists across the files that follow it in one compilation.
+const TIMESCALE: &str = "`timescale 1ns/1ps\n";
 
 /// A design translated to SystemVerilog for an external simulator.
 pub struct PreparedDesign {
@@ -45,13 +51,16 @@ pub(crate) struct Staged {
 }
 
 /// Write the original and translated sources of `design`, and for a script
-/// case that simulates, the generated testbench, into `directory`.
+/// case that simulates, the generated testbench, into `directory`. `defines`
+/// are the macros the adapter's compiler predefines.
 pub(crate) fn stage(
     frontend: &dyn Frontend,
     design: &Design,
     directory: &Path,
     script: Option<&ScriptCase>,
+    defines: &[&str],
 ) -> Result<Staged> {
+    validate_timed_design_with_defines(design, defines)?;
     fs::create_dir_all(directory)?;
     let directory = fs::canonicalize(directory)?;
     for (index, source) in design.sources.iter().enumerate() {
@@ -64,6 +73,11 @@ pub(crate) fn stage(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frontend.prepare(design)))
             .map_err(|error| EmissionError(panic_message(error.as_ref())))??;
     let mut paths = Vec::new();
+    if design.timed {
+        let timescale = directory.join("timescale.sv");
+        write_if_changed(&timescale, TIMESCALE.as_bytes())?;
+        paths.push(timescale);
+    }
     for (index, source) in prepared.sources.iter().enumerate() {
         let path = directory.join(format!("source_{index}.sv"));
         write_if_changed(&path, source.as_bytes())?;
