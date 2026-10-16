@@ -556,8 +556,10 @@ export class Simulation<P = Record<string, unknown>> {
 	/**
 	 * Wait for `count` rising edges of the given clock.
 	 *
-	 * Detects actual 0→1 transitions by reading the clock signal directly
-	 * from the shared buffer (clock ports are excluded from the DUT proxy).
+	 * Detects actual posedges by reading the clock signal directly from the
+	 * shared buffer (clock ports are excluded from the DUT proxy). In a
+	 * four-state simulation, a change from x or z to 1 and from 0 to x or z
+	 * is a posedge too (IEEE 1800-2023 Table 9-2).
 	 * The clock must have been registered via `addClock`.
 	 *
 	 * @returns The simulation time after the edges are observed.
@@ -579,12 +581,20 @@ export class Simulation<P = Record<string, unknown>> {
 			throw new Error(`No layout entry for clock '${clock}'.`);
 		}
 		const view = new DataView(this._buffer);
-		const readClk = () => view.getUint8(sig.offset);
+		// The level of the clock's LSB: 0, 1, or 2 plus the value bit for x
+		// and z, whose mask plane follows the value plane.
+		const maskOffset = sig.is4state ? sig.offset + sig.byteSize : -1;
+		const readClk = () => {
+			const value = view.getUint8(sig.offset) & 1;
+			return maskOffset < 0
+				? value
+				: value | ((view.getUint8(maskOffset) & 1) << 1);
+		};
 		let prev = readClk();
 		let remaining = count;
 		return this.waitUntil(() => {
 			const curr = readClk();
-			if (prev === 0 && curr !== 0) remaining--;
+			if (prev !== 1 && curr !== 0 && (prev & curr & 2) === 0) remaining--;
 			prev = curr;
 			return remaining <= 0;
 		}, opts);
