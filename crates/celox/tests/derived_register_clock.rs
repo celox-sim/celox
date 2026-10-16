@@ -788,3 +788,77 @@ fn a_systemverilog_clock_copy_sensed_at_the_falling_edge() {
             .unwrap(),
     );
 }
+
+#[cfg(feature = "systemverilog")]
+fn check_sv_falling_edges(source: &str) {
+    let path = std::path::Path::new("derived_register_clock.sv");
+    check_falling_edges(
+        Simulation::from_sv_sources(vec![(source, path)], "Top")
+            .build()
+            .unwrap(),
+    );
+}
+
+/// A copy of a copy takes its edge from the end of the chain that is sensed.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_systemverilog_chain_of_clock_copies_sensed_at_the_falling_edge() {
+    check_sv_falling_edges(
+        "module Top(input logic clk, input logic rst, output logic [7:0] cnt);
+           logic c, d;
+           logic [7:0] a;
+           assign c = clk;
+           assign d = c;
+           always_ff @(posedge clk or negedge rst) if (!rst) a <= 0; else a <= a + 1;
+           always_ff @(negedge d or negedge rst) if (!rst) cnt <= 0; else cnt <= cnt + 1;
+         endmodule",
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_systemverilog_chain_of_clock_copies_through_a_child_port() {
+    check_sv_falling_edges(
+        "module Child(input logic k, input logic rst, output logic [7:0] cnt);
+           logic j;
+           assign j = k;
+           always_ff @(negedge j or negedge rst) if (!rst) cnt <= 0; else cnt <= cnt + 1;
+         endmodule
+         module Top(input logic clk, input logic rst, output logic [7:0] cnt);
+           logic c;
+           logic [7:0] a;
+           assign c = clk;
+           always_ff @(posedge clk or negedge rst) if (!rst) a <= 0; else a <= a + 1;
+           Child u(.k(c), .rst(rst), .cnt(cnt));
+         endmodule",
+    );
+}
+
+/// Copies of a clock that is itself sensed at no edge, one at each edge.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn a_systemverilog_unsensed_clock_copied_to_both_edges() {
+    for (first, second) in [("posedge c", "negedge d"), ("negedge d", "posedge c")] {
+        let block = |edge: &str| {
+            if edge.ends_with('c') {
+                format!("always_ff @({edge} or negedge rst) if (!rst) a <= 0; else a <= a + 1;")
+            } else {
+                format!(
+                    "always_ff @({edge} or negedge rst) if (!rst) cnt <= 0; else cnt <= cnt + 1;"
+                )
+            }
+        };
+        check_sv_falling_edges(&format!(
+            "module Top(input logic clk, input logic rst, output logic [7:0] cnt);
+               logic c, d;
+               logic [7:0] a;
+               assign c = clk;
+               assign d = clk;
+               {}
+               {}
+             endmodule",
+            block(first),
+            block(second),
+        ));
+    }
+}

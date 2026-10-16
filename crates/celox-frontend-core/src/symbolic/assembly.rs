@@ -1809,6 +1809,8 @@ fn unify_clock_domains(
     modules: &HashMap<ModuleId, SimModule>,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
+    // The edge each clock is sensed at: `true` rising, `false` falling.
+    let mut polarities: HashMap<AbsoluteAddr, bool> = HashMap::default();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -1820,20 +1822,20 @@ fn unify_clock_domains(
                 .get(&var)
                 .map(|variable| variable.metadata.width)
         };
-        // A copy sensed at the opposite edge of its source is a clock of its
-        // own: `always_ff @(negedge c)` with `assign c = clk` runs when `clk`
-        // falls, not with `clk`'s rising domain.
-        let polarity = |module: &SimModule, var: SourceVarId| {
-            module
-                .variables
-                .get(&var)
-                .and_then(|variable| match variable.metadata.kind {
-                    DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
-                    DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
-                    _ => None,
-                })
+        let mut record_polarity = |module: &SimModule, instance: InstanceId, var: SourceVarId| {
+            let polarity =
+                module
+                    .variables
+                    .get(&var)
+                    .and_then(|variable| match variable.metadata.kind {
+                        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
+                        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
+                        _ => None,
+                    });
+            if let Some(polarity) = polarity {
+                polarities.insert(bindings.locate(instance, var), polarity);
+            }
         };
-        let same_edge = |a: Option<bool>, b: Option<bool>| a.is_none() || b.is_none() || a == b;
 
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
@@ -1845,8 +1847,9 @@ fn unify_clock_domains(
                 logic_path,
                 |target| width(sim_module, target),
                 |source| width(sim_module, source),
-            ) && same_edge(polarity(sim_module, target), polarity(sim_module, source))
-            {
+            ) {
+                record_polarity(sim_module, *id, target);
+                record_polarity(sim_module, *id, source);
                 drive_graph
                     .entry(bindings.locate(*id, source))
                     .or_default()
@@ -1868,11 +1871,9 @@ fn unify_clock_domains(
                 for (_, logic_path) in &glue_block.input_ports {
                     if let Some((GlueAddr::Child(child_var), GlueAddr::Parent(parent_var))) =
                         whole_variable_copy(&glue_block.arena, logic_path, glue_width, glue_width)
-                        && same_edge(
-                            polarity(child_module, child_var),
-                            polarity(sim_module, parent_var),
-                        )
                     {
+                        record_polarity(child_module, child_id, child_var);
+                        record_polarity(sim_module, *id, parent_var);
                         drive_graph
                             .entry(bindings.locate(*id, parent_var))
                             .or_default()
@@ -1890,10 +1891,9 @@ fn unify_clock_domains(
                         logic_path,
                         |_| parent_width,
                         glue_width,
-                    ) && same_edge(
-                        polarity(child_module, child_var),
-                        polarity(sim_module, *parent_var),
                     ) {
+                        record_polarity(child_module, child_id, child_var);
+                        record_polarity(sim_module, *id, *parent_var);
                         drive_graph
                             .entry(bindings.locate(child_id, child_var))
                             .or_default()
@@ -1903,6 +1903,68 @@ fn unify_clock_domains(
             }
         }
     }
+
+    // A copy sensed at the opposite edge of its source is a clock of its own:
+    // `always_ff @(negedge d)` with `assign c = clk; assign d = c;` runs when
+    // `clk` falls, not in `clk`'s rising domain. A copy sensed at no edge
+    // takes the edge of its drivers, and a root sensed at no edge the edge of
+    // its first copy sensed at one. Copies that join edges of both kinds are
+    // cut apart.
+    let drivers = {
+        let mut drivers: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
+        for (src, sinks) in &drive_graph {
+            for sink in sinks {
+                drivers.entry(*sink).or_default().push(*src);
+            }
+        }
+        drivers
+    };
+    let root_polarity = |root: AbsoluteAddr| {
+        polarities.get(&root).copied().or_else(|| {
+            let mut stack = vec![root];
+            let mut visited = HashSet::default();
+            while let Some(addr) = stack.pop() {
+                if !visited.insert(addr) {
+                    continue;
+                }
+                if let Some(&polarity) = polarities.get(&addr) {
+                    return Some(polarity);
+                }
+                if let Some(sinks) = drive_graph.get(&addr) {
+                    stack.extend(sinks.iter().rev());
+                }
+            }
+            None
+        })
+    };
+    let effective_polarity = |addr: AbsoluteAddr| {
+        let mut current = addr;
+        let mut visited = HashSet::default();
+        loop {
+            if let Some(&polarity) = polarities.get(&current) {
+                return Some(polarity);
+            }
+            match drivers.get(&current).and_then(|sources| sources.first()) {
+                Some(&next) if visited.insert(next) => current = next,
+                _ => return root_polarity(current),
+            }
+        }
+    };
+    let drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = drive_graph
+        .iter()
+        .map(|(src, sinks)| {
+            let src_polarity = effective_polarity(*src);
+            let sinks = sinks
+                .iter()
+                .copied()
+                .filter(|sink| match (src_polarity, effective_polarity(*sink)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                })
+                .collect();
+            (*src, sinks)
+        })
+        .collect();
 
     // Resolve Canonical Clock Domains: Find the root driver for each connected component
     let mut clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
