@@ -715,6 +715,121 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 uses the host thread/context RNG for $urandom, so separately seeded design processes interfere when clocked independently. IEEE 1800-2023 18.14.1-2 requires a separate stream per SystemVerilog process, independent of thread execution order. The shared case seeds two module-instance processes identically and compares their streams after alternating activations.",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_keeps_process_and_instance_streams_independent",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_process_state",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 uses the host thread/context RNG for $urandom, so separately seeded design processes interfere when clocked independently. IEEE 1800-2023 18.14.1-2 requires a separate stream per SystemVerilog process, independent of thread execution order. The shared case seeds two module-instance processes identically and compares their streams after alternating activations."
+      }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 treats a zero $urandom seed as an entropy request, so reseeding with zero does not reproduce the sequence. IEEE 1800-2023 18.13.1 permits any integral seed and requires the same sequence for the same seed. A standalone run reports zero_seed_repeat=0 in Verilator and 1 in Icarus; nonzero seeding repeats in both.",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_reseeds_and_shares_the_calling_process_stream",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_zero_seed",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 treats a zero $urandom seed as an entropy request, so reseeding with zero does not reproduce the sequence. IEEE 1800-2023 18.13.1 permits any integral seed and requires the same sequence for the same seed. A standalone run reports zero_seed_repeat=0 in Verilator and 1 in Icarus; nonzero seeding repeats in both."
+      }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved.",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_statement_order",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved."
+      }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved.",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_select_keeps_distinct_source_calls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_statement_order",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 moves an unseeded $urandom draw before the preceding seeded call when optimizing the clocked body, breaking the reseeded reference sequence. Its generated C++ assigns second from VL_RANDOM_I before the preceding VL_URANDOM_SEEDED_II call. IEEE 1800-2023 18.13.1 requires the seed to determine the following stream; 18.14.2 localizes its state to the calling process. The original sequential assertions, short circuits and indexed draw are preserved."
+      }
+    },
+    {
+      "category": "Functions",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_extends_signed_seed_values",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Verilator 5.052 treats a zero $urandom seed as an entropy request, so reseeding with zero does not reproduce the sequence. IEEE 1800-2023 18.13.1 permits any integral seed and requires the same sequence for the same seed. A standalone run reports zero_seed_repeat=0 in Verilator and 1 in Icarus; nonzero seeding repeats in both.",
+      "phase": "skip",
+      "status": "ignored",
+      "known_issue": {
+        "phase": "execute",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_urandom.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_urandom_zero_seed",
+        "category": "simulator_disagreement",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 treats a zero $urandom seed as an entropy request, so reseeding with zero does not reproduce the sequence. IEEE 1800-2023 18.13.1 permits any integral seed and requires the same sequence for the same seed. A standalone run reports zero_seed_repeat=0 in Verilator and 1 in Icarus; nonzero seeding repeats in both."
+      }
     }
   ]
 }

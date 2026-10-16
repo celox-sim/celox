@@ -1,0 +1,175 @@
+{
+  "standard": "IEEE 1800-2023 18.13.1 and 18.14.1-2",
+  "source": "module Top;\n  int seed;\n  int unsigned a, b, c, d, e, ignored;\n  initial begin\n    seed=0; a=$urandom(seed); b=$urandom;\n    seed=0; c=$urandom(seed); d=$urandom;\n    $display(\"zero_seed_repeat=%0d\", a==c && b==d);\n    seed=123; a=$urandom(seed); b=$urandom; c=$urandom;\n    seed=123; ignored=$urandom(seed); d=$urandom; e=$urandom;\n    $display(\"nonzero_seed_repeat=%0d\", b==d && c==e);\n    $finish;\n  end\nendmodule\n",
+  "constant_source": "module Top;\n  int unsigned a;\n  initial begin a=$urandom(123); $display(\"finished=%0d\", a>=0); $finish; end\nendmodule\n",
+  "expected": [
+    "zero_seed_repeat=1",
+    "nonzero_seed_repeat=1",
+    "finished=1"
+  ],
+  "verilator_compile": {
+    "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+    "exit_code": 0
+  },
+  "verilator_run": {
+    "command": "<repro>/obj/VTop",
+    "exit_code": 0,
+    "output": "zero_seed_repeat=0\nnonzero_seed_repeat=1\n- <repro>/probe.sv:11: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 0s; walltime 0.000 s; speed 0.000 s/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+  },
+  "icarus_compile": {
+    "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+    "exit_code": 0
+  },
+  "icarus_run": {
+    "command": "vvp <repro>/probe.vvp",
+    "exit_code": 0,
+    "output": "zero_seed_repeat=1\nnonzero_seed_repeat=1\n<repro>/probe.sv:11: $finish called at 0 (1s)\n"
+  },
+  "icarus_constant_compile": {
+    "command": "iverilog -g2012 -s Top -o <repro>/constant.vvp <repro>/constant.sv",
+    "exit_code": 0
+  },
+  "icarus_constant_run": {
+    "command": "vvp <repro>/constant.vvp",
+    "exit_code": 1,
+    "output": "ERROR: <repro>/constant.sv:3: $urandom's seed must be an integer/time variable or a register.\n"
+  },
+  "note": "Focused shared failures were reviewed against the locally supplied IEEE 1800-2023; passing or unrelated baseline rows are not refreshed.",
+  "shared_failures": {
+    "verilator": [
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_keeps_process_and_instance_streams_independent at 2484:5: assert_eq same: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_keeps_process_and_instance_streams_independent",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_reseeds_and_shares_the_calling_process_stream at 2453:5: assert_eq ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_reseeds_and_shares_the_calling_process_stream",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once at 2508:3: assert_eq ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_select_keeps_distinct_source_calls at 2594:3: assert_eq ff_ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_select_keeps_distinct_source_calls",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::urandom_extends_signed_seed_values at 2623:5: assert_eq ff_ok: expected 0x1, got 0x0",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_extends_signed_seed_values",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      }
+    ],
+    "icarus": [
+      {
+        "category": "Functions",
+        "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_keeps_process_and_instance_streams_independent",
+        "phase": "execute",
+        "status": "runtime_error",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_reseeds_and_shares_the_calling_process_stream",
+        "phase": "execute",
+        "status": "runtime_error",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once",
+        "phase": "execute",
+        "status": "runtime_error",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+        "expectation": "Simulation",
+        "name": "system_functions::urandom_extends_signed_seed_values",
+        "phase": "execute",
+        "status": "runtime_error",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      }
+    ]
+  },
+  "verilator_generated_code_observation": "In the clocked short-circuit/index regression, the generated C++ assigns second = VL_RANDOM_I() before ignored = VL_URANDOM_SEEDED_II(42), reversing the original blocking statement order. In verilated.cpp, VL_URANDOM_SEEDED_II updates the host thread context seed; globalRNG is host thread_local. randSeedDefault64 obtains entropy when seed is zero.",
+  "tool_versions": {
+    "verilator": "Verilator 5.052 2026-09-05 rev v5.052",
+    "icarus": "Icarus Verilog version 13.0 (stable) (v13_0)"
+  },
+  "distinct_index_calls_observation": {
+    "case": "system_functions::urandom_select_keeps_distinct_source_calls",
+    "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "icarus_result": "passed (Icarus 13.0)",
+    "generated_cpp": "a = VL_RANDOM_I(); b = VL_RANDOM_I(); ignored = VL_URANDOM_SEEDED_II(0x00000011U); third = VL_RANDOM_I(); selected |= 1U << ((VL_RANDOM_I() + VL_RANDOM_I()) & 31); actual = VL_RANDOM_I();",
+    "source_order": "seed = 17; ignored = $urandom(seed); a = $urandom; b = $urandom; third = $urandom; seed = 17; ignored = $urandom(seed); selected = 0; selected[($urandom() + $urandom()) & 31] = 1; actual = $urandom;",
+    "finding": "The generated code removes/reorders seeded calls before reference draws. The two calls in the select remain distinct; the mismatch is the existing seeded-statement-order disagreement. Original assertions are retained."
+  },
+  "signed_seed_observation": {
+    "standard": "IEEE 1800-2023 18.13.1: any integral seed expression, with int seed formal",
+    "case": "system_functions::urandom_extends_signed_seed_values",
+    "source": "module Top;\n      function automatic logic check_seed(input logic [7:0] raw);\n        logic signed [7:0] narrow;\n        logic [7:0] unsigned_narrow;\n        int extended, unsigned_extended;\n        int unsigned a, b, c, d;\n        narrow = raw; unsigned_narrow = raw;\n        extended = int'(narrow); unsigned_extended = int'(unsigned_narrow);\n        a = $urandom(narrow); b = $urandom(extended);\n        c = $urandom(unsigned_narrow); d = $urandom(unsigned_extended);\n        return a == b && c == d;\n      endfunction\n      initial begin\n        for (int i = 1; i < 256; i++) begin\n          if (!check_seed(i)) $fatal(1, \"seed extension mismatch at %0d\", i);\n        end\n        $display(\"nonzero_seed_extension=1\");\n        $finish;\n      end\nendmodule\n",
+    "expected_nonzero_probe": "nonzero_seed_extension=1",
+    "verilator_nonzero_probe": {
+      "compile_exit_code": 0,
+      "run_exit_code": 0,
+      "output": "nonzero_seed_extension=1\n- <repro>/signed_seed.sv:18: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 0s; walltime 0.000 s; speed 0.000 s/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    },
+    "icarus_nonzero_probe": {
+      "compile_exit_code": 0,
+      "compile_output": "",
+      "run_exit_code": 1,
+      "run_output": "Error: <repro>/signed_seed.sv:9: $urandom's seed variable is less than 32 bits  (8).\nError: <repro>/signed_seed.sv:10: $urandom's seed variable is less than 32 bits  (8).\n"
+    },
+    "icarus_shared_diagnostic": "Error: <case>/source_0.sv:10: $urandom's seed variable is less than 32 bits  (8).\nError: <case>/source_0.sv:11: $urandom's seed variable is less than 32 bits  (8).\n",
+    "finding": "The shared case retains all 256 input bit patterns, including zero. Verilator fails the zero input through its existing zero-seed entropy behavior; its generated C++ uses VL_EXTENDS_II(32,8,narrow) for the signed seed and zero extension for the unsigned seed. The standalone check passes all 255 nonzero patterns. Icarus rejects both narrow seed variables before executing the shared assertions."
+  }
+}

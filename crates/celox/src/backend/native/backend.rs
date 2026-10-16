@@ -487,6 +487,9 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
+                // The image retains the final classification in comb_writes;
+                // optimization-time classification roots are no longer used.
+                persistent_comb_state: Default::default(),
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),

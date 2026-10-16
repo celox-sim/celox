@@ -46,10 +46,15 @@ pub(super) struct Ff<'p, 'a> {
     /// Read-modify-write views of a variable's working value: alias -> var.
     aliases: HashMap<SourceVarId, SourceVarId>,
     next_alias: u32,
+    /// One persistent RNG shared by every call from this process, including
+    /// calls in inlined subroutines. Bit 32 distinguishes an unseeded state.
+    random: Option<(SourceVarId, String)>,
+    random_seed: u32,
     /// The kernel of a process being lowered. Its builder is `b` while the
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    direct: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -67,7 +72,7 @@ fn working(var_id: SourceVarId) -> Addr {
 }
 
 impl<'p, 'a> Ff<'p, 'a> {
-    pub fn new(m: &'p mut ProcModule<'a>) -> Self {
+    pub fn new(m: &'p mut ProcModule<'a>, random_seed: u32) -> Self {
         let mut element_widths = HashMap::default();
         for (&id, variable) in m.variables.iter() {
             if let Some(width) = unpacked_element_width(variable) {
@@ -88,14 +93,17 @@ impl<'p, 'a> Ff<'p, 'a> {
             unrolled: 0,
             aliases: HashMap::default(),
             next_alias: u32::MAX,
+            random: None,
+            random_seed,
             kernel: None,
+            direct: false,
         }
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
     /// the working region, or stable state in a process kernel.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() {
+        if self.kernel.is_some() || self.direct {
             stable(id)
         } else {
             working(id)
@@ -204,6 +212,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         while let Some((name, args)) = calls.pop() {
+            if name == "$urandom" && self.random.is_none() {
+                let (id, name) = self.m.temp("urandom_state", 33, false, false);
+                self.working.insert(id);
+                self.targets.push((id, BitAccess::new(0, 32)));
+                self.random = Some((id, name));
+            }
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -235,7 +249,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let aliases = &self.aliases;
         let working_set = &self.working;
         let variables = &*self.m.variables;
-        let direct = self.kernel.is_some();
+        let direct = self.kernel.is_some() || self.direct;
         let map = |id: &SourceVarId| -> Addr {
             if direct {
                 stable(*aliases.get(id).unwrap_or(id))
@@ -488,10 +502,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
-            ConstExpr::Function { name, args, .. }
-                if self.m.subroutines.contains_key(name)
-                    || self.m.dpi_imports.contains_key(name) =>
-            {
+            ConstExpr::Function { name, args, .. } if self.m.is_callee(name) => {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
@@ -771,6 +782,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call { name, args, .. } if name == "$urandom" => self.urandom(args)?,
             Expr::Call {
                 name,
                 args,
@@ -1023,6 +1035,63 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     // ---------------------------------------------------------------- stores
+
+    /// IEEE 1800-2023 18.13.1/18.14: a deterministic, process-local stream.
+    /// This full-period 32-bit LCG is implementation-defined; tests compare
+    /// repeatability rather than assuming another simulator's sequence.
+    fn urandom(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        if self.random.is_none() {
+            let random = self.m.temp("urandom_state", 33, false, false);
+            self.random = Some(random);
+        }
+        let (id, name) = self.random.clone().expect("a process RNG");
+        let initial = match args.first().and_then(Option::as_ref) {
+            Some(seed) => self.hoist(seed)?,
+            None => Expr::Mux {
+                condition: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Ident(name.clone())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal("33'd0".into())),
+                }),
+                then_expr: Box::new(Expr::Literal(format!("32'd{}", self.random_seed))),
+                else_expr: Box::new(Expr::Ident(name.clone())),
+            },
+        };
+        // The int seed formal preserves a narrow signed operand's sign bits
+        // before its 32-bit representation becomes unsigned RNG state.
+        let seed_signed = self.expr_signed(&initial);
+        let next = Expr::Resize {
+            width: 32,
+            signed: false,
+            expr: Box::new(Expr::Binary {
+                left: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Resize {
+                        expr: Box::new(initial),
+                        width: 32,
+                        signed: seed_signed,
+                    }),
+                    op: BinaryOp::Mul,
+                    right: Box::new(Expr::Literal("32'd1664525".into())),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal("32'd1013904223".into())),
+            }),
+        };
+        let result = self.eval(&next, Some((32, false)))?;
+        let (temp, temp_name) = self.m.temp("urandom_result", 32, false, false);
+        self.store(temp, SIROffset::Static(0), 32, result);
+        let state = Expr::Concat(vec![
+            Expr::Literal("1'b1".into()),
+            Expr::Ident(temp_name.clone()),
+        ]);
+        let state = self.eval(&state, Some((33, false)))?;
+        self.store(id, SIROffset::Static(0), 33, state);
+        Ok(Expr::Ident(temp_name))
+    }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
         let target = self.target(id);
@@ -2292,6 +2361,218 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     // -------------------------------------------------------------- process
+
+    /// Lower a stateful combinational process. Its memory guard records the
+    /// implicit sensitivity values, independently of internal settling calls.
+    pub fn lower_comb_process(
+        mut self,
+        body: &[sv::ir::Stmt],
+        sensitivity_body: &[sv::ir::Stmt],
+        kind: sv::ir::CombProcessKind,
+        arena: &mut SLTNodeArena<SourceVarId>,
+    ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
+        let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
+        self.direct = true;
+        let mut reads = self.m.implicit_reads(body, always_comb);
+        reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
+        for stmt in body {
+            let mut nonblocking = false;
+            stmt.walk(&mut |stmt| {
+                nonblocking |= matches!(
+                    stmt,
+                    sv::ir::Stmt::Assign {
+                        nonblocking: true,
+                        ..
+                    } | sv::ir::Stmt::AssignConcat {
+                        nonblocking: true,
+                        ..
+                    }
+                )
+            });
+            if nonblocking {
+                return Err(unsupported("nonblocking assignment inside always_comb"));
+            }
+        }
+        self.scan(body, &mut HashSet::default());
+        if self.exec_block(body)? {
+            self.b.seal_block(SIRTerminator::Return);
+        }
+        let body_unit = seal_drained(std::mem::replace(&mut self.b, SIRBuilder::new()));
+        let mut targets: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|(id, _)| !self.m.is_hidden(*id))
+            .map(|(id, access)| VarAtomBase::new(*id, access.lsb, access.msb))
+            .collect();
+        targets.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for target in targets {
+            match merged.last_mut() {
+                Some(last) if last.id == target.id && target.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(target.access.msb)
+                }
+                _ => merged.push(target),
+            }
+        }
+        let mut targets = merged;
+        let dependencies = super::comb::subtract_written_sensitivity(reads.clone(), &targets);
+        let mut sources: Vec<_> = if always_comb {
+            dependencies.clone()
+        } else {
+            reads
+        }
+        .into_iter()
+        .collect();
+        sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+        let (initialized, _) = self.m.temp("comb_initialized", 1, false, false);
+        let init = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Load(
+            init,
+            stable(initialized),
+            SIROffset::Static(0),
+            1,
+        ));
+        let mut changed = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+        let mut snapshots = Vec::new();
+        for source in &sources {
+            let width = source.access.msb - source.access.lsb + 1;
+            let (saved, _) = self.m.temp(
+                "comb_input",
+                width,
+                false,
+                self.m.four_state && self.m.var(source.id).is_4state,
+            );
+            let current = self.b.alloc_logic(width);
+            let previous = self.b.alloc_logic(width);
+            let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+            self.b.emit(SIRInstruction::Load(
+                current,
+                stable(source.id),
+                offset,
+                width,
+            ));
+            self.b.emit(SIRInstruction::Load(
+                previous,
+                stable(saved),
+                SIROffset::Static(0),
+                width,
+            ));
+            let differs = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                differs,
+                current,
+                BinaryOp::NeCase,
+                previous,
+            ));
+            let next = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
+            changed = next;
+            snapshots.push((saved, width, current));
+        }
+        let run = self.b.alloc_bit(1, false);
+        if always_comb {
+            let first = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
+            self.b
+                .emit(SIRInstruction::Binary(run, first, BinaryOp::Or, changed));
+        } else {
+            self.b
+                .emit(SIRInstruction::Binary(run, init, BinaryOp::And, changed));
+        }
+        // Snapshot before executing: writes in the body do not retrigger it.
+        for &(saved, width, current) in &snapshots {
+            self.store(saved, SIROffset::Static(0), width, current);
+        }
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        self.store(initialized, SIROffset::Static(0), 1, one);
+        let execute = self.b.new_block();
+        let done = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: run,
+            true_block: (execute, vec![]),
+            false_block: (done, vec![]),
+        });
+        self.b.switch_to_block(execute);
+        self.b.inline_execution_unit(&body_unit);
+        if !always_comb {
+            // @* is not waiting during its body. Its own writes cannot wake
+            // the same activation, including when another output is published.
+            for (source, &(saved, width, _)) in sources.iter().zip(&snapshots) {
+                let current = self.b.alloc_logic(width);
+                let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(source.id),
+                    offset,
+                    width,
+                ));
+                self.store(saved, SIROffset::Static(0), width, current);
+            }
+        }
+        self.jump(done);
+        self.b.switch_to_block(done);
+        let mut private_locals = HashMap::default();
+        let unit = seal_builder(self.b).into_map_addr(&mut |addr| {
+            let id = addr.var_id;
+            if !self.m.is_hidden(id) || self.m.created.contains(&id) {
+                return id;
+            }
+            *private_locals.entry(id).or_insert_with(|| {
+                let variable = self.m.var(id).clone();
+                let (copy, name) = self.m.temp(
+                    "comb_local",
+                    variable.width,
+                    variable.signed,
+                    variable.is_4state,
+                );
+                self.m.variables.insert(
+                    copy,
+                    SvVariable {
+                        path: vec![name],
+                        ..variable
+                    },
+                );
+                copy
+            })
+        });
+        if targets.is_empty() {
+            targets.push(VarAtomBase::new(initialized, 0, 0));
+        }
+        let mut paths = Vec::new();
+        for target in targets {
+            let expr = arena
+                .alloc(SLTNode::Input {
+                    variable: target.id,
+                    signed: false,
+                    index: Vec::new(),
+                    access: target.access,
+                })
+                .map_err(slt_error)?;
+            paths.push(LogicPath {
+                target: LogicPathTarget::Process {
+                    process: initialized,
+                    after_initials: kind == sv::ir::CombProcessKind::AlwaysComb,
+                    target,
+                    unit: Box::new(unit.clone()),
+                },
+                sources: dependencies.clone(),
+                previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+        }
+        Ok(paths)
+    }
 
     /// Lower one `always_ff` body into its evaluation and commit units.
     pub fn lower_process(

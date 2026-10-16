@@ -55,6 +55,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    pub(super) sensitivity_body: Vec<Stmt>,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -113,6 +114,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let automatic = state.automatic;
         Self {
             automatic,
+            sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
             scopes: vec![Scope {
@@ -942,8 +944,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
             };
             if let Some(value) = constant {
+                // Implicit sensitivity is syntactic even for unreachable
+                // branches. Preserve reads separately from executable writes.
+                self.sensitivity_body.push(Stmt::Eval(condition.clone()));
                 if value != 0 {
+                    self.sensitivity_body.extend(else_body);
                     else_body = then_body;
+                } else {
+                    self.sensitivity_body.extend(then_body);
                 }
                 continue;
             }
@@ -1884,8 +1892,13 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     params: lowered_params,
                     return_var,
                     body,
+                    sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
                 };
-                for stmt in &mut subroutine.body {
+                for stmt in subroutine
+                    .body
+                    .iter_mut()
+                    .chain(&mut subroutine.sensitivity_body)
+                {
                     qualify_stmt(item, stmt);
                     substitute_stmt_constants(stmt, &declaration_env, literals);
                 }
@@ -1985,7 +1998,7 @@ pub(super) fn initial_processes_from_module_node(
     let mut processes = Vec::new();
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
-    for item in &active {
+    for (creation_order, item) in active.iter().enumerate() {
         if item.is_parameter_declaration() {
             continue;
         }
@@ -2031,9 +2044,11 @@ pub(super) fn initial_processes_from_module_node(
             }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
+                    creation_order,
                     condition: None,
                     body,
                     initializer: true,
+                    synthetic: false,
                 });
             }
             continue;
@@ -2059,9 +2074,11 @@ pub(super) fn initial_processes_from_module_node(
             substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
+            creation_order,
             condition: None,
             body,
             initializer: false,
+            synthetic: false,
         });
     }
     initializers.extend(processes);

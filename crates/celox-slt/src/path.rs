@@ -16,6 +16,14 @@ pub struct LogicPathId(pub usize);
 ))]
 pub enum LogicPathTarget<A: Hash + Eq + Clone> {
     Var(VarAtomBase<A>),
+    /// An imperative combinational process. All its output paths share a
+    /// sensitivity guard in the unit, so one activation executes it once.
+    Process {
+        process: A,
+        after_initials: bool,
+        target: VarAtomBase<A>,
+        unit: Box<celox_sir::ExecutionUnit<A>>,
+    },
     CombCaptureEvent {
         site_id: u32,
         guard: Option<NodeId>,
@@ -30,7 +38,7 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
 impl<A: Hash + Eq + Clone> LogicPathTarget<A> {
     pub fn var(&self) -> Option<&VarAtomBase<A>> {
         match self {
-            LogicPathTarget::Var(var) => Some(var),
+            LogicPathTarget::Var(var) | LogicPathTarget::Process { target: var, .. } => Some(var),
             LogicPathTarget::CombCaptureEvent { .. } => None,
         }
     }
@@ -40,6 +48,7 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LogicPathTarget::Var(var) => write!(f, "{var}"),
+            LogicPathTarget::Process { target, .. } => write!(f, "process({target})"),
             LogicPathTarget::CombCaptureEvent { site_id, .. } => {
                 write!(f, "capture_event({site_id})")
             }
@@ -94,6 +103,17 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             LogicPathTarget::Var(var) => {
                 LogicPathTarget::Var(VarAtomBase::new(f(&var.id), var.access.lsb, var.access.msb))
             }
+            LogicPathTarget::Process {
+                process,
+                after_initials,
+                target,
+                unit,
+            } => LogicPathTarget::Process {
+                process: f(process),
+                after_initials: *after_initials,
+                target: VarAtomBase::new(f(&target.id), target.access.lsb, target.access.msb),
+                unit: Box::new((**unit).clone().into_map_addr(&mut |addr| f(&addr))),
+            },
             LogicPathTarget::CombCaptureEvent {
                 site_id,
                 guard,

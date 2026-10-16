@@ -248,6 +248,7 @@ impl ConstantFunctions {
             .iter()
             .map(|(name, function)| crate::ir::Subroutine {
                 name: name.clone(),
+                sensitivity_body: Vec::new(),
                 is_task: false,
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
