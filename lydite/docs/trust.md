@@ -41,7 +41,7 @@ Low-level Rust term constructors are implementation APIs, not a soundness proof.
 The finite backend validates SAT assignments against the original formula and
 context. Unsupported operators, malformed results, exhausted budgets and failed
 replay remain errors/Unknown. Its UNSAT results and the structural kernel are
-trusted. The [Lean memory-rule proofs](../proof/README-ja.md) and independent
+trusted. The [Lean memory-rule proofs](../proof/README.md) and independent
 concrete interpreters test particular boundaries; they do not certify all Rust
 code, lowering, the SAT solver or imported RTL semantics. Future Verus/Lean-style
 verification is not an implemented guarantee.

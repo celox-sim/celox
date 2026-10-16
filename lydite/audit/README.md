@@ -51,7 +51,7 @@ contribute to closure, along with successful guarded use and source diagnostics.
 | Concrete CPU oracle and counterexample replay | `cpu_simulation.py`, `replay_counterexamples.py`, `interpreter.py`; `cpu_simulation_results.json`, `counterexample_replay_results.json` |
 | Structural/finite solver campaigns | `structural_solver`, `structural_independent`, `finite_solver_independent`, `finite_speed_independent`, `branch_solver_scaling*`, `branch_solver_decomposition*`, `expected_result_search*`; corresponding JSON/log/query trees under `results/` |
 | Physical implementation | [Synthesis reproduction](https://github.com/tignear/hwverify/blob/ae8f84cca8859097ac2b0a7a4f6e311355c2b48d/synthesis/README.md), [emitted-SV differential/mutation instructions](veryl_scaling/split_candidate_tests/README.md) |
-| Small memory-law formalization | [Lean proof and Rust comparison](../proof/README-ja.md) |
+| Small memory-law formalization | [Lean proof and Rust comparison](../proof/README.md) |
 
 Independent integer interpretation and SAT replay supplement the checker; they do
 not certify UNSAT. The old counterexample-first policy under `counterexample_search*`
