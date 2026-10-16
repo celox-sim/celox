@@ -71,7 +71,6 @@
             pkgs.cmake
             pkgs.pkg-config
             pkgs.openssl
-            pkgs.fuse-overlayfs
             pkgs.cargo-insta
             pkgs.cargo-nextest
             pkgs.git
