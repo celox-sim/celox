@@ -39,8 +39,13 @@ if command -v fuse-overlayfs >/dev/null 2>&1; then
       "$dst"
   }
 
-  # Rust build cache
-  mount_overlay "target"
+  # Rust build cache. A symlinked target/ is owned by an external build-cache
+  # manager (such as mbx), which already shares compiled work across checkouts
+  # and garbage-collects it. An overlay would divert the worktree's builds into
+  # an unmanaged upper layer, so let Cargo create the worktree's own link.
+  if [ ! -L "$MAIN_DIR/target" ]; then
+    mount_overlay "target"
+  fi
 
   # node_modules directories (pnpm workspace)
   while IFS= read -r nm_dir; do
