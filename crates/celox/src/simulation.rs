@@ -600,9 +600,6 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
-    /// Whether a process of the design requested the end of the simulation.
-    /// Once it has, [`Self::step`] returns `None` and [`Self::run_until`]
-    /// stops at the time of the request.
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.
     /// Returns `false`, with the simulation at the time of its last step,
     /// when another step would be needed to reach `end_time`.
@@ -629,6 +626,9 @@ impl<B: SimBackend> Simulation<B> {
         Ok(true)
     }
 
+    /// Whether a process of the design requested the end of the simulation.
+    /// Once it has, [`Self::step`] returns `None` and [`Self::run_until`]
+    /// stops at the time of the request.
     pub fn is_finished(&self) -> bool {
         self.state.is_finished()
     }

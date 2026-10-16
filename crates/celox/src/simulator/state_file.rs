@@ -36,9 +36,9 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
-    /// Not returned since state files record suspended processes; kept so
-    /// that matching code keeps compiling.
-    #[error("state files are not supported for simulations with processes")]
+    /// Not returned: state files record suspended processes. Kept so that
+    /// matching code keeps compiling.
+    #[error("the state of the simulation's processes could not be recorded")]
     Processes,
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
     TestbenchStrings,

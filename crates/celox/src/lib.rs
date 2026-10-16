@@ -36,9 +36,10 @@ pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
-    DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
-    ScheduleRecord, ScheduledEvent, SignalDirection, StateDifference, StateFile, StateFileError,
-    StateObject, StateRole, format_state_value,
+    BaselineRecord, DesignReflection, NbaRecord, ProcessRecord, ReflectionScope, ReflectionScopeId,
+    ReflectionSignal, ReflectionSignalId, ScheduleRecord, ScheduledEvent, SignalDirection,
+    StateDifference, StateFile, StateFileError, StateObject, StateRole, WaiterRecord,
+    format_state_value,
 };
 pub use celox_slt::scheduler::SchedulerError;
 pub use celox_state_layout::STATE_HEADER_SIZE;
