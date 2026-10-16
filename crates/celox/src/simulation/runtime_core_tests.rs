@@ -1266,3 +1266,48 @@ endmodule
     assert!(sim.is_finished());
     assert!(file.schedule.unwrap().processes.finished);
 }
+
+/// `y = a & b` is read only by a wait: dead store elimination keeps its
+/// store, so the wait still sees `y` rise.
+fn wait_on_comb(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("WaitOnComb", four_state);
+    let a = d.input("a", 1);
+    let b = d.input("b", 1);
+    let ty = d.ty(1);
+    let y = d.module.internal("y", ty).unwrap();
+    let hits = d.output("hits", 8, 0);
+    let (read_a, read_b) = (d.read(a), d.read(b));
+    let and = d.module.binary(BinaryOp::And, read_a, read_b, ty).unwrap();
+    let target = d.module.whole(y).unwrap();
+    d.module.assign(target, and).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(y, EventEdge::Posedge), d.increment(hits)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn dead_store_elimination_keeps_signals_a_wait_watches() {
+    for four_state in [false, true] {
+        let artifact = wait_on_comb(four_state);
+        let optimized = || builder(&artifact, four_state).opt_level(crate::OptLevel::O2);
+        on_every_backend!(optimized(), "WaitOnComb", |sim| {
+            let (a, b) = (sim.signal("a"), sim.signal("b"));
+            sim.modify(|io| {
+                io.set(a, 0u8);
+                io.set(b, 1u8);
+            })
+            .unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "hits"), 0);
+            for (time, hits) in [(2, 1), (4, 2)] {
+                sim.modify(|io| io.set(a, 1u8)).unwrap();
+                sim.run_until(time).unwrap();
+                assert_eq!(value(&mut sim, "hits"), hits);
+                sim.modify(|io| io.set(a, 0u8)).unwrap();
+                sim.run_until(time + 1).unwrap();
+            }
+        });
+    }
+}

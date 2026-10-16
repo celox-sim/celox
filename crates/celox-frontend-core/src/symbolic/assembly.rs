@@ -1510,7 +1510,8 @@ pub fn schedule_symbolic_rtl(
         wait_sites.iter().map(|site| site.map(project)).collect();
     let nba_sites: Vec<NbaSite<StateAddr>> =
         nba_sites.iter().map(|site| site.map(project)).collect();
-    // The runtime reads counters and staged nonblocking values directly.
+    // The runtime reads counters, the signals waits watch and staged
+    // nonblocking values directly; no unit loads a wait's signal.
     let timing_read_roots = watches
         .iter()
         .flat_map(|watch| {
@@ -1519,6 +1520,11 @@ pub fn schedule_symbolic_rtl(
                 .map(|(_, counter)| counter)
                 .collect::<Vec<_>>()
         })
+        .chain(
+            wait_sites
+                .iter()
+                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+        )
         .chain(
             nba_sites
                 .iter()
