@@ -18,6 +18,7 @@ mod instruction;
 mod memory;
 mod packed_compare;
 mod runtime_events;
+mod slice;
 mod sparse;
 mod strided;
 mod wide;
@@ -292,13 +293,9 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut mblock = MBlock::new(mir_block_id);
         ctx.trigger_only_seen.clear();
 
-        // Record static Load origins before lowering this block so Slice can
-        // reload the same range after an intervening partial Store.
-        for inst in &sir_block.instructions {
-            if let SIRInstruction::Load(dst, addr, SIROffset::Static(bit_offset), _) = inst {
-                ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
-            }
-        }
+        // Origins are valid only along the instruction order of this block.
+        // A load in another block may have intervening writes on its path here.
+        ctx.reg_addrs.clear();
 
         let priority_plans = if native_priority_encode {
             find_priority_encode_plans(sir_block, sir_use_sites.as_ref().unwrap())
@@ -350,6 +347,9 @@ pub fn lower_execution_unit_with_diagnostics(
         let mut trace_marks = HashSet::default();
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            // Track SIR effects before specialized lowering can consume/skip
+            // stores, commits, or loads.
+            ctx.update_slice_load_origins(inst);
             let target = match inst {
                 SIRInstruction::Store(addr, _, width, _, _, _)
                 | SIRInstruction::Commit(_, addr, _, width, _)
@@ -869,7 +869,7 @@ struct ISelContext<'a> {
     /// Known constant values for SIR registers (from Imm, Mul of constants, etc.)
     consts: ConstMap,
     /// RegisterId → (sim-state address, static load bit offset).
-    /// Used by Slice to reload memory after an intervening partial Store.
+    /// Valid while no overlapping state write has followed the load in this block.
     reg_addrs: crate::HashMap<RegisterId, (RegionedAbsoluteAddr, usize)>,
     /// Conservative lower bound for the number of low zero bits in a SIR value.
     /// This lets dynamic bit offsets that are known byte-aligned use indexed
