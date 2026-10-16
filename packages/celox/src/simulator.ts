@@ -566,7 +566,9 @@ export class Simulator<P = Record<string, unknown>> {
 	 * one of the edges evaluates against the state before them, then all of
 	 * them commit, as coincident edges in hardware.
 	 */
-	edges(moves: ReadonlyArray<readonly [EventHandle | number, ClockEdge]>): void {
+	edges(
+		moves: ReadonlyArray<readonly [EventHandle | number, ClockEdge]>,
+	): void {
 		this.ensureAlive();
 		const handle = this._handle;
 		if (!handle.edges) {

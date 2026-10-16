@@ -16,6 +16,11 @@ import type {
 	NativeSimulatorHandle,
 	WasmFrontendSimulatorHandle,
 } from "./types.js";
+import {
+	type EdgeKernels,
+	type EdgePlans,
+	WasmEdgeRunner,
+} from "./wasm-edges.js";
 
 // ---------------------------------------------------------------------------
 // Minimal WebAssembly type declarations for environments without DOM lib.
@@ -123,6 +128,61 @@ function wasmCheckpointMethods(
 	};
 }
 
+/**
+ * The edge runner of a bridge, when the raw handle provides edge plans.
+ * Phase modules of split kernels are compiled on first use.
+ */
+function wasmEdgeRunner(
+	raw: RawWasmSimulatorHandle,
+	memory: WebAssembly.Memory,
+	events: Record<string, number>,
+	eventInstances: Map<number, WebAssembly.Instance>,
+	evalComb: () => void,
+): WasmEdgeRunner | undefined {
+	if (!raw.edgePlansJson) return undefined;
+	const plans = JSON.parse(raw.edgePlansJson()) as EdgePlans;
+	const run = (instance: WebAssembly.Instance) => () =>
+		(instance.exports.run as CallableFunction)();
+	const phase = (name: string, kind: "evalOnly" | "apply") => {
+		if (!raw.eventPhaseWasmBytes) return undefined;
+		try {
+			const bytes = new Uint8Array(raw.eventPhaseWasmBytes(name, kind));
+			const module = new WebAssembly.Module(bytes);
+			return run(new WebAssembly.Instance(module, { env: { memory } }));
+		} catch {
+			return undefined;
+		}
+	};
+	const cache = new Map<string, EdgeKernels | undefined>();
+	const kernels = (name: string): EdgeKernels | undefined => {
+		if (cache.has(name)) return cache.get(name);
+		const id = events[name];
+		const instance = id === undefined ? undefined : eventInstances.get(id);
+		let kernel: EdgeKernels | undefined;
+		if (instance) {
+			const evalOnly = phase(name, "evalOnly");
+			const apply = phase(name, "apply");
+			kernel =
+				evalOnly && apply
+					? { evalApply: run(instance), evalOnly, apply }
+					: { evalApply: run(instance) };
+		}
+		cache.set(name, kernel);
+		return kernel;
+	};
+	return new WasmEdgeRunner(memory, plans, events, kernels, evalComb);
+}
+
+function edgeMethods(
+	edges: WasmEdgeRunner | undefined,
+): Pick<NativeSimulatorHandle, "edges" | "activeEdgeIsRising"> {
+	if (!edges) return {};
+	return {
+		edges: (eventIds, rising) => edges.edges(eventIds, rising),
+		activeEdgeIsRising: (eventId) => edges.activeEdgeIsRising(eventId),
+	};
+}
+
 /** Result of creating a WASM simulator bridge. */
 export interface WasmBridgeResult {
 	/** Handle compatible with the existing Simulator code. */
@@ -176,14 +236,22 @@ export function createWasmSimulatorBridge(
 
 	const sharedMemory = new Uint8Array(memory.buffer, 0, stableSize);
 
+	const edges = wasmEdgeRunner(raw, memory, events, eventInstances, () =>
+		(combInstance.exports.run as CallableFunction)(),
+	);
 	const handle: NativeSimulatorHandle = {
 		tick(eventId: number): void {
+			if (edges?.hasDerived(eventId)) {
+				edges.tick(eventId);
+				return;
+			}
 			// eval_comb → eval_apply_ff → eval_comb
 			(combInstance.exports.run as CallableFunction)();
 			const evInst = eventInstances.get(eventId);
 			if (evInst) (evInst.exports.run as CallableFunction)();
 			(combInstance.exports.run as CallableFunction)();
 		},
+		...edgeMethods(edges),
 		tickN(eventId: number, count: number): void {
 			for (let i = 0; i < count; i++) {
 				this.tick(eventId);
@@ -248,13 +316,21 @@ export async function createWasmSimulatorBridgeAsync(
 
 	const sharedMemory = new Uint8Array(memory.buffer, 0, stableSize);
 
+	const edges = wasmEdgeRunner(raw, memory, events, eventInstances, () =>
+		(combInstance.exports.run as CallableFunction)(),
+	);
 	const handle: NativeSimulatorHandle = {
 		tick(eventId: number): void {
+			if (edges?.hasDerived(eventId)) {
+				edges.tick(eventId);
+				return;
+			}
 			(combInstance.exports.run as CallableFunction)();
 			const evInst = eventInstances.get(eventId);
 			if (evInst) (evInst.exports.run as CallableFunction)();
 			(combInstance.exports.run as CallableFunction)();
 		},
+		...edgeMethods(edges),
 		tickN(eventId: number, count: number): void {
 			for (let i = 0; i < count; i++) {
 				this.tick(eventId);

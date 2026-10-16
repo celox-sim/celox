@@ -2531,6 +2531,46 @@ impl NativeSimulatorHandle {
         )))
     }
 
+    /// Per event name, the derived domains its ticks and edges run, as JSON
+    /// (`celox::EdgePlans`), for the TypeScript runtime that drives the
+    /// event modules itself.
+    #[napi]
+    pub fn edge_plans_json(&self) -> String {
+        serde_json::to_string(&celox::edge_plans(&self.program))
+            .unwrap_or_else(|_| "{\"fourState\":false,\"events\":{}}".to_string())
+    }
+
+    /// The WASM module of one phase of an event's split kernels: `"evalOnly"`
+    /// evaluates its next state without committing, `"apply"` commits it.
+    /// Domains that evaluate together use them to sample the same state.
+    #[napi]
+    pub fn event_phase_wasm_bytes(&self, event_name: String, phase: String) -> Result<Vec<u8>> {
+        let units = match phase.as_str() {
+            "evalOnly" => &self.program.sir.eval_only_ffs,
+            "apply" => &self.program.sir.apply_ffs,
+            _ => {
+                return Err(Error::from_reason(format!(
+                    "unknown event phase '{phase}'; expected 'evalOnly' or 'apply'"
+                )));
+            }
+        };
+        units
+            .iter()
+            .find(|(addr, _)| self.program.get_path(addr) == event_name)
+            .map(|(_, units)| {
+                celox::wasm_codegen::compile_units(
+                    units,
+                    self.program.layout(),
+                    self.four_state,
+                    false,
+                )
+                .bytes
+            })
+            .ok_or_else(|| {
+                Error::from_reason(format!("event '{event_name}' has no {phase} kernel"))
+            })
+    }
+
     /// No-op on wasm32 (no native resources to release).
     #[napi]
     pub fn dispose(&mut self) {}

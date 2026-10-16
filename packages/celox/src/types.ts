@@ -151,6 +151,16 @@ export interface WasmFrontendSimulatorHandle
 	combWasmBytes(): Uint8Array | number[];
 	eventWasmBytes(name: string): Uint8Array | number[];
 	/**
+	 * Per event name, the derived domains its ticks and edges run, as JSON.
+	 * Absent on addons that predate explicit edges.
+	 */
+	edgePlansJson?(): string;
+	/** The `"evalOnly"` or `"apply"` phase module of an event's kernels. */
+	eventPhaseWasmBytes?(
+		name: string,
+		phase: "evalOnly" | "apply",
+	): Uint8Array | number[];
+	/**
 	 * Offset where the checkpointable design state starts (it ends at
 	 * `stableSize`). Absent on addons without checkpoint support.
 	 */

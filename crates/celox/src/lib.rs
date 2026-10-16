@@ -10,6 +10,8 @@ pub use component::{
     register_static_component_manifest,
 };
 mod debug;
+mod edge_plans;
+pub use edge_plans::{EdgePlanDomain, EdgePlanEvent, EdgePlanSignal, EdgePlans, edge_plans};
 mod diagnostics;
 // Without a host runtime nothing builds simulators, so nothing links DPI-C.
 #[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]

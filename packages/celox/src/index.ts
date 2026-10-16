@@ -62,8 +62,8 @@ export {
 // Core types
 /** @internal */
 export type {
-	CreateResult,
 	ClockEdge,
+	CreateResult,
 	EventHandle,
 	FourStateSignalValue,
 	FourStateValue,
