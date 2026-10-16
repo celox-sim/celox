@@ -2234,11 +2234,13 @@ fn upstream_string_argument_and_host_file_service_roundtrip() {
         module t {
             var component: $comp::celox_counter;
             var value: logic<8>;
+            var path: string;
             initial {
                 component.set(42);
                 component.save("state.bin");
                 component.set(0);
-                component.load("state.bin");
+                path = "state.bin";
+                component.load(path);
                 value = component.get();
                 $assert(value == 42, "file service roundtrip");
                 $finish();

@@ -77,3 +77,43 @@ module Top {
 "#)
   (top Top)
   (run_testbench))
+
+(case array_elements
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string[2];
+    var index: u32;
+    initial {
+        text[0] = "first";
+        text[1] = "second element is longer";
+        index = 1;
+        $assert(text[index] == "second element is longer");
+        text[index] = text[0];
+        text[0] = "";
+        $assert(text[0] == "");
+        $assert(text[1] == "first");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case function_argument
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string;
+    function identity(value: input string) -> string {
+        return value;
+    }
+    initial {
+        text = "function argument longer than eight bytes";
+        $assert(identity(text) == text);
+        text = identity("");
+        $assert(text == "");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
