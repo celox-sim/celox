@@ -1479,6 +1479,13 @@ mod host {
             match outcome {
                 Ok(celox_runtime::EdgeOutcome::Unchanged) => {}
                 Ok(celox_runtime::EdgeOutcome::Moved) => self.dirty = true,
+                // Combinational logic does not read the signal; observers
+                // still see its new level at their next evaluation.
+                Ok(celox_runtime::EdgeOutcome::Stored) => {
+                    if !self.program.runtime_schema.comb_observers.is_empty() {
+                        self.dirty = true;
+                    }
+                }
                 Ok(celox_runtime::EdgeOutcome::Settled) => self.dirty = false,
                 // An RTL `$finish` ends only a timed simulation; an edge, as a
                 // tick, leaves it to the host. What ran may not have settled.
@@ -2336,6 +2343,33 @@ mod host {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn edges_that_run_nothing_leave_comb_stale_only_when_comb_reads_the_clock() {
+            for (seen, comb_read) in [("1'b1", false), ("clk", true)] {
+                let source = format!(
+                    "module Top (clk: input clock, count: output logic<8>, seen: output logic) {{
+                        always_ff (clk) {{ count += 1; }}
+                        assign seen = {seen};
+                    }}"
+                );
+                let mut sim = Simulator::builder(&source, "Top").build().unwrap();
+                let clk = sim.event("clk");
+                sim.posedge(clk).unwrap();
+                assert!(!sim.dirty);
+                // Moving `clk` without running a domain leaves combinational
+                // logic stale only when it reads `clk`.
+                sim.negedge(clk).unwrap();
+                assert_eq!(sim.dirty, comb_read, "{seen}");
+                sim.cycle(clk).unwrap();
+                assert_eq!(sim.dirty, comb_read, "{seen}");
+                let seen_signal = sim.signal("seen");
+                let expected = if comb_read { 0u8 } else { 1 };
+                assert_eq!(sim.get(seen_signal), BigUint::from(expected));
+                let count = sim.signal("count");
+                assert_eq!(sim.get(count), BigUint::from(2u8));
+            }
+        }
 
         #[test]
         fn comb_fatal_records_do_not_mask_unrelated_backend_errors() {

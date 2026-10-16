@@ -178,7 +178,7 @@ function edgeMethods(
 ): Pick<NativeSimulatorHandle, "edges" | "activeEdgeIsRising"> {
 	if (!edges) return {};
 	return {
-		edges: (eventIds, rising) => edges.edges(eventIds, rising),
+		edges: (eventIds, rising, dirty) => edges.edges(eventIds, rising, dirty),
 		activeEdgeIsRising: (eventId) => edges.activeEdgeIsRising(eventId),
 	};
 }

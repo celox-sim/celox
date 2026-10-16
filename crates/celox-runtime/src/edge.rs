@@ -8,7 +8,10 @@
 //!
 //! An event without derived domains costs one load and one store of its
 //! level on top of its domain's kernel; its signal settles first only when
-//! combinational logic reads it.
+//! combinational logic reads it. An edge that runs no domain leaves
+//! combinational logic stale only when combinational logic reads the signal,
+//! so the inactive edge of a clock that only clocks flip-flops costs no
+//! settle on the next active edge.
 
 use celox_design::{DomainKind, EventTopology};
 
@@ -103,10 +106,23 @@ pub fn build_event_edges<B: SimBackend>(
 pub enum EdgeOutcome {
     /// The signal already was at the edge's level: nothing changed.
     Unchanged,
-    /// The signal moved but no domain ran; combinational logic is stale.
+    /// The signal moved but no domain ran, and combinational logic reads
+    /// it: combinational logic is stale.
     Moved,
+    /// The signal moved but no domain ran, and combinational logic does not
+    /// read it: combinational logic is exactly as settled as before.
+    Stored,
     /// Domains ran and combinational logic is settled.
     Settled,
+}
+
+/// The outcome of a move that ran no domain.
+fn moved_only(comb_read: bool) -> EdgeOutcome {
+    if comb_read {
+        EdgeOutcome::Moved
+    } else {
+        EdgeOutcome::Stored
+    }
 }
 
 /// The level of `signal`, or `None` while it is unknown.
@@ -168,11 +184,11 @@ where
         return Ok(if settled {
             EdgeOutcome::Settled
         } else {
-            EdgeOutcome::Moved
+            moved_only(info.comb_read)
         });
     }
     if !fires {
-        return Ok(EdgeOutcome::Moved);
+        return Ok(moved_only(info.comb_read));
     }
     if settle {
         executor.eval_comb_apply_ff_at(event)?;
@@ -214,7 +230,7 @@ where
     let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(moves.len());
     let mut moved_plans = Vec::new();
     let mut transitions: Vec<(SignalRef, (u8, u8))> = Vec::new();
-    let mut settle = dirty;
+    let mut comb_read = false;
     let mut any_moved = false;
     for &(event, edge) in moves {
         let id = event.id();
@@ -227,7 +243,7 @@ where
         any_moved = true;
         executor.backend_mut().set(info.signal, new);
         transitions.push((info.signal, (old.map_or(new ^ 1, u8::from), new)));
-        settle |= info.comb_read;
+        comb_read |= info.comb_read;
         if info.fires(old, edge) {
             let address = executor.backend().id_to_addr_slice()[id];
             sources.push(EventDomain {
@@ -256,7 +272,7 @@ where
     let settled = plan.run(
         executor,
         scratch,
-        settle,
+        dirty || comb_read,
         EdgeRun {
             transitions: &lever_transitions,
             persist: true,
@@ -266,6 +282,6 @@ where
     Ok(if settled {
         EdgeOutcome::Settled
     } else {
-        EdgeOutcome::Moved
+        moved_only(comb_read)
     })
 }

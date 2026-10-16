@@ -158,14 +158,22 @@ export class WasmEdgeRunner {
 
 	/**
 	 * Move event signals at one instant; `rising[i]` gives the direction of
-	 * `eventIds[i]`. Returns whether combinational logic is settled.
+	 * `eventIds[i]`. `dirty` says whether combinational logic has pending
+	 * changes. Returns whether combinational logic is settled afterwards:
+	 * moving a signal that combinational logic does not read, without running
+	 * a domain, leaves it as it was.
 	 */
-	edges(eventIds: readonly number[], rising: readonly boolean[]): boolean {
+	edges(
+		eventIds: readonly number[],
+		rising: readonly boolean[],
+		dirty = true,
+	): boolean {
 		const sources: string[] = [];
 		const levers: Lever[] = [];
 		const domains: EdgePlanDomain[] = [];
 		const gated: [EdgePlanDomain, number][] = [];
 		let moved = false;
+		let combRead = false;
 		eventIds.forEach((eventId, index) => {
 			const name = this.name(eventId);
 			const plan = this.plan(eventId);
@@ -181,6 +189,7 @@ export class WasmEdgeRunner {
 				return;
 			}
 			moved = true;
+			combRead ||= plan.combRead;
 			this.setLevel(plan.signal, to);
 			const lever = { signal: plan.signal, from: old ?? to ^ 1, to };
 			if (plan.edge === "any" || (plan.edge === "posedge") === (to === 1)) {
@@ -201,17 +210,18 @@ export class WasmEdgeRunner {
 			}
 		});
 		if (!moved) {
-			return true;
+			return !dirty;
 		}
 		const notSource = (domain: EdgePlanDomain) =>
 			!sources.includes(domain.event);
-		return this.run(
+		const ran = this.run(
 			sources,
 			domains.filter(notSource),
 			gated.filter(([domain]) => notSource(domain)),
 			levers,
-			{ settle: true, persist: true },
+			{ settle: dirty || combRead, persist: true },
 		);
+		return ran || (!dirty && !combRead);
 	}
 
 	private run(

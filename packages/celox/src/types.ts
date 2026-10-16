@@ -120,10 +120,11 @@ export interface NativeFrontendSimulatorHandle
 	/**
 	 * Move event signals through coincident edges and run every domain
 	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
-	 * Returns whether combinational logic is settled afterwards. Absent on
-	 * addons without explicit edges.
+	 * `dirty` says whether combinational logic has pending changes (default
+	 * `true`: it settles first). Returns whether combinational logic is
+	 * settled afterwards. Absent on addons without explicit edges.
 	 */
-	edges?(eventIds: number[], rising: boolean[]): boolean;
+	edges?(eventIds: number[], rising: boolean[], dirty?: boolean): boolean;
 	/** Whether the event's active edge is rising. */
 	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;
@@ -192,10 +193,11 @@ export interface NativeSimulatorHandle {
 	/**
 	 * Move event signals through coincident edges and run every domain
 	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
-	 * Returns whether combinational logic is settled afterwards. Absent on
-	 * addons without explicit edges.
+	 * `dirty` says whether combinational logic has pending changes (default
+	 * `true`: it settles first). Returns whether combinational logic is
+	 * settled afterwards. Absent on addons without explicit edges.
 	 */
-	edges?(eventIds: number[], rising: boolean[]): boolean;
+	edges?(eventIds: number[], rising: boolean[], dirty?: boolean): boolean;
 	/** Whether the event's active edge is rising. */
 	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;

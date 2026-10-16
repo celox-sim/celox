@@ -932,6 +932,7 @@ impl HandleBackend {
         derived: &HandleDerivedTicks,
         event_edges: &celox::EventEdges,
         scratch: &mut celox::DerivedTickScratch,
+        dirty: bool,
     ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
         fn edges_with<B: celox::SimBackend>(
             backend: &mut B,
@@ -939,29 +940,41 @@ impl HandleBackend {
             plans: &celox::DerivedTickPlans<B::Event>,
             event_edges: &celox::EventEdges,
             scratch: &mut celox::DerivedTickScratch,
+            dirty: bool,
         ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
             let moves: Vec<_> = moves
                 .iter()
                 .map(|&(id, edge)| (backend.id_to_event_slice()[id], edge))
                 .collect();
-            // Handles keep no pending-change flag: settle first, as `tick`
-            // does.
             celox::run_edges(
                 &mut celox::BackendExecutor(backend),
                 plans,
                 event_edges,
                 scratch,
                 &moves,
-                true,
+                dirty,
             )
-            .map(|outcome| outcome != celox::EdgeOutcome::Moved)
+            .map_or_else(
+                |halt| match halt {
+                    // A bare backend reports no `$finish`; settle next time.
+                    celox::Halt::Finish => Ok(false),
+                    celox::Halt::Error(error) => Err(error),
+                },
+                |outcome| {
+                    Ok(match outcome {
+                        celox::EdgeOutcome::Unchanged | celox::EdgeOutcome::Stored => !dirty,
+                        celox::EdgeOutcome::Moved => false,
+                        celox::EdgeOutcome::Settled => true,
+                    })
+                },
+            )
         }
         match (self, derived) {
             (Self::Default(backend), HandleDerivedTicks::Default(plans)) => {
-                edges_with(backend, moves, plans, event_edges, scratch)
+                edges_with(backend, moves, plans, event_edges, scratch, dirty)
             }
             (Self::Tiered(backend), HandleDerivedTicks::Tiered(plans)) => {
-                edges_with(backend.as_mut(), moves, plans, event_edges, scratch)
+                edges_with(backend.as_mut(), moves, plans, event_edges, scratch, dirty)
             }
             _ => unreachable!("derived tick plans belong to the handle's backend"),
         }
@@ -1497,10 +1510,18 @@ impl NativeSimulatorHandle {
 
     /// Move event signals through coincident edges and run every domain
     /// sensitive to them: `rising[i]` gives the direction of `event_ids[i]`.
-    /// See `Simulator::edges`. Returns whether combinational logic is
-    /// settled afterwards; it is not when a signal moved but no domain ran.
+    /// See `Simulator::edges`. `dirty` says whether combinational logic has
+    /// pending changes (default: it has, so it settles first). Returns whether
+    /// combinational logic is settled afterwards: it is not when a signal that
+    /// combinational logic reads moved but no domain ran, or when it was
+    /// dirty and nothing ran.
     #[napi]
-    pub fn edges(&mut self, event_ids: Vec<u32>, rising: Vec<bool>) -> Result<bool> {
+    pub fn edges(
+        &mut self,
+        event_ids: Vec<u32>,
+        rising: Vec<bool>,
+        dirty: Option<bool>,
+    ) -> Result<bool> {
         if event_ids.len() != rising.len() {
             return Err(Error::from_reason(
                 "edges needs one direction per event".to_string(),
@@ -1526,6 +1547,7 @@ impl NativeSimulatorHandle {
             &self.derived_ticks,
             &self.event_edges,
             &mut self.derived_scratch,
+            dirty.unwrap_or(true),
         )
         .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
@@ -4003,9 +4025,9 @@ mod tests {
             };
             let clk_event = events["clk"];
             assert!(handle.active_edge_is_rising(clk_event).unwrap());
-            let _ = handle.edges(vec![clk_event], vec![false]).unwrap();
+            let _ = handle.edges(vec![clk_event], vec![false], None).unwrap();
             let start = (memory(&mut handle)[rising], memory(&mut handle)[falling]);
-            assert!(handle.edges(vec![clk_event], vec![true]).unwrap());
+            assert!(handle.edges(vec![clk_event], vec![true], None).unwrap());
             assert_eq!(memory(&mut handle)[clk], 1, "{mode}: clk stays high");
             assert_eq!(
                 memory(&mut handle)[rising],
@@ -4013,7 +4035,7 @@ mod tests {
                 "{mode}"
             );
             assert_eq!(memory(&mut handle)[falling], start.1, "{mode}");
-            let _ = handle.edges(vec![clk_event], vec![false]).unwrap();
+            let _ = handle.edges(vec![clk_event], vec![false], None).unwrap();
             assert_eq!(
                 memory(&mut handle)[rising],
                 start.0.wrapping_add(1),
@@ -4024,7 +4046,34 @@ mod tests {
                 start.1.wrapping_add(1),
                 "{mode}"
             );
-            assert!(handle.edges(vec![clk_event], vec![]).is_err());
+            assert!(handle.edges(vec![clk_event], vec![], None).is_err());
+            handle.dispose().unwrap();
+        }
+    }
+
+    #[test]
+    fn native_handle_edges_of_clocks_comb_logic_does_not_read_stay_settled() {
+        for (seen, comb_read) in [("1'b1", false), ("clk", true)] {
+            let source = format!(
+                "module Top (clk: input clock, count: output logic<8>, seen: output logic) {{
+                    always_ff (clk) {{ count += 1; }}
+                    assign seen = {seen};
+                }}"
+            );
+            let mut handle =
+                NativeSimulatorHandle::new(napi_sources(&source), "Top".into(), None).unwrap();
+            let events: HashMap<String, u32> = serde_json::from_str(&handle.events_json()).unwrap();
+            let clk = events["clk"];
+            assert!(handle.edges(vec![clk], vec![true], None).unwrap());
+            // Moving `clk` without running a domain leaves combinational
+            // logic stale only when it reads `clk`, or already was.
+            assert_eq!(
+                handle.edges(vec![clk], vec![false], Some(false)).unwrap(),
+                !comb_read,
+                "{seen}"
+            );
+            assert!(handle.edges(vec![clk], vec![true], Some(true)).unwrap());
+            assert!(!handle.edges(vec![clk], vec![false], Some(true)).unwrap());
             handle.dispose().unwrap();
         }
     }

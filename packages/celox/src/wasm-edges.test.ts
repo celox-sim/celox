@@ -174,3 +174,16 @@ test("a bridge without edge plans keeps the plain tick", () => {
 	expect([sharedMemory[RISING], sharedMemory[GATED_COUNT]]).toEqual([1, 0]);
 	expect(handle.edges).toBeUndefined();
 });
+
+test("edges of a clock combinational logic does not read keep it settled", () => {
+	const { handle, sharedMemory } = createWasmSimulatorBridge(raw(PLANS));
+	handle.evalComb();
+	// `gated` only clocks its counter: its falling edge runs nothing and
+	// leaves combinational logic as it was.
+	expect(handle.edges?.([1], [true], false)).toBe(true);
+	expect(sharedMemory[GATED_COUNT]).toBe(1);
+	expect(handle.edges?.([1], [false], false)).toBe(true);
+	expect(handle.edges?.([1], [false], true)).toBe(false);
+	expect(handle.edges?.([1], [true], true)).toBe(true);
+	expect(sharedMemory[GATED_COUNT]).toBe(2);
+});

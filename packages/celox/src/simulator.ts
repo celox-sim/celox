@@ -585,14 +585,10 @@ export class Simulator<P = Record<string, unknown>> {
 			ids.push(id);
 			rising.push(edge === "posedge");
 		}
-		if (this._state.dirty) {
-			handle.evalComb();
-			this._state.dirty = false;
-		}
-		const settled = handle.edges(ids, rising);
-		if (!settled) {
-			this._state.dirty = true;
-		}
+		// The handle settles first only when needed, and leaves
+		// combinational logic as it was when no domain ran and nothing
+		// combinational reads the moved signals.
+		this._state.dirty = !handle.edges(ids, rising, this._state.dirty);
 	}
 
 	private resolveEventId(event: EventHandle | number | undefined): number {
