@@ -1,12 +1,90 @@
 # yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
 # Keep ordinary PR checks focused; validate combined trees on queue draft PRs.
 merge_queue:
+  # Independent scopes advance separately; overlapping changes stay ordered.
+  mode: parallel
   max_parallel_checks: 5
   queued_label: queued
   dequeued_label: dequeued
 
+# Keep the product dependency graph together. Only these standalone PR-policy
+# validators are independent of Veryl/compiler changes; unknown paths stay core.
+scopes:
+  source:
+    files:
+      core:
+        include:
+          - "**"
+        exclude:
+          - .github/workflows/pr-title.yml
+          - scripts/check-pr-title.mjs
+          - scripts/check-pr-title.test.mjs
+          - scripts/check-pr-release-impact.mjs
+          - scripts/check-pr-release-impact.test.mjs
+          - scripts/check-mergify-batch.mjs
+          - scripts/check-mergify-batch.test.mjs
+          - scripts/check-mergify-queue-title.mjs
+          - scripts/check-mergify-queue-title.test.mjs
+      pr-policy:
+        include:
+          - .github/workflows/pr-title.yml
+          - scripts/check-pr-title.mjs
+          - scripts/check-pr-title.test.mjs
+          - scripts/check-pr-release-impact.mjs
+          - scripts/check-pr-release-impact.test.mjs
+          - scripts/check-mergify-batch.mjs
+          - scripts/check-mergify-batch.test.mjs
+          - scripts/check-mergify-queue-title.mjs
+          - scripts/check-mergify-queue-title.test.mjs
+  capacities:
+    core: 2
+    pr-policy: 1
+  barrier_files:
+    include:
+      - .mergify.yml
+      - release-please-config.json
+      - VERSION
+
+# Use the actual change-based CI result, not the PR title or author, to prefer
+# lightweight changes. Scope isolation handles independent running batches.
+priority_rules:
+  - name: Lightweight validated changes first
+    conditions:
+      - check-success = Lint & Format
+      - check-skipped = Rust Test & NAPI Build
+      - check-skipped = JS Test (Ubuntu)
+    priority: high
+    allow_checks_interruption: false
+
 queue_rules:
-  - name: default
+  - name: integration
+    batch_size: 1
+    batch_max_wait_time: 0 seconds
+    max_checks_retries: 0
+    checks_timeout: 3 hours
+    merge_method: merge
+    update_method: merge
+    commit_message_format:
+      title: pr-title
+      body: empty
+      trailers: []
+    branch_protection_injection_mode: queue
+    merge_conditions:
+      - check-success = Queue validation
+      - check-success = Conventional Commit title
+    queue_conditions:
+      - head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
+      - base ~= ^(master|develop)$
+      - -draft
+      - -label = release:hold
+      # A release is only eligible after the weekly workflow requests it.
+      - or:
+          - head != release-please--branches--master--components--celox
+          - label = merge-ready
+      # Required checks (including allowed skipped jobs) come from GitHub's
+      # rulesets. Keep those rules enforced by GitHub; Mergify gets no bypass.
+
+  - name: dependencies
     batch_size: 5
     batch_max_wait_time: 1 minute
     max_checks_retries: 0
@@ -22,6 +100,36 @@ queue_rules:
       - check-success = Queue validation
       - check-success = Conventional Commit title
     queue_conditions:
+      - head ~= ^renovate/
+      - -head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
+      - base ~= ^(master|develop)$
+      - -draft
+      - -label = release:hold
+      # A release is only eligible after the weekly workflow requests it.
+      - or:
+          - head != release-please--branches--master--components--celox
+          - label = merge-ready
+      # Required checks (including allowed skipped jobs) come from GitHub's
+      # rulesets. Keep those rules enforced by GitHub; Mergify gets no bypass.
+
+  - name: changes
+    batch_size: 3
+    batch_max_wait_time: 1 minute
+    max_checks_retries: 0
+    checks_timeout: 3 hours
+    merge_method: merge
+    update_method: merge
+    commit_message_format:
+      title: pr-title
+      body: empty
+      trailers: []
+    branch_protection_injection_mode: queue
+    merge_conditions:
+      - check-success = Queue validation
+      - check-success = Conventional Commit title
+    queue_conditions:
+      - -head ~= ^renovate/
+      - -head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
       - base ~= ^(master|develop)$
       - -draft
       - -label = release:hold
