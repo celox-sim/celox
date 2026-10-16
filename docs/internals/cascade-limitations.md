@@ -46,14 +46,25 @@ always_ff (gated) {
 }
 ```
 
-Its edge is judged when `clk` changes, from the state before the edge with
+Celox follows the SystemVerilog scheduling of the code Veryl emits (IEEE
+1800-2023 4.4.2, 4.5), for both frontends. When `clk` rises, `clk & en` is
+evaluated in the same active region as `clk`'s processes, before the
+nonblocking updates: its edge is judged from the state before the edge with
 `clk` at its new level, and its domain evaluates together with `clk`'s as a
-simultaneous domain: `cnt2` reads the pre-update `cnt1`, and the edge is gated
-by the `en` from before it. A change of the gate caused by that commit, such as
-`en` rising in the same step, is not an edge of `gated` (the latch of a
-clock-gating cell holds the enable while the clock is high). SystemVerilog
-schedulers re-evaluate `clk & en` after the nonblocking updates and report such
-a rise as a separate edge, so designs that depend on it differ.
+simultaneous domain. `cnt2` reads the pre-update `cnt1`, and the edge is gated
+by the `en` from before it.
+
+The nonblocking updates then re-evaluate the gate. If the edge raised `en`
+while `clk` is still high, `gated` rises after the commit; that is a further
+edge, handled in the cascade rounds below, and its domain reads the committed
+state. A gate that falls after the commit is a falling edge in the same way.
+When `clk` returns low, clocks such as `~clk` or a falling edge of `gated` are
+judged from the state the rising edge left, as a separate instant.
+
+Veryl's own simulator holds a gate's enable for the whole edge, like a
+clock-gating cell, and does not report the rise after the commit. Celox does
+not follow it there; the shared suite records the difference for that
+simulator.
 
 ## Cascaded clocks
 
@@ -90,7 +101,8 @@ optimization and does not change the ordering model above.
 `Simulator::tick` applies the same rules to one active edge of an event.
 Gated clocks of the event are judged from the state before the edge and
 evaluate with the ticked domain; after the commit, the rounds above run the
-domains whose clocks are computed from state. `Simulator::tick_events` does
+domains whose clocks are computed from state and the gated clocks the commit
+moves. `Simulator::tick_events` does
 the same for coincident events, and the native testbench's `clock.next()` and
 the N-API `tick` use the same mechanism.
 

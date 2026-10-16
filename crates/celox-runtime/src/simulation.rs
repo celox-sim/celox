@@ -175,8 +175,9 @@ impl<B: SimBackend> SimulationState<B> {
     /// Declare, per event ID, the clocks computed combinationally from the
     /// event's signal. A change of the signal gives them their edges at the
     /// same instant: they are judged from the state before it and evaluate
-    /// with the event's own domain, and they do not fire again after that
-    /// domain commits within the same step.
+    /// with the event's own domain. Their levels at that instant are the
+    /// baseline for the rounds after the commit, where a gate the commit
+    /// moves gives a further edge.
     pub fn set_combinational_derived(&mut self, derived: Vec<Box<[usize]>>) {
         self.combinational_derived = derived;
     }
@@ -527,16 +528,31 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         // Clocks computed from a changed scheduled signal, such as
-        // `clk & enable`, change at the same instant: their edges are judged
-        // now, from the state before any domain commits, and their domains
-        // evaluate together with the scheduled ones. A change after the
-        // commit, such as an enable register rising, is no edge of theirs.
+        // `clk & enable`, change at the same instant, in the active region
+        // before any nonblocking update (IEEE 1800-2023 4.4.2, 4.5): their
+        // edges are judged now, from the state before any domain commits, and
+        // their domains evaluate together with the scheduled ones. Their
+        // levels at this instant become the baseline for the rounds after the
+        // commit, where a gate the commit moves (an enable register rising
+        // with the edge) gives a further edge, as the update events of the
+        // NBA region do.
+        let mut edge_approved: Option<BitSet> = None;
         for &source in &gating_sources {
             for &id in self.combinational_derived[source].iter() {
                 if self.stable_edge_triggered(executor.backend(), id) {
                     executor.backend_mut().mark_triggered_bit(id);
+                    edge_approved
+                        .get_or_insert_with(|| BitSet::with_capacity(num_events))
+                        .insert(id);
+                }
+                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
+                else {
+                    continue;
+                };
+                if event_level(executor.backend(), *signal) != 0 {
+                    self.last_clock_values.insert(id);
                 } else {
-                    discovered_in_this_step.insert(id);
+                    self.last_clock_values.remove(id);
                 }
             }
         }
@@ -586,7 +602,10 @@ impl<B: SimBackend> SimulationState<B> {
                     // Native trigger bits can be coarse hints raised by a
                     // working-region write before its commit. A derived clock
                     // must have the requested stable edge before its FFs run.
-                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                    if info.is_cascaded
+                        && !edge_approved.as_ref().is_some_and(|ids| ids.contains(id))
+                        && !self.stable_edge_triggered(executor.backend(), id)
+                    {
                         continue;
                     }
                     discovered_in_this_step.insert(id);

@@ -376,7 +376,8 @@ pub struct EventTopology<A> {
     /// signal, such as `clk & enable` or `~clk`, in
     /// [`Self::ordered_events`] order. Their edges coincide with a change of
     /// the event's signal: they are judged from the state before that edge
-    /// and their domains evaluate together with the event's own.
+    /// and their domains evaluate together with the event's own. A change the
+    /// commit then causes is a further edge in the cascade rounds.
     #[serde(default)]
     pub combinational_derived: BTreeMap<A, Vec<CombDerivedClock<A>>>,
     /// Canonical events whose [`Self::combinational_derived`] domains can

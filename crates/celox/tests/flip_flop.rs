@@ -5380,3 +5380,17 @@ fn test_ff_inverted_clock_samples_after_the_rising_edge(sim) {
 }
 
 }
+
+all_backends! {
+
+fn test_ff_register_gated_clock_rises_after_the_commit(sim) {
+    // Veryl 0.22.0's simulator holds a master-gated clock's enable for the
+    // whole edge, as a clock-gating cell does: the enable register rising
+    // with the edge does not raise `clk & en` until the next edge. Celox
+    // follows the SystemVerilog Veryl emits (IEEE 1800-2023 4.4.2, 4.5), as
+    // Verilator and Icarus do.
+    @ignore_on(veryl);
+    @case "flip_flop::test_ff_register_gated_clock_rises_after_the_commit";
+}
+
+}

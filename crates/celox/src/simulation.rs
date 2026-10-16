@@ -870,8 +870,9 @@ mod process_tests {
 
     /// Clocks computed from `clk` share its edge: `clk & en` is gated by the
     /// enable from before the edge (here a register of `clk`'s own domain)
-    /// and its domain reads the state from before `clk`'s domain commits,
-    /// while `~clk` rises on the return of `clk`. Timed steps and
+    /// and its domain reads the state from before `clk`'s domain commits; an
+    /// edge raising `en` raises the gate after the commit, a further edge
+    /// that reads the committed state. `~clk` rises on the return of `clk`. Timed steps and
     /// event-based ticks agree on every backend, in both state modes; the
     /// four-state ticks judge the gate by settling the design.
     #[test]
@@ -906,7 +907,12 @@ mod process_tests {
                 .zip(1u64..)
                 .map(|(&enable, edge)| {
                     if gate == 1 {
+                        // The edge passes the open gate before any commit.
                         sampled = edge - 1;
+                        fired += 1;
+                    } else if enable == 1 {
+                        // The commit raises `en` while `clk` is high.
+                        sampled = edge;
                         fired += 1;
                     }
                     gate = enable;

@@ -3237,8 +3237,8 @@
   ; `en` is a register of `clk`'s own domain. Each edge is gated by the
   ; enable from before it, so the edge that clears `en` still passes, and
   ; the gated domain reads `a` before `clk`'s domain commits. The enable
-  ; only falls here: a rising enable register makes `clk & en` rise after
-  ; the commit, which SystemVerilog schedulers report as a separate edge.
+  ; only falls here; test_ff_register_gated_clock_rises_after_the_commit
+  ; covers a rising enable.
   (let gate 1)
   (let last 0)
   (let count 0)
@@ -3285,3 +3285,71 @@
     (tick clk)
     (assert_eq cnt1 edge)
     (assert_eq sampled edge "the falling half of the cycle sees the new counter")))
+
+(case test_ff_register_gated_clock_rises_after_the_commit
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            en_in: input logic,
+            cnt1: output logic<8>,
+            sampled: output logic<8>,
+            fired: output logic<8>
+        ) {
+            var a: logic<8>;
+            var en: logic;
+            var b: logic<8>;
+            var c: logic<8>;
+            always_ff (clk, rst) {
+                if_reset {
+                    a = 0;
+                    en = 1;
+                } else {
+                    a = a + 8'd1;
+                    en = en_in;
+                }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset {
+                    b = 0;
+                    c = 0;
+                } else {
+                    b = a;
+                    c = c + 8'd1;
+                }
+            }
+            assign cnt1 = a;
+            assign sampled = b;
+            assign fired = c;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set en_in 1))
+  (tick clk)
+  (modify (set rst 1))
+  ; IEEE 1800-2023 4.4.2 and 4.5: at the edge, `clk & en` is evaluated in
+  ; the active region with the enable from before the edge, and a gated edge
+  ; then reads the state before the nonblocking updates. When the edge itself
+  ; raises `en`, the update in the NBA region raises `clk & en` while `clk`
+  ; is still high: that is a further edge, which reads the updated state.
+  (let gate 1)
+  (let last 0)
+  (let count 0)
+  (for (edge enable) (list (1 1) (2 0) (3 1) (4 1) (5 0) (6 0) (7 1) (8 0))
+    (modify (set en_in enable))
+    (tick clk)
+    (if gate
+      (do
+        (set! last (- edge 1))
+        (set! count (+ count 1)))
+      (if enable
+        (do
+          (set! last edge)
+          (set! count (+ count 1)))))
+    (set! gate enable)
+    (assert_eq cnt1 edge)
+    (assert_eq sampled last "the gated domain reads the state of its own edge")
+    (assert_eq fired count "every rise of the gate is an edge")))

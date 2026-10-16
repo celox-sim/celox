@@ -494,18 +494,17 @@ fn a_register_gated_clock_follows_its_enable_on_tick() {
     sim.tick(eclk).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 2u8.into(), "a closed gate passes no edge");
-    // Both clocks at once: the gate is judged before `eclk` commits the
-    // enable, so this edge still sees the closed gate, and the next one the
-    // open gate.
+    // Both clocks at once: the edge finds the gate closed, then `eclk`'s
+    // commit opens it while `clk` is high, which is an edge of `gated`.
     sim.modify(|io| io.set(en_in, 1u8)).unwrap();
     sim.tick_events(&[clk, eclk]).unwrap();
     assert_eq!(
         sim.get(q),
-        2u8.into(),
-        "the edge sees the gate before it opens"
+        3u8.into(),
+        "the opened gate passes the high clock"
     );
     sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 3u8.into(), "the next edge sees the opened gate");
+    assert_eq!(sim.get(q), 4u8.into(), "the next edge passes the open gate");
 }
 
 /// A native testbench with one `initial` block drives its clock with

@@ -119,7 +119,8 @@ mod host {
         /// Per event ID, the derived clock domains a tick can trigger.
         /// Empty for a design without derived clocks.
         derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
-        derived_scratch: celox_runtime::DerivedTickScratch,
+        /// Boxed, so that taking it out for a tick moves one pointer.
+        derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
     }
 
     /// Why [`Simulator::try_dump`] failed.
@@ -706,7 +707,7 @@ mod host {
                 tick_timing_eval_apply_ns: 0,
                 tick_timing_eval_comb_ns: 0,
                 derived_ticks,
-                derived_scratch,
+                derived_scratch: Some(Box::new(derived_scratch)),
             };
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
@@ -1322,8 +1323,8 @@ mod host {
         /// combinationally from the event's signal, such as `clk & enable`,
         /// is judged from the state before the edge and its domain evaluates
         /// together with the event's own; domains clocked from state the
-        /// tick changes, such as a register bit or a divider, run after the
-        /// commit, transitively. Clocks that rise when the event's signal
+        /// tick changes, such as a register bit, a divider or a gate whose
+        /// enable the commit raises, run after the commit, transitively. Clocks that rise when the event's signal
         /// returns to its inactive level, such as `~clk`, run last, as the
         /// second half of the cycle. The event's signal is left unchanged.
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
@@ -1382,10 +1383,10 @@ mod host {
             let Some(Some(plan)) = plans.get(event.id()) else {
                 unreachable!("tick_derived needs a plan");
             };
-            let mut scratch = std::mem::take(&mut self.derived_scratch);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
             let dirty = self.dirty;
             let result = plan.tick(self, &mut scratch, dirty);
-            self.derived_scratch = scratch;
+            self.derived_scratch = Some(scratch);
             if result.is_ok() {
                 self.dirty = false;
             }
@@ -1423,10 +1424,10 @@ mod host {
                     .chain(unsplit)
                     .filter_map(|event| plans.get(event.id())?.as_ref()),
             );
-            let mut scratch = std::mem::take(&mut self.derived_scratch);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
             let dirty = self.dirty;
             let result = plan.tick(self, &mut scratch, dirty);
-            self.derived_scratch = scratch;
+            self.derived_scratch = Some(scratch);
             if result.is_ok() {
                 self.dirty = false;
             }
