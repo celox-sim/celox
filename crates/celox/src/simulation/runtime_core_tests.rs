@@ -1530,3 +1530,57 @@ fn comb_processes_rerun_on_bits_they_do_not_write() {
         });
     }
 }
+
+/// `gclk = clk & en` clocks a counter, and a process waits on `clk`: the
+/// woken process makes a second wave of the active region, or with `#0`
+/// an inactive region, before the gated domain evaluates. The domain still
+/// sees every edge.
+fn gated_clock_with_process(four_state: bool, inactive: bool) -> FrontendArtifact {
+    let mut d = Design::new("GatedClock", four_state);
+    let clk = d.input("clk", 1);
+    let en = d.input("en", 1);
+    let ty = d.ty(1);
+    let gclk = d.module.internal("gclk", ty).unwrap();
+    let (read_clk, read_en) = (d.read(clk), d.read(en));
+    let and = d
+        .module
+        .binary(BinaryOp::And, read_clk, read_en, ty)
+        .unwrap();
+    let target = d.module.whole(gclk).unwrap();
+    d.module.assign(target, and).unwrap();
+    let count = d.output("count", 8, 0);
+    d.counter(count, gclk);
+    let ticks = d.output("ticks", 8, 0);
+    d.counter(ticks, clk);
+    let wakes = d.output("wakes", 8, 0);
+    let mut body = vec![wait(clk, EventEdge::Posedge)];
+    if inactive {
+        body.push(d.inactive_delay(0));
+    }
+    body.push(d.increment(wakes));
+    d.module.process(vec![Statement::Forever { body }]).unwrap();
+    d.finish()
+}
+
+#[test]
+fn gated_clocks_see_their_edges_with_processes() {
+    for four_state in [false, true] {
+        for inactive in [false, true] {
+            let artifact = gated_clock_with_process(four_state, inactive);
+            on_every_backend!(builder(&artifact, four_state), "GatedClock", |sim| {
+                let en = sim.signal("en");
+                sim.modify(|io| io.set(en, 1u8)).unwrap();
+                sim.schedule("clk", 0, 0).unwrap();
+                sim.run_until(0).unwrap();
+                for edge in 1..=3u64 {
+                    sim.schedule("clk", 2 * edge - 1, 1).unwrap();
+                    sim.schedule("clk", 2 * edge, 0).unwrap();
+                    sim.run_until(2 * edge).unwrap();
+                    assert_eq!(value(&mut sim, "ticks"), edge);
+                    assert_eq!(value(&mut sim, "wakes"), edge);
+                    assert_eq!(value(&mut sim, "count"), edge, "edge {edge}");
+                }
+            });
+        }
+    }
+}

@@ -896,6 +896,12 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.backend_mut().mark_triggered_bit(id);
                 }
             }
+            // Derived clocks judged at an earlier settle of the round keep
+            // their edge until their domain evaluates; their baseline
+            // already moved.
+            for id in round.edge_approved.iter() {
+                executor.backend_mut().mark_triggered_bit(id);
+            }
         }
         if !round.gating_sources.is_empty() {
             self.judge_derived_edges(executor.backend_mut(), round);
@@ -1018,6 +1024,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             if info.is_cascaded
                 && !round.counted_triggered.contains(id)
+                && !round.edge_approved.contains(id)
                 && !self.stable_edge_triggered(executor.backend(), id)
             {
                 continue;
@@ -1029,6 +1036,7 @@ impl<B: SimBackend> SimulationState<B> {
                 unsplit.push(id);
                 continue;
             }
+            round.edge_approved.remove(id);
             self.evaluate_deferred(executor, current_time, round, info)?;
         }
         // The edges are consumed: later rounds compare against the values
@@ -1038,8 +1046,10 @@ impl<B: SimBackend> SimulationState<B> {
         round.scheduled_trigger_ids.make_empty();
         round.counted_triggered.make_empty();
         for id in unsplit {
+            // The edge stays approved: the new baseline no longer shows it.
             executor.backend_mut().mark_triggered_bit(id);
             round.scheduled_trigger_ids.insert(id);
+            round.edge_approved.insert(id);
         }
         Ok(())
     }
