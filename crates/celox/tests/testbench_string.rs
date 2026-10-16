@@ -36,6 +36,55 @@ all_backends! {
 }
 
 #[test]
+fn let_and_var_strings_preserve_display_values() {
+    // Regression for https://github.com/veryl-lang/veryl/issues/3555.
+    let result = celox::Simulator::builder(
+        r#"
+        #[test(Top)] module Top {
+            let a: string = "hi";
+            var b: string;
+            const C: string = "const";
+            initial {
+                b = "hello";
+                $display("let  : %s", a);
+                $display("var  : %s", b);
+                $display("const: %s", C);
+                $display(a);
+                $display(b);
+                // Assertion messages use the same renderer as $display and
+                // let the test check the bytes, not just successful execution.
+                $assert(a == "hi", "let  : %s", a);
+                $assert(b == "hello", "var  : %s", b);
+                $assert(C == "const", "const: %s", C);
+                $assert(1, a);
+                $assert(1, b);
+                $finish();
+            }
+        }
+        "#,
+        "Top",
+    )
+    .run_test_detailed()
+    .unwrap();
+    assert!(result.passed);
+    let messages: Vec<_> = result
+        .assertions
+        .iter()
+        .map(|assertion| assertion.message.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            b"let  : hi".as_slice(),
+            b"var  : hello".as_slice(),
+            b"const: const".as_slice(),
+            b"hi".as_slice(),
+            b"hello".as_slice(),
+        ]
+    );
+}
+
+#[test]
 fn strings_survive_clock_steps_and_preserve_message_lengths() {
     let result = celox::Simulator::builder(
         r#"
@@ -114,4 +163,79 @@ fn checkpoint_restores_string_values() {
         run_compiled_testbench(&mut sim, &program),
         celox::TestResult::Pass
     );
+}
+
+#[test]
+fn unsupported_string_concatenation_is_rejected() {
+    for expression in ["{a, b}", "{a repeat 2}"] {
+        let source = format!(
+            r#"#[test(Top)] module Top {{
+                var a: string;
+                var b: string;
+                initial {{
+                    a = "hello";
+                    b = "world";
+                    $display({expression});
+                    $finish();
+                }}
+            }}"#,
+        );
+        let error = celox::Simulator::builder(&source, "Top")
+            .run_test_detailed()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("string concatenation"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_string_let_is_rejected() {
+    let error = celox::Simulator::builder(
+        r#"#[test(Top)] module Top {
+            var text: string;
+            let mirrored: string = text;
+            initial {
+                text = "hello";
+                $display(mirrored);
+                $finish();
+            }
+        }"#,
+        "Top",
+    )
+    .run_test_detailed()
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("string let initializer"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn unsupported_string_operations_are_rejected() {
+    for expression in [
+        "~text",
+        "text == 1'b1",
+        "text.len()",
+        "text[0]",
+        "text.substr(0, 1)",
+    ] {
+        let source = format!(
+            r#"#[test(Top)] module Top {{
+                var text: string;
+                initial {{
+                    text = "hello";
+                    $display({expression});
+                    $finish();
+                }}
+            }}"#,
+        );
+        assert!(
+            celox::Simulator::builder(&source, "Top")
+                .run_test_detailed()
+                .is_err(),
+            "{expression}"
+        );
+    }
 }

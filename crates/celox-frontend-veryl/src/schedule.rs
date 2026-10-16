@@ -73,6 +73,53 @@ pub fn schedule_symbolic_rtl(
         trace,
     )?;
     let lookup = &output.scheduled.frontend_lookup;
+    let mut constant_strings = crate::HashMap::default();
+    for (&instance, module_id) in &lookup.instance_module {
+        let Some(module) = module_ir.get(module_id) else {
+            continue;
+        };
+        let Some(variables) = source_id_maps.get(module_id) else {
+            continue;
+        };
+        for declaration in &module.declarations {
+            let Declaration::Comb(comb) = declaration else {
+                continue;
+            };
+            for statement in &comb.statements {
+                let veryl_analyzer::ir::Statement::Assign(assign) = statement else {
+                    continue;
+                };
+                if !assign.expr.comptime().r#type.is_string()
+                    || assign.hier_dst.is_some()
+                    || assign.dst.len() != 1
+                {
+                    continue;
+                }
+                let dst = &assign.dst[0];
+                let Some(variable) = module.variables.get(&dst.id) else {
+                    continue;
+                };
+                if !matches!(variable.kind, veryl_analyzer::ir::VarKind::Let) {
+                    continue;
+                }
+                if !assign.expr.comptime().is_const
+                    || assign.expr.comptime().get_value().is_err()
+                    || variable.r#type.is_array()
+                {
+                    return Err(ParserError::illegal_context(
+                        "string let initializer",
+                        "Celox currently supports only constant scalar string let initializers",
+                        Some(&variable.token),
+                    ));
+                }
+                if let Some(id) = variables.get(&dst.id)
+                    && let Some((address, _)) = lookup.instance_variable(instance, *id)
+                {
+                    constant_strings.insert(address, assign.expr.clone());
+                }
+            }
+        }
+    }
     let mut child_sources = Vec::new();
     let mut components = Vec::new();
     let mut component_bindings = Vec::new();
@@ -97,6 +144,7 @@ pub fn schedule_symbolic_rtl(
                 .collect();
             if blocks.iter().any(|block| !block.is_empty()) {
                 child_sources.push(VerylTestbenchSource {
+                    constant_strings: constant_strings.clone(),
                     id_map: VerylIdMap {
                         module_variables: source_id_maps
                             .get(module_id)
@@ -132,6 +180,7 @@ pub fn schedule_symbolic_rtl(
         component_bindings.append(&mut instance_bindings);
     }
     let testbench_source = VerylTestbenchSource {
+        constant_strings,
         id_map: VerylIdMap {
             module_variables: source_id_maps,
         },

@@ -1061,6 +1061,7 @@ struct ExprCompiler<'a> {
     lookup: &'a FrontendLookup,
     id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
+    constant_strings: &'a HashMap<StateAddr, Expression>,
     base_instance: InstanceId,
 }
 
@@ -1464,6 +1465,11 @@ impl ExprCompiler<'_> {
         select: &VarSelect,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
+        if let Some(expression) = self.constant_strings.get(&address) {
+            self.emit(expression, ops);
+            return;
+        }
+
         let target = self
             .resolve_target_parts(
                 SemanticSignal {
@@ -2624,6 +2630,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let ec = ExprCompiler {
             lookup: self.lookup,
             id_map: &self.testbench_source.id_map,
+            constant_strings: &self.testbench_source.constant_strings,
             functions: &self.testbench_source.functions,
             base_instance,
         };
@@ -2653,6 +2660,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 let ec = ExprCompiler {
                     lookup: self.lookup,
                     id_map: &self.testbench_source.id_map,
+                    constant_strings: &self.testbench_source.constant_strings,
                     functions: &component.functions,
                     base_instance: component.parent_instance,
                 };
@@ -3253,6 +3261,37 @@ fn validate_testbench_expression(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
+    if let Expression::Term(factor) = expression
+        && factor.comptime().r#type.is_string()
+    {
+        let access = match factor.as_ref() {
+            Factor::Variable(id, index, select, _) => source
+                .id_map
+                .instance_var(lookup, source.base_instance(lookup), *id)
+                .and_then(|id| lookup.instance_variable(source.base_instance(lookup), id))
+                .map(|(_, info)| (info, index, select)),
+            Factor::HierVariable(reference) => Some((
+                resolve_hierarchical_reference_from(
+                    lookup,
+                    source.base_instance(lookup),
+                    reference,
+                )?
+                .1,
+                &reference.index,
+                &reference.select,
+            )),
+            _ => None,
+        };
+        if let Some((info, index, select)) = access
+            && (index.0.len() > info.array_dims.len() || !select.0.is_empty() || select.1.is_some())
+        {
+            return Err(ParserError::illegal_context(
+                "string character selection",
+                "character indexing and slicing of strings are not supported in Celox testbenches",
+                Some(&factor.comptime().token),
+            ));
+        }
+    }
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
@@ -3309,9 +3348,23 @@ fn validate_testbench_expression(
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
+            if inner.comptime().r#type.is_string() {
+                return Err(ParserError::illegal_context(
+                    "unary string operation",
+                    "unary operations on strings are not supported in Celox testbenches",
+                    Some(&inner.comptime().token),
+                ));
+            }
             validate_testbench_expression(inner, lookup, source, active_functions)
         }
         Expression::Binary(lhs, _, rhs, _) => {
+            if lhs.comptime().r#type.is_string() != rhs.comptime().r#type.is_string() {
+                return Err(ParserError::illegal_context(
+                    "mixed string operation",
+                    "operations mixing string and non-string operands are not supported in Celox testbenches",
+                    Some(&expression.comptime().token),
+                ));
+            }
             validate_testbench_expression(lhs, lookup, source, active_functions)?;
             validate_testbench_expression(rhs, lookup, source, active_functions)
         }
@@ -3322,6 +3375,13 @@ fn validate_testbench_expression(
         }
         Expression::Concatenation(items, _) => {
             for (expression, repeat) in items {
+                if expression.comptime().r#type.is_string() {
+                    return Err(ParserError::illegal_context(
+                        "string concatenation or replication",
+                        "string concatenation and replication are not supported in Celox testbenches",
+                        Some(&expression.comptime().token),
+                    ));
+                }
                 validate_testbench_expression(expression, lookup, source, active_functions)?;
                 if let Some(repeat) = repeat {
                     validate_testbench_expression(repeat, lookup, source, active_functions)?;
@@ -3619,6 +3679,7 @@ fn validate_testbench_hierarchical_destination(
     let compiler = ExprCompiler {
         lookup,
         id_map: &source.id_map,
+        constant_strings: &source.constant_strings,
         functions: &source.functions,
         base_instance: source.base_instance(lookup),
     };
@@ -3650,6 +3711,7 @@ fn validate_testbench_destination(
     ExprCompiler {
         lookup,
         id_map: &source.id_map,
+        constant_strings: &source.constant_strings,
         functions: &source.functions,
         base_instance: source.base_instance(lookup),
     }
@@ -3841,6 +3903,7 @@ mod tests {
         let compiler = ExprCompiler {
             lookup: &lookup,
             id_map: &source.id_map,
+            constant_strings: &source.constant_strings,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };
@@ -3860,6 +3923,7 @@ mod tests {
         let compiler = ExprCompiler {
             lookup: &lookup,
             id_map: &source.id_map,
+            constant_strings: &source.constant_strings,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };

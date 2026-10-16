@@ -3541,8 +3541,10 @@ describe("E2E: native testbench (runTest)", () => {
 					path: "strings.veryl",
 					content: `
             #[test(Top)] module Top {
+                let greeting: string = "hi";
                 var text: string;
                 initial {
+                    $assert(greeting == "hi", greeting);
                     text = "a dynamic string longer than eight bytes";
                     $assert(text == "a dynamic string longer than eight bytes", "[%s]", text);
                     text = "";
@@ -3560,7 +3562,7 @@ describe("E2E: native testbench (runTest)", () => {
 			result.assertions.map((assertion) =>
 				new TextDecoder().decode(assertion.message!),
 			),
-		).toEqual(["[a dynamic string longer than eight bytes]", "[]"]);
+		).toEqual(["hi", "[a dynamic string longer than eight bytes]", "[]"]);
 	});
 
 	const addon = loadNativeAddon();
