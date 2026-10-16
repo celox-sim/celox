@@ -30,6 +30,6 @@ cp conformance/veryl-proof/tools/z3-tripwire.sh "$OUT/tripwire-bin/z3"
 export Z3_BIN="$OUT/tripwire-bin/z3"
 export PATH="$OUT/tripwire-bin:$PATH"
 export LYDITE_SOLVER=finite
-python3 -m unittest audit.veryl_scaling.test_rv32i_isa audit.veryl_scaling.test_rv32i_spec audit.veryl_scaling.test_rv32i_normalization audit.veryl_scaling.test_rv32i_split_refinement audit.veryl_scaling.test_rv32i_selected_ci audit.veryl_scaling.test_rv32i_memory.ContractTests audit.veryl_scaling.test_rv32i_latency audit.veryl_scaling.test_rv32i_latency_onehot_candidate audit.veryl_scaling.test_rv32i_latency_shared
+python3 -m unittest audit.veryl_scaling.test_rv32i_isa audit.veryl_scaling.test_rv32i_spec audit.veryl_scaling.test_rv32i_normalization audit.veryl_scaling.test_rv32i_split_refinement audit.veryl_scaling.test_rv32i_control_invariants audit.veryl_scaling.test_rv32i_selected_ci audit.veryl_scaling.test_rv32i_memory.ContractTests audit.veryl_scaling.test_rv32i_latency audit.veryl_scaling.test_rv32i_latency_onehot_candidate audit.veryl_scaling.test_rv32i_latency_shared
 python3 -m audit.veryl_scaling.rv32i_selected_ci --out "$OUT/selected-proof"
 test ! -e "$Z3_TRIPWIRE_MARKER"
