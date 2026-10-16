@@ -455,7 +455,6 @@ impl<B: SimBackend> Simulation<B> {
             .resolve_host_writes(&record.processes.host_writes)?;
         self.simulator.load_state(file)?;
         self.state.import_schedule(parts);
-        self.state.sample_counted_waits(&self.simulator.backend);
         self.simulator.host_watch.set_log(host_writes);
         self.simulator.frozen = self.state.is_finished();
         Ok(())

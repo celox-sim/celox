@@ -1234,7 +1234,11 @@ fn state_files_reject_baselines_of_the_wrong_kind() {
     let waiters = &mut file.schedule.as_mut().unwrap().processes.waiters;
     assert_eq!(waiters.len(), 1);
     // `go` is not counted: its wait compares values.
-    waiters[0].baselines = vec![celox_runtime::BaselineRecord::Counter(0)];
+    waiters[0].baselines = vec![celox_runtime::BaselineRecord::Counter {
+        seen: 0,
+        value: vec![0],
+        mask: vec![0],
+    }];
     assert!(matches!(
         sim.load_state(&file),
         Err(crate::StateError::Mismatch(_))
@@ -1691,11 +1695,12 @@ fn waits_on_counted_signals_see_uncounted_writers() {
             assert!(base >= 1, "the pulse of v[0] is a change");
             for (time, input, changes) in [(2, 1u8, base + 1), (4, 0, base + 2)] {
                 sim.modify(|io| io.set(a, input)).unwrap();
-                sim.run_until(time).unwrap();
-                assert_eq!(value(&mut sim, "changes"), changes, "a = {input}");
-                // A loaded wait compares with the loaded value.
+                // Saving settles the write; the loaded wait still compares
+                // with the value it saw before it.
                 let file = sim.save_state().unwrap();
                 sim.load_state(&file).unwrap();
+                sim.run_until(time).unwrap();
+                assert_eq!(value(&mut sim, "changes"), changes, "a = {input}");
             }
         });
     }

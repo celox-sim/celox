@@ -23,7 +23,8 @@
 //!     wakeup count u32, then per wakeup: process str | time u64
 //!     waiter count u32, then per waiter:
 //!       process str | site u64 | baseline count u32, then per baseline:
-//!         0 u8 | counter u32, or 1 u8 | value bytes | mask bytes
+//!         0 u8 | counter u32 | value bytes | mask bytes, or
+//!         1 u8 | value bytes | mask bytes
 //!     ready count u32, then per process: process str
 //!     inactive count u32, then per process: process str
 //!     update count u32, then per update:
@@ -137,8 +138,13 @@ pub struct WaiterRecord {
 /// What one term of a waiting process compares against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BaselineRecord {
-    /// A counted signal's counter value when the wait began.
-    Counter(u32),
+    /// A counted signal's counter value when the wait began, and its value
+    /// at the last check as little-endian bytes.
+    Counter {
+        seen: u32,
+        value: Vec<u8>,
+        mask: Vec<u8>,
+    },
     /// The signal's value at the last check, as little-endian bytes.
     Value { value: Vec<u8>, mask: Vec<u8> },
 }
@@ -461,9 +467,11 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()
         put_len(w, waiter.baselines.len())?;
         for baseline in &waiter.baselines {
             match baseline {
-                BaselineRecord::Counter(value) => {
+                BaselineRecord::Counter { seen, value, mask } => {
                     w.write_all(&[0])?;
-                    w.write_all(&value.to_le_bytes())?;
+                    w.write_all(&seen.to_le_bytes())?;
+                    put_bytes(w, value)?;
+                    put_bytes(w, mask)?;
                 }
                 BaselineRecord::Value { value, mask } => {
                     w.write_all(&[1])?;
@@ -531,7 +539,11 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
                     let mut tag = [0; 1];
                     r.read_exact(&mut tag)?;
                     match tag[0] {
-                        0 => Ok(BaselineRecord::Counter(get_u32(r)?)),
+                        0 => Ok(BaselineRecord::Counter {
+                            seen: get_u32(r)?,
+                            value: get_len_bytes(r)?,
+                            mask: get_len_bytes(r)?,
+                        }),
                         1 => Ok(BaselineRecord::Value {
                             value: get_len_bytes(r)?,
                             mask: get_len_bytes(r)?,
@@ -676,7 +688,11 @@ mod tests {
                         process: "$process[1].status".into(),
                         site: 2,
                         baselines: vec![
-                            BaselineRecord::Counter(7),
+                            BaselineRecord::Counter {
+                                seen: 7,
+                                value: vec![2],
+                                mask: vec![0],
+                            },
                             BaselineRecord::Value {
                                 value: vec![1],
                                 mask: vec![0],

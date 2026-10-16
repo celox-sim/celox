@@ -696,7 +696,7 @@ impl<B: SimBackend> SimulationState<B> {
                         Some(counter) => {
                             *baseline = Baseline::Counter {
                                 seen: backend.get_as(counter),
-                                value: Some(read(backend, term.signal)),
+                                value: read(backend, term.signal),
                             }
                         }
                         None => match planes(backend, term.signal) {
@@ -799,10 +799,8 @@ impl<B: SimBackend> SimulationState<B> {
                             .counter
                             .is_some_and(|counter| backend.get_as::<u32>(counter) != *seen);
                         let now = read(backend, term.signal);
-                        let changed = value
-                            .as_ref()
-                            .is_some_and(|last| occurs(term.kind, last, &now));
-                        *value = Some(now);
+                        let changed = occurs(term.kind, value, &now);
+                        *value = now;
                         counted || changed
                     }
                     Baseline::Raw(last) => {
@@ -843,24 +841,6 @@ impl<B: SimBackend> SimulationState<B> {
         let hit = planes_occur(kind, last, now, width);
         copy_planes(last, now, width);
         hit
-    }
-
-    /// Sample the values that counted terms of waits loaded from a state
-    /// file compare against, once the state is in place.
-    pub fn sample_counted_waits(&mut self, backend: &B) {
-        let processes = &self.processes;
-        for (process, waiter) in self.process_state.waiters.iter_mut() {
-            let terms = &processes[process].wait_sites[waiter.site];
-            for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
-                if let Baseline::Counter {
-                    value: value @ None,
-                    ..
-                } = baseline
-                {
-                    *value = Some(read(backend, term.signal));
-                }
-            }
-        }
     }
 
     /// Show the waits one value the host wrote to `signal`.

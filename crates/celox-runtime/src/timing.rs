@@ -233,8 +233,7 @@ pub enum Baseline {
     /// the last check. Only kernels and combinational process units count a
     /// signal's writes, so a write the counter misses, such as one of a
     /// continuous assignment to other bits, shows as a change of value.
-    /// `None` until the value is sampled, after a state file is loaded.
-    Counter { seen: u32, value: Option<Value> },
+    Counter { seen: u32, value: Value },
     /// The signal's value at the last check.
     Value(Value),
     /// The signal's state at the last check, as the bytes of its planes

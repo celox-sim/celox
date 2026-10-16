@@ -456,7 +456,14 @@ impl<B: SimBackend> Simulator<B> {
                             .iter()
                             .enumerate()
                             .map(|(term, baseline)| match baseline {
-                                Baseline::Counter { seen, .. } => BaselineRecord::Counter(*seen),
+                                Baseline::Counter {
+                                    seen,
+                                    value: (value, mask),
+                                } => BaselineRecord::Counter {
+                                    seen: *seen,
+                                    value: value.to_bytes_le(),
+                                    mask: mask.to_bytes_le(),
+                                },
                                 Baseline::Value((value, mask)) => BaselineRecord::Value {
                                     value: value.to_bytes_le(),
                                     mask: mask.to_bytes_le(),
@@ -615,7 +622,7 @@ impl<B: SimBackend> Simulator<B> {
                         .iter()
                         .zip(&waiter.baselines)
                         .all(|((signal, _), baseline)| {
-                            counted(signal) == matches!(baseline, BaselineRecord::Counter(_))
+                            counted(signal) == matches!(baseline, BaselineRecord::Counter { .. })
                         })
             }) {
                 unknown.push(format!("{} wait site {}", waiter.process, waiter.site));
@@ -646,10 +653,12 @@ impl<B: SimBackend> Simulator<B> {
                         .baselines
                         .iter()
                         .map(|baseline| match baseline {
-                            // The value is sampled once the state is loaded.
-                            BaselineRecord::Counter(seen) => Baseline::Counter {
+                            BaselineRecord::Counter { seen, value, mask } => Baseline::Counter {
                                 seen: *seen,
-                                value: None,
+                                value: (
+                                    BigUint::from_bytes_le(value),
+                                    BigUint::from_bytes_le(mask),
+                                ),
                             },
                             BaselineRecord::Value { value, mask } => Baseline::Value((
                                 BigUint::from_bytes_le(value),
