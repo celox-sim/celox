@@ -41,7 +41,7 @@ impl Verilator {
             top,
             testbench,
             edges,
-        } = stage(frontend, design, directory, script)?;
+        } = stage(frontend, design, directory, script, &[])?;
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
             include_bytes!("vpi_bits.hpp"),

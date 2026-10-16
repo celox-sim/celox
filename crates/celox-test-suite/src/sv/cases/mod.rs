@@ -56,6 +56,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("system_functions.vtest"),
     },
     Group {
+        file: "src/sv/cases/timing.vtest",
+        text: include_str!("timing.vtest"),
+    },
+    Group {
         file: "src/sv/cases/types.vtest",
         text: include_str!("types.vtest"),
     },

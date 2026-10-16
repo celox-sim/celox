@@ -12,6 +12,7 @@
     "icarus/review_regressions.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
+    "icarus/timing.json",
     "icarus/types.json"
   ],
   "exclude_stronger_than_sv": false,
