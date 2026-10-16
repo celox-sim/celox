@@ -128,9 +128,13 @@ Celox artifact JSON も parse しません。build 可能な addon と load test
 | 文 | 動作 |
 |---|---|
 | `Assign` | blocking 代入。後続の文は新しい値を読み、他の logic は process が suspend した後に新しい値を見ます。 |
+| `Nonblocking` | nonblocking 代入。値はその場で評価し、現在時刻の NBA region で代入します。 |
 | `If` | 条件で分岐します。不定 bit を含む条件は偽として扱います。 |
 | `While` / `Forever` | 条件が成り立つ間、または永久に body を繰り返します。 |
-| `Delay` | 指定した時間単位だけ suspend します。量は 64 bit 以下です。 |
+| `Delay` | 指定した時間単位だけ suspend します。量は 64 bit 以下です。0 の delay は、その時刻の nonblocking 代入が反映された後で再開します。 |
+| `InactiveDelay` | `Delay` と同様ですが、SystemVerilog の `#0` と同じく 0 の delay は inactive region、つまり nonblocking 代入の反映より前に再開します。 |
+| `WaitEvent` | term のどれかが起きるまで suspend します。term は signal の任意の変化、立ち上がり edge、立ち下がり edge です（`@(...)`）。 |
+| `WaitLevel` | 条件が非 0 になるまで suspend します（`wait (...)`）。既に成り立っていればそのまま進みます。 |
 | `Finish` | simulation を終了します。 |
 
 ```rust
@@ -144,30 +148,53 @@ module.process(vec![Statement::Forever {
         Statement::Assign { target: module.whole(clk)?, value: toggled },
     ],
 }])?;
+
+// always @(posedge clk) count = count + 1;
+module.process(vec![Statement::Forever {
+    body: vec![
+        Statement::WaitEvent { terms: vec![EventTerm::new(clk, EventEdge::Posedge)] },
+        Statement::Assign { target: module.whole(count)?, value: next_count },
+    ],
+}])?;
 ```
 
+`ModuleBuilder::comb_process` は `always_comb` のような組み合わせ process を
+追加します。代入と条件分岐だけからなり、時刻 0 と、読む（書かない）signal が
+変化したときに実行されます。書き込みはその都度見えるので、`y = 0; if (a) y = 1;`
+は入力の変化で再実行されたときに `y` に pulse を出します。入力が変わらないまま
+settle し直しても再実行はされません。
+
 process は時刻付きの `Simulation` でだけ実行されます。各 process は再開可能な
-kernel に compile され、delay が満了すると simulation の scheduler が再開
-します。同じ時刻に再開する process は宣言順に実行されます。process が見るのは前の時刻で
-settle した state です。process が起こした clock や reset の edge は、
-schedule された event と同様にその時刻の register を trigger します。0 の delay
-を置くと、process は同じ時刻のうちに、他の process が実行され、その edge が
-trigger した register が settle した後で再開します。そのため 0 の delay で区切った
-pulse も edge になります。
+kernel に compile され、delay の満了や wait の成立で simulation の scheduler が
+再開します。同じ時刻に再開する process は宣言順に実行されます。time slot は
+IEEE 1800-2023 4.5 の region に従います。edge で起こされた process も含めて
+process は active region で実行され、その edge の register が nonblocking 代入を
+反映する前に動きます。そのため `@(posedge clk)` で起きた process は edge 前の
+register 出力を読みます。0 の `InactiveDelay` の process は active region の後に
+実行され、nonblocking 代入は両方が空になってから反映されます。同じ edge で
+register の入力を駆動する process は、SystemVerilog と同じく register と race
+します。
+
+process の書き込みはすべて数えられます。suspend を挟まない `clk = 1; clk = 0;`
+のような pulse も `@(posedge clk)` と `clk` の register を 1 回 trigger し、1 つの
+time slot で同じ signal へ行う 2 つの nonblocking 代入は順に反映されます。
+`Simulation::modify` による host の書き込みは現在時刻の更新です。次の `step` や
+`run_until` は時刻を進める前にそれを settle します。
 
 process が書けるのは、continuous assignment や register が駆動していない
 output と internal signal です。同じ signal を複数の process が書いても
-構いません。checkpoint は suspend 中の process を保存しますが、process を
-持つ simulation の state file にはまだ対応していません。process を持つ
-artifact は Veryl native testbench から instantiate できません。
+構いません。checkpoint と state file は suspend 中や wait 中の process を
+保存します。process を持つ artifact は Veryl native testbench から
+instantiate できません。
 
 ## artifact format の制限
 
 format version 1 が受け取るのは平坦化済みの1 module です。型付き signal、
 constant、組み合わせ式と代入、edge-triggered register、非同期 reset、同期
-enable、初期値を扱えます。format version 2 で process が加わりました。
-process を持たない artifact は builder が version 1 として書き出すので、
-version 1 しか読まない consumer もそのまま受け取れます。hierarchy、memory、
+enable、初期値を扱えます。format version 2 で process が、version 3 で
+その nonblocking 代入、inactive delay、wait と組み合わせ process が加わりました。
+builder は artifact を表せる最も古い version で書き出すので、それより前の
+version しか読まない consumer もそのまま受け取れます。hierarchy、memory、
 latch、custom primitive、bidirectional signal は SDK builder を呼ぶ前に
 frontend 側で lower してください。
 
