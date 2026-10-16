@@ -137,7 +137,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
         440,
     ),
     ("wildcard port connection", 442),
-    ("mixed clock-edge polarities for one signal", 443),
     ("delayed continuous assignment", 444),
     ("duplicate internal signal", 445),
     ("streaming concatenation", 447),
@@ -150,7 +149,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("undriven net declaration", 460),
     ("non-integer module parameter override", 461),
     ("always_ff event expression", 464),
-    ("mixed reset-edge polarities for one signal", 471),
     ("package net", 1146),
 ];
 

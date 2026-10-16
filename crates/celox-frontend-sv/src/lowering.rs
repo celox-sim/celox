@@ -105,6 +105,8 @@ pub(crate) struct LoweredSvModule {
     pub instances: Vec<LoweredSvInstance>,
     /// Variables that denote a package variable, with its package and name.
     package_variables: Vec<(SourceVarId, String, String)>,
+    /// The hidden `(copy, signal)` event copies of [`FfEventVars`].
+    event_copies: Vec<(SourceVarId, SourceVarId)>,
 }
 
 #[derive(Clone)]
@@ -1242,6 +1244,8 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             parameter_types: HashMap::default(),
             instances: Vec::new(),
             package_variables: Vec::new(),
+            // The foreign module's own combinational blocks carry its copies.
+            event_copies: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -1941,6 +1945,7 @@ fn lower_module_with_overrides(
             eval_apply_ff_blocks,
             reset_clock_map,
             parallel_ff_parts,
+            event_vars,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -1962,7 +1967,7 @@ fn lower_module_with_overrides(
             std::mem::take(&mut pm.extern_functions),
         )
     };
-    mark_ff_event_domains(module, &mut variables, &name_to_id);
+    mark_ff_event_domains(&event_vars, &mut variables);
     let (initial_values, processes) = lower_initial_processes(
         module,
         &mut variables,
@@ -2075,44 +2080,22 @@ fn lower_module_with_overrides(
         parameter_types,
         instances,
         package_variables,
+        event_copies: event_vars.copies,
     })
 }
 
 fn mark_ff_event_domains(
-    module: &sv::ir::Module,
+    event_vars: &FfEventVars,
     variables: &mut HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
 ) {
-    for process in module.ff_processes() {
-        let Some(clock) = clock_event_from_ff_process(process) else {
-            continue;
-        };
-        if let Some(id) = name_to_id.get(clock.signal()).copied()
-            && let Some(variable) = variables.get_mut(&id)
-        {
-            variable.domain_kind = match clock.edge() {
-                sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
-                sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+    for (id, kind) in event_vars.kinds() {
+        if let Some(variable) = variables.get_mut(&id) {
+            variable.domain_kind = kind;
+            variable.type_kind = match kind {
+                DomainKind::ResetAsyncHigh => PortTypeKind::ResetAsyncHigh,
+                DomainKind::ResetAsyncLow => PortTypeKind::ResetAsyncLow,
+                _ => PortTypeKind::Clock,
             };
-            variable.type_kind = PortTypeKind::Clock;
-        }
-        for event in process
-            .events()
-            .iter()
-            .filter(|event| event.signal() != clock.signal())
-        {
-            if let Some(id) = name_to_id.get(event.signal()).copied()
-                && let Some(variable) = variables.get_mut(&id)
-            {
-                variable.domain_kind = match event.edge() {
-                    sv::ir::FfEdge::Pos => DomainKind::ResetAsyncHigh,
-                    sv::ir::FfEdge::Neg => DomainKind::ResetAsyncLow,
-                };
-                variable.type_kind = match event.edge() {
-                    sv::ir::FfEdge::Pos => PortTypeKind::ResetAsyncHigh,
-                    sv::ir::FfEdge::Neg => PortTypeKind::ResetAsyncLow,
-                };
-            }
         }
     }
 }
@@ -2438,6 +2421,8 @@ pub(crate) fn attach_instance_glue(
             None,
         ),
     })?;
+    let (mut comb_blocks, mut arena) = (comb_blocks, arena);
+    push_event_copies(&lowered.event_copies, &mut comb_blocks, &mut arena)?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
     module.arena = arena;
@@ -2962,6 +2947,46 @@ fn lower_comb_processes(
     *extern_functions = std::mem::take(&mut pm.extern_functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites))
+}
+
+/// The continuous assignments `copy = signal` of the hidden event copies of
+/// [`FfEventVars`]: a whole-variable copy, which clock-domain unification
+/// keeps in the signal's domain unless the copy is sensed at the other edge.
+fn push_event_copies(
+    copies: &[(SourceVarId, SourceVarId)],
+    comb_blocks: &mut Vec<LogicPath<SourceVarId>>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Result<(), ParserError> {
+    for &(copy, signal) in copies {
+        let access = BitAccess::new(0, 0);
+        let expr = arena
+            .alloc(SLTNode::Input {
+                variable: signal,
+                signed: false,
+                index: Vec::new(),
+                access,
+            })
+            .map_err(|error| {
+                ParserError::illegal_context(
+                    "systemverilog always_ff event copy",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+        comb_blocks.push(LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(copy, 0, 0)),
+            sources: std::iter::once(VarAtomBase::new(signal, 0, 0)).collect(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr,
+        });
+    }
+    Ok(())
 }
 
 /// The bit boundaries at which combinational processes write or statically
@@ -6176,7 +6201,88 @@ type SvFfBlocks = (
         TriggerSet<SourceVarId>,
         Vec<celox_frontend_core::symbolic::artifact::FfPart<RegionedVarAddr>>,
     >,
+    FfEventVars,
 );
+
+/// The variables `always_ff` event controls are sensed on.
+///
+/// A variable carries one domain kind, the edge and role of its event, so a
+/// signal is sensed on itself at one edge and role, and at any other on a
+/// hidden copy of the signal: `negedge clk` beside `posedge clk`, or
+/// `posedge rst` as a clock beside `negedge rst` as an asynchronous reset.
+/// Each copy is a whole-variable continuous assignment of the signal, so it
+/// changes in the same time step as the signal and is a clock derived from
+/// it; only domains sensed on a copy pay for it.
+///
+/// The signal itself keeps the first of rising clock, falling clock, active
+/// high reset, active low reset that it is sensed as, independent of the
+/// order of the processes: a clock port stays in the domain of the rising
+/// clock that drives it, and `Simulator::tick` of the signal is its rising
+/// edge whenever a process uses that.
+#[derive(Clone, Default)]
+pub(crate) struct FfEventVars {
+    /// Per signal, the domain kinds it is sensed at and their variables.
+    sensed: HashMap<SourceVarId, Vec<(DomainKind, SourceVarId)>>,
+    /// The `(copy, signal)` pairs of the hidden copies, in creation order.
+    copies: Vec<(SourceVarId, SourceVarId)>,
+}
+
+impl FfEventVars {
+    /// Sense each signal of `events` on itself at its first kind in
+    /// priority order.
+    fn new(events: impl Iterator<Item = (SourceVarId, DomainKind)>) -> Self {
+        let priority = |kind: DomainKind| match kind {
+            DomainKind::ClockPosedge => 0,
+            DomainKind::ClockNegedge => 1,
+            DomainKind::ResetAsyncHigh => 2,
+            DomainKind::ResetAsyncLow => 3,
+            DomainKind::Other => 4,
+        };
+        let mut primary = HashMap::<SourceVarId, DomainKind>::default();
+        for (signal, kind) in events {
+            primary
+                .entry(signal)
+                .and_modify(|primary| {
+                    if priority(kind) < priority(*primary) {
+                        *primary = kind;
+                    }
+                })
+                .or_insert(kind);
+        }
+        Self {
+            sensed: primary
+                .into_iter()
+                .map(|(signal, kind)| (signal, vec![(kind, signal)]))
+                .collect(),
+            copies: Vec::new(),
+        }
+    }
+
+    /// The variable on which `signal` is sensed as `kind`.
+    fn sensed(
+        &mut self,
+        pm: &mut procedural::ProcModule<'_>,
+        signal: SourceVarId,
+        kind: DomainKind,
+    ) -> SourceVarId {
+        let sensed = self.sensed.entry(signal).or_default();
+        if let Some(&(_, var)) = sensed.iter().find(|(sensed_kind, _)| *sensed_kind == kind) {
+            return var;
+        }
+        let copy = pm.event_copy(signal, kind);
+        self.copies.push((copy, signal));
+        sensed.push((kind, copy));
+        copy
+    }
+
+    /// Every sensed variable with its domain kind.
+    fn kinds(&self) -> impl Iterator<Item = (SourceVarId, DomainKind)> + '_ {
+        self.sensed
+            .values()
+            .flatten()
+            .map(|&(kind, var)| (var, kind))
+    }
+}
 
 fn lower_ff_processes(
     module: &sv::ir::Module,
@@ -6188,71 +6294,58 @@ fn lower_ff_processes(
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
-    let mut clock_edges = HashMap::default();
-    let mut reset_edges = HashMap::default();
 
-    let random_seeds = process_random_seeds(module);
-    for (index, process) in module.ff_processes().iter().enumerate() {
+    // Every event of every process, as (signal, domain kind): the clock, then
+    // the resets.
+    let mut process_events = Vec::new();
+    for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        let clock_id = pm
-            .id(clock.signal())
-            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        if pm
-            .variables
-            .get(&clock_id)
-            .is_some_and(|variable| variable.width != 1)
-        {
-            return Err(sv::AnalyzerError::Unsupported(
-                "multi-bit always_ff event signal".to_string(),
-            ));
-        }
-        if reset_edges.contains_key(&clock_id) {
-            return Err(sv::AnalyzerError::Unsupported(
-                "mixed clock/reset-edge polarities for one signal".to_string(),
-            ));
-        }
-        if clock_edges
-            .insert(clock_id, clock.edge())
-            .is_some_and(|edge| edge != clock.edge())
-        {
-            return Err(sv::AnalyzerError::Unsupported(
-                "mixed clock-edge polarities for one signal".to_string(),
-            ));
-        }
-        for reset in process
-            .events()
-            .iter()
-            .filter(|event| event.signal() != clock.signal())
-        {
-            let reset_id = pm.id(reset.signal()).ok_or_else(|| {
+        let event_id = |event: &sv::ir::FfEvent| {
+            let id = pm.id(event.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
             if pm
                 .variables
-                .get(&reset_id)
+                .get(&id)
                 .is_some_and(|variable| variable.width != 1)
             {
                 return Err(sv::AnalyzerError::Unsupported(
                     "multi-bit always_ff event signal".to_string(),
                 ));
             }
-            if clock_edges.contains_key(&reset_id) {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "mixed clock/reset-edge polarities for one signal".to_string(),
-                ));
-            }
-            if reset_edges
-                .insert(reset_id, reset.edge())
-                .is_some_and(|edge| edge != reset.edge())
-            {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "mixed reset-edge polarities for one signal".to_string(),
-                ));
-            }
+            Ok(id)
+        };
+        let clock_kind = match clock.edge() {
+            sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
+            sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+        };
+        let mut events = vec![(event_id(clock)?, clock_kind)];
+        for reset in process
+            .events()
+            .iter()
+            .filter(|event| event.signal() != clock.signal())
+        {
+            let reset_kind = match reset.edge() {
+                sv::ir::FfEdge::Pos => DomainKind::ResetAsyncHigh,
+                sv::ir::FfEdge::Neg => DomainKind::ResetAsyncLow,
+            };
+            events.push((event_id(reset)?, reset_kind));
         }
-        let trigger_set = trigger_set_from_ff_process(process, pm.name_to_id)
-            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        process_events.push(events);
+    }
+    let mut event_vars = FfEventVars::new(process_events.iter().flatten().copied());
+
+    let random_seeds = process_random_seeds(module);
+    for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
+        let mut events = events
+            .into_iter()
+            .map(|(signal, kind)| event_vars.sensed(pm, signal, kind));
+        let mut trigger_set = TriggerSet {
+            clock: events.next().expect("a process has a clock event"),
+            resets: Vec::new(),
+        };
+        trigger_set.resets.extend(events);
         // A reset shared by several clock domains is associated with the
         // first; the association only names a clock for the reset signal.
         for reset in &trigger_set.resets {
@@ -6299,6 +6392,7 @@ fn lower_ff_processes(
         eval_apply_ff_blocks,
         reset_clock_map,
         parallel_ff_parts,
+        event_vars,
     ))
 }
 
@@ -6381,24 +6475,6 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
             .any(|arg| expr_uses_ident_as_condition(arg, name)),
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
     }
-}
-
-fn trigger_set_from_ff_process(
-    process: &sv::ir::FfProcess,
-    name_to_id: &HashMap<String, SourceVarId>,
-) -> Option<TriggerSet<SourceVarId>> {
-    let clock = clock_event_from_ff_process(process)?;
-    let clock_id = *name_to_id.get(clock.signal())?;
-    let resets = process
-        .events()
-        .iter()
-        .filter(|event| event.signal() != clock.signal())
-        .filter_map(|event| name_to_id.get(event.signal()).copied())
-        .collect();
-    Some(TriggerSet {
-        clock: clock_id,
-        resets,
-    })
 }
 
 fn seal_builder(mut builder: SIRBuilder<RegionedVarAddr>) -> ExecutionUnit<RegionedVarAddr> {
