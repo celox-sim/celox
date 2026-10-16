@@ -63,6 +63,7 @@ export {
 /** @internal */
 export type {
 	CreateResult,
+	ClockEdge,
 	EventHandle,
 	FourStateSignalValue,
 	FourStateValue,

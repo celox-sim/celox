@@ -117,6 +117,15 @@ export interface NativeFrontendSimulatorHandle
 	extends FrontendSimulatorHandleMetadata {
 	tick(eventId: number): void;
 	tickN(eventId: number, count: number): void;
+	/**
+	 * Move event signals through coincident edges and run every domain
+	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
+	 * Returns whether combinational logic is settled afterwards. Absent on
+	 * addons without explicit edges.
+	 */
+	edges?(eventIds: number[], rising: boolean[]): boolean;
+	/** Whether the event's active edge is rising. */
+	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
@@ -170,6 +179,15 @@ export type FrontendSimulatorHandle =
 export interface NativeSimulatorHandle {
 	tick(eventId: number): void;
 	tickN(eventId: number, count: number): void;
+	/**
+	 * Move event signals through coincident edges and run every domain
+	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
+	 * Returns whether combinational logic is settled afterwards. Absent on
+	 * addons without explicit edges.
+	 */
+	edges?(eventIds: number[], rising: boolean[]): boolean;
+	/** Whether the event's active edge is rising. */
+	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;
@@ -395,6 +413,9 @@ export interface EventHandle {
 	readonly name: string;
 	readonly id: number;
 }
+
+/** A transition of a clock or reset signal. */
+export type ClockEdge = "posedge" | "negedge";
 
 // ---------------------------------------------------------------------------
 // 4-state helpers

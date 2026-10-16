@@ -932,14 +932,14 @@ impl HandleBackend {
         derived: &HandleDerivedTicks,
         event_edges: &celox::EventEdges,
         scratch: &mut celox::DerivedTickScratch,
-    ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+    ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
         fn edges_with<B: celox::SimBackend>(
             backend: &mut B,
             moves: &[(usize, celox::Edge)],
             plans: &celox::DerivedTickPlans<B::Event>,
             event_edges: &celox::EventEdges,
             scratch: &mut celox::DerivedTickScratch,
-        ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
             let moves: Vec<_> = moves
                 .iter()
                 .map(|&(id, edge)| (backend.id_to_event_slice()[id], edge))
@@ -954,7 +954,7 @@ impl HandleBackend {
                 &moves,
                 true,
             )
-            .map(drop)
+            .map(|outcome| outcome != celox::EdgeOutcome::Moved)
         }
         match (self, derived) {
             (Self::Default(backend), HandleDerivedTicks::Default(plans)) => {
@@ -1497,9 +1497,10 @@ impl NativeSimulatorHandle {
 
     /// Move event signals through coincident edges and run every domain
     /// sensitive to them: `rising[i]` gives the direction of `event_ids[i]`.
-    /// See `Simulator::edges`.
+    /// See `Simulator::edges`. Returns whether combinational logic is
+    /// settled afterwards; it is not when a signal moved but no domain ran.
     #[napi]
-    pub fn edges(&mut self, event_ids: Vec<u32>, rising: Vec<bool>) -> Result<()> {
+    pub fn edges(&mut self, event_ids: Vec<u32>, rising: Vec<bool>) -> Result<bool> {
         if event_ids.len() != rising.len() {
             return Err(Error::from_reason(
                 "edges needs one direction per event".to_string(),
@@ -3962,9 +3963,9 @@ mod tests {
             };
             let clk_event = events["clk"];
             assert!(handle.active_edge_is_rising(clk_event).unwrap());
-            handle.edges(vec![clk_event], vec![false]).unwrap();
+            let _ = handle.edges(vec![clk_event], vec![false]).unwrap();
             let start = (memory(&mut handle)[rising], memory(&mut handle)[falling]);
-            handle.edges(vec![clk_event], vec![true]).unwrap();
+            assert!(handle.edges(vec![clk_event], vec![true]).unwrap());
             assert_eq!(memory(&mut handle)[clk], 1, "{mode}: clk stays high");
             assert_eq!(
                 memory(&mut handle)[rising],
@@ -3972,7 +3973,7 @@ mod tests {
                 "{mode}"
             );
             assert_eq!(memory(&mut handle)[falling], start.1, "{mode}");
-            handle.edges(vec![clk_event], vec![false]).unwrap();
+            let _ = handle.edges(vec![clk_event], vec![false]).unwrap();
             assert_eq!(
                 memory(&mut handle)[rising],
                 start.0.wrapping_add(1),
