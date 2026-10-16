@@ -1620,9 +1620,15 @@ fn lower_processes(
         hidden,
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
+        // A port may have writers outside the module (`NbaSite::pending`).
         single_nba_targets: counts
             .into_iter()
-            .filter(|&(_, count)| count == 1)
+            .filter(|&(target, count)| {
+                count == 1
+                    && artifact
+                        .signal(target)
+                        .is_some_and(|signal| signal.direction() == Direction::Internal)
+            })
             .map(|(target, _)| target)
             .collect(),
         process: 0,
