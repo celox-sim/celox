@@ -223,7 +223,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$load_coverage_db", Task),
     // 20.15 Probabilistic distribution functions
     unsupported("$random", Function),
-    unsupported("$urandom", Function),
+    function("$urandom", 0, 1),
     unsupported("$urandom_range", Function),
     unsupported("$dist_uniform", Function),
     unsupported("$dist_normal", Function),

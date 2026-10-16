@@ -775,13 +775,25 @@ impl LValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
+    creation_order: usize,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
+    sensitivity_body: Vec<Stmt>,
 }
 
 impl CombProcess {
+    /// Reads removed from executable branches still affect implicit sensitivity.
+    pub fn sensitivity_body(&self) -> &[Stmt] {
+        &self.sensitivity_body
+    }
+
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(
         kind: CombProcessKind,
         condition: Option<ConstExpr>,
@@ -789,6 +801,8 @@ impl CombProcess {
         body: Vec<Stmt>,
     ) -> Self {
         Self {
+            creation_order: 0,
+            sensitivity_body: Vec::new(),
             kind,
             condition,
             assignments,
@@ -819,17 +833,28 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
-        Self { events, body }
+        Self {
+            creation_order: 0,
+            events,
+            body,
+        }
     }
 
     pub fn events(&self) -> &[FfEvent] {
@@ -844,18 +869,32 @@ impl FfProcess {
 /// An `initial` process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
+    creation_order: usize,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
+    synthetic: bool,
 }
 
 impl InitialProcess {
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
+            creation_order: 0,
             condition,
             body,
             initializer,
+            synthetic: false,
         }
+    }
+
+    /// Compiler-generated storage initialization, without a user static process.
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Whether this process holds variable declaration initializers, which
@@ -1135,7 +1174,7 @@ impl From<ast::LValue> for LValue {
 
 impl From<ast::CombProcess> for CombProcess {
     fn from(process: ast::CombProcess) -> Self {
-        CombProcess::new(
+        let mut result = CombProcess::new(
             process.kind().into(),
             process.condition().cloned().map(Into::into),
             process
@@ -1150,7 +1189,15 @@ impl From<ast::CombProcess> for CombProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result.sensitivity_body = process
+            .sensitivity_body()
+            .iter()
+            .cloned()
+            .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
+            .collect();
+        result
     }
 }
 
@@ -1159,13 +1206,14 @@ impl From<ast::CombProcessKind> for CombProcessKind {
         match kind {
             ast::CombProcessKind::ContinuousAssign => CombProcessKind::ContinuousAssign,
             ast::CombProcessKind::AlwaysComb => CombProcessKind::AlwaysComb,
+            ast::CombProcessKind::AlwaysStar => CombProcessKind::AlwaysStar,
         }
     }
 }
 
 impl From<ast::FfProcess> for FfProcess {
     fn from(process: ast::FfProcess) -> Self {
-        Self::new(
+        let mut result = Self::new(
             process.events().iter().cloned().map(Into::into).collect(),
             process
                 .body()
@@ -1173,13 +1221,15 @@ impl From<ast::FfProcess> for FfProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result
     }
 }
 
 impl From<ast::InitialProcess> for InitialProcess {
     fn from(process: ast::InitialProcess) -> Self {
-        Self::new(
+        let mut result = Self::new(
             process.condition().cloned().map(Into::into),
             process
                 .body()
@@ -1188,7 +1238,10 @@ impl From<ast::InitialProcess> for InitialProcess {
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
             process.is_initializer(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result.synthetic = process.is_synthetic();
+        result
     }
 }
 

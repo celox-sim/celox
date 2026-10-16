@@ -349,7 +349,7 @@ fn replace_sir_terminator_uses(
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
-fn renumber_sir_inst<A: Clone>(
+pub(crate) fn renumber_sir_inst<A: Clone>(
     inst: &SIRInstruction<A>,
     ro: usize,
     _bo: usize,

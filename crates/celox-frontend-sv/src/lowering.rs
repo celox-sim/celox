@@ -2422,6 +2422,8 @@ pub(crate) fn attach_instance_glue(
         &lowered.constants,
         &lowered.parameter_types,
         four_state,
+        &mut module.runtime_errors,
+        &mut module.extern_functions,
     )
     .map_err(|error| match error {
         sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -2462,6 +2464,17 @@ pub(crate) fn attach_instance_glue(
                     None,
                 )
             })?;
+    }
+    for path in &mut module.comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            for block in unit.blocks.values_mut() {
+                for inst in &mut block.instructions {
+                    if let SIRInstruction::RuntimeEvent { site_id, .. } = inst {
+                        *site_id += site_base;
+                    }
+                }
+            }
+        }
     }
     for mut observer in comb_observers {
         observer.site_id += site_base;
@@ -2653,6 +2666,42 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
     }
 }
 
+/// Process kind and index identify a thread without merging the lowering paths.
+/// Each instance owns an initialization RNG seeded with the same default
+/// (IEEE 1800-2023 18.14.1); relocation keeps sibling RNG states independent.
+fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
+    let mut processes: Vec<_> = module
+        .ff_processes()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.creation_order(), 0u8, i))
+        .chain(
+            module
+                .initial_processes()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.is_synthetic())
+                .map(|(i, p)| (p.creation_order(), 1, i)),
+        )
+        .chain(
+            module
+                .comb_processes()
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.creation_order(), 2, i)),
+        )
+        .collect();
+    processes.sort_by_key(|&(order, kind, i)| (order, kind, i));
+    let mut state = 0x4d59_5df4u32;
+    processes
+        .into_iter()
+        .map(|(_, kind, index)| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((kind, index), state)
+        })
+        .collect()
+}
+
 /// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
 /// 10.5): the initial state they define, and the processes that run the
 /// others from time zero.
@@ -2690,7 +2739,8 @@ fn lower_initial_processes(
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
-    for process in module.initial_processes() {
+    let random_seeds = process_random_seeds(module);
+    for (index, process) in module.initial_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -2701,6 +2751,10 @@ fn lower_initial_processes(
                 continue;
             }
         }
+        let random_seed = random_seeds
+            .get(&(1, index))
+            .copied()
+            .unwrap_or(0x4d59_5df4);
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {
@@ -2709,7 +2763,7 @@ fn lower_initial_processes(
                     seed = store;
                 }
             }
-            Err(_) => runtime.push(process),
+            Err(_) => runtime.push((process, random_seed)),
         }
     }
     let created = std::mem::take(&mut pm.created);
@@ -2776,9 +2830,10 @@ fn lower_initial_processes(
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|(process, slots)| {
+        .map(|((process, random_seed), slots)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                kernel: ff::Ff::new(&mut pm, random_seed)
+                    .lower_initial_kernel(process.body(), slots)?,
                 slots,
             })
         })
@@ -2796,6 +2851,8 @@ fn lower_comb_processes(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
+    runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+    extern_functions: &mut Vec<ExternFunction>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -2818,7 +2875,10 @@ fn lower_comb_processes(
         parameter_types,
         four_state,
     );
-    for process in module.comb_processes() {
+    pm.runtime_errors = std::mem::take(runtime_errors);
+    pm.extern_functions = std::mem::take(extern_functions);
+    let random_seeds = process_random_seeds(module);
+    for (index, process) in module.comb_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -2831,10 +2891,65 @@ fn lower_comb_processes(
                 continue;
             }
         }
+        if pm.uses_random(process.body()) {
+            pm.runtime_event_sites = std::mem::take(&mut sites);
+            comb_blocks.extend(
+                ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
+                    process.body(),
+                    process.sensitivity_body(),
+                    process.kind(),
+                    &mut arena,
+                )?,
+            );
+            sites = std::mem::take(&mut pm.runtime_event_sites);
+            continue;
+        }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         comb_blocks.extend(comb.lower_process(process.body())?);
+        if comb.observers.iter().any(|observer| {
+            observer
+                .sensitivity
+                .iter()
+                .any(|atom| !comb.m.var(atom.id).array_dims.is_empty())
+        }) {
+            // Symbolic array reads may conservatively depend on every element.
+            // Process activation follows the syntactic static selection instead.
+            let include_functions = process.kind() != sv::ir::CombProcessKind::AlwaysStar;
+            let mut reads = comb.m.implicit_reads(process.body(), include_functions);
+            reads.extend(
+                comb.m
+                    .implicit_reads(process.sensitivity_body(), include_functions),
+            );
+            for observer in &mut comb.observers {
+                observer.sensitivity = observer
+                    .sensitivity
+                    .iter()
+                    .flat_map(|atom| {
+                        if comb.m.var(atom.id).array_dims.is_empty() {
+                            return vec![*atom];
+                        }
+                        let selected: Vec<_> = reads
+                            .iter()
+                            .filter(|read| read.id == atom.id && read.access.overlaps(&atom.access))
+                            .map(|read| {
+                                VarAtomBase::new(
+                                    atom.id,
+                                    read.access.lsb.max(atom.access.lsb),
+                                    read.access.msb.min(atom.access.msb),
+                                )
+                            })
+                            .collect();
+                        if selected.is_empty() {
+                            vec![*atom]
+                        } else {
+                            selected
+                        }
+                    })
+                    .collect();
+            }
+        }
         // The sites of one process activate together.
         let base = sites.len() as u32;
         for mut observer in std::mem::take(&mut comb.observers) {
@@ -2843,6 +2958,8 @@ fn lower_comb_processes(
         }
         sites.append(&mut comb.sites);
     }
+    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
+    *extern_functions = std::mem::take(&mut pm.extern_functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites))
 }
@@ -6074,7 +6191,8 @@ fn lower_ff_processes(
     let mut clock_edges = HashMap::default();
     let mut reset_edges = HashMap::default();
 
-    for process in module.ff_processes() {
+    let random_seeds = process_random_seeds(module);
+    for (index, process) in module.ff_processes().iter().enumerate() {
         let clock = clock_event_from_ff_process(process)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
         let clock_id = pm
@@ -6142,7 +6260,8 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
-        let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
+        let (eval_only, apply, targets) =
+            ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =

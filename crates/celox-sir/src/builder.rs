@@ -209,6 +209,82 @@ impl<Addr> SIRBuilder<Addr> {
         }
     }
 
+    /// Append a control-flow unit, continuing after any normal return.
+    pub fn inline_execution_unit(&mut self, unit: &crate::ExecutionUnit<Addr>)
+    where
+        Addr: Clone,
+    {
+        let ro = self.next_reg_id;
+        let bo = self.next_block_id;
+        let r = |id: RegisterId| RegisterId(id.0 + ro);
+        let b = |id: BlockId| BlockId(id.0 + bo);
+        self.next_reg_id += unit
+            .register_map
+            .keys()
+            .map(|id| id.0 + 1)
+            .max()
+            .unwrap_or(0);
+        self.next_block_id += unit.blocks.keys().map(|id| id.0 + 1).max().unwrap_or(0);
+        let done = self.new_block();
+        self.seal_block(SIRTerminator::Jump(b(unit.entry_block_id), vec![]));
+        for (id, ty) in &unit.register_map {
+            self.registers.insert(r(*id), ty.clone());
+        }
+        for (id, block) in &unit.blocks {
+            let terminator = match &block.terminator {
+                SIRTerminator::Return => SIRTerminator::Jump(done, vec![]),
+                SIRTerminator::Error(code) => SIRTerminator::Error(*code),
+                SIRTerminator::Jump(target, args) => {
+                    SIRTerminator::Jump(b(*target), args.iter().copied().map(r).collect())
+                }
+                SIRTerminator::Branch {
+                    cond,
+                    true_block,
+                    false_block,
+                } => SIRTerminator::Branch {
+                    cond: r(*cond),
+                    true_block: (
+                        b(true_block.0),
+                        true_block.1.iter().copied().map(r).collect(),
+                    ),
+                    false_block: (
+                        b(false_block.0),
+                        false_block.1.iter().copied().map(r).collect(),
+                    ),
+                },
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => SIRTerminator::Switch {
+                    selector: r(*selector),
+                    cases: cases
+                        .iter()
+                        .map(|case| crate::SIRSwitchCase {
+                            value: case.value.clone(),
+                            target: b(case.target),
+                        })
+                        .collect(),
+                    default: b(*default),
+                },
+            };
+            self.blocks.insert(
+                b(*id),
+                BasicBlock {
+                    id: b(*id),
+                    params: block.params.iter().copied().map(r).collect(),
+                    instructions: block
+                        .instructions
+                        .iter()
+                        .map(|inst| crate::transform::renumber_sir_inst(inst, ro, bo))
+                        .collect(),
+                    terminator,
+                },
+            );
+        }
+        self.switch_to_block(done);
+    }
+
     /// Returns the total number of blocks currently in this builder.
     pub fn block_count(&self) -> usize {
         self.blocks.len()
@@ -288,6 +364,151 @@ mod tests {
             blocks,
             register_map,
         }
+    }
+
+    #[test]
+    fn inlines_sparse_control_flow_with_params_and_dynamic_offsets() {
+        let input = crate::ExecutionUnit::<usize> {
+            entry_block_id: BlockId(17),
+            register_map: HashMap::from_iter([
+                (
+                    RegisterId(41),
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (
+                    RegisterId(42),
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    RegisterId(72),
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    RegisterId(90),
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (RegisterId(91), RegisterType::Logic { width: 32 }),
+            ]),
+            blocks: HashMap::from_iter([
+                (
+                    BlockId(17),
+                    BasicBlock {
+                        id: BlockId(17),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(41), SIRValue::new(1u8)),
+                            SIRInstruction::Imm(RegisterId(42), SIRValue::new(2u8)),
+                        ],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(41),
+                            true_block: (BlockId(50), vec![RegisterId(41)]),
+                            false_block: (BlockId(80), vec![]),
+                        },
+                    },
+                ),
+                (
+                    BlockId(50),
+                    BasicBlock {
+                        id: BlockId(50),
+                        params: vec![RegisterId(90)],
+                        instructions: vec![
+                            SIRInstruction::Imm(RegisterId(72), SIRValue::new(0u8)),
+                            SIRInstruction::Load(
+                                RegisterId(91),
+                                0,
+                                crate::SIROffset::Dynamic(RegisterId(72)),
+                                32,
+                            ),
+                            SIRInstruction::Store(
+                                0,
+                                crate::SIROffset::Dynamic(RegisterId(72)),
+                                32,
+                                RegisterId(91),
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+                (
+                    BlockId(80),
+                    BasicBlock {
+                        id: BlockId(80),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Switch {
+                            selector: RegisterId(42),
+                            cases: vec![crate::SIRSwitchCase {
+                                value: 2u8.into(),
+                                target: BlockId(70),
+                            }],
+                            default: BlockId(100),
+                        },
+                    },
+                ),
+                (
+                    BlockId(70),
+                    BasicBlock {
+                        id: BlockId(70),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+                (
+                    BlockId(100),
+                    BasicBlock {
+                        id: BlockId(100),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Error(19),
+                    },
+                ),
+            ]),
+        };
+        input.verify();
+        let mut builder = SIRBuilder::new();
+        let prefix = builder.alloc_bit(8, false);
+        builder.emit(SIRInstruction::Imm(prefix, SIRValue::new(7u8)));
+        builder.inline_execution_unit(&input);
+        builder.inline_execution_unit(&input);
+        builder.emit(SIRInstruction::Store(
+            1,
+            crate::SIROffset::Static(0),
+            8,
+            prefix,
+            vec![],
+            vec![],
+        ));
+        let unit = builder.flush_eu().unwrap();
+        unit.verify();
+        assert_eq!(
+            unit.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Return))
+                .count(),
+            1
+        );
+        assert_eq!(
+            unit.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Error(19)))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -415,7 +415,7 @@ fn check_package_variable_drivers(
     }
     // A continuous driver overlaps every other write.
     for path in comb_blocks {
-        let celox_slt::LogicPathTarget::Var(target) = &path.target else {
+        let Some(target) = path.target.var() else {
             continue;
         };
         if ff_writes
@@ -753,6 +753,7 @@ pub fn schedule_symbolic_rtl(
         &mut comb_observers,
         &runtime_event_sites,
         &mut global_arena,
+        &unpacked_element_widths,
     )?;
     for (site_id, site) in runtime_event_sites.iter().enumerate() {
         if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
@@ -869,6 +870,18 @@ pub fn schedule_symbolic_rtl(
             )
             .collect::<HashSet<_>>()
     });
+    let mut persistent_comb_state = HashSet::default();
+    for path in &comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for block in unit.blocks.values() {
+                for inst in &block.instructions {
+                    if let SIRInstruction::Store(address, ..) = inst {
+                        persistent_comb_state.insert(*address);
+                    }
+                }
+            }
+        }
+    }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
@@ -1381,6 +1394,7 @@ pub fn schedule_symbolic_rtl(
         .map(|(source, state)| (*state, *source))
         .collect();
 
+    let persistent_comb_state = persistent_comb_state.into_iter().map(project).collect();
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -1408,6 +1422,7 @@ pub fn schedule_symbolic_rtl(
             testbench_read_roots: Default::default(),
             rtl_writes,
             comb_writes: Default::default(),
+            persistent_comb_state,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
@@ -1756,7 +1771,9 @@ fn unify_clock_domains(
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
             // Only unify direct aliases, not complex logic like gated clocks
-            if logic_path.sources.len() == 1 {
+            if matches!(logic_path.target, celox_slt::LogicPathTarget::Var(_))
+                && logic_path.sources.len() == 1
+            {
                 let expr_node = sim_module.arena.get(logic_path.expr);
                 let is_alias = matches!(
                     expr_node,
@@ -1919,6 +1936,55 @@ fn build_fused_ff_actions(
     result
 }
 
+/// always_comb starts after every initial procedure has reached its first
+/// suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
+/// until that happens; all control slots are ordinary checkpointed state.
+fn after_initial_processes(
+    unit: &ExecutionUnit<AbsoluteAddr>,
+    statuses: &[AbsoluteAddr],
+) -> ExecutionUnit<AbsoluteAddr> {
+    use celox_sir::{SIRBuilder, SIROffset, SIRValue};
+    let mut b = SIRBuilder::new();
+    let mut ready = b.alloc_bit(1, false);
+    b.emit(SIRInstruction::Imm(ready, SIRValue::new(1u8)));
+    for status in statuses {
+        let value = b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        b.emit(SIRInstruction::Load(
+            value,
+            *status,
+            SIROffset::Static(0),
+            celox_design::PROCESS_STATUS_WIDTH,
+        ));
+        let started = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Unary(
+            started,
+            celox_design::UnaryOp::Or,
+            value,
+        ));
+        let next = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Binary(
+            next,
+            ready,
+            celox_design::BinaryOp::And,
+            started,
+        ));
+        ready = next;
+    }
+    let execute = b.new_block();
+    let done = b.new_block();
+    b.seal_block(SIRTerminator::Branch {
+        cond: ready,
+        true_block: (execute, vec![]),
+        false_block: (done, vec![]),
+    });
+    b.switch_to_block(execute);
+    b.inline_execution_unit(unit);
+    b.seal_block(SIRTerminator::Jump(done, vec![]));
+    b.switch_to_block(done);
+    b.flush_eu()
+        .expect("process activation gate has instructions")
+}
+
 fn relocate_units(
     bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
@@ -1971,6 +2037,17 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
+    let mut initial_statuses: Vec<_> = expanded
+        .values()
+        .flat_map(|id| {
+            modules[&instance_modules[id]]
+                .processes
+                .iter()
+                .map(|process| bindings.locate(*id, process.slots.status))
+        })
+        .collect();
+    initial_statuses.sort();
+    initial_statuses.dedup();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -2155,6 +2232,25 @@ fn relocate_units(
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
+        for path in &mut relocated_module.comb_blocks {
+            if let celox_slt::LogicPathTarget::Process {
+                unit,
+                after_initials,
+                ..
+            } = &mut path.target
+            {
+                **unit = relocate_executation_unit_with_errors(
+                    unit,
+                    &|addr| *addr,
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                    &extern_function_map,
+                );
+                if *after_initials && !initial_statuses.is_empty() {
+                    **unit = after_initial_processes(unit, &initial_statuses);
+                }
+            }
+        }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
 
@@ -2337,12 +2433,13 @@ fn build_comb_observer_capture_paths(
     observers: &mut [CombObserver<AbsoluteAddr>],
     sites: &[RuntimeEventSite],
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) -> Result<(), ParserError> {
     if observers.is_empty() {
         return Ok(());
     }
 
-    annotate_comb_capture_enable_sites(comb_blocks, observers);
+    annotate_comb_capture_enable_sites(comb_blocks, observers, unpacked_element_widths);
 
     let mut group_members: HashMap<u32, Vec<usize>> = HashMap::default();
     for (idx, observer) in observers.iter().enumerate() {
@@ -2806,6 +2903,7 @@ fn capture_contains_nested_snapshot(node: NodeId, arena: &SLTNodeArena<AbsoluteA
 fn annotate_comb_capture_enable_sites(
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     observers: &[CombObserver<AbsoluteAddr>],
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) {
     let mut group_sites: HashMap<u32, Vec<u32>> = HashMap::default();
     for observer in observers {
@@ -2828,6 +2926,109 @@ fn annotate_comb_capture_enable_sites(
                     }
                 }
             }
+        }
+    }
+    // A process executes all its writes on its first output projection.
+    // Compare exactly the observed bits around each store: a dynamic select
+    // may change another bit of the same object without waking the observer.
+    use celox_sir::{RegisterId, RegisterType, SIROffset};
+    let mut process_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<AbsoluteAddr>>> =
+        HashMap::default();
+    for path in comb_blocks.iter() {
+        if let LogicPathTarget::Process {
+            process, target, ..
+        } = &path.target
+        {
+            process_writes.entry(*process).or_default().push(*target);
+        }
+    }
+    for path in comb_blocks.iter_mut() {
+        let LogicPathTarget::Process { process, unit, .. } = &mut path.target else {
+            continue;
+        };
+        let mut probes: Vec<(VarAtomBase<AbsoluteAddr>, Vec<u32>)> = Vec::new();
+        for observer in observers {
+            for atom in &observer.sensitivity {
+                if !process_writes[&*process]
+                    .iter()
+                    .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+                {
+                    continue;
+                }
+                let index = match probes.iter().position(|(probe, _)| probe == atom) {
+                    Some(index) => index,
+                    None => {
+                        probes.push((*atom, Vec::new()));
+                        probes.len() - 1
+                    }
+                };
+                for site in &group_sites[&observer.activation_group] {
+                    if !probes[index].1.contains(site) {
+                        probes[index].1.push(*site);
+                    }
+                }
+            }
+        }
+        let unit = &mut **unit;
+        let mut next_register = unit
+            .register_map
+            .keys()
+            .map(|reg| reg.0 + 1)
+            .max()
+            .unwrap_or(0);
+        for block in unit.blocks.values_mut() {
+            let mut instructions = Vec::new();
+            for inst in std::mem::take(&mut block.instructions) {
+                let mut captures = Vec::new();
+                if let SIRInstruction::Store(address, offset, width, ..) = &inst {
+                    let written = offset.constant_bit_offset().and_then(|lsb| {
+                        Some(BitAccess::new(lsb, lsb.checked_add(width.checked_sub(1)?)?))
+                    });
+                    for (atom, sites) in &probes {
+                        if atom.id != *address
+                            || written.is_some_and(|written| !written.overlaps(&atom.access))
+                        {
+                            continue;
+                        }
+                        let width = atom.access.msb - atom.access.lsb + 1;
+                        let offset = match unpacked_element_widths.get(address) {
+                            Some(element_width)
+                                if width > *element_width
+                                    && atom.access.lsb.is_multiple_of(*element_width)
+                                    && width.is_multiple_of(*element_width) =>
+                            {
+                                SIROffset::PackedElements {
+                                    bit_offset: atom.access.lsb,
+                                    element_width: *element_width,
+                                }
+                            }
+                            _ => SIROffset::Static(atom.access.lsb),
+                        };
+                        let old = RegisterId(next_register);
+                        let new = RegisterId(next_register + 1);
+                        next_register += 2;
+                        unit.register_map.insert(old, RegisterType::Logic { width });
+                        unit.register_map.insert(new, RegisterType::Logic { width });
+                        instructions.push(SIRInstruction::Load(
+                            old,
+                            *address,
+                            offset.clone(),
+                            width,
+                        ));
+                        captures.push((old, new, *address, offset, width, sites));
+                    }
+                }
+                instructions.push(inst);
+                for (old, new, address, offset, width, sites) in captures {
+                    instructions.push(SIRInstruction::Load(new, address, offset, width));
+                    instructions.push(SIRInstruction::CombCaptureEnableIfChanged {
+                        old,
+                        new,
+                        sites: sites.clone(),
+                    });
+                }
+            }
+            block.instructions = instructions;
         }
     }
 }
@@ -3022,7 +3223,11 @@ fn analyze_clock_dependencies(
         };
         let target_abs = target.id;
         let mut sources = HashSet::default();
-        crate::flattening::collect_inputs(path.expr, arena, &mut sources);
+        if matches!(path.target, celox_slt::LogicPathTarget::Process { .. }) {
+            sources.extend(path.sources.iter().cloned());
+        } else {
+            crate::flattening::collect_inputs(path.expr, arena, &mut sources);
+        }
         for source in sources {
             comb_deps.entry(target_abs).or_default().insert(source.id);
         }

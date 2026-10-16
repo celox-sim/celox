@@ -973,9 +973,11 @@ impl Module {
             initial_processes.insert(
                 first_block,
                 InitialProcess {
+                    creation_order: 0,
                     condition: None,
                     body: static_initializers,
                     initializer: true,
+                    synthetic: false,
                 },
             );
         }
@@ -1027,6 +1029,7 @@ impl Module {
             let body = |body: Vec<Stmt>| body.into_iter().map(|stmt| rename.stmt(stmt)).collect();
             for process in &mut comb_processes {
                 process.body = body(std::mem::take(&mut process.body));
+                process.sensitivity_body = body(std::mem::take(&mut process.sensitivity_body));
                 for assignment in &mut process.assignments {
                     assignment.rhs = rename.expr(assignment.rhs.clone());
                 }
@@ -1822,9 +1825,9 @@ pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
 }
 
 impl ConstExpr {
-    /// A call of `name`; a user subroutine call gets a site of its own.
+    /// Effectful calls get distinct sites; analyzer-created copies retain them.
     fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        let site = (!system_functions::is_system_name(&name))
+        let site = (name == "$urandom" || !system_functions::is_system_name(&name))
             .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
         ConstExpr::Function { name, args, site }
     }
@@ -1919,13 +1922,25 @@ impl LValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
+    creation_order: usize,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
+    sensitivity_body: Vec<Stmt>,
 }
 
 impl CombProcess {
+    /// Reads removed from executable branches still affect implicit sensitivity.
+    pub fn sensitivity_body(&self) -> &[Stmt] {
+        &self.sensitivity_body
+    }
+
+    /// Position among the elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     fn new(
         kind: CombProcessKind,
         condition: Option<ConstExpr>,
@@ -1940,6 +1955,8 @@ impl CombProcess {
             })
             .collect();
         Self {
+            creation_order: 0,
+            sensitivity_body: Vec::new(),
             kind,
             condition,
             assignments,
@@ -1949,6 +1966,8 @@ impl CombProcess {
 
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
+            creation_order: 0,
+            sensitivity_body: Vec::new(),
             kind,
             condition,
             assignments: Vec::new(),
@@ -1977,17 +1996,28 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    /// Position among the elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
-        Self { events, body }
+        Self {
+            creation_order: 0,
+            events,
+            body,
+        }
     }
 
     pub fn events(&self) -> &[FfEvent] {
@@ -2002,14 +2032,26 @@ impl FfProcess {
 /// An `initial` process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
+    creation_order: usize,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
+    synthetic: bool,
 }
 
 impl InitialProcess {
+    /// Position among the elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub fn condition(&self) -> Option<&ConstExpr> {
         self.condition.as_ref()
+    }
+
+    /// Compiler-generated storage initialization, without a user static process.
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Whether this process holds variable declaration initializers.

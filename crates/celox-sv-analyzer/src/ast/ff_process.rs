@@ -18,7 +18,7 @@ pub(super) fn ff_processes_from_module_node(
         &packed_dimensions.type_aliases,
     )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
-    for item in &active {
+    for (creation_order, item) in active.iter().enumerate() {
         let ScopeItem::Module(node) = item.node else {
             continue;
         };
@@ -40,6 +40,7 @@ pub(super) fn ff_processes_from_module_node(
             state,
         )?;
         for process in &mut processes[start..] {
+            process.creation_order = creation_order;
             for event in &mut process.events {
                 event.signal = item.name(&event.signal);
             }

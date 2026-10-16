@@ -601,6 +601,47 @@ fn expr_from_system_function_call(
     )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match name {
+        "$urandom" => {
+            let args = match call {
+                sv_parser::SystemTfCall::ArgOptionl(call) if call.nodes.1.is_none() => Vec::new(),
+                _ => match single_expression_argument(call) {
+                    Some(argument) => {
+                        if dimensions::unpacked_expression_dimensions(
+                            argument,
+                            syntax_tree,
+                            &packed_dimensions.const_env,
+                            &packed_dimensions.type_aliases,
+                            Some(packed_dimensions),
+                        )
+                        .is_some_and(|rank| rank != 0)
+                        {
+                            return Err(operand_error());
+                        }
+                        let argument = expr_from_expression_with_types(
+                            argument,
+                            syntax_tree,
+                            packed_dimensions,
+                        )
+                        .map_err(|error| {
+                            AnalyzerError::InvalidSystemTfCall {
+                                name: name.into(),
+                                detail: format!("seed must be an integral expression: {error}"),
+                            }
+                        })?;
+                        expr_static_width(&argument, packed_dimensions)
+                            .ok_or_else(operand_error)?;
+                        vec![Some(argument)]
+                    }
+                    None if args.as_deref() == Some(&[]) => Vec::new(),
+                    None => return Err(operand_error()),
+                },
+            };
+            Ok(Expr::Call {
+                name: name.into(),
+                args,
+                arg_order: Vec::new(),
+            })
+        }
         "$timeunit" | "$timeprecision" => timescales::query(call, syntax_tree).map(|value| {
             Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))
         }),

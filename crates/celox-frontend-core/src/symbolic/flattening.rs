@@ -309,6 +309,10 @@ fn atomize_logic_paths(
     let mut atomized_paths = Vec::new();
 
     for path in paths {
+        if matches!(path.target, LogicPathTarget::Process { .. }) {
+            atomized_paths.push(path.clone());
+            continue;
+        }
         let Some(target_var) = path.target.var() else {
             atomized_paths.push(path.clone());
             continue;
