@@ -619,8 +619,8 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns the time of the next scheduled event, if any.
     ///
     /// Pending host writes conservatively report the current time when event
-    /// domains or waiting processes may need work. This query does not settle
-    /// writes; a step consumes the notification even if no edge or waiter fires.
+    /// domains, waiting processes or a finish site may need work. This query
+    /// does not settle writes; a step consumes the notification even if no edge or waiter fires.
     pub fn next_event_time(&self) -> Option<u64> {
         if self.pending_host_work
             && !self.state.is_finished()
@@ -631,7 +631,14 @@ impl<B: SimBackend> Simulation<B> {
                     .design
                     .events
                     .ordered_events
-                    .is_empty())
+                    .is_empty()
+                || self
+                    .simulator
+                    .program
+                    .runtime_schema
+                    .runtime_event_sites
+                    .iter()
+                    .any(|site| matches!(site.kind, celox_design::RuntimeEventKind::Finish)))
         {
             Some(self.state.time())
         } else {
@@ -640,6 +647,10 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Directly execute combinational logic evaluation.
+    ///
+    /// Clock occurrences are retained for the next step; this does not execute
+    /// sequential bodies or snapshot their input operands. To sample different
+    /// input values at different edges, step between those input changes.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         self.simulator.eval_comb()?;
         if self.simulator.has_pending_runtime_finish() {
@@ -4252,6 +4263,134 @@ mod pr1158_merge_regressions {
                 $check(Simulation::new(build().build_native().unwrap()));
             }
         }};
+    }
+    #[test]
+    fn omitted_defaults_participate_in_hierarchy_pulse_guards() {
+        for (call, functions) in [
+            ("f()", "function bit f(input bit x=a);return x;endfunction"),
+            (
+                "f()",
+                "function bit read_a();return a;endfunction function bit f(input bit x=read_a());return x;endfunction",
+            ),
+            (
+                "f(.x())",
+                "function bit f(input bit x=a);return x;endfunction",
+            ),
+            (
+                "f() & f(1)",
+                "function bit f(input bit x=a);return x;endfunction",
+            ),
+            (
+                "f()",
+                "function bit read_a();return a;endfunction function bit h(input bit y=read_a());return y;endfunction function bit f(input bit x=h());return x;endfunction",
+            ),
+        ] {
+            for four_state in [false, true] {
+                let source = format!(
+                    "module Child(input bit a,output bit q);{functions} always_comb q={call};endmodule module Top;bit a;wire q;Child child(a,q);initial begin #1;a=1;a=0;end initial forever @(q);endmodule"
+                );
+                let result = Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("default-pulse.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .build_interpreter();
+                let error = match result {
+                    Ok(_) => panic!("accepted hidden default read: {call}, {functions}"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("cross-instance event dependency with multiple blocking writes"),
+                    "{error}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn hierarchy_default_reads_keep_separated_and_overridden_calls_supported() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let overridden = sim.get(sim.signal("overridden")) == 1u8.into();
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), u8::from(!overridden).into());
+            sim.run_until(2).unwrap();
+            assert_eq!(
+                sim.get(sim.signal("seen")),
+                if overridden { 0u8 } else { 2 }.into()
+            );
+        }
+        for (call, writes, overridden) in [("f()", "#1;a=1;#1;a=0;", 0), ("f(0)", "#1;a=1;a=0;", 1)]
+        {
+            let source = format!(
+                "module Child(input bit a,output bit q);function bit f(input bit x=a);return x;endfunction always_comb q={call};endmodule module Top(output bit[7:0]seen,output bit overridden);bit a;wire q;Child child(a,q);assign overridden=1'b{overridden};initial begin {writes} end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn replayed_nba_images_keep_other_domains_and_unknown_masks() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let q = sim.signal("q");
+            sim.modify(|io| io.set(q, 0u8)).unwrap();
+            sim.run_until(0).unwrap();
+            sim.run_until(2).unwrap();
+            let known = sim.get(sim.signal("known")) == 1u8.into();
+            let expected = u8::from(known || sim.simulator.backend.layout().four_state);
+            assert_eq!(sim.get(q), 0u8.into());
+            assert_eq!(sim.get(sim.signal("seen")), expected.into());
+            assert_eq!(sim.get(sim.signal("cascaded")), expected.into());
+            assert_eq!(sim.get(sim.signal("calls")), 2u8.into());
+            assert_eq!(sim.get(sim.signal("other")), 0x5au8.into());
+        }
+        for first in ["1'b1", "1'bx", "1'bz"] {
+            let known = u8::from(first == "1'b1");
+            let source = format!(
+                "module Top(output logic q,output bit[7:0]seen,cascaded,calls,other,output bit known);bit clk,clk2;logic d;assign known=1'b{known};always @(posedge clk)begin q<=d;calls++;end always @(posedge clk2)other<=8'h5a;always @(posedge q)cascaded<=cascaded+1;initial forever begin @(posedge q);seen++;end initial begin #1;d={first};clk=1;#0;clk2=1;#0;d=0;clk=0;#0;clk=1;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn next_event_time_reports_pending_combinational_finish() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert_eq!(sim.next_event_time(), None);
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            assert_eq!(sim.next_event_time(), Some(0));
+            assert_eq!(sim.step().unwrap(), None);
+            assert!(!sim.is_finished());
+            assert_eq!(sim.next_event_time(), None);
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            for _ in 0..2 {
+                assert_eq!(sim.next_event_time(), Some(0));
+                assert!(!sim.is_finished());
+            }
+            let pending = sim.checkpoint().unwrap();
+            sim.step().unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.next_event_time(), None);
+            sim.restore(&pending).unwrap();
+            assert_eq!(sim.next_event_time(), Some(0));
+            sim.run_until(0).unwrap();
+            assert!(sim.is_finished());
+        }
+        backends!(
+            "module Top(input bit go);always_comb if(go)$finish;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn replayed_domain_nba_updates_preserve_intermediate_edges() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 0u8.into());
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+            assert_eq!(sim.get(sim.signal("cascaded")), 1u8.into());
+        }
+        backends!(
+            "module Top(output bit q,output bit[7:0]seen,cascaded);bit clk,d;always @(posedge clk)q<=d;always @(posedge q)cascaded<=cascaded+1;initial forever begin @(posedge q);seen++;end initial begin #1;d=1;clk=1;#0;d=0;clk=0;#0;clk=1;end endmodule",
+            check
+        );
     }
     #[test]
     fn combinational_loop_exits_preserve_single_write_observers() {

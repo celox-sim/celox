@@ -15,6 +15,8 @@ use crate::{
 
 /// Bound all active and inactive passes within one simulation time slot.
 const PROCESS_DELTA_LIMIT: usize = 100_000;
+/// Bound retained next-state images as well as execution in one time slot.
+const NBA_IMAGE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 
 fn count_delta_pass(rounds: &mut usize) -> Result<(), SimulatorErrorCode> {
     *rounds += 1;
@@ -84,6 +86,24 @@ pub trait SimulationExecutor {
 
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
+}
+
+// Retain a domain's earlier next-state image only when another evaluation
+// would overwrite it. Ordinary single-occurrence batches allocate no images.
+fn snapshot_ff_working<B: SimBackend>(backend: &B) -> Vec<u8> {
+    let layout = backend.layout();
+    let start = layout.working_base_offset;
+    let end = layout.triggered_bits_offset;
+    let (ptr, len) = backend.memory_as_ptr();
+    assert!(start <= end && end <= len);
+    // SAFETY: the backend exposes len bytes, and the immutable borrow prevents
+    // execution while copying the working/sparse regions and their metadata.
+    unsafe { std::slice::from_raw_parts(ptr.add(start), end - start) }.to_vec()
+}
+
+fn restore_ff_working<B: SimBackend>(backend: &mut B, image: &[u8]) {
+    let start = backend.layout().working_base_offset;
+    backend.write_memory(start, image);
 }
 
 /// Control slots of one process kernel, resolved to signals of the backend.
@@ -991,7 +1011,9 @@ impl<B: SimBackend> SimulationState<B> {
         let mut comb_already_done = false;
         // Accumulate publications across every occurrence in this active
         // batch. Replayed evaluations must still read pre-NBA state.
-        let mut newly_triggered = Vec::new();
+        let mut newly_triggered: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
+        let mut pending_latest = FxHashMap::<usize, usize>::default();
+        let mut pending_image_bytes = 0usize;
         loop {
             let mut any_new_outer_loop_trigger = false;
 
@@ -1053,7 +1075,28 @@ impl<B: SimBackend> SimulationState<B> {
                     }
                     discovered_in_this_step.insert(id);
                     triggered_domains.insert(info.canonical_id);
-                    newly_triggered.push(info.canonical_id);
+                    if let Some(&previous) = pending_latest.get(&info.canonical_id) {
+                        let layout = executor.backend().layout();
+                        let image_len = layout.triggered_bits_offset - layout.working_base_offset;
+                        // Reserve the final working image too. Fail explicitly
+                        // instead of losing an NBA or allocating an unbounded
+                        // copy of unrelated working storage for every replay.
+                        let retained = pending_image_bytes.checked_add(image_len);
+                        if retained
+                            .and_then(|size| size.checked_add(image_len))
+                            .is_none_or(|size| size > NBA_IMAGE_BYTE_LIMIT)
+                        {
+                            return Err(SimulatorErrorCode::Runtime {
+                                message: "pending NBA images exceed the 64 MiB time-slot limit"
+                                    .into(),
+                                signals: Vec::new(),
+                            });
+                        }
+                        pending_image_bytes = retained.expect("checked image size");
+                        newly_triggered[previous].1 = Some(snapshot_ff_working(executor.backend()));
+                    }
+                    pending_latest.insert(info.canonical_id, newly_triggered.len());
+                    newly_triggered.push((info.canonical_id, None));
 
                     let before = self.event_counter_values(executor.backend());
                     if let Some(event) = info.eval_only_event {
@@ -1272,17 +1315,30 @@ impl<B: SimBackend> SimulationState<B> {
                 Vec::new()
             };
             let mut any_process_ran = false;
-            for id in &newly_triggered {
+            let final_working = newly_triggered
+                .iter()
+                .any(|(_, image)| image.is_some())
+                .then(|| snapshot_ff_working(executor.backend()));
+            let before_nba = self.event_counter_values(executor.backend());
+            for (id, image) in &newly_triggered {
+                if let Some(image) = image.as_ref().or(final_working.as_ref()) {
+                    restore_ff_working(executor.backend_mut(), image);
+                }
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
                 }
             }
-            for id in &newly_triggered {
+            if let Some(image) = &final_working {
+                restore_ff_working(executor.backend_mut(), image);
+            }
+            for (id, _) in &newly_triggered {
                 if let Some(event) = self.event_info[*id].eval_ff_event {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
             newly_triggered.clear();
+            pending_latest.clear();
+            pending_image_bytes = 0;
 
             if comb_already_done {
                 comb_already_done = false;
@@ -1295,6 +1351,23 @@ impl<B: SimBackend> SimulationState<B> {
                 if track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
                 }
+            }
+
+            // Each committed image records its transitions, including a
+            // pulse restored by a later NBA in the same batch. Preserve those
+            // events for both suspended kernels and cascaded FF domains.
+            let nba_edges = self.counter_edges(executor.backend(), &before_nba);
+            self.add_process_edge_replays(
+                executor.backend(),
+                &before_nba,
+                &mut edge_replays,
+                &BitSet::new(),
+            );
+            recorded_edges.union_with(&nba_edges);
+            for id in nba_edges.iter() {
+                discovered_in_this_step.remove(id);
+                triggered_domains.remove(self.event_info[id].canonical_id);
+                executor.backend_mut().mark_triggered_bit(id);
             }
 
             if polled {
@@ -1310,7 +1383,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend(),
                         &counter_values,
                         &mut edge_replays,
-                        &BitSet::new(),
+                        &nba_edges,
                     );
                     let mut driven = self.counter_edges(executor.backend(), &counter_values);
                     recorded_edges.union_with(&driven);
@@ -1347,6 +1420,11 @@ impl<B: SimBackend> SimulationState<B> {
                         }
                     }
                 }
+            }
+            // A resumed waiter may settle again and replace the trigger set.
+            // The earlier committed NBA transitions remain observable.
+            for id in nba_edges.iter() {
+                executor.backend_mut().mark_triggered_bit(id);
             }
         }
 

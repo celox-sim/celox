@@ -2876,20 +2876,38 @@ fn validate_cross_instance_event_pulses(
                 }
                 let mut reads = HashSet::default();
                 let mut pending = vec![body];
-                let mut visited = HashSet::default();
+                let mut visited_bodies = HashSet::default();
+                let mut visited_calls = HashSet::default();
                 while let Some(body) = pending.pop() {
+                    let mut calls = Vec::new();
                     ff::walk_reachable(body, &pm, &mut |stmt| {
                         procedural::stmt_reads(stmt, &mut reads);
-                        let mut calls = Vec::new();
                         procedural::stmt_calls(stmt, &mut calls);
-                        for (name, _) in calls {
-                            if visited.insert(name.clone())
-                                && let Some(function) = pm.subroutines.get(&name)
-                            {
-                                pending.push(&function.body);
+                    });
+                    while let Some((name, args)) = calls.pop() {
+                        let Some(function) = pm.subroutines.get(&name) else {
+                            continue;
+                        };
+                        // A call with explicit arguments must not hide defaults
+                        // used by another call of the same subroutine. Bound
+                        // recursive default traversal by the argument presence.
+                        if visited_calls.insert((
+                            name.clone(),
+                            args.iter().map(Option::is_some).collect::<Vec<_>>(),
+                        )) {
+                            for (position, param) in function.params.iter().enumerate() {
+                                if matches!(args.get(position), None | Some(None))
+                                    && let Some(default) = &param.default
+                                {
+                                    procedural::expr_idents(default, &mut reads);
+                                    procedural::collect_calls(default, &mut calls);
+                                }
                             }
                         }
-                    });
+                        if visited_bodies.insert(name) {
+                            pending.push(&function.body);
+                        }
+                    }
                 }
                 for name in count(body).keys() {
                     if let Some(&target) = module.signal_names.get(name) {
