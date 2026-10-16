@@ -3278,19 +3278,9 @@ impl super::super::SimBackend for NativeBackend {
         self.mem_bytes_mut()[byte_idx] |= 1 << bit_idx;
     }
 
-    #[inline]
     fn get_triggered_bits(&self) -> BitSet {
         let offset = self.compiled.layout.triggered_bits_offset;
         let size = self.compiled.layout.triggered_bits_total_size;
-        let bytes = self.mem_bytes();
-        let mut bs = BitSet::with_capacity(size * 8);
-        for i in 0..size * 8 {
-            let byte_idx = offset + i / 8;
-            let bit_idx = i % 8;
-            if bytes[byte_idx] & (1 << bit_idx) != 0 {
-                bs.insert(i);
-            }
-        }
-        bs
+        celox_runtime::backend::triggered_bits_from_bytes(&self.mem_bytes()[offset..offset + size])
     }
 }
