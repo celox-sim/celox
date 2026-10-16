@@ -465,8 +465,9 @@ impl<B: SimBackend> SimulationState<B> {
         self.step_until(executor, u64::MAX)
     }
 
-    /// Like [`Self::step`], but after settling host writes at the current
-    /// time, advance only to a time up to `limit`.
+    /// Like [`Self::step`], but run no time after `limit`: settle host
+    /// writes at the current time if it is not after `limit`, and advance
+    /// only to a time up to `limit`. Returns `None` when nothing was run.
     pub fn step_until<E>(
         &mut self,
         executor: &mut E,
@@ -497,7 +498,7 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     /// Settle host writes at the current time, then run the next time with
-    /// work, if it is not after `limit`. Host writes do not hold a step at
+    /// work; nothing after `limit` runs. Host writes do not hold a step at
     /// the current time: the step goes on to the next event.
     fn step_time<E>(&mut self, executor: &mut E, limit: u64) -> Result<Option<u64>, Halt>
     where
@@ -508,7 +509,7 @@ impl<B: SimBackend> SimulationState<B> {
             let Some(current_time) = self.next_event_time() else {
                 return Ok(settled);
             };
-            if settled.is_some() && current_time > limit {
+            if current_time > limit {
                 return Ok(settled);
             }
             // Host writes alone: settle them, then go on to the next time.
