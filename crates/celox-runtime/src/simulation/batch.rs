@@ -26,35 +26,101 @@ pub(crate) fn event_level<B: SimBackend>(backend: &B, signal: SignalRef) -> u8 {
     }
 }
 
-/// Whether a settled level change from `was` to `is` is an active edge of a
-/// domain of `kind`. A domain of unknown kind reacts to any change.
-pub(crate) fn stable_edge(kind: Option<DomainKind>, was: bool, is: bool) -> bool {
+/// The bit of an edge level that marks an unknown (x or z) value; the value
+/// bit then tells x (1) from z (0), as in the state image.
+pub(crate) const LEVEL_UNKNOWN: u8 = 2;
+
+/// The level of an edge-sensed signal for [`stable_edge`]: 0, 1, or, in a
+/// four-state design, [`LEVEL_UNKNOWN`] with the value bit for x and z.
+/// `FOUR_STATE` is the design's state mode; a two-state design reads only
+/// the value bits, as [`event_level`] does.
+#[inline]
+pub(crate) fn edge_level<const FOUR_STATE: bool, B: SimBackend>(
+    backend: &B,
+    signal: SignalRef,
+) -> u8 {
+    let value = u8::from(event_level(backend, signal) != 0);
+    if FOUR_STATE && signal.is_4state && event_unknown(backend, signal) {
+        value | LEVEL_UNKNOWN
+    } else {
+        value
+    }
+}
+
+/// Whether a four-state event signal has unknown bits. Its mask plane
+/// follows its value bytes in the state image.
+#[inline]
+fn event_unknown<B: SimBackend>(backend: &B, signal: SignalRef) -> bool {
+    let mask = SignalRef {
+        offset: signal.offset + celox_state_layout::get_byte_size(signal.width),
+        width: signal.width,
+        is_4state: false,
+        array_layout: None,
+    };
+    event_level(backend, mask) != 0
+}
+
+/// Whether a settled level change from `was` to `is`, levels as
+/// [`edge_level`] gives them, is an active edge of a domain of `kind`
+/// (IEEE 1800-2023 9.4.2, Table 9-2): a posedge leaves 0 or reaches 1, a
+/// negedge leaves 1 or reaches 0, and a change between x and z is neither.
+/// A domain of unknown kind reacts to any change. With two-state levels
+/// (`FOUR_STATE` false) this is a rise or a fall of the value.
+#[inline]
+pub(crate) fn stable_edge<const FOUR_STATE: bool>(
+    kind: Option<DomainKind>,
+    was: u8,
+    is: u8,
+) -> bool {
+    let between_unknowns = FOUR_STATE && was & is & LEVEL_UNKNOWN != 0;
     match kind {
-        Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => !was && is,
-        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => was && !is,
+        Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+            was != 1 && is != 0 && !between_unknowns
+        }
+        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+            was != 0 && is != 1 && !between_unknowns
+        }
         _ => was != is,
     }
 }
 
 impl<B: SimBackend> SimulationState<B> {
+    #[inline(always)]
     pub(super) fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
+        if self.four_state {
+            self.stable_edge_triggered_in::<true>(backend, id)
+        } else {
+            self.stable_edge_triggered_in::<false>(backend, id)
+        }
+    }
+
+    #[inline(always)]
+    fn stable_edge_triggered_in<const FOUR_STATE: bool>(&self, backend: &B, id: usize) -> bool {
         let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
             return true;
         };
-        let was_nonzero = self.last_clock_values.contains(id);
-        let is_nonzero = event_level(backend, *signal) != 0;
-        stable_edge(self.domain_kinds[id], was_nonzero, is_nonzero)
+        let was = self.last_level_in::<FOUR_STATE>(id);
+        let is = edge_level::<FOUR_STATE, _>(backend, *signal);
+        stable_edge::<FOUR_STATE>(self.domain_kinds[id], was, is)
     }
 
     pub(super) fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
+        if self.four_state {
+            self.replace_triggers_in::<true>(backend);
+        } else {
+            self.replace_triggers_in::<false>(backend);
+        }
+    }
+
+    fn replace_triggers_in<const FOUR_STATE: bool>(&self, backend: &mut B) {
         backend.clear_triggered_bits();
         for (signal, id) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
-            let was_nonzero = self.last_clock_values.contains(*id);
-            let is_nonzero = event_level(backend, *signal) != 0;
-            if stable_edge(self.domain_kinds[*id], was_nonzero, is_nonzero) {
+            let was = self.last_level_in::<FOUR_STATE>(*id);
+            let is = edge_level::<FOUR_STATE, _>(backend, *signal);
+            if stable_edge::<FOUR_STATE>(self.domain_kinds[*id], was, is) {
                 backend.mark_triggered_bit(*id);
             }
         }
@@ -119,14 +185,14 @@ impl<B: SimBackend> SimulationState<B> {
         let scheduled = events_to_process.iter().filter_map(|event| {
             self.signal_to_id
                 .get(&event.signal)
-                .map(|&id| (id, event.next_val != 0))
+                .map(|&id| (id, u8::from(event.next_val != 0)))
         });
         // Scheduled signals that changed level and gate derived clocks.
         let mut gating_sources = Vec::new();
-        for (id, is_nonzero) in scheduled {
+        for (id, is) in scheduled {
             track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
-            if was_nonzero != is_nonzero
+            let was = self.last_level(id);
+            if was != is
                 && self
                     .combinational_derived
                     .get(id)
@@ -134,16 +200,7 @@ impl<B: SimBackend> SimulationState<B> {
             {
                 gating_sources.push(id);
             }
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
-            if triggered {
+            if self.scheduled_edge(id, was, is) {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
             }
@@ -176,21 +233,19 @@ impl<B: SimBackend> SimulationState<B> {
         // NBA region do.
         let mut edge_approved: Option<BitSet> = None;
         for &source in &gating_sources {
-            for &id in self.combinational_derived[source].iter() {
+            for index in 0..self.combinational_derived[source].len() {
+                let id = self.combinational_derived[source][index];
                 if self.stable_edge_triggered(executor.backend(), id) {
                     executor.backend_mut().mark_triggered_bit(id);
                     edge_approved
                         .get_or_insert_with(|| BitSet::with_capacity(num_events))
                         .insert(id);
                 }
-                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+                let Some(&(signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
                     continue;
                 };
-                if event_level(executor.backend(), *signal) != 0 {
-                    self.last_clock_values.insert(id);
-                } else {
-                    self.last_clock_values.remove(id);
-                }
+                let level = self.level(executor.backend(), signal);
+                self.record_level(id, level);
             }
         }
 
@@ -296,16 +351,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id) in &self.topo_signals {
-            if *id == usize::MAX {
-                continue;
-            }
-            if event_level(executor.backend(), *signal) != 0 {
-                self.last_clock_values.insert(*id);
-            } else {
-                self.last_clock_values.remove(*id);
-            }
-        }
+        self.record_all_levels(executor.backend());
 
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();

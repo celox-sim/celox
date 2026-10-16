@@ -17,7 +17,7 @@ use bit_set::BitSet;
 use celox_design::{CounterKind, DomainKind};
 use fxhash::FxHashMap;
 
-pub(crate) use batch::{event_level, stable_edge};
+pub(crate) use batch::{LEVEL_UNKNOWN, edge_level, stable_edge};
 pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
 pub use persist::{ScheduleParts, SimulationSnapshot};
@@ -77,7 +77,14 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
+    /// Events whose signal was high (value bit set) when edge detection last
+    /// sampled it.
     last_clock_values: BitSet,
+    /// Events whose signal was x or z when edge detection last sampled it.
+    /// Empty unless the design is four-state.
+    last_clock_unknown: BitSet,
+    /// The design keeps unknown bits, so edges follow the four-state table.
+    four_state: bool,
     topo_signals: Vec<(SignalRef, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
@@ -141,7 +148,6 @@ impl<B: SimBackend> SimulationState<B> {
         event_info: Vec<EventInfo<B>>,
         processes: Vec<ProcessRefs>,
     ) -> Self {
-        let mut last_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
         let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
         for (index, (signal, id)) in topo_signals.iter().copied().enumerate() {
@@ -150,19 +156,18 @@ impl<B: SimBackend> SimulationState<B> {
             }
             signal_to_id.insert(signal, id);
             signal_index_by_id[id] = index;
-            if event_level(backend, signal) != 0 {
-                last_clock_values.insert(id);
-            }
         }
 
         let has_processes = !processes.is_empty();
         let has_pending_nba_sites = processes
             .iter()
             .any(|process| process.nba_sites.iter().any(|site| site.pending.is_some()));
-        Self {
+        let mut state = Self {
             scheduler: Scheduler::new(),
             periodic_events: FxHashMap::default(),
-            last_clock_values,
+            last_clock_values: BitSet::with_capacity(backend.num_events()),
+            last_clock_unknown: BitSet::new(),
+            four_state: backend.layout().four_state,
             topo_signals,
             domain_kinds,
             event_info,
@@ -184,7 +189,9 @@ impl<B: SimBackend> SimulationState<B> {
             round_budget: SLOT_ROUND_BUDGET,
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
-        }
+        };
+        state.synchronize_event_values(backend);
+        state
     }
 
     /// Count the occurrences of `counted` signals, whose counters trigger
@@ -296,9 +303,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
         // Otherwise only an event signal's change needs the current time.
         for (signal, id) in &self.topo_signals {
-            if *id != usize::MAX
-                && (event_level(backend, *signal) != 0) != self.last_clock_values.contains(*id)
-            {
+            if *id != usize::MAX && self.level(backend, *signal) != self.last_level(*id) {
                 self.host_pending = true;
                 return;
             }

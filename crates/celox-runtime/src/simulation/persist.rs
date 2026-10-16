@@ -23,6 +23,7 @@ impl<B: SimBackend> SimulationState<B> {
             event_queue: self.scheduler.event_queue.clone(),
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
+            last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
             host_pending: self.host_pending,
@@ -58,6 +59,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.periodic_events.clone_from(&snapshot.periodic_events);
         self.last_clock_values
             .clone_from(&snapshot.last_clock_values);
+        self.last_clock_unknown
+            .clone_from(&snapshot.last_clock_unknown);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.process_state.clone_from(&snapshot.process_state);
         self.host_pending = snapshot.host_pending;
@@ -78,7 +81,10 @@ pub struct ScheduleParts<B: SimBackend> {
     /// the number of identical such events.
     pub periodic: Vec<(SimEvent<B>, u64)>,
     /// Events whose signal was high when edge detection last sampled it.
+    /// An x counts as high.
     pub high_events: Vec<B::Event>,
+    /// Events whose signal was x or z when edge detection last sampled it.
+    pub unknown_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
     /// Waiting and ready processes, queued nonblocking assignments and the
@@ -120,6 +126,11 @@ impl<B: SimBackend> SimulationState<B> {
                 })
                 .collect(),
             high_events: self.last_clock_values.iter().map(|id| events[id]).collect(),
+            unknown_events: self
+                .last_clock_unknown
+                .iter()
+                .map(|id| events[id])
+                .collect(),
             process_wakeups: {
                 let mut wakeups = self
                     .process_wakeups
@@ -157,6 +168,12 @@ impl<B: SimBackend> SimulationState<B> {
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
         }
+        self.last_clock_unknown.make_empty();
+        if self.four_state {
+            for event in parts.unknown_events {
+                self.last_clock_unknown.insert(event.id());
+            }
+        }
         self.process_wakeups = parts
             .process_wakeups
             .into_iter()
@@ -175,6 +192,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     event_queue: std::collections::BinaryHeap<SimEvent<B>>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
+    last_clock_unknown: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
     host_pending: bool,
@@ -189,6 +207,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             event_queue: self.event_queue.clone(),
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
+            last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
             host_pending: self.host_pending,

@@ -7,7 +7,7 @@ use bit_set::BitSet;
 use super::host::SimulationExecutor;
 use super::nba::{restore_working_image, working_image};
 use super::time::PeriodicEventKey;
-use super::{EventInfo, SimulationState, event_level};
+use super::{EventInfo, SimulationState};
 use crate::{
     SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
@@ -32,10 +32,10 @@ pub(super) struct Round {
     /// Kernels ran in this round, so pending nonblocking flags may be set.
     pub(super) kernels_ran: bool,
     pub(super) nba_published: bool,
-    /// Event-signal values scheduled or written by processes, not yet
-    /// marked.
-    pub(super) transitions: Vec<(usize, bool)>,
-    /// Event-signal values before and after a process run.
+    /// Event-signal levels (see [`super::edge_level`]) scheduled or written
+    /// by processes, not yet marked.
+    pub(super) transitions: Vec<(usize, u8)>,
+    /// Event-signal levels before and after a process run.
     pub(super) before: Vec<u8>,
     pub(super) after: Vec<u8>,
     /// Event ids a pulse of several publications triggered; like counted
@@ -54,7 +54,7 @@ pub(super) struct Round {
     /// since the baseline (`last_clock_values`) was last taken, valid where
     /// the stamp equals `generation`: a value written in one wave of the
     /// active region is the previous value of the next wave's write.
-    latest: Vec<(u32, bool)>,
+    latest: Vec<(u32, u8)>,
     generation: u32,
 }
 
@@ -63,24 +63,19 @@ impl Round {
     /// baseline.
     fn begin_scan(&mut self, events: usize) {
         if self.latest.len() < events {
-            self.latest.resize(events, (0, false));
+            self.latest.resize(events, (0, 0));
         }
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
             // Stamps of an earlier wrap must not match.
-            self.latest.fill((0, false));
+            self.latest.fill((0, 0));
             self.generation = 1;
         }
     }
 
-    /// The value event `id` had before this transition: its latest value in
+    /// The level event `id` had before this transition: its latest level in
     /// the scan, or `baseline`; records `value` as its latest.
-    pub(super) fn previous(
-        &mut self,
-        id: usize,
-        value: bool,
-        baseline: impl FnOnce() -> bool,
-    ) -> bool {
+    pub(super) fn previous(&mut self, id: usize, value: u8, baseline: impl FnOnce() -> u8) -> u8 {
         let (stamp, latest) = std::mem::replace(&mut self.latest[id], (self.generation, value));
         if stamp == self.generation {
             latest
@@ -160,19 +155,17 @@ impl<B: SimBackend> SimulationState<B> {
     /// edge) gives a further edge, as the update events of the NBA region do.
     fn judge_derived_edges(&mut self, backend: &mut B, round: &mut Round) {
         for source in std::mem::take(&mut round.gating_sources) {
-            for &id in self.combinational_derived[source].iter() {
+            for index in 0..self.combinational_derived[source].len() {
+                let id = self.combinational_derived[source][index];
                 if self.stable_edge_triggered(backend, id) {
                     backend.mark_triggered_bit(id);
                     round.edge_approved.insert(id);
                 }
-                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+                let Some(&(signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
                     continue;
                 };
-                if event_level(backend, *signal) != 0 {
-                    self.last_clock_values.insert(id);
-                } else {
-                    self.last_clock_values.remove(id);
-                }
+                let level = self.level(backend, signal);
+                self.record_level(id, level);
             }
         }
     }
@@ -421,7 +414,7 @@ impl<B: SimBackend> SimulationState<B> {
             .extend(events_to_process.iter().filter_map(|event| {
                 self.signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0))
+                    .map(|&id| (id, u8::from(event.next_val != 0)))
             }));
 
         // The check after the batch already saw every signal.
@@ -589,16 +582,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id) in &self.topo_signals {
-            if *id == usize::MAX {
-                continue;
-            }
-            if event_level(executor.backend(), *signal) != 0 {
-                self.last_clock_values.insert(*id);
-            } else {
-                self.last_clock_values.remove(*id);
-            }
-        }
+        self.record_all_levels(executor.backend());
 
         // Processes the published values wake run in the next round.
         self.observe_driven(executor.backend());
