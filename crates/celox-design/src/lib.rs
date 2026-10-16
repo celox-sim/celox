@@ -615,6 +615,10 @@ pub struct EventTopology<A> {
     /// an earlier one writes, and none has side effects.
     #[serde(default)]
     pub independent_derived: BTreeSet<A>,
+    /// Canonical events whose signal combinational logic reads. Moving such
+    /// a signal needs a settle before its domains evaluate.
+    #[serde(default)]
+    pub combinationally_read: BTreeSet<A>,
 }
 
 /// A clock computed combinationally from an event's signal.
@@ -709,6 +713,7 @@ impl<A> Default for EventTopology<A> {
             derived_events: BTreeMap::new(),
             combinational_derived: BTreeMap::new(),
             independent_derived: BTreeSet::new(),
+            combinationally_read: BTreeSet::new(),
         }
     }
 }

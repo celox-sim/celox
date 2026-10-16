@@ -136,6 +136,8 @@ mod host {
         /// Whether a timed simulation runs the design and it has a `$finish`
         /// runtime event site.
         pub(crate) finish_sites: bool,
+        /// Per event ID, its signal and polarity for explicit edges.
+        event_edges: celox_runtime::EventEdges,
     }
 
     /// Why [`Simulator::try_dump`] failed.
@@ -704,6 +706,8 @@ mod host {
             );
             let (derived_ticks, derived_scratch) =
                 celox_runtime::build_derived_tick_plans(&backend, &schedule);
+            let event_edges =
+                celox_runtime::build_event_edges(&backend, &schedule.events, &schedule.kinds);
             let mut sim = Self {
                 backend,
                 program,
@@ -730,6 +734,7 @@ mod host {
                 host_watch: Default::default(),
                 finish_scan_seq: 0,
                 finish_sites: false,
+                event_edges,
             };
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
@@ -1432,6 +1437,111 @@ mod host {
             }
             self.dirty = false;
             Ok(())
+        }
+
+        /// Move `event`'s signal through `edge` and run every domain
+        /// sensitive to that transition, as a timed step does: the event's own
+        /// domain when `edge` is its active edge, clocks computed
+        /// combinationally from the signal that see their active edge (judged
+        /// from the state before the edge, evaluating with the event's own
+        /// domain), and, after the commit, gates the commit moves and domains
+        /// clocked from state, transitively. The signal stays at its new
+        /// level. An edge to the level the signal already has does nothing.
+        ///
+        /// An unknown (X) level counts as either level, as in SystemVerilog.
+        pub fn edge(
+            &mut self,
+            event: B::Event,
+            edge: celox_runtime::Edge,
+        ) -> Result<(), RuntimeErrorCode> {
+            let info = self.event_edges[event.id()];
+            let outcome = if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
+                let plans = std::sync::Arc::clone(&self.derived_ticks);
+                let plan = plans.get(event.id()).and_then(Option::as_ref);
+                let mut scratch = self.derived_scratch.take().unwrap_or_default();
+                let dirty = self.dirty;
+                let result =
+                    celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty);
+                self.derived_scratch = Some(scratch);
+                result
+            } else {
+                let mut scratch = celox_runtime::DerivedTickScratch::default();
+                let dirty = self.dirty;
+                celox_runtime::run_edge(self, None, info, &mut scratch, event, edge, dirty)
+            };
+            self.note_edge(outcome)
+        }
+
+        fn note_edge(
+            &mut self,
+            outcome: Result<celox_runtime::EdgeOutcome, celox_runtime::Halt>,
+        ) -> Result<(), RuntimeErrorCode> {
+            match outcome {
+                Ok(celox_runtime::EdgeOutcome::Unchanged) => {}
+                Ok(celox_runtime::EdgeOutcome::Moved) => self.dirty = true,
+                Ok(celox_runtime::EdgeOutcome::Settled) => self.dirty = false,
+                // An RTL `$finish` ends only a timed simulation; an edge, as a
+                // tick, leaves it to the host. What ran may not have settled.
+                Err(celox_runtime::Halt::Finish) => self.dirty = true,
+                Err(celox_runtime::Halt::Error(error)) => return Err(error),
+            }
+            Ok(())
+        }
+
+        /// A rising edge of `event`'s signal; see [`Self::edge`].
+        pub fn posedge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.edge(event, celox_runtime::Edge::Rising)
+        }
+
+        /// A falling edge of `event`'s signal; see [`Self::edge`].
+        pub fn negedge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.edge(event, celox_runtime::Edge::Falling)
+        }
+
+        /// The event's active edge (rising for a positive-edge clock or an
+        /// active-high reset, falling otherwise); see [`Self::edge`].
+        pub fn active_edge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let edge = self.event_edges[event.id()].active_edge();
+            self.edge(event, edge)
+        }
+
+        /// The edge opposite to the event's active edge; see [`Self::edge`].
+        pub fn inactive_edge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let edge = match self.event_edges[event.id()].active_edge() {
+                celox_runtime::Edge::Rising => celox_runtime::Edge::Falling,
+                celox_runtime::Edge::Falling => celox_runtime::Edge::Rising,
+            };
+            self.edge(event, edge)
+        }
+
+        /// One clock cycle: [`Self::active_edge`], then
+        /// [`Self::inactive_edge`].
+        pub fn cycle(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.active_edge(event)?;
+            self.inactive_edge(event)
+        }
+
+        /// Move several event signals at one instant, as coincident edges:
+        /// every domain sensitive to one of them evaluates against the state
+        /// before the edges, then all of them commit, then the rounds of
+        /// [`Self::edge`] follow.
+        pub fn edges(
+            &mut self,
+            moves: &[(B::Event, celox_runtime::Edge)],
+        ) -> Result<(), RuntimeErrorCode> {
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let edges = std::sync::Arc::clone(&self.event_edges);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let dirty = self.dirty;
+            let result = celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty);
+            self.derived_scratch = Some(scratch);
+            self.note_edge(result)
+        }
+
+        /// Per event ID, its signal and polarity, for hosts that drive the
+        /// backend without this facade.
+        pub fn event_edges(&self) -> celox_runtime::EventEdges {
+            std::sync::Arc::clone(&self.event_edges)
         }
 
         /// Per event ID, the derived clock domains a tick of the event can
