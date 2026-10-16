@@ -115,6 +115,8 @@ jobs:
         run: node scripts/check-package-includes.mjs
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 
       - name: cargo fmt
@@ -186,6 +188,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: actions/setup-python@v7
         with:
@@ -364,6 +368,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Fetch the pinned sv-tests revision
         run: |
@@ -405,6 +411,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           shared-key: ci-napi-linux
 
       - uses: pnpm/action-setup@v6
@@ -449,6 +456,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           shared-key: ci-napi-wasm
 
       - uses: pnpm/action-setup@v6
@@ -546,6 +554,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Lint ARM64 backend
         run: >-
@@ -583,6 +593,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: pnpm/action-setup@v6
 
@@ -621,6 +633,8 @@ jobs:
           targets: aarch64-unknown-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - uses: pnpm/action-setup@v6
 
