@@ -136,6 +136,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("linear_sorter_pull.vtest"),
     },
     Group {
+        file: "src/veryl/cases/logical_shift_count.vtest",
+        text: include_str!("logical_shift_count.vtest"),
+    },
+    Group {
         file: "src/veryl/cases/loop_idiom.vtest",
         text: include_str!("loop_idiom.vtest"),
     },
