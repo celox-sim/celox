@@ -117,14 +117,14 @@ fn const_expr(expr: &sv::ConstExpr) -> Result<String, ParserError> {
             };
             format!("({op}{})", const_expr(expr)?)
         }
-        sv::ConstExpr::Function { name, args, .. } => {
-            if !name.starts_with('$') {
+        sv::ConstExpr::Function { callee, args, .. } => {
+            let sv::Callee::System(function) = callee else {
                 return Err(unsupported(format!(
-                    "header-dependent SV constant function `{name}` without an expression body"
+                    "header-dependent SV constant function `{callee}` without an expression body"
                 )));
-            }
+            };
             format!(
-                "{name}({})",
+                "{function}({})",
                 args.iter()
                     .map(const_expr)
                     .collect::<Result<Vec<_>, _>>()?
@@ -189,9 +189,6 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
         signature: &InterfaceSignature,
         visited: &mut fxhash::FxHashSet<String>,
     ) -> bool {
-        if name.starts_with('$') {
-            return false;
-        }
         if !visited.insert(name.to_string()) {
             return false;
         }
@@ -338,8 +335,10 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
                     || expression(then_expr, signature, visited)
                     || expression(else_expr, signature, visited)
             }
-            Call { name, args, .. } => {
-                function(name, signature, visited)
+            Call { callee, args, .. } => {
+                callee
+                    .subroutine()
+                    .is_some_and(|name| function(name, signature, visited))
                     || args
                         .iter()
                         .flatten()
@@ -394,8 +393,10 @@ fn depends_on_header(expr: &sv::ConstExpr, signature: &InterfaceSignature) -> bo
                     || visit(msb, signature, visited)
                     || visit(lsb, signature, visited)
             }
-            Function { name, args, .. } => {
-                function(name, signature, visited)
+            Function { callee, args, .. } => {
+                callee
+                    .subroutine()
+                    .is_some_and(|name| function(name, signature, visited))
                     || args.iter().any(|arg| visit(arg, signature, visited))
             }
             Mux {

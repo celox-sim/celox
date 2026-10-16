@@ -1774,7 +1774,7 @@ fn function_expr_from_conditional_statement(
 
     Some(Expr::Call {
         arg_order: Vec::new(),
-        name: "$unsupported_mixed_function_conditional".to_string(),
+        callee: Callee::Subroutine("$unsupported_mixed_function_conditional".to_string()),
         args: Vec::new(),
     })
 }
@@ -1928,7 +1928,7 @@ fn function_expr_from_case_statement(
 
     Some(Expr::Call {
         arg_order: Vec::new(),
-        name: "$unsupported_mixed_function_case".to_string(),
+        callee: Callee::Subroutine("$unsupported_mixed_function_case".to_string()),
         args: Vec::new(),
     })
 }

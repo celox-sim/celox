@@ -129,7 +129,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
         (
             Expr::Call {
                 arg_order: Vec::new(),
-                name: "$countones".into(),
+                callee: Callee::System(SystemFunction::Countones),
                 args: vec![Some(ident("A"))],
             },
             1,
@@ -137,7 +137,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
         (
             Expr::Call {
                 arg_order: Vec::new(),
-                name: "unresolved_function".into(),
+                callee: Callee::Subroutine("unresolved_function".into()),
                 args: vec![Some(ident("B"))],
             },
             1,

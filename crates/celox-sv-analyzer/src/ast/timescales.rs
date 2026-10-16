@@ -14,14 +14,16 @@ enum DisplayScope {
 }
 
 struct ResolvedScope {
+    /// The query or `$printtimescale` call that resolved the scope.
+    call: system_functions::SystemCall,
     scale: Scale,
     display: DisplayScope,
     is_interface: bool,
 }
 
 impl ResolvedScope {
-    fn value(&self, name: &str) -> i32 {
-        if name == "$timeunit" {
+    fn value(&self) -> i32 {
+        if self.call == system_functions::SystemCall::Function(SystemFunction::Timeunit) {
             self.scale.unit
         } else {
             self.scale.precision
@@ -63,13 +65,22 @@ impl ResolvedScope {
         .replace('"', "\\\"")
     }
 
-    fn replacement(&self, function: &str, prefix: Option<&str>) -> String {
-        if function == "$printtimescale" {
+    fn replacement(&self, prefix: Option<&str>) -> String {
+        if self.call == system_functions::SystemCall::Task(SystemTask::Printtimescale) {
             format!("$display(\"{}\")", self.message(prefix))
         } else {
-            format!("32'sh{:08x}", self.value(function) as u32)
+            format!("32'sh{:08x}", self.value() as u32)
         }
     }
+}
+
+/// Whether `call` is a timescale query or `$printtimescale`, whose argument
+/// names a design element instead of a value.
+pub(super) fn is_timescale_call(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> bool {
+    matches!(
+        called_system_function(call, tree),
+        Some(SystemFunction::Timeunit | SystemFunction::Timeprecision)
+    ) || called_system_task(call, tree) == Some(SystemTask::Printtimescale)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -772,11 +783,8 @@ impl Timescales {
         tree: &SyntaxTree,
         unit: &Unit,
     ) -> Converted<i32> {
-        let name = system_tf_call_parts(call, tree)
-            .ok_or_else(|| unsupported("timescale query name"))?
-            .0;
         self.resolve(call, tree, unit, system_functions::CallSite::Expression)
-            .map(|scope| scope.value(name))
+            .map(|scope| scope.value())
     }
 
     pub(super) fn interface_path_queries<'a>(
@@ -791,11 +799,8 @@ impl Timescales {
             .ok_or_else(|| unsupported("missing interface query time scope"))?;
         // Resolve the content key once for this rewrite, not for each query.
         Ok(move |call: &sv_parser::SystemTfCall, site| {
-            let name = system_tf_call_parts(call, tree)
-                .ok_or_else(|| unsupported("timescale query name"))?
-                .0;
             self.resolve(call, tree, unit, site)
-                .map(|scope| scope.is_interface.then(|| scope.replacement(name, None)))
+                .map(|scope| scope.is_interface.then(|| scope.replacement(None)))
         })
     }
 
@@ -808,7 +813,7 @@ impl Timescales {
     ) -> Converted<ResolvedScope> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        system_functions::check_call(name, args.as_deref(), site)?;
+        let checked = system_functions::check_call(name, args.as_deref(), site)?;
         let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
         let current = scope_at(&unit.scopes, &unit.parents, at).map(|i| &unit.scopes[i]);
         let mut interface_target = false;
@@ -922,6 +927,7 @@ impl Timescales {
             }
         };
         Ok(ResolvedScope {
+            call: checked,
             scale,
             display,
             is_interface: interface_target,
@@ -986,17 +992,18 @@ impl Timescales {
     ) -> Converted<String> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        system_functions::check_call(name, args.as_deref(), site)?;
+        let checked = system_functions::check_call(name, args.as_deref(), site)?;
         let scope = self
             .definitions
             .get(ty)
             .ok_or_else(|| unsupported(format!("unknown timescale query design element `{ty}`")))?;
         Ok(ResolvedScope {
+            call: checked,
             scale: scope.scale,
             display: DisplayScope::Relative(handle.to_string()),
             is_interface: true,
         }
-        .replacement(name, None))
+        .replacement(None))
     }
 }
 

@@ -465,9 +465,9 @@ fn collect_module_constant_functions(
 }
 
 /// Fill defaults in the declaration's bound scope; runtime IR keeps its holes.
-pub(super) fn resolved_arguments(name: &str, args: &[Option<Expr>]) -> Option<Vec<Expr>> {
+pub(super) fn resolved_arguments(callee: &Callee, args: &[Option<Expr>]) -> Option<Vec<Expr>> {
     let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
-    let Some(function) = functions.get(name) else {
+    let Some(function) = callee.subroutine().and_then(|name| functions.get(name)) else {
         return args.iter().cloned().collect();
     };
     if args.len() > function.params.len() {
@@ -512,7 +512,11 @@ pub(super) fn eval_expression_literal(
     expr: &Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
-    let Expr::Call { name, .. } = expr else {
+    let Expr::Call {
+        callee: Callee::Subroutine(name),
+        ..
+    } = expr
+    else {
         return None;
     };
     let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
@@ -752,9 +756,9 @@ impl Frame<'_> {
                     self.lower(else_expr)?
                 }
             }
-            Expr::Call { name, args, .. } => ConstExpr::Function {
-                name: name.clone(),
-                args: resolved_arguments(name, args)?
+            Expr::Call { callee, args, .. } => ConstExpr::Function {
+                callee: callee.clone(),
+                args: resolved_arguments(callee, args)?
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,

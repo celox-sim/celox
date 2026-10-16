@@ -368,12 +368,12 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
                 .collect(),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => Expr::Call {
             arg_order: arg_order.clone(),
-            name,
+            callee,
             args: args
                 .into_iter()
                 .map(|arg| arg.map(guard_zero_divisions))
@@ -588,11 +588,7 @@ fn expr_from_system_function_call(
 ) -> Converted<Expr> {
     let (name, args) = system_tf_call_parts(call, syntax_tree)
         .ok_or_else(|| unsupported("system function name"))?;
-    system_functions::check_call(
-        name,
-        args.as_deref(),
-        system_functions::CallSite::Expression,
-    )?;
+    let function = system_functions::check_function_call(name, args.as_deref())?;
     parameters::reject_unbounded_data_query(
         call,
         syntax_tree,
@@ -600,8 +596,8 @@ fn expr_from_system_function_call(
         packed_dimensions.scope_types_complete,
     )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
-    match name {
-        "$urandom" => {
+    match function {
+        SystemFunction::Urandom => {
             let args = match call {
                 sv_parser::SystemTfCall::ArgOptionl(call) if call.nodes.1.is_none() => Vec::new(),
                 _ => match single_expression_argument(call) {
@@ -637,15 +633,17 @@ fn expr_from_system_function_call(
                 },
             };
             Ok(Expr::Call {
-                name: name.into(),
+                callee: Callee::System(function),
                 args,
                 arg_order: Vec::new(),
             })
         }
-        "$timeunit" | "$timeprecision" => timescales::query(call, syntax_tree).map(|value| {
-            Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))
-        }),
-        "$isunbounded" => {
+        SystemFunction::Timeunit | SystemFunction::Timeprecision => {
+            timescales::query(call, syntax_tree).map(|value| {
+                Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))
+            })
+        }
+        SystemFunction::Isunbounded => {
             parameters::isunbounded_call(call, syntax_tree, &packed_dimensions.const_env)?
                 .map(const_expr_to_expr)
                 .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
@@ -653,7 +651,7 @@ fn expr_from_system_function_call(
                     detail: "argument must name a value parameter".into(),
                 })
         }
-        "$dimensions" => dimensions::dimensions_system_function_call_value(
+        SystemFunction::Dimensions => dimensions::dimensions_system_function_call_value(
             call,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -662,7 +660,7 @@ fn expr_from_system_function_call(
         )
         .map(|count| Expr::Literal(count.to_string()))
         .ok_or_else(operand_error),
-        "$unpacked_dimensions" => dimensions::unpacked_dimensions_call_value(
+        SystemFunction::UnpackedDimensions => dimensions::unpacked_dimensions_call_value(
             call,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -671,7 +669,7 @@ fn expr_from_system_function_call(
         )
         .map(|count| Expr::Literal(count.to_string()))
         .ok_or_else(operand_error),
-        "$left" | "$right" | "$low" | "$high" | "$increment" => dimensions::array_query_call(
+        SystemFunction::ArrayQuery(_) => dimensions::array_query_call(
             call,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -680,7 +678,7 @@ fn expr_from_system_function_call(
         )
         .ok_or_else(operand_error),
         // `$bits(x)` and `$size(x)` depend only on the declared type of `x`.
-        "$bits" | "$size" => dimensions::size_system_function_call_type(
+        SystemFunction::Bits | SystemFunction::Size => dimensions::size_system_function_call_type(
             call,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -689,7 +687,7 @@ fn expr_from_system_function_call(
         )
         .map(|ty| Expr::Literal(ty.width.to_string()))
         .ok_or_else(operand_error),
-        "$signed" | "$unsigned" => {
+        SystemFunction::Signed | SystemFunction::Unsigned => {
             // Reinterpret the operand's signedness without changing its width.
             let arg = expr_from_expression_with_types(
                 single_expression_argument(call).ok_or_else(operand_error)?,
@@ -700,10 +698,10 @@ fn expr_from_system_function_call(
             Ok(Expr::Resize {
                 expr: Box::new(arg),
                 width,
-                signed: name == "$signed",
+                signed: function == SystemFunction::Signed,
             })
         }
-        "$countbits" => {
+        SystemFunction::Countbits => {
             let sv_parser::SystemTfCall::ArgExpression(call) = call else {
                 return Err(operand_error());
             };
@@ -717,22 +715,26 @@ fn expr_from_system_function_call(
             }
             Ok(Expr::Call {
                 arg_order: Vec::new(),
-                name: name.to_string(),
+                callee: Callee::System(function),
                 args: args.into_iter().map(Some).collect(),
             })
         }
-        "$clog2" | "$countones" | "$onehot" | "$onehot0" | "$isunknown" => {
+        SystemFunction::Clog2
+        | SystemFunction::Countones
+        | SystemFunction::Onehot
+        | SystemFunction::Onehot0
+        | SystemFunction::Isunknown => {
             let arg = expr_from_expression_with_types(
                 single_expression_argument(call).ok_or_else(operand_error)?,
                 syntax_tree,
                 packed_dimensions,
             )?;
             // `$clog2` of a constant is a constant.
-            if name == "$clog2"
+            if function == SystemFunction::Clog2
                 && let Some(argument) = expr_to_const(arg.clone())
                 && let Some(value) = eval_ast_const_expr(
                     &ConstExpr::Function {
-                        name: name.to_string(),
+                        callee: Callee::System(function),
                         args: vec![argument],
                         site: None,
                     },
@@ -743,13 +745,10 @@ fn expr_from_system_function_call(
             }
             Ok(Expr::Call {
                 arg_order: Vec::new(),
-                name: name.to_string(),
+                callee: Callee::System(function),
                 args: vec![Some(arg)],
             })
         }
-        _ => Err(AnalyzerError::Unsupported(format!(
-            "system function `{name}` in an expression"
-        ))),
     }
 }
 
@@ -874,7 +873,7 @@ pub(super) fn expr_from_tf_call(
         args.push(Some(arg));
     }
     Ok(Expr::Call {
-        name,
+        callee: Callee::Subroutine(name),
         args,
         arg_order,
     })
@@ -923,6 +922,34 @@ fn selected_concatenation(
         lsb,
         signed: false,
     })
+}
+
+/// Check a system function call in expression position and identify the
+/// function; `None` if its name cannot be read.
+pub(crate) fn system_function_call(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+) -> Converted<Option<SystemFunction>> {
+    let Some((name, args)) = system_tf_call_parts(call, syntax_tree) else {
+        return Ok(None);
+    };
+    system_functions::check_function_call(name, args.as_deref()).map(Some)
+}
+
+/// The supported system function a call names, without checking the call.
+pub(super) fn called_system_function(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+) -> Option<SystemFunction> {
+    SystemFunction::from_name(system_tf_call_parts(call, syntax_tree)?.0)
+}
+
+/// The supported system task a call names, without checking the call.
+pub(super) fn called_system_task(
+    call: &sv_parser::SystemTfCall,
+    syntax_tree: &SyntaxTree,
+) -> Option<SystemTask> {
+    SystemTask::from_name(system_tf_call_parts(call, syntax_tree)?.0)
 }
 
 /// The name of a system task or function call, with its leading `$`, and its

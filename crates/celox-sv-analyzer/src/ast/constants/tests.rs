@@ -227,10 +227,10 @@ fn compare_lazy_and_copied_scalar_call_contexts() {
                     )
                     .unwrap()
                 };
-                let Some(ConstExpr::Function { name, args, .. }) = black_box(result) else {
+                let Some(ConstExpr::Function { callee, args, .. }) = black_box(result) else {
                     panic!("call was not retained")
                 };
-                assert_eq!(name, "f");
+                assert_eq!(callee, Callee::Subroutine("f".into()));
                 assert_eq!(args.len(), 1);
             }
             start.elapsed().as_secs_f64() * 1000.0
