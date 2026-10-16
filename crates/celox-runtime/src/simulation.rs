@@ -190,6 +190,13 @@ pub struct SimulationState<B: SimBackend> {
     /// The design has process kernels or counted signals. Without either, a
     /// round is exactly the batch step and skips every process check.
     timed: bool,
+    /// Rounds and process-phase passes one time slot may run, and kernel
+    /// returns one round may spend, before the slot is reported as not
+    /// settling.
+    round_budget: u64,
+    return_budget: u64,
+    /// Rounds and process-phase passes the current time slot has run.
+    slot_passes: u64,
 }
 
 /// Bookkeeping of one round of a time slot.
@@ -280,6 +287,15 @@ impl Round {
 }
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Bound the work of one time slot: `rounds` rounds and passes of the
+    /// process phase, and `returns` kernel returns per round, before a step
+    /// reports processes that keep resuming at that time. The defaults are
+    /// 2^20 and 2^24.
+    pub fn set_slot_budgets(&mut self, rounds: u64, returns: u64) {
+        self.round_budget = rounds;
+        self.return_budget = returns;
+    }
+
     /// Declare, per event ID, the clocks computed combinationally from the
     /// event's signal. A change of the signal gives them their edges at the
     /// same instant: they are judged from the state before it and evaluate
@@ -374,6 +390,9 @@ impl<B: SimBackend> SimulationState<B> {
             combinational_derived: Vec::new(),
             scratch: None,
             timed: has_processes,
+            round_budget: SLOT_ROUND_BUDGET,
+            return_budget: SLOT_RETURN_BUDGET,
+            slot_passes: 0,
         }
     }
 
@@ -470,6 +489,7 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(None);
         };
         self.host_pending = false;
+        self.slot_passes = 0;
         let events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -483,25 +503,31 @@ impl<B: SimBackend> SimulationState<B> {
         // A process that waited for zero time, or that the round woke,
         // resumes in a later round of this time, after the previous round's
         // edges have been handled.
-        let mut returns = 0;
         loop {
             let ready = self.take_ready_processes(current_time);
             if ready.is_empty() && self.process_state.ready.is_empty() {
                 break;
             }
-            returns += 1;
-            self.charge(returns, None)?;
+            self.charge_pass()?;
             self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
         executor.finish_timed_step(current_time);
         Ok(Some(current_time))
     }
 
+    /// Count a round or a pass of the process phase against the slot's
+    /// budget, so that processes resuming at one time forever end the step
+    /// with an error instead of hanging it.
+    fn charge_pass(&mut self) -> Result<(), Halt> {
+        self.slot_passes += 1;
+        self.charge(self.slot_passes, None)
+    }
+
     fn charge(&self, returns: u64, process: Option<usize>) -> Result<(), Halt> {
         let budget = if process.is_some() {
-            SLOT_RETURN_BUDGET
+            self.return_budget
         } else {
-            SLOT_ROUND_BUDGET
+            self.round_budget
         };
         if returns <= budget {
             return Ok(());
@@ -1222,6 +1248,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut returns = 0;
         let mut first = true;
         loop {
+            self.charge_pass()?;
             // Processes run after this time's scheduled values are applied
             // and see the state settled at the previous time. The event
             // signals they change are edges of this time, like scheduled
@@ -1275,6 +1302,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.slot_passes = 0;
         match self.step_round(executor, time, Vec::new(), Vec::new(), true) {
             Ok(()) => {
                 executor.finish_timed_step(time);

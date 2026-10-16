@@ -5,7 +5,7 @@
 
 use celox_frontend_sdk::{
     BinaryOp, Constant, Edge, EventEdge, EventTerm, ExprId, FrontendArtifact, ModuleBuilder,
-    SignalId, Statement, ValueType,
+    SignalId, Statement, UnaryOp, ValueType,
 };
 
 use super::Simulation;
@@ -1382,5 +1382,63 @@ fn a_pulse_across_two_waves_of_a_slot_is_an_edge() {
             assert_eq!(value(&mut sim, "s"), 1);
             assert_eq!(value(&mut sim, "rises"), 1);
         });
+    }
+}
+
+/// Processes that keep resuming at one time, through `#0` or by waking
+/// each other, exhaust the slot's budget instead of hanging a step.
+fn zero_time_loops(four_state: bool) -> [FrontendArtifact; 2] {
+    let mut d = Design::new("InactiveLoop", four_state);
+    let body = vec![
+        d.delay(1),
+        Statement::Forever {
+            body: vec![d.inactive_delay(0)],
+        },
+    ];
+    d.module.process(body).unwrap();
+    let inactive = d.finish();
+
+    let mut d = Design::new("PingPong", four_state);
+    let ping = d.internal("ping", 1, 0);
+    let pong = d.internal("pong", 1, 0);
+    let (read_ping, read_pong) = (d.read(ping), d.read(pong));
+    let ty = d.ty(1);
+    let not_ping = d.module.unary(UnaryOp::BitNot, read_ping, ty).unwrap();
+    let not_pong = d.module.unary(UnaryOp::BitNot, read_pong, ty).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(ping, EventEdge::Change), d.assign(pong, not_pong)],
+    }];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(pong, EventEdge::Change), d.assign(ping, not_ping)],
+    }];
+    d.module.process(body).unwrap();
+    let body = vec![d.delay(1), d.set(ping, 1)];
+    d.module.process(body).unwrap();
+    [inactive, d.finish()]
+}
+
+#[test]
+fn zero_time_loops_exhaust_the_slot_budget() {
+    for four_state in [false, true] {
+        for (artifact, top) in zero_time_loops(four_state)
+            .into_iter()
+            .zip(["InactiveLoop", "PingPong"])
+        {
+            on_every_backend!(builder(&artifact, four_state), top, |sim| {
+                sim.state.set_slot_budgets(256, 1 << 24);
+                sim.run_until(0).unwrap();
+                let error = sim.run_until(5).unwrap_err();
+                assert!(
+                    matches!(
+                        &error,
+                        crate::RuntimeErrorCode::Runtime { message, .. }
+                            if message.contains("does not settle")
+                    ),
+                    "{error}"
+                );
+                assert_eq!(sim.time(), 1);
+            });
+        }
     }
 }
