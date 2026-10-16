@@ -87,59 +87,6 @@ fn working(var_id: SourceVarId) -> Addr {
     }
 }
 
-// Share case matching with timing analysis so wildcard, range and
-// four-state matching cannot diverge from executable lowering.
-fn case_item_condition(
-    kind: sv::ir::CaseKind,
-    selector: &sv::ir::Expr,
-    labels: &[sv::ir::CaseLabel<sv::ir::Expr>],
-) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-    let mut terms = Vec::new();
-    for label in labels {
-        terms.push(match (kind, label) {
-            (sv::ir::CaseKind::Inside, label) => sv::ir::Expr::Inside {
-                expr: Box::new(selector.clone()),
-                items: vec![match label {
-                    sv::ir::CaseLabel::Value(value) => sv::ir::InsideItem::Value(value.clone()),
-                    sv::ir::CaseLabel::Range { low, high } => sv::ir::InsideItem::Range {
-                        low: low.clone(),
-                        high: high.clone(),
-                    },
-                }],
-            },
-            (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
-                left: Box::new(sv::ir::Expr::Binary {
-                    left: Box::new(selector.clone()),
-                    op: sv::ir::BinaryOp::EqWildcard,
-                    right: Box::new(value.clone()),
-                }),
-                op: sv::ir::BinaryOp::NeCase,
-                right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
-            },
-            (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
-                left: Box::new(selector.clone()),
-                op: if kind == sv::ir::CaseKind::Exact {
-                    sv::ir::BinaryOp::EqCase
-                } else {
-                    sv::ir::BinaryOp::EqWildcard
-                },
-                right: Box::new(value.clone()),
-            },
-            (_, sv::ir::CaseLabel::Range { .. }) => {
-                return Err(unsupported("range label outside case inside"));
-            }
-        });
-    }
-    Ok(terms
-        .into_iter()
-        .reduce(|left, right| sv::ir::Expr::Binary {
-            left: Box::new(left),
-            op: sv::ir::BinaryOp::LogicOr,
-            right: Box::new(right),
-        })
-        .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string())))
-}
-
 impl<'p, 'a> Ff<'p, 'a> {
     pub fn new(m: &'p mut ProcModule<'a>) -> Self {
         let mut element_widths = HashMap::default();
@@ -3607,39 +3554,24 @@ fn selected_case_body<'a>(
     default: Option<&'a [sv::ir::Stmt]>,
     pm: &ProcModule<'_>,
 ) -> Option<&'a [sv::ir::Stmt]> {
-    // Lowering evaluates the selector even when there are no items.
-    if expr_calls(selector, &|_| true) {
-        return None;
-    }
-    for item in items {
-        let condition = case_item_condition(kind, selector, &item.labels).ok()?;
-        // An unknown earlier match prevents choosing a later item.
-        if known_condition(&condition, pm)? {
-            return Some(&item.body);
-        }
-    }
-    Some(default.unwrap_or_default())
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .selected_case_body(kind, selector, items, default)
 }
-
 fn selected_branch<'a>(stmt: &'a sv::ir::Stmt, pm: &ProcModule<'_>) -> Option<&'a [sv::ir::Stmt]> {
-    match stmt {
-        sv::ir::Stmt::If {
-            condition,
-            then_body,
-            else_body,
-        } => Some(if known_condition(condition, pm)? {
-            then_body
-        } else {
-            else_body
-        }),
-        sv::ir::Stmt::Case {
-            kind,
-            selector,
-            items,
-            default,
-        } => selected_case_body(*kind, selector, items, default.as_deref(), pm),
-        _ => None,
-    }
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .selected_branch(stmt)
 }
 /// Reachable statements under the same typed constant selection as lowering.
 pub(super) fn walk_reachable<'a>(
@@ -3712,65 +3644,25 @@ pub(super) fn walk_reachable<'a>(
     }
 }
 
-// Flow out of the current sequence. A continue reaches this loop's step;
-// a break/return does not. Nested loops consume their own continue targets.
-#[derive(Clone, Copy)]
-struct RuntimeFlow {
-    fallthrough: bool,
-    continues: bool,
+fn runtime_body_flow(body: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> ProceduralFlow {
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .body_flow(body)
 }
-impl RuntimeFlow {
-    fn choice(self, other: Self) -> Self {
-        Self {
-            fallthrough: self.fallthrough || other.fallthrough,
-            continues: self.continues || other.continues,
-        }
-    }
-}
-fn runtime_body_flow(body: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> RuntimeFlow {
-    let mut flow = RuntimeFlow {
-        fallthrough: true,
-        continues: false,
-    };
-    for stmt in body {
-        if !flow.fallthrough {
-            break;
-        }
-        let next = runtime_stmt_flow(stmt, pm);
-        flow.fallthrough = next.fallthrough;
-        flow.continues |= next.continues;
-    }
-    flow
-}
-fn runtime_stmt_flow(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> RuntimeFlow {
-    if let Some(branch) = selected_branch(stmt, pm) {
-        return runtime_body_flow(branch, pm);
-    }
-    match stmt {
-        sv::ir::Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => runtime_body_flow(then_body, pm).choice(runtime_body_flow(else_body, pm)),
-        sv::ir::Stmt::Case { items, default, .. } => items.iter().fold(
-            runtime_body_flow(default.as_deref().unwrap_or_default(), pm),
-            |flow, item| flow.choice(runtime_body_flow(&item.body, pm)),
-        ),
-        sv::ir::Stmt::Continue => RuntimeFlow {
-            fallthrough: false,
-            continues: true,
-        },
-        sv::ir::Stmt::Wait(condition) if known_condition(condition, pm) == Some(false) => {
-            RuntimeFlow {
-                fallthrough: false,
-                continues: false,
-            }
-        }
-        _ => RuntimeFlow {
-            fallthrough: stmt_may_fall_through(stmt),
-            continues: false,
-        },
-    }
+fn runtime_stmt_flow(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> ProceduralFlow {
+    LoopConstContext::new(
+        pm.variables,
+        pm.name_to_id,
+        pm.constants,
+        pm.parameter_types,
+        pm.four_state,
+    )
+    .stmt_flow(stmt)
 }
 fn runtime_stmt_may_fall_through(stmt: &sv::ir::Stmt, pm: &ProcModule<'_>) -> bool {
     runtime_stmt_flow(stmt, pm).fallthrough

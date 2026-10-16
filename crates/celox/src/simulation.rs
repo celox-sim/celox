@@ -4254,6 +4254,78 @@ mod pr1158_merge_regressions {
         }};
     }
     #[test]
+    fn combinational_loop_exits_preserve_single_write_observers() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let a = sim.signal("a");
+            sim.run_until(0).unwrap();
+            for (value, seen) in [(1u8, 1u8), (0, 2), (1, 3)] {
+                sim.modify(|io| io.set(a, value)).unwrap();
+                sim.run_until(0).unwrap();
+                assert_eq!(sim.get(sim.signal("q")), value.into());
+                assert_eq!(sim.get(sim.signal("seen")), seen.into());
+            }
+        }
+        for body in [
+            "repeat(2)begin q=a;break;end",
+            "for(int i=0;i<3;i++)begin q=a;break;end",
+            "while(1)begin q=a;break;end",
+            "do begin q=a;break;end while(1);",
+            "repeat(2)begin q=a;if(1)break;q=0;end",
+            "repeat(2)begin q=a;case(1)1:break;default:continue;endcase q=0;end",
+            "repeat(2)begin q=a;casez(2'b10)2'b1?:break;default:continue;endcase end",
+            "repeat(2)begin q=a;if(a)break;else break;end",
+            "repeat(2)begin q=a;if(1'bx)continue;break;end",
+            "repeat(2)begin q=a;case(3)inside [2:4]:break;default:continue;endcase end",
+            "while(touch())break;",
+            "for(int i=0;touch();i++)break;",
+            "do begin q=a;break;end while(touch());",
+            "for(int i=0;i<2;i=touch())begin q=a;break;end",
+            "if(return_from_loop())begin end",
+            // Neither the step write nor the post-break suffix is reachable.
+            "for(int i=0;i<2;q=0)begin q=a;break;q=0;end",
+            // A nested break belongs to the inner loop, while this outer one
+            // still executes only once because of its own terminal break.
+            "repeat(2)begin repeat(2)begin q=a;break;end break;end",
+        ] {
+            let source = format!(
+                "module Top(input bit a,output bit q,output bit[7:0]seen);function bit touch();q=a;return 1;endfunction function bit return_from_loop();repeat(2)begin q=a;return 1;end return 0;endfunction always_comb begin {body} end initial forever begin @(q);seen++;end endmodule"
+            );
+            backends!(&source, check);
+        }
+    }
+    #[test]
+    fn combinational_exit_proofs_keep_reachable_multiple_writes_rejected() {
+        for body in [
+            "repeat(2)begin q=a;continue;end",
+            "repeat(2)begin repeat(2)break;q=a;end",
+            "repeat(2)begin q=a;if(a)break;end",
+            "repeat(2)begin q=a;if(a)continue;break;end",
+            "for(int i=0;i<2;i++)begin q=a;end",
+            "repeat(2)begin q=0;q=a;break;end",
+            "for(int i=0;i<2;q=0)begin q=a;if(a)continue;break;end",
+        ] {
+            let source = format!(
+                "module Top(input bit a,output bit q);always_comb begin {body} end initial forever @(q);endmodule"
+            );
+            for four_state in [false, true] {
+                let result = Simulator::from_sv_sources(
+                    vec![(&source, std::path::Path::new("multiple-comb-writes.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .build_interpreter();
+                let error = match result {
+                    Ok(_) => panic!("accepted hidden writes: {body}"),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    error.contains("multiple blocking writes"),
+                    "{body}: {error}"
+                );
+            }
+        }
+    }
+    #[test]
     fn constant_true_wait_uses_configured_state_mode_for_write_times() {
         fn check<B: SimBackend>(mut sim: Simulation<B>, always_true: bool) {
             let first = u8::from(always_true || !sim.simulator.backend.layout().four_state);

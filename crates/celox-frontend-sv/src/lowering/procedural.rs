@@ -8,6 +8,59 @@
 use super::*;
 use num_traits::{ToPrimitive, Zero};
 
+// Share case matching with timing analysis so wildcard, range and
+// four-state matching cannot diverge from executable lowering.
+pub(super) fn case_item_condition(
+    kind: sv::ir::CaseKind,
+    selector: &sv::ir::Expr,
+    labels: &[sv::ir::CaseLabel<sv::ir::Expr>],
+) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    let mut terms = Vec::new();
+    for label in labels {
+        terms.push(match (kind, label) {
+            (sv::ir::CaseKind::Inside, label) => sv::ir::Expr::Inside {
+                expr: Box::new(selector.clone()),
+                items: vec![match label {
+                    sv::ir::CaseLabel::Value(value) => sv::ir::InsideItem::Value(value.clone()),
+                    sv::ir::CaseLabel::Range { low, high } => sv::ir::InsideItem::Range {
+                        low: low.clone(),
+                        high: high.clone(),
+                    },
+                }],
+            },
+            (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: sv::ir::BinaryOp::EqWildcard,
+                    right: Box::new(value.clone()),
+                }),
+                op: sv::ir::BinaryOp::NeCase,
+                right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
+            },
+            (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(selector.clone()),
+                op: if kind == sv::ir::CaseKind::Exact {
+                    sv::ir::BinaryOp::EqCase
+                } else {
+                    sv::ir::BinaryOp::EqWildcard
+                },
+                right: Box::new(value.clone()),
+            },
+            (_, sv::ir::CaseLabel::Range { .. }) => {
+                return Err(unsupported("range label outside case inside"));
+            }
+        });
+    }
+    Ok(terms
+        .into_iter()
+        .reduce(|left, right| sv::ir::Expr::Binary {
+            left: Box::new(left),
+            op: sv::ir::BinaryOp::LogicOr,
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string())))
+}
+
 /// Upper bound on the iterations unrolled for one process, matching the
 /// generate-loop bound of the analyzer.
 pub(super) const MAX_UNROLLED_ITERATIONS: usize = 10_000;
@@ -2534,6 +2587,22 @@ pub(super) struct LoopConstContext<'a> {
     four_state: bool,
 }
 
+// Flow out of the current sequence. A continue reaches this loop's step;
+// a break/return does not. Nested loops consume their own continue targets.
+#[derive(Clone, Copy)]
+pub(super) struct ProceduralFlow {
+    pub fallthrough: bool,
+    pub continues: bool,
+}
+impl ProceduralFlow {
+    fn choice(self, other: Self) -> Self {
+        Self {
+            fallthrough: self.fallthrough || other.fallthrough,
+            continues: self.continues || other.continues,
+        }
+    }
+}
+
 impl<'a> LoopConstContext<'a> {
     pub fn new(
         variables: &'a HashMap<SourceVarId, SvVariable>,
@@ -2616,6 +2685,94 @@ impl<'a> LoopConstContext<'a> {
             signed,
         )
         .map(|(node, _)| node)
+    }
+
+    pub(super) fn selected_case_body<'b>(
+        &self,
+        kind: sv::ir::CaseKind,
+        selector: &sv::ir::Expr,
+        items: &'b [sv::ir::CaseItem],
+        default: Option<&'b [sv::ir::Stmt]>,
+    ) -> Option<&'b [sv::ir::Stmt]> {
+        // The selector executes even when the case has no items.
+        if expr_calls(selector, &|_| true) {
+            return None;
+        }
+        for item in items {
+            let condition = case_item_condition(kind, selector, &item.labels).ok()?;
+            if self.truth(&condition)? {
+                return Some(&item.body);
+            }
+        }
+        Some(default.unwrap_or_default())
+    }
+
+    pub(super) fn selected_branch<'b>(&self, stmt: &'b sv::ir::Stmt) -> Option<&'b [sv::ir::Stmt]> {
+        match stmt {
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Some(if self.truth(condition)? {
+                then_body
+            } else {
+                else_body
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => self.selected_case_body(*kind, selector, items, default.as_deref()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn body_flow(&self, body: &[sv::ir::Stmt]) -> ProceduralFlow {
+        let mut flow = ProceduralFlow {
+            fallthrough: true,
+            continues: false,
+        };
+        for stmt in body {
+            if !flow.fallthrough {
+                break;
+            }
+            let next = self.stmt_flow(stmt);
+            flow.fallthrough = next.fallthrough;
+            flow.continues |= next.continues;
+        }
+        flow
+    }
+
+    pub(super) fn stmt_flow(&self, stmt: &sv::ir::Stmt) -> ProceduralFlow {
+        if let Some(branch) = self.selected_branch(stmt) {
+            return self.body_flow(branch);
+        }
+        match stmt {
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => self.body_flow(then_body).choice(self.body_flow(else_body)),
+            sv::ir::Stmt::Case { items, default, .. } => items.iter().fold(
+                self.body_flow(default.as_deref().unwrap_or_default()),
+                |flow, item| flow.choice(self.body_flow(&item.body)),
+            ),
+            sv::ir::Stmt::Continue => ProceduralFlow {
+                fallthrough: false,
+                continues: true,
+            },
+            sv::ir::Stmt::Wait(condition) if self.truth(condition) == Some(false) => {
+                ProceduralFlow {
+                    fallthrough: false,
+                    continues: false,
+                }
+            }
+            _ => ProceduralFlow {
+                fallthrough: stmt_may_fall_through(stmt),
+                continues: false,
+            },
+        }
     }
 
     fn for_cap(
@@ -2788,11 +2945,17 @@ pub(super) fn procedural_write_counts(
                     }
                 }
                 sv::ir::Stmt::Case { items, default, .. } => {
-                    for body in items
-                        .iter()
-                        .map(|item| item.body.as_slice())
-                        .chain(default.iter().map(Vec::as_slice))
-                    {
+                    let branches: Vec<&[sv::ir::Stmt]> =
+                        if let Some(selected) = eval.selected_branch(stmt) {
+                            vec![selected]
+                        } else {
+                            items
+                                .iter()
+                                .map(|item| item.body.as_slice())
+                                .chain(default.iter().map(Vec::as_slice))
+                                .collect()
+                        };
+                    for body in branches {
                         for (name, count) in counts(
                             body,
                             subroutines,
@@ -2821,26 +2984,42 @@ pub(super) fn procedural_write_counts(
                         two_state,
                         include_nonblocking,
                     );
-                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, body, eval);
-                    call_evaluations = loop_condition_eval_cap(kind, trips);
+                    let flow = eval.body_flow(body);
+                    // A break/return prevents another iteration and its step.
+                    // A continue reaches the step and must retain multiplicity.
+                    let reaches_step = flow.fallthrough || flow.continues;
+                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, body, eval)
+                        .min(if reaches_step { 2 } else { 1 });
+                    call_evaluations = if reaches_step {
+                        loop_condition_eval_cap(kind, trips)
+                    } else {
+                        // Repeat and pre-test loops evaluate once; a do-while
+                        // condition after an unconditional exit is unreachable.
+                        usize::from(!matches!(kind, sv::ir::LoopKind::DoWhile))
+                    };
                     if trips != 0 {
-                        for (name, count) in counts(
+                        let mut cycle = counts(
                             body,
                             subroutines,
                             visiting,
                             eval,
                             two_state,
                             include_nonblocking,
-                        )
-                        .into_iter()
-                        .chain(counts(
-                            step,
-                            subroutines,
-                            visiting,
-                            eval,
-                            two_state,
-                            include_nonblocking,
-                        )) {
+                        );
+                        if reaches_step {
+                            for (name, count) in counts(
+                                step,
+                                subroutines,
+                                visiting,
+                                eval,
+                                two_state,
+                                include_nonblocking,
+                            ) {
+                                let entry = cycle.entry(name).or_default();
+                                *entry = (*entry + count).min(2);
+                            }
+                        }
+                        for (name, count) in cycle {
                             let entry = next.entry(name).or_default();
                             *entry = (*entry + count * trips).min(2);
                         }
@@ -2885,7 +3064,7 @@ pub(super) fn procedural_write_counts(
                 let entry = result.entry(name).or_default();
                 *entry = (*entry + count).min(2);
             }
-            if !stmt_may_fall_through(stmt) {
+            if !eval.stmt_flow(stmt).fallthrough {
                 break;
             }
         }
