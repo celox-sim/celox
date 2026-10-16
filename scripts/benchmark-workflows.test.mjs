@@ -29,17 +29,17 @@ function runs(name, event, ref, inputs = {}, validation = event === "workflow_di
   ));
 }
 
-test("benchmarks run daily and manually; PRs only test the Heliodor tooling", () => {
+test("benchmarks run daily and manually; required lint tests the Heliodor tooling", () => {
   for (const workflow of [heliodor, bench, codspeed]) {
     const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
-    assert.doesNotMatch(triggers, /^\s+push:|^\s+merge_group:/m);
+    assert.doesNotMatch(triggers, /^\s+(push|pull_request|merge_group):/m);
     assert.match(triggers, /^\s+schedule:/m);
     assert.match(triggers, /^\s+workflow_dispatch:/m);
   }
-  assert.doesNotMatch(codspeed, /^  pull_request:/m);
-  const paths = heliodor.match(/  pull_request:\n    paths:\n([\s\S]*?)  schedule:/)[1];
-  assert.doesNotMatch(paths, /Cargo\.(lock|toml)|crates\/|ci-changes/);
-  assert.match(job(heliodor, "converter-test"), /scripts\/benchmark-workflows\.test\.mjs/);
+  const scriptTests = read("ci").match(/name: Test repository scripts\n[\s\S]*?\n\n/)[0];
+  for (const fixture of ["convert-heliodor-bench", "run-heliodor-bench-results", "run-heliodor-bench-gate"]) {
+    assert.match(scriptTests, new RegExp(`bash scripts/tests/${fixture}\\.sh`));
+  }
   assert.doesNotMatch(heliodor, /^  arm64-linux-boot:|^  arm64-changes:/m);
   for (const name of ["heliodor", "linux-suite-matrix", "heliodor-head", "arm64-linux-boot-full"]) {
     assert.equal(runs(name, "pull_request", "master"), false, name);

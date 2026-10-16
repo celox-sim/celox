@@ -220,8 +220,8 @@ be dispatched manually. It validates the updated flake and mbx executable,
 then opens or updates `automation/update-mbx` against the default branch.
 Only `flake.lock` is included in the PR; other flake inputs stay pinned.
 The workflow uses the existing release GitHub App credentials so its PR
-triggers normal CI. PR and merge-queue checks build and run the pinned mbx
-package on both x86_64 and ARM64 Linux. Updates are proposed as PRs for review;
+triggers normal CI. The daily and manual runs also build and run the
+committed mbx package on both x86_64 and ARM64 Linux. Updates are proposed as PRs for review;
 the workflow does not merge them automatically. Upstream package-definition
 updates can produce a PR even when the mbx version is unchanged.
 

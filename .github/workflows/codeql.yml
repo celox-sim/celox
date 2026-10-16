@@ -2,25 +2,22 @@ name: CodeQL
 
 # Enable CODEQL_ADVANCED_ENABLED only after disabling GitHub's default setup.
 # See CONTRIBUTING.md for the cutover and rollback procedure.
+# Code scanning does not gate merges, so it runs on a schedule rather than PRs.
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/**"
-      - ".github/actions/**"
   schedule:
     - cron: "17 4 * * 0"
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || 'full' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
   analyze:
-    if: vars.CODEQL_ADVANCED_ENABLED == 'true' && !startsWith(github.head_ref, 'mergify/merge-queue/')
+    if: vars.CODEQL_ADVANCED_ENABLED == 'true'
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -31,7 +28,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        language: ${{ fromJSON(github.event_name == 'pull_request' && '["actions"]' || '["actions", "c-cpp", "javascript-typescript", "python", "rust"]') }}
+        language: [actions, c-cpp, javascript-typescript, python, rust]
     steps:
       - uses: actions/checkout@v7
         with:
