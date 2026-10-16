@@ -77,6 +77,7 @@ function createMockNative(opts?: {
 				handle.runUntil(endTime);
 				return true;
 			}),
+		noteHostWrites: vi.fn(),
 		step: vi.fn().mockImplementation(processNextEvent),
 		time: vi.fn().mockImplementation(() => currentTime),
 		nextEventTime: vi.fn().mockImplementation(() => nextScheduledTime),
@@ -290,6 +291,39 @@ describe("Simulation", () => {
 		expect(() => {
 			Simulation.create(TopModule);
 		}).toThrow("Native simulator binding not loaded");
+	});
+
+	test("input writes reach the scheduler before it advances", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		const order: string[] = [];
+		vi.mocked(mock.handle.noteHostWrites!).mockImplementation(() => {
+			order.push("note");
+		});
+
+		sim.runUntil(10);
+		expect(mock.handle.noteHostWrites).not.toHaveBeenCalled();
+		vi.mocked(mock.handle.runUntil).mockImplementationOnce(() => {
+			order.push("run");
+		});
+
+		// A read settles the inputs but does not report them.
+		sim.dut.d = 0x42n;
+		expect(sim.dut.q).toBe(0x42n);
+		sim.runUntil(20);
+		expect(order).toEqual(["note", "run"]);
+
+		// Each write is reported once, before the step that sees it.
+		sim.dut.d = 1n;
+		sim.step();
+		sim.step();
+		sim.nextEventTime();
+		expect(mock.handle.noteHostWrites).toHaveBeenCalledTimes(2);
+		sim.dut.d = 2n;
+		sim.nextEventTime();
+		expect(mock.handle.noteHostWrites).toHaveBeenCalledTimes(3);
 	});
 
 	test("runUntil with maxSteps: fast path when omitted", () => {

@@ -46,6 +46,7 @@ export interface RawNapiSimulationHandle {
 	schedule(eventId: number, time: number, value: number): void;
 	runUntil(endTime: number): void;
 	runUntilBounded(endTime: number, maxSteps: number): boolean;
+	noteHostWrites?(): void;
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
@@ -863,6 +864,9 @@ export function wrapDirectSimulationHandle(
 		},
 		runUntilBounded(endTime: number, maxSteps: number): boolean {
 			return raw.runUntilBounded(endTime, maxSteps);
+		},
+		noteHostWrites(): void {
+			raw.noteHostWrites?.();
 		},
 		step(): number | null {
 			return raw.step();

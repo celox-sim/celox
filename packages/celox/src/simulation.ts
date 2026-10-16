@@ -446,6 +446,7 @@ export class Simulation<P = Record<string, unknown>> {
 		// A skipped run must preserve pending input changes for lazy evaluation.
 		if (endTime < this._handle.time()) return;
 		if (opts?.maxSteps == null) {
+			this.noteHostWrites();
 			this._handle.runUntil(endTime);
 			this._state.dirty = false;
 			return;
@@ -454,6 +455,7 @@ export class Simulation<P = Record<string, unknown>> {
 		// Nothing is due before the target: keep pending inputs for lazy
 		// evaluation.
 		if (this._handle.time() >= endTime) return;
+		this.noteHostWrites();
 		if (!this._handle.runUntilBounded(endTime, max)) {
 			// A step took the pending inputs unless none was allowed.
 			if (max > 0) this._state.dirty = false;
@@ -473,6 +475,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	step(): number | null {
 		this.ensureAlive();
+		this.noteHostWrites();
 		const t = this._handle.step();
 		this._state.dirty = false;
 		return t;
@@ -491,6 +494,7 @@ export class Simulation<P = Record<string, unknown>> {
 	 */
 	nextEventTime(): number | null {
 		this.ensureAlive();
+		this.noteHostWrites();
 		return this._handle.nextEventTime();
 	}
 
@@ -514,6 +518,7 @@ export class Simulation<P = Record<string, unknown>> {
 		const max = opts?.maxSteps ?? this._defaultMaxSteps ?? 100_000;
 		let steps = 0;
 		while (!condition()) {
+			this.noteHostWrites();
 			// An exhausted queue is a normal completion, even when the budget is
 			// already spent. Preserve that behavior instead of reporting a timeout.
 			if (steps >= max && this._handle.nextEventTime() != null) {
@@ -684,6 +689,7 @@ export class Simulation<P = Record<string, unknown>> {
 		if (!this._handle.checkpoint) {
 			throw new Error("This simulation does not support checkpoints");
 		}
+		this.noteHostWrites();
 		return new SimulationCheckpoint(this._handle.checkpoint());
 	}
 
@@ -701,6 +707,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.restore(checkpoint._native);
 		this.syncClocks();
 		this._state.dirty = false;
+		this._state.written = false;
 	}
 
 	/**
@@ -725,6 +732,7 @@ export class Simulation<P = Record<string, unknown>> {
 		if (!this._handle.saveState) {
 			throw new Error("This simulation does not support state files");
 		}
+		this.noteHostWrites();
 		const bytes = this._handle.saveState();
 		this._state.dirty = false;
 		return bytes;
@@ -746,6 +754,7 @@ export class Simulation<P = Record<string, unknown>> {
 		this._handle.loadState(bytes);
 		this.syncClocks();
 		this._state.dirty = false;
+		this._state.written = false;
 	}
 
 	/** Release native resources. */
@@ -762,6 +771,17 @@ export class Simulation<P = Record<string, unknown>> {
 	// -----------------------------------------------------------------------
 	// Internal
 	// -----------------------------------------------------------------------
+
+	/**
+	 * Report the DUT's input writes to the timed scheduler, which settles the
+	 * current time first when a process may see them or a clock changed.
+	 */
+	private noteHostWrites(): void {
+		if (this._state.written) {
+			this._state.written = false;
+			this._handle.noteHostWrites?.();
+		}
+	}
 
 	/** Rebuild the clock registry from the clocks the handle now runs. */
 	private syncClocks(): void {

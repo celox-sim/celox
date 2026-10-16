@@ -672,6 +672,14 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.memory_as_mut_ptr()
     }
 
+    /// The host wrote the state through [`Self::memory_as_mut_ptr`]. Like
+    /// [`Self::modify`], the next step then settles the current time when the
+    /// writes may wake a process or changed an event signal. Waits and
+    /// counters see the values the writes left, not each write.
+    pub fn note_raw_writes(&mut self) {
+        self.state.note_host_writes(&self.simulator.backend, false);
+    }
+
     /// Returns an opaque owner that keeps the backend memory allocation alive.
     pub fn memory_owner(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
         self.simulator.memory_owner()

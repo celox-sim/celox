@@ -1442,3 +1442,49 @@ fn zero_time_loops_exhaust_the_slot_budget() {
         }
     }
 }
+
+/// A process waiting on an input wakes at the time the host writes the
+/// input through the raw memory view, as the TypeScript DUT does, once
+/// the host reports the write.
+fn raw_go(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("RawGo", four_state);
+    let go = d.input("go", 1);
+    let done = d.output("done", 8, 0);
+    let body = vec![wait(go, EventEdge::Posedge), d.set(done, 1)];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+/// Write `value` to `signal` through the raw memory view.
+fn write_raw<B: SimBackend>(sim: &mut Simulation<B>, signal: crate::SignalRef, value: u8) {
+    let four_state = sim.layout().four_state && signal.is_4state;
+    let bytes = signal.width.div_ceil(8);
+    let (pointer, size) = sim.memory_as_mut_ptr();
+    assert!(signal.offset + 2 * bytes <= size);
+    // Safety: the view holds `size` writable bytes.
+    unsafe {
+        *pointer.add(signal.offset) = value;
+        if four_state {
+            *pointer.add(signal.offset + bytes) = 0;
+        }
+    }
+}
+
+#[test]
+fn raw_host_writes_wake_waits_at_the_current_time() {
+    for four_state in [false, true] {
+        let artifact = raw_go(four_state);
+        on_every_backend!(builder(&artifact, four_state), "RawGo", |sim| {
+            let go = sim.signal("go");
+            write_raw(&mut sim, go, 0);
+            sim.note_raw_writes();
+            sim.run_until(3).unwrap();
+            assert_eq!(value(&mut sim, "done"), 0);
+            write_raw(&mut sim, go, 1);
+            sim.note_raw_writes();
+            assert_eq!(sim.next_event_time(), Some(3));
+            sim.run_until(3).unwrap();
+            assert_eq!(value(&mut sim, "done"), 1);
+        });
+    }
+}

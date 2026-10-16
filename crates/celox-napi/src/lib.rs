@@ -1921,6 +1921,19 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Report that the host wrote the state through the shared memory: the
+    /// next step settles the current time when a process may see the writes
+    /// or an event signal changed.
+    #[napi]
+    pub fn note_host_writes(&mut self) -> Result<()> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.note_raw_writes();
+        Ok(())
+    }
+
     /// Advance to the next event. Returns the new time, or null if no events.
     #[napi]
     pub fn step(&mut self) -> Result<Option<f64>> {

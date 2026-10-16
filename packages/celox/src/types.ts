@@ -204,6 +204,12 @@ export interface NativeSimulationHandle {
 	 * the steps ran out first, at the time of the last step.
 	 */
 	runUntilBounded(endTime: number, maxSteps: number): boolean;
+	/**
+	 * Report that the host wrote the shared memory: the next step settles the
+	 * current time when a process may see the writes or an event signal
+	 * changed.
+	 */
+	noteHostWrites?(): void;
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
