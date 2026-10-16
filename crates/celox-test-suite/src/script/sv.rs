@@ -1050,7 +1050,9 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
             generator.line(format!("$write(\"\\n{FINISHING_MARKER}\\n\");"));
             generator.line("suite_reached_finish = 1;");
             generator.line("settle_now();");
-            generator.line(format!("#(64'd{});", RUN_UNTIL_LIMIT * 1000));
+            // One picosecond past the limit, so a `$finish` due exactly at
+            // the limit runs first rather than in the same time slot.
+            generator.line(format!("#(64'd{});", RUN_UNTIL_LIMIT * 1000 + 1));
             generator.line("suite_timed_out = 1;");
             generator
                 .line("$display(\"@suite assert the design did not finish after run_to_finish\");");

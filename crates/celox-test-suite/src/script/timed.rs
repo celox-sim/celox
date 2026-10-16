@@ -6,32 +6,20 @@ pub fn validate_timed_design(design: &Design) -> Result<()> {
     validate_timed_design_with_defines(design, &[])
 }
 
+/// `names` are the macros the simulator predefines. A timed source must
+/// not depend on them: the testbench is generated from the source as
+/// preprocessed without them.
 pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]) -> Result<()> {
     if !design.timed {
         return Ok(());
     }
-    let mut defines: sv_parser::Defines = Default::default();
-    for name in names {
-        defines.insert(
-            (*name).to_owned(),
-            Some(sv_parser::Define::new((*name).to_owned(), Vec::new(), None)),
+    let texts = active_texts(design, names)?;
+    if !names.is_empty() && texts != active_texts(design, &[])? {
+        return Err(
+            "timed shared sources cannot depend on the simulator's predefined macros".into(),
         );
     }
-    let includes: Vec<&std::path::Path> = Vec::new();
-    for source in &design.sources {
-        let (active, next_defines) = sv_parser::preprocess_str(
-            &source.text,
-            &source.path,
-            &defines,
-            &includes,
-            true,
-            false,
-            0,
-            0,
-        )
-        .map_err(|error| format!("timed source preprocessing: {error}"))?;
-        defines = next_defines;
-        let text = active.text();
+    for text in &texts {
         if sv_words(text).iter().any(|(start, _, word)| {
             matches!(*word, "timeunit" | "timeprecision")
                 || (matches!(*word, "timescale" | "resetall") && text[..*start].ends_with('`'))
@@ -47,6 +35,36 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
         }
     }
     Ok(())
+}
+
+/// The active text of each source, preprocessed in order with `names`
+/// defined.
+fn active_texts(design: &Design, names: &[&str]) -> Result<Vec<String>> {
+    let mut defines: sv_parser::Defines = Default::default();
+    for name in names {
+        defines.insert(
+            (*name).to_owned(),
+            Some(sv_parser::Define::new((*name).to_owned(), Vec::new(), None)),
+        );
+    }
+    let includes: Vec<&std::path::Path> = Vec::new();
+    let mut texts = Vec::new();
+    for source in &design.sources {
+        let (active, next_defines) = sv_parser::preprocess_str(
+            &source.text,
+            &source.path,
+            &defines,
+            &includes,
+            true,
+            false,
+            0,
+            0,
+        )
+        .map_err(|error| format!("timed source preprocessing: {error}"))?;
+        defines = next_defines;
+        texts.push(active.text().to_owned());
+    }
+    Ok(texts)
 }
 
 fn sv_words(source: &str) -> Vec<(usize, usize, &str)> {
@@ -182,5 +200,17 @@ module Top;endmodule"#) (top Top)(run_until 0))"##,
                 validate_timed_design_with_defines(&design(&source), &["TOOL_ACTIVE"]).is_err()
             );
         }
+    }
+
+    #[test]
+    fn sources_cannot_depend_on_predefined_macros() {
+        let source =
+            "module Top(\n`ifdef VERILATOR\ninput bit a,\n`endif\noutput bit y);\nendmodule";
+        let error =
+            validate_timed_design_with_defines(&design(source), &["VERILATOR"]).unwrap_err();
+        assert!(error.to_string().contains("predefined macros"), "{error}");
+        assert!(validate_timed_design(&design(source)).is_ok());
+        let source = "module Top; endmodule";
+        assert!(validate_timed_design_with_defines(&design(source), &["VERILATOR"]).is_ok());
     }
 }
