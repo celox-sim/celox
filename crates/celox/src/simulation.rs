@@ -4254,6 +4254,132 @@ mod pr1158_merge_regressions {
         }};
     }
     #[test]
+    fn constant_true_wait_uses_configured_state_mode_for_write_times() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>, always_true: bool) {
+            let first = u8::from(always_true || !sim.simulator.backend.layout().four_state);
+            sim.run_until(1).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), first.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), (first + 1).into());
+        }
+        // In two-state mode X/Z become zero before equality is evaluated.
+        // Case equality is true in either mode, so both exercise exact times.
+        for condition in [
+            "4'bx001 == 4'b0001",
+            "4'bz001 == 4'b0001",
+            "4'bx001 === 4'bx001",
+        ] {
+            let source = format!(
+                "module Child(output bit[1:0]q);initial begin #1;wait({condition});q[0]=1;end initial begin #2;q[1]=1;end endmodule module Top(output bit[7:0]seen);wire[1:0]q;Child c(q);initial forever begin @(q[0]^q[1]);seen++;end endmodule"
+            );
+            for four_state in [false, true] {
+                let always_true = condition.contains("===");
+                let build = || {
+                    Simulator::from_sv_sources(
+                        vec![(&source, std::path::Path::new("constant-wait.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                };
+                check(
+                    Simulation::new(build().build_interpreter().unwrap()),
+                    always_true,
+                );
+                check(
+                    Simulation::new(build().build_cranelift().unwrap()),
+                    always_true,
+                );
+                check(Simulation::new(build().build_wasm().unwrap()), always_true);
+                #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                check(
+                    Simulation::new(build().build_native().unwrap()),
+                    always_true,
+                );
+            }
+        }
+    }
+    #[test]
+    fn wide_repeat_counts_enter_once_before_break() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            use num_bigint::BigUint;
+            let n = sim.signal("n");
+            sim.modify(|io| {
+                io.set_four_state(n, BigUint::from(1u8) << 64usize, BigUint::default())
+            })
+            .unwrap();
+            sim.run_until(0).unwrap();
+            for name in ["literal_q", "dynamic_q", "function_q", "calls"] {
+                assert_eq!(sim.get(sim.signal(name)), 1u8.into(), "{name}");
+            }
+        }
+        backends!(
+            "module Top(input bit[79:0]n,output bit literal_q,dynamic_q,function_q,output bit[7:0]calls);function automatic bit[79:0] count();calls++;return n;endfunction initial begin #0;repeat(65'd18446744073709551616)begin literal_q=1;break;end repeat(n)begin dynamic_q=1;break;end repeat(count())begin function_q=1;break;end end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn wide_repeat_counter_codegen_preserves_sign_and_explicit_casts() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            let n = sim.signal("n");
+            let clk = sim.signal("clk");
+            for (value, expected, signed_expected, cast_expected) in [
+                (0u128, 0u8, 0u8, 0u8),
+                (1, 1, 1, 1),
+                (1 << 64, 1, 1, 0),
+                ((1 << 64) + 2, 1, 1, 1),
+                (1 << 79, 1, 0, 0),
+            ] {
+                sim.modify(|io| {
+                    io.set(n, value);
+                    io.set(clk, 0u8);
+                })
+                .unwrap();
+                sim.run_until(0).unwrap();
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                sim.run_until(0).unwrap();
+                for (name, expected) in [
+                    ("literal_q", 1),
+                    ("dynamic_q", expected),
+                    ("function_q", expected),
+                    ("signed_q", signed_expected),
+                    ("cast_q", cast_expected),
+                    ("calls", 1),
+                ] {
+                    assert_eq!(
+                        sim.get(sim.signal(name)),
+                        expected.into(),
+                        "{name}, n={value}"
+                    );
+                }
+            }
+        }
+        // Exercise the FF consumer of the same counter lowering. The external
+        // tools narrow these counts too (Icarus warns about constant truncation;
+        // Verilator generates 32-bit repeat temporaries), so they cannot be the
+        // oracle for this code-generation regression. IEEE 1800-2023 12.7.2.
+        backends!(
+            "module Top(input bit clk,input bit[79:0]n,output bit[7:0]literal_q,dynamic_q,function_q,signed_q,cast_q,calls);function automatic bit[79:0] count();calls++;return n;endfunction always_ff @(posedge clk)begin literal_q=0;dynamic_q=0;function_q=0;signed_q=0;cast_q=0;calls=0;repeat(65'd18446744073709551616)begin literal_q++;break;end repeat(n)begin dynamic_q++;break;end repeat(count())begin function_q++;break;end repeat($signed(n))begin signed_q++;break;end repeat(64'(n))begin cast_q++;break;end end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn level_wait_rechecks_after_an_uninterrupted_writer() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            sim.run_until(1).unwrap();
+            // The writer runs without suspension. The posedge is retained,
+            // but the level predicate is false when its waiter resumes.
+            assert_eq!(sim.get(sim.signal("seen")), 0u8.into());
+            assert_eq!(sim.get(sim.signal("edge_seen")), 1u8.into());
+            sim.run_until(2).unwrap();
+            assert_eq!(sim.get(sim.signal("seen")), 1u8.into());
+        }
+        backends!(
+            "module Top(output bit seen,edge_seen);bit a;initial begin wait(a);seen=1;end initial begin @(posedge a);edge_seen=1;end initial begin #1;a=1;a=0;#1;a=1;end endmodule",
+            check
+        );
+    }
+    #[test]
     fn masked_false_while_preserves_separate_write_times() {
         fn check<B: SimBackend>(mut sim: Simulation<B>) {
             sim.run_until(1).unwrap();

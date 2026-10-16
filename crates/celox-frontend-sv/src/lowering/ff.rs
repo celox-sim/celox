@@ -2584,18 +2584,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         let counter = match kind {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
-                let (id, name) = self.m.temp("repeat", 64, false, false);
+                let mut arena = SLTNodeArena::new();
+                let node = self.expr_slt(count, None, &mut arena)?;
+                let original = self.lower_slt(&arena, node)?;
+                // A repeat count is self-determined, not a 64-bit time value.
+                // Preserve every bit so a nonzero high part still enters the
+                // loop (even when a break bounds its actual execution).
+                let width = self.b.register(&original).width();
+                let (id, name) = self.m.temp("repeat", width, false, false);
                 // IEEE 1800-2023 12.7.2, including literal masks in two-state mode.
                 let value = if self.constant_unknown(count) {
-                    let zero = self.b.alloc_bit(64, false);
+                    let zero = self.b.alloc_bit(width, false);
                     self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                     zero
                 } else {
-                    let mut arena = SLTNodeArena::new();
-                    let node = self.expr_slt(count, None, &mut arena)?;
-                    let original = self.lower_slt(&arena, node)?;
-                    let negative = if signed {
-                        let zero = self.b.alloc_bit(self.b.register(&original).width(), true);
+                    let value = self.zero_if_unknown(original, original);
+                    if signed {
+                        let zero = self.b.alloc_bit(width, true);
                         self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
                         let negative = self.b.alloc_bit(1, false);
                         self.b.emit(SIRInstruction::Binary(
@@ -2604,18 +2609,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                             BinaryOp::LtS,
                             zero,
                         ));
-                        Some(negative)
-                    } else {
-                        None
-                    };
-                    let node =
-                        coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
-                    let value = self.lower_slt(&arena, node)?;
-                    let value = self.zero_if_unknown(value, original);
-                    if let Some(negative) = negative {
-                        let zero = self.b.alloc_bit(64, false);
-                        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
-                        let clamped = self.b.alloc_bit(64, false);
+                        let clamped = self.b.alloc_bit(width, false);
                         self.b
                             .emit(SIRInstruction::Mux(clamped, negative, zero, value));
                         clamped
@@ -2623,7 +2617,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                         value
                     }
                 };
-                self.store(id, SIROffset::Static(0), 64, value)?;
+                self.store(id, SIROffset::Static(0), width, value)?;
                 Some(name)
             }
             _ => None,
@@ -3830,18 +3824,7 @@ pub(super) fn fixed_runtime_write_times(
         None
     }
     fn statically_true_wait(condition: &sv::ir::Expr, pm: &ProcModule<'_>) -> bool {
-        let negated = sv::ir::Expr::Unary {
-            op: sv::ir::UnaryOp::LogicNot,
-            expr: Box::new(condition.clone()),
-        };
-        known_loop_value(
-            &negated,
-            pm.variables,
-            pm.name_to_id,
-            pm.constants,
-            pm.parameter_types,
-        )
-        .is_some_and(|value| value == 0)
+        known_condition(condition, pm) == Some(true)
     }
     fn preserves_own_time(stmts: &[sv::ir::Stmt], pm: &ProcModule<'_>) -> bool {
         let mut safe = true;
