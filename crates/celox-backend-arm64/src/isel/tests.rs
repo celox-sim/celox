@@ -1,5 +1,6 @@
 mod partial_load;
 mod shifts;
+mod slice;
 mod strided;
 
 use super::*;
