@@ -1589,6 +1589,11 @@ impl<B: SimBackend> SimulationState<B> {
                             if !self.counted.is_empty() {
                                 self.mark_counted_domains(executor.backend_mut(), &mut round);
                             }
+                            if timed {
+                                // Each update is seen by the waits on it
+                                // (IEEE 1800-2023 4.5).
+                                self.observe_driven(executor.backend());
+                            }
                             comb_already_done = true;
                             break;
                         }
@@ -1702,6 +1707,11 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 if !self.counted.is_empty() {
                     self.mark_counted_domains(executor.backend_mut(), &mut round);
+                }
+                if timed {
+                    // A combinational value between two waves of domains is
+                    // an update the waits see (IEEE 1800-2023 4.5).
+                    self.observe_driven(executor.backend());
                 }
             }
         }

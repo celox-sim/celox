@@ -1686,3 +1686,51 @@ fn waits_on_counted_signals_see_uncounted_writers() {
         });
     }
 }
+
+/// `a` toggles on `clk`, `b <= a` on `posedge a`, and `y = a & ~b`: when
+/// `a` first rises, `y` is high between the two domains' publications and
+/// low at the end of the slot. A process waiting on `posedge y` sees the
+/// pulse like the flip-flop clocked by `y` does.
+fn comb_pulse_between_waves(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("CombPulse", four_state);
+    let clk = d.input("clk", 1);
+    let a = d.internal("a", 1, 0);
+    let b = d.internal("b", 1, 0);
+    let ty = d.ty(1);
+    let y = d.module.internal("y", ty).unwrap();
+    let read_a = d.read(a);
+    let not_a = d.module.unary(UnaryOp::BitNot, read_a, ty).unwrap();
+    d.register(a, not_a, clk, Edge::Posedge);
+    let read_a = d.read(a);
+    d.register(b, read_a, a, Edge::Posedge);
+    let (read_a, read_b) = (d.read(a), d.read(b));
+    let not_b = d.module.unary(UnaryOp::BitNot, read_b, ty).unwrap();
+    let and = d.module.binary(BinaryOp::And, read_a, not_b, ty).unwrap();
+    let target = d.module.whole(y).unwrap();
+    d.module.assign(target, and).unwrap();
+    let ffs = d.output("ffs", 8, 0);
+    d.counter(ffs, y);
+    let wakes = d.output("wakes", 8, 0);
+    let body = vec![Statement::Forever {
+        body: vec![wait(y, EventEdge::Posedge), d.increment(wakes)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn waits_see_combinational_pulses_between_flip_flop_waves() {
+    for four_state in [false, true] {
+        let artifact = comb_pulse_between_waves(four_state);
+        on_every_backend!(builder(&artifact, four_state), "CombPulse", |sim| {
+            sim.schedule("clk", 0, 0).unwrap();
+            for edge in 1..=4u64 {
+                sim.schedule("clk", 2 * edge - 1, 1).unwrap();
+                sim.schedule("clk", 2 * edge, 0).unwrap();
+            }
+            sim.run_until(8).unwrap();
+            assert_eq!(value(&mut sim, "ffs"), 1);
+            assert_eq!(value(&mut sim, "wakes"), 1);
+        });
+    }
+}
