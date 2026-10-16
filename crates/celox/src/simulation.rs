@@ -529,9 +529,10 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
-    /// A write that changes an event signal, and any write in a design with
-    /// processes, is an update of the current time: the next [`Self::step`]
-    /// or [`Self::run_until`] settles the current time before advancing.
+    /// A write that changes an event signal, and any write while a process
+    /// waits or a signal is counted, is an update of the current time: the
+    /// next [`Self::step`] or [`Self::run_until`] settles it at that time,
+    /// then advances.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
         F: FnOnce(&mut crate::IOContext<B>),
@@ -572,9 +573,17 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Advance time to the next scheduled event and process all events at that time.
-    /// Returns the new simulation time, or None if no events are scheduled.
+    /// Host writes since the last step are settled at the current time first.
+    /// Returns the new simulation time, the current time when only host
+    /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
         self.state.step(&mut self.simulator)
+    }
+
+    /// [`Self::step`] that, after settling host writes at the current time,
+    /// does not advance past `end_time`.
+    fn step_until(&mut self, end_time: u64) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.state.step_until(&mut self.simulator, end_time)
     }
 
     /// Advance time and run until `end_time` (inclusive).
@@ -590,7 +599,7 @@ impl<B: SimBackend> Simulation<B> {
             if next_time > end_time {
                 break;
             }
-            self.step()?;
+            self.step_until(end_time)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -619,7 +628,7 @@ impl<B: SimBackend> Simulation<B> {
             if steps >= max_steps {
                 return Ok(false);
             }
-            self.step()?;
+            self.step_until(end_time)?;
             steps += 1;
         }
         self.run_until(end_time)?;

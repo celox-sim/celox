@@ -179,8 +179,10 @@ SystemVerilog.
 Every write a process makes counts: a pulse such as `clk = 1; clk = 0;`
 without a suspension in between triggers `@(posedge clk)` and the registers of
 `clk` once, and two nonblocking assignments to one signal in one time slot
-publish in order. A host write through `Simulation::modify` is an update of
-the current time: the next `step` or `run_until` settles it before advancing.
+publish in order. A host write through `Simulation::modify`, through the
+raw memory view reported with `Simulation::note_raw_writes`, or through a
+TypeScript DUT input, is an update of the current time: the next `step` or
+`run_until` settles it at that time, then advances.
 
 A process may write output and internal signals that no continuous assignment
 or register drives. Several processes may write the same signal. Checkpoints

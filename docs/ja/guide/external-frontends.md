@@ -178,8 +178,9 @@ register の入力を駆動する process は、SystemVerilog と同じく regis
 process の書き込みはすべて数えられます。suspend を挟まない `clk = 1; clk = 0;`
 のような pulse も `@(posedge clk)` と `clk` の register を 1 回 trigger し、1 つの
 time slot で同じ signal へ行う 2 つの nonblocking 代入は順に反映されます。
-`Simulation::modify` による host の書き込みは現在時刻の更新です。次の `step` や
-`run_until` は時刻を進める前にそれを settle します。
+`Simulation::modify`、`Simulation::note_raw_writes` で報告した raw memory view
+への書き込み、TypeScript DUT の input への書き込みは、いずれも現在時刻の更新です。
+次の `step` や `run_until` はそれを現在時刻で settle してから時刻を進めます。
 
 process が書けるのは、continuous assignment や register が駆動していない
 output と internal signal です。同じ signal を複数の process が書いても

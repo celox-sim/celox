@@ -1584,3 +1584,51 @@ fn gated_clocks_see_their_edges_with_processes() {
         }
     }
 }
+
+/// A process that has finished, or one waiting on a clock, does not keep
+/// host writes from advancing time: each step settles them at the current
+/// time and goes on to the next event.
+fn host_writes_with_processes(four_state: bool, waiting: bool) -> FrontendArtifact {
+    let mut d = Design::new("HostSteps", four_state);
+    let clk = d.input("clk", 1);
+    let din = d.input("d", 8);
+    let q = d.output("q", 8, 0);
+    let read = d.read(din);
+    let target = d.module.whole(q).unwrap();
+    d.module.assign(target, read).unwrap();
+    let ticks = d.output("ticks", 8, 0);
+    d.counter(ticks, clk);
+    let done = d.output("done", 1, 0);
+    let body = vec![d.delay(5), d.set(done, 1)];
+    d.module.process(body).unwrap();
+    if waiting {
+        let rises = d.output("rises", 8, 0);
+        let body = vec![Statement::Forever {
+            body: vec![wait(clk, EventEdge::Posedge), d.increment(rises)],
+        }];
+        d.module.process(body).unwrap();
+    }
+    d.finish()
+}
+
+#[test]
+fn host_writes_do_not_hold_steps_at_the_current_time() {
+    for four_state in [false, true] {
+        for waiting in [false, true] {
+            let artifact = host_writes_with_processes(four_state, waiting);
+            on_every_backend!(builder(&artifact, four_state), "HostSteps", |sim| {
+                for (time, level) in [(10, 1), (20, 0), (30, 1)] {
+                    sim.schedule("clk", time, level).unwrap();
+                }
+                sim.run_until(6).unwrap();
+                assert_eq!(value(&mut sim, "done"), 1);
+                let din = sim.signal("d");
+                for (index, time) in [10u64, 20, 30].into_iter().enumerate() {
+                    sim.modify(|io| io.set(din, index as u8 + 1)).unwrap();
+                    assert_eq!(sim.step().unwrap(), Some(time));
+                    assert_eq!(value(&mut sim, "q"), index as u64 + 1);
+                }
+            });
+        }
+    }
+}

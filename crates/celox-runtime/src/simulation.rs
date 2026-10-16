@@ -454,13 +454,28 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.push(event);
     }
 
-    /// Settle the current time or advance to the next scheduled time and
-    /// run it. Returns that time, or `None` when nothing is scheduled.
+    /// Settle host writes at the current time, then advance to the next time
+    /// with scheduled events or processes and run it. Returns that time, the
+    /// current time when only host writes were settled, or `None` when
+    /// nothing was to do.
     pub fn step<E>(&mut self, executor: &mut E) -> Result<Option<u64>, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        match self.step_time(executor) {
+        self.step_until(executor, u64::MAX)
+    }
+
+    /// Like [`Self::step`], but after settling host writes at the current
+    /// time, advance only to a time up to `limit`.
+    pub fn step_until<E>(
+        &mut self,
+        executor: &mut E,
+        limit: u64,
+    ) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match self.step_time(executor, limit) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
                 // The waveform records the state at the finish.
@@ -481,13 +496,37 @@ impl<B: SimBackend> SimulationState<B> {
         executor.freeze();
     }
 
-    fn step_time<E>(&mut self, executor: &mut E) -> Result<Option<u64>, Halt>
+    /// Settle host writes at the current time, then run the next time with
+    /// work, if it is not after `limit`. Host writes do not hold a step at
+    /// the current time: the step goes on to the next event.
+    fn step_time<E>(&mut self, executor: &mut E, limit: u64) -> Result<Option<u64>, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        let Some(current_time) = self.next_event_time() else {
-            return Ok(None);
-        };
+        let mut settled = None;
+        loop {
+            let Some(current_time) = self.next_event_time() else {
+                return Ok(settled);
+            };
+            if settled.is_some() && current_time > limit {
+                return Ok(settled);
+            }
+            // Host writes alone: settle them, then go on to the next time.
+            let host_only = self.host_pending && self.next_work_time() != Some(current_time);
+            self.run_time(executor, current_time)?;
+            if !host_only {
+                return Ok(Some(current_time));
+            }
+            settled = Some(current_time);
+        }
+    }
+
+    /// Run the time slot `current_time`: its scheduled events, the
+    /// processes due then, and the rounds they cause.
+    fn run_time<E>(&mut self, executor: &mut E, current_time: u64) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         self.host_pending = false;
         self.slot_passes = 0;
         let events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
@@ -512,7 +551,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
         executor.finish_timed_step(current_time);
-        Ok(Some(current_time))
+        Ok(())
     }
 
     /// Count a round or a pass of the process phase against the slot's
@@ -1334,10 +1373,11 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return;
         }
-        // With processes or counted signals, a write may reach a waited or
-        // counted signal through combinational logic that has not settled
-        // yet; only settling the current time tells.
-        if logged || !self.processes.is_empty() || !self.counted.is_empty() {
+        // With waiting processes or counted signals, a write may reach a
+        // waited or counted signal through combinational logic that has not
+        // settled yet; only settling the current time tells. Processes that
+        // finished or wait for a time do not see it.
+        if logged || !self.process_state.waiters.is_empty() || !self.counted.is_empty() {
             self.host_pending = true;
             return;
         }
@@ -1966,8 +2006,19 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finished {
             return None;
         }
-        // Host writes and woken processes are work of the current time.
-        if self.host_pending || !self.process_state.ready.is_empty() {
+        // Host writes are work of the current time.
+        if self.host_pending {
+            return Some(self.scheduler.time);
+        }
+        self.next_work_time()
+    }
+
+    /// The next time with scheduled events or processes to run.
+    fn next_work_time(&self) -> Option<u64> {
+        if self.finished {
+            return None;
+        }
+        if !self.process_state.ready.is_empty() {
             return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);

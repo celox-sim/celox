@@ -253,7 +253,8 @@ assigns the destination.
 simulation where it is: the scheduler propagates it as a control result, and
 the simulator freezes so that evaluation, host writes and dumps change
 nothing. A host write is an update of the current time; the next step settles
-it before advancing. Checkpoints, state files and exported schedules carry
+it at that time, then advances, so host writes never hold the simulation at
+one time. Checkpoints, state files and exported schedules carry
 the waiting processes with what each compares against, the ready and inactive
 processes, the queued nonblocking assignments and the counter values counted
 domains last triggered on; the slots and counters themselves are ordinary
