@@ -258,7 +258,7 @@ export class WasmEdgeRunner {
 			return {
 				domain,
 				was: now,
-				fired: stableEdge(domain.edge, before[index], now),
+				fired: stableEdge(domain.edge, before[index] ?? now, now),
 			};
 		});
 		this.fire(
@@ -274,7 +274,7 @@ export class WasmEdgeRunner {
 		this.rounds([...rounds, ...gatedEntries]);
 		if (!options.persist) {
 			levers.forEach((lever, index) => {
-				this.restoreLevel(lever.signal, saved[index]);
+				this.restoreLevel(lever.signal, saved[index] ?? [0, 0]);
 			});
 			this.evalComb();
 		}
@@ -312,8 +312,9 @@ export class WasmEdgeRunner {
 		if (settle) {
 			this.evalComb();
 		}
-		if (events.length === 1) {
-			this.kernel(events[0]).evalApply();
+		const [only] = events;
+		if (events.length === 1 && only !== undefined) {
+			this.kernel(only).evalApply();
 			return;
 		}
 		const kernels = events.map((name) => this.kernel(name));
@@ -333,32 +334,34 @@ export class WasmEdgeRunner {
 		return new Uint8Array(this.memory.buffer);
 	}
 
+	private byte(offset: number): number {
+		return this.bytes()[offset] ?? 0;
+	}
+
 	private level(signal: EdgePlanSignal): boolean {
-		return (this.bytes()[signal.offset] & 1) !== 0;
+		return (this.byte(signal.offset) & 1) !== 0;
 	}
 
 	/** The signal's level, or `null` while it is unknown. */
 	private knownLevel(signal: EdgePlanSignal): number | null {
-		const bytes = this.bytes();
-		if (this.plans.fourState && (bytes[signal.offset + 1] & 1) !== 0) {
+		if (this.plans.fourState && (this.byte(signal.offset + 1) & 1) !== 0) {
 			return null;
 		}
-		return bytes[signal.offset] & 1;
+		return this.byte(signal.offset) & 1;
 	}
 
 	private setLevel(signal: EdgePlanSignal, level: number): void {
 		const bytes = this.bytes();
-		bytes[signal.offset] = (bytes[signal.offset] & ~1) | level;
+		bytes[signal.offset] = (this.byte(signal.offset) & ~1) | level;
 		if (this.plans.fourState) {
-			bytes[signal.offset + 1] &= ~1;
+			bytes[signal.offset + 1] = this.byte(signal.offset + 1) & ~1;
 		}
 	}
 
 	private saveLevel(signal: EdgePlanSignal): [number, number] {
-		const bytes = this.bytes();
 		return [
-			bytes[signal.offset],
-			this.plans.fourState ? bytes[signal.offset + 1] : 0,
+			this.byte(signal.offset),
+			this.plans.fourState ? this.byte(signal.offset + 1) : 0,
 		];
 	}
 
