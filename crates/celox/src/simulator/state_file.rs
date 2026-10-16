@@ -644,6 +644,19 @@ impl<B: SimBackend> Simulator<B> {
         let mut nba_queue = Vec::new();
         for update in &record.nba_queue {
             match signals.get(&update.target) {
+                // A queued assignment covers a nonempty range of its target.
+                Some(&target)
+                    if update.width == 0
+                        || update
+                            .lsb
+                            .checked_add(update.width)
+                            .is_none_or(|end| end > target.width as u64) =>
+                {
+                    unknown.push(format!(
+                        "{} [{} +: {}]",
+                        update.target, update.lsb, update.width
+                    ));
+                }
                 Some(&target) => nba_queue.push(celox_runtime::NbaUpdate {
                     target,
                     lsb: update.lsb as usize,

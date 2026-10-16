@@ -1037,3 +1037,72 @@ endmodule
         assert_eq!(value(&mut sim, "y"), 1, "frozen at the finish");
     });
 }
+
+/// Two outputs of a domain evaluated twice publish 1 then 0 together; a
+/// domain on the negative edge of the first sees its pulse although the
+/// transitions of the two signals interleave.
+fn interleaved(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Interleaved", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let data = d.internal("data", 1, 0);
+    let qa = d.output("qa", 1, 0);
+    let qb = d.output("qb", 1, 0);
+    let falls = d.output("falls", 8, 0);
+    let rises = d.output("rises", 8, 0);
+    for q in [qa, qb] {
+        let read = d.read(data);
+        d.register(q, read, clk, Edge::Posedge);
+    }
+    let next = d.plus_one(falls);
+    d.register(falls, next, qa, Edge::Negedge);
+    d.counter(rises, qb);
+    let body = vec![
+        d.delay(1),
+        d.set(data, 1),
+        d.set(clk, 1),
+        d.inactive_delay(0),
+        d.set(clk, 0),
+        d.set(data, 0),
+        d.inactive_delay(0),
+        d.set(clk, 1),
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn interleaved_publications_keep_each_signals_edges() {
+    for four_state in [false, true] {
+        let artifact = interleaved(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Interleaved", |sim| {
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "qa"), 0);
+            assert_eq!(value(&mut sim, "rises"), 1);
+            assert_eq!(value(&mut sim, "falls"), 1, "qa fell after its pulse");
+        });
+    }
+}
+
+#[test]
+fn state_files_reject_queued_assignments_outside_their_target() {
+    let artifact = nonblocking(false);
+    let mut sim = Simulation::new(builder(&artifact, false).build_interpreter().unwrap());
+    sim.run_until(0).unwrap();
+    let mut file = sim.save_state().unwrap();
+    file.schedule
+        .as_mut()
+        .unwrap()
+        .processes
+        .nba_queue
+        .push(celox_runtime::NbaRecord {
+            target: "q".into(),
+            lsb: 4,
+            width: u64::MAX,
+            value: vec![1],
+            mask: Vec::new(),
+        });
+    assert!(matches!(
+        sim.load_state(&file),
+        Err(crate::StateError::Mismatch(_))
+    ));
+}

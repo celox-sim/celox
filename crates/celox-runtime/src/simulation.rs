@@ -218,6 +218,9 @@ struct Round {
     /// Event ids a pulse of several publications triggered; like counted
     /// triggers they survive settling and bypass the stable-edge test.
     occurrences: BitSet,
+    /// A domain published several evaluations and `transitions` records
+    /// the event signals they changed.
+    publishing: bool,
     /// Event ids whose level change gates combinationally derived clocks,
     /// not yet judged.
     gating_sources: Vec<usize>,
@@ -233,6 +236,7 @@ impl Round {
         self.track_stable_edges = track_stable_edges;
         self.counted_triggered.make_empty();
         self.occurrences.make_empty();
+        self.publishing = false;
         self.gating_sources.clear();
         self.edge_approved.make_empty();
         self.deferred.clear();
@@ -1107,26 +1111,36 @@ impl<B: SimBackend> SimulationState<B> {
                 applied.push(id);
             }
         }
-        if superseded {
-            self.record_transitions(executor.backend(), round);
-            let transitions = std::mem::take(&mut round.transitions);
-            self.mark_occurrences(executor.backend_mut(), round, &transitions);
-            round.transitions = transitions;
-            round.transitions.clear();
-        }
+        // The domains' last evaluations may still publish with the NBA
+        // region: their edges are marked once that is done.
+        round.publishing = superseded;
         Ok(applied)
+    }
+
+    /// After the NBA region of a round in which a domain published several
+    /// evaluations: see the last publication and mark the domains the
+    /// edges among all of them trigger.
+    fn finish_publications(&self, backend: &mut B, round: &mut Round) {
+        if !std::mem::take(&mut round.publishing) {
+            return;
+        }
+        self.record_transitions(backend, round);
+        let transitions = std::mem::take(&mut round.transitions);
+        self.mark_occurrences(backend, round, &transitions);
+        round.transitions = transitions;
+        round.transitions.clear();
     }
 
     /// Mark the domains that edges among `transitions` trigger, even if the
     /// signals end at their old values, and keep them marked through the
     /// settles of this round.
     fn mark_occurrences(&self, backend: &mut B, round: &mut Round, transitions: &[(usize, bool)]) {
-        let mut previous = None::<(usize, bool)>;
+        // The latest value of each event signal among the transitions so far.
+        let mut latest = fxhash::FxHashMap::<usize, bool>::default();
         for &(id, is_nonzero) in transitions {
-            let was_nonzero = previous
-                .filter(|(last, _)| *last == id)
-                .map_or(self.last_clock_values.contains(id), |(_, value)| value);
-            previous = Some((id, is_nonzero));
+            let was_nonzero = latest
+                .insert(id, is_nonzero)
+                .unwrap_or_else(|| self.last_clock_values.contains(id));
             let triggered = match self.domain_kinds[id] {
                 Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
                     !was_nonzero && is_nonzero
@@ -1488,6 +1502,10 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
+                if published {
+                    self.finish_publications(executor.backend_mut(), &mut round);
+                    self.observe_driven(executor.backend());
+                }
                 // The NBA region still publishes the processes' assignments,
                 // which may trigger further domains.
                 if (timed && self.publish_nba(executor, &mut round)) || published {
@@ -1501,6 +1519,10 @@ impl<B: SimBackend> SimulationState<B> {
                 if let Some(event) = self.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
                 }
+            }
+            if round.publishing {
+                self.finish_publications(executor.backend_mut(), &mut round);
+                self.observe_driven(executor.backend());
             }
             for id in &newly_triggered {
                 if let Some(event) = self.event_info[*id].eval_ff_event {
