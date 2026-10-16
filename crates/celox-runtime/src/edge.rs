@@ -65,7 +65,7 @@ impl EventEdge {
     /// Whether `edge` from `old` (`None` when unknown) runs the event's own
     /// domain: its active transition, or any change for a domain of unknown
     /// kind. An unknown level counts as either level, as in SystemVerilog.
-    fn fires(&self, old: Option<bool>, edge: Edge) -> bool {
+    pub fn fires(&self, old: Option<bool>, edge: Edge) -> bool {
         match self.kind {
             Some(
                 DomainKind::ClockPosedge
@@ -137,6 +137,22 @@ fn level<B: SimBackend>(backend: &B, signal: SignalRef) -> Option<bool> {
     Some(event_level(backend, signal) != 0)
 }
 
+/// Move `info`'s signal to the level of `edge`. Returns the level it had
+/// (`None` while unknown), or `None` when it already was at that level.
+pub fn move_signal<B: SimBackend>(
+    backend: &mut B,
+    info: &EventEdge,
+    edge: Edge,
+) -> Option<Option<bool>> {
+    let old = level(backend, info.signal);
+    let new = edge.level();
+    if old == Some(new != 0) {
+        return None;
+    }
+    backend.set(info.signal, new);
+    Some(old)
+}
+
 /// Move `event`'s signal through `edge` and run the domains sensitive to it.
 /// `info` and `plan` are the event's entries of its host's tables; `dirty`
 /// says whether combinational logic has pending changes.
@@ -155,12 +171,10 @@ where
     X::Backend: SimBackend<Event = E>,
     E: EventHandle,
 {
-    let old = level(executor.backend(), info.signal);
-    let new = edge.level();
-    if old == Some(new != 0) {
+    let Some(old) = move_signal(executor.backend_mut(), &info, edge) else {
         return Ok(EdgeOutcome::Unchanged);
-    }
-    executor.backend_mut().set(info.signal, new);
+    };
+    let new = edge.level();
     let fires = info.fires(old, edge);
     let settle = dirty || info.comb_read;
     if let Some(plan) = plan {

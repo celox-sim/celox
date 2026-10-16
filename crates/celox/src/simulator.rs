@@ -1455,21 +1455,31 @@ mod host {
             edge: celox_runtime::Edge,
         ) -> Result<(), RuntimeErrorCode> {
             let info = self.event_edges[event.id()];
-            let outcome = if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
-                let plans = std::sync::Arc::clone(&self.derived_ticks);
-                let plan = plans.get(event.id()).and_then(Option::as_ref);
-                let mut scratch = self.derived_scratch.take().unwrap_or_default();
-                let dirty = self.dirty;
-                let result =
-                    celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty);
-                self.derived_scratch = Some(scratch);
-                result
-            } else {
-                let mut scratch = celox_runtime::DerivedTickScratch::default();
-                let dirty = self.dirty;
-                celox_runtime::run_edge(self, None, info, &mut scratch, event, edge, dirty)
-            };
-            self.note_edge(outcome)
+            if !matches!(self.derived_ticks.get(event.id()), Some(Some(_))) {
+                // No derived domains: move the signal, then run the event's
+                // domain exactly as `tick` does.
+                let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge) else {
+                    return Ok(());
+                };
+                if info.comb_read {
+                    self.dirty = true;
+                }
+                if info.fires(old, edge) {
+                    return self.tick(event);
+                }
+                if !self.program.runtime_schema.comb_observers.is_empty() {
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let plan = plans.get(event.id()).and_then(Option::as_ref);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let dirty = self.dirty;
+            let result =
+                celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty);
+            self.derived_scratch = Some(scratch);
+            self.note_edge(result)
         }
 
         fn note_edge(

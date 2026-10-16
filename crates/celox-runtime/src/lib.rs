@@ -19,7 +19,9 @@ pub use derived_tick::{
     BackendExecutor, DerivedDomain, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, EdgeRun,
     EventDomain, Gate, GatedDomain, TickExecutor, build_derived_tick_plans,
 };
-pub use edge::{Edge, EdgeOutcome, EventEdge, EventEdges, build_event_edges, run_edge, run_edges};
+pub use edge::{
+    Edge, EdgeOutcome, EventEdge, EventEdges, build_event_edges, move_signal, run_edge, run_edges,
+};
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
 pub use reflection::{
