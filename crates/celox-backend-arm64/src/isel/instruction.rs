@@ -273,14 +273,6 @@ pub(super) fn lower_instruction(
         }
 
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
-            match offset {
-                SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
-                    ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
-                }
-                SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
-                    ctx.reg_addrs.remove(dst);
-                }
-            }
             let vreg = ctx.reg_map.get(*dst);
 
             match offset {
@@ -3097,9 +3089,8 @@ pub(super) fn lower_instruction(
             let dst_vreg = ctx.reg_map.get(*dst);
             let src_width = ctx.sir_width(src);
 
-            // If src has a known sim-state address (from a preceding Load/Store)
-            // load directly from memory. This handles partial Stores that
-            // updated memory without rewriting the source register's VRegs.
+            // Reload only while the source's memory still holds its captured
+            // value. Overlapping writes invalidate the origin before lowering.
             if let Some((addr, source_bit_offset)) = ctx.reg_addrs.get(src).cloned() {
                 let slice_bit_offset = source_bit_offset + *bit_offset;
                 let value_base = ctx.byte_offset(&addr, slice_bit_offset);
