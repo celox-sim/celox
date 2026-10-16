@@ -68,11 +68,89 @@ minimum safety net, not the definition of validation completeness.
 
 ## CI coverage and cadence
 
+### Code scanning
+
+`.github/workflows/codeql.yml` scans Actions on pull requests that change
+workflow or local action files. Other ordinary PRs and Mergify queue drafts
+do not run this workflow's analysis. Every Sunday at 04:17 UTC, and on manual
+dispatch, it scans Actions, C/C++, JavaScript/TypeScript, Python, and Rust, with
+at most two analyses running concurrently. Compiled languages use CodeQL's
+`none` build mode. There is no push-triggered full scan or merge requirement.
+
+The workflow is inactive until the repository variable
+`CODEQL_ADVANCED_ENABLED` is set to `true`. To replace the existing automatic
+scans after this workflow merges:
+
+1. In repository Settings, switch CodeQL analysis from default to advanced
+   setup, disabling default setup. Keep the existing alerts and their history.
+2. Disable the separate automatic GitHub Code Quality scans in Settings;
+   these are independent of CodeQL default setup and would otherwise continue
+   using runners on PRs and pushes.
+3. Set the repository Actions variable `CODEQL_ADVANCED_ENABLED` to `true`,
+   then manually dispatch `codeql.yml` on `master`.
+4. Confirm that all five analyses upload results and that an Actions-changing
+   PR runs only the Actions analysis. Rust/application-only PRs should not
+   start CodeQL or Code Quality scans.
+
+For rollback, unset `CODEQL_ADVANCED_ENABLED` and re-enable default setup.
+This variable allows the replacement to be reviewed without running both
+setups at once. Until cutover, GitHub's existing automatic scans remain active.
+See GitHub's [advanced setup migration instructions](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/configure-code-scanning/configuring-advanced-setup-for-code-scanning).
+
+### Product checks
+
+Rust caches in `ci.yml` are restored on every branch but saved only on the
+default branch. A PR's merge-ref cache cannot be restored by another PR, so
+saving one copy per PR consumes the shared cache quota without warming other
+queues. `rust-cache.yml` builds the Rust Tests targets on master after toolchain,
+manifest, or CI-cache setup changes, or on manual dispatch. It uses the same job
+ID, toolchain, environment and CI features as Rust Tests, skips the build on an
+exact cache hit, and does not execute tests. The normal daily master CI warms
+the other job caches. Caches remain dependency-only; workspace binaries are not
+added to the quota. Toolchain changes and cold caches still require compilation.
+Mergify-only configuration edits run script validation, not product compilation;
+mixed Rust changes and unknown paths retain their existing coverage.
+
+
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
 legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
-workspace when Rust is affected. Mergify checks up to five batches concurrently,
-with up to five PRs per batch, waiting at most one minute to collect them.
+workspace when Rust is affected. Mergify checks up to five batches concurrently
+across three queue rules. Parallel mode separates independent file scopes while
+retaining combined-tree validation for overlapping scopes:
+
+| Queue | PR heads | Batch size | Maximum collection wait |
+| --- | --- | --- | --- |
+| `dependencies` | `renovate/*`, except Veryl updates | 5 | 1 minute |
+| `changes` | Other heads: features, fixes, CI, and manual dependency updates | 3 | 1 minute |
+| `integration` | `integration/*`, `renovate/veryl-crates`, `upgrade/veryl-*`, the Release Please branch, and legacy `master` sync PRs | 1 | None |
+
+The head conditions are mutually exclusive, including for explicit queue
+commands. The existing `merge-ready` rule selects the matching queue without
+changing which PRs may auto-merge; manual-review dependency groups still require
+an explicit merge request. All three queues retain the same GitHub protections,
+queue validation, title checks, release hold, and release authorization gate.
+Queue categories control batch sizes; file scopes control independence. The
+`pr-policy` scope contains only the title workflow and its standalone title,
+release-impact, and batch validators. Everything else (including unknown paths,
+Rust dependencies, Veryl, NAPI, and feature changes) shares `core`. This lets a
+PR-title repair advance without inheriting a speculative Veryl update, while
+compiler and dependency changes still validate together. Mixed PRs share both
+scopes. Core is capped at two concurrent batches and PR policy at one, within
+the global five-batch ceiling; these are batch limits, not runner counts.
+Changes to `.mergify.yml`, `release-please-config.json`, or `VERSION` are barriers, requiring
+ordering across both scopes. Extend the narrow policy allowlist only after
+checking its runtime dependencies. Scopes do not change CI job selection.
+PRs whose source CI passed lint and skipped both the Rust/NAPI aggregate and
+Ubuntu JS tests receive high queue priority. This prioritizes lightweight work
+using the actual CI classification, including docs and standalone scripts,
+rather than a `ci:` title or bot identity. Other PRs retain medium priority.
+Running checks are not interrupted: independent scopes can progress separately,
+but overlapping work already being tested and barriers still impose ordering.
+This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
+See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
+[Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
+
 The separate lydite proof/editor gates run on queue drafts rather than ordinary
 PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
 The `Queue validation` merge condition requires those pre-merge checks to pass;
