@@ -969,7 +969,10 @@ impl DriverScan<'_> {
                 procedural::stmt_calls(stmt, &mut calls);
             });
         }
-        while let Some((name, args)) = calls.pop() {
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
             let Some(subroutine) = self
                 .subroutines
                 .iter()
@@ -2652,12 +2655,12 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 .collect(),
         },
         sv::ir::Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => sv::ir::Expr::Call {
             arg_order: arg_order.clone(),
-            name: name.clone(),
+            callee: callee.clone(),
             args: args
                 .iter()
                 .map(|arg| arg.as_ref().map(|arg| expr_for_state_mode(arg, four_state)))
@@ -4115,10 +4118,10 @@ fn lower_glue_parent_expr(
             context_signed,
         ),
         sv::ir::Expr::Call {
-            name,
+            callee: sv::ir::Callee::System(function),
             args,
-            arg_order,
-        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
+            ..
+        } if function.result_type().is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
             let mut source_ids = Vec::new();
@@ -4143,7 +4146,7 @@ fn lower_glue_parent_expr(
             Some((
                 lower_bit_vector_function_slt(
                     arena,
-                    name,
+                    *function,
                     &operands,
                     context_width,
                     context_signed,
@@ -4494,7 +4497,7 @@ fn permute_reversed_lvalue_rhs_slt(
 // IEEE 1800-2023 20.9: bit vector functions return known counts/predicates.
 fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
-    name: &str,
+    function: sv::ir::SystemFunction,
     operands: &[NodeId],
     context_width: Option<usize>,
     context_signed: Option<bool>,
@@ -4503,114 +4506,133 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     let known = arena
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
-    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, operands.len())?;
-    let result = if name == "$countbits" {
-        let controls = operands[1..]
-            .iter()
-            .map(|&expr| {
-                arena
-                    .alloc(SLTNode::Slice {
-                        expr,
-                        access: BitAccess::new(0, 0),
-                    })
-                    .ok()
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let operand_width = celox_slt::get_width(inner, arena);
-        let mut matches = Vec::with_capacity(operand_width);
-        for bit in (0..operand_width).rev() {
-            let selected = arena
-                .alloc(SLTNode::Slice {
-                    expr: inner,
-                    access: BitAccess::new(bit, bit),
+    use sv::ir::SystemFunction;
+    let (width, signed) = function.result_type()?;
+    let result = match function {
+        SystemFunction::Countbits => {
+            let controls = operands[1..]
+                .iter()
+                .map(|&expr| {
+                    arena
+                        .alloc(SLTNode::Slice {
+                            expr,
+                            access: BitAccess::new(0, 0),
+                        })
+                        .ok()
                 })
-                .ok()?;
-            let mut matched = None;
-            for &control in &controls {
-                // Case equality distinguishes all four states and returns a
-                // known bit. OR makes repeated controls count only once.
-                let equal = arena
-                    .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                .collect::<Option<Vec<_>>>()?;
+            let operand_width = celox_slt::get_width(inner, arena);
+            let mut matches = Vec::with_capacity(operand_width);
+            for bit in (0..operand_width).rev() {
+                let selected = arena
+                    .alloc(SLTNode::Slice {
+                        expr: inner,
+                        access: BitAccess::new(bit, bit),
+                    })
                     .ok()?;
-                matched = Some(match matched {
-                    None => equal,
-                    Some(previous) => arena
-                        .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
-                        .ok()?,
-                });
+                let mut matched = None;
+                for &control in &controls {
+                    // Case equality distinguishes all four states and returns a
+                    // known bit. OR makes repeated controls count only once.
+                    let equal = arena
+                        .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                        .ok()?;
+                    matched = Some(match matched {
+                        None => equal,
+                        Some(previous) => arena
+                            .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
+                            .ok()?,
+                    });
+                }
+                matches.push((matched?, 1));
             }
-            matches.push((matched?, 1));
-        }
-        let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
-        let count = arena
-            .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
-            .ok()?;
-        coerce_node_width(arena, count, Some(32), false).ok()?
-    } else if name == "$clog2" {
-        // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
-        // (IEEE 1800-2023 20.8.1).
-        let operand_width = celox_slt::get_width(known, arena);
-        let constant = |arena: &mut SLTNodeArena<A>, value: usize, width: usize| {
-            arena
-                .alloc(SLTNode::Constant(
-                    BigUint::from(value),
-                    BigUint::default(),
-                    width,
-                    false,
-                ))
-                .ok()
-        };
-        let one = constant(arena, 1, operand_width)?;
-        let decremented = arena
-            .alloc(SLTNode::Binary(known, BinaryOp::Sub, one))
-            .ok()?;
-        let zeros = arena
-            .alloc(SLTNode::Unary(UnaryOp::CountLeadingZeros, decremented))
-            .ok()?;
-        let zeros = coerce_node_width(arena, zeros, Some(32), false).ok()?;
-        let total = constant(arena, operand_width, 32)?;
-        let bits = arena
-            .alloc(SLTNode::Binary(total, BinaryOp::Sub, zeros))
-            .ok()?;
-        let small = arena
-            .alloc(SLTNode::Binary(known, BinaryOp::LeU, one))
-            .ok()?;
-        let zero = constant(arena, 0, 32)?;
-        arena
-            .alloc(SLTNode::Mux {
-                cond: small,
-                then_expr: zero,
-                else_expr: bits,
-            })
-            .ok()?
-    } else if name == "$isunknown" {
-        // Case inequality detects either X or Z, including unknown bits whose
-        // value plane is zero and would disappear during two-state conversion.
-        arena
-            .alloc(SLTNode::Binary(inner, BinaryOp::NeCase, known))
-            .ok()?
-    } else {
-        let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
-        // PopCount has a minimal unsigned width; $countones returns signed int.
-        let count = coerce_node_width(arena, count, Some(32), false).ok()?;
-        if name == "$countones" {
-            count
-        } else {
-            let one = arena
-                .alloc(SLTNode::Constant(
-                    BigUint::from(1u8),
-                    BigUint::default(),
-                    32,
-                    false,
-                ))
+            let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
+            let count = arena
+                .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
                 .ok()?;
-            let op = if name == "$onehot" {
-                BinaryOp::Eq
-            } else {
-                BinaryOp::LeU
-            };
-            arena.alloc(SLTNode::Binary(count, op, one)).ok()?
+            coerce_node_width(arena, count, Some(32), false).ok()?
         }
+        SystemFunction::Clog2 => {
+            // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
+            // (IEEE 1800-2023 20.8.1).
+            let operand_width = celox_slt::get_width(known, arena);
+            let constant = |arena: &mut SLTNodeArena<A>, value: usize, width: usize| {
+                arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(value),
+                        BigUint::default(),
+                        width,
+                        false,
+                    ))
+                    .ok()
+            };
+            let one = constant(arena, 1, operand_width)?;
+            let decremented = arena
+                .alloc(SLTNode::Binary(known, BinaryOp::Sub, one))
+                .ok()?;
+            let zeros = arena
+                .alloc(SLTNode::Unary(UnaryOp::CountLeadingZeros, decremented))
+                .ok()?;
+            let zeros = coerce_node_width(arena, zeros, Some(32), false).ok()?;
+            let total = constant(arena, operand_width, 32)?;
+            let bits = arena
+                .alloc(SLTNode::Binary(total, BinaryOp::Sub, zeros))
+                .ok()?;
+            let small = arena
+                .alloc(SLTNode::Binary(known, BinaryOp::LeU, one))
+                .ok()?;
+            let zero = constant(arena, 0, 32)?;
+            arena
+                .alloc(SLTNode::Mux {
+                    cond: small,
+                    then_expr: zero,
+                    else_expr: bits,
+                })
+                .ok()?
+        }
+        SystemFunction::Isunknown => {
+            // Case inequality detects either X or Z, including unknown bits whose
+            // value plane is zero and would disappear during two-state conversion.
+            arena
+                .alloc(SLTNode::Binary(inner, BinaryOp::NeCase, known))
+                .ok()?
+        }
+        SystemFunction::Countones | SystemFunction::Onehot | SystemFunction::Onehot0 => {
+            let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
+            // PopCount has a minimal unsigned width; $countones returns signed int.
+            let count = coerce_node_width(arena, count, Some(32), false).ok()?;
+            if function == SystemFunction::Countones {
+                count
+            } else {
+                let one = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(1u8),
+                        BigUint::default(),
+                        32,
+                        false,
+                    ))
+                    .ok()?;
+                let op = if function == SystemFunction::Onehot {
+                    BinaryOp::Eq
+                } else {
+                    BinaryOp::LeU
+                };
+                arena.alloc(SLTNode::Binary(count, op, one)).ok()?
+            }
+        }
+        // `$urandom` needs process state, and the analyzer folds the other
+        // functions to constants.
+        SystemFunction::Urandom
+        | SystemFunction::Timeunit
+        | SystemFunction::Timeprecision
+        | SystemFunction::Isunbounded
+        | SystemFunction::Signed
+        | SystemFunction::Unsigned
+        | SystemFunction::Bits
+        | SystemFunction::Size
+        | SystemFunction::Dimensions
+        | SystemFunction::UnpackedDimensions
+        | SystemFunction::ArrayQuery(_) => return None,
     };
     coerce_node_width(
         arena,
@@ -5290,10 +5312,10 @@ fn lower_expr_with_context(
             context_signed,
         ),
         sv::ir::Expr::Call {
-            name,
+            callee: sv::ir::Callee::System(function),
             args,
-            arg_order,
-        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
+            ..
+        } if function.result_type().is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
 
@@ -5317,7 +5339,7 @@ fn lower_expr_with_context(
             Some((
                 lower_bit_vector_function_slt(
                     arena,
-                    name,
+                    *function,
                     &operands,
                     context_width,
                     context_signed,
@@ -6469,10 +6491,7 @@ fn sv_glue_expr_is_signed(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len())
-                .is_some_and(|(_, signed)| signed)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().is_some_and(|(_, signed)| signed),
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -6531,10 +6550,7 @@ fn sv_expr_is_signed_with_parameters(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len())
-                .is_some_and(|(_, signed)| signed)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().is_some_and(|(_, signed)| signed),
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -6779,9 +6795,7 @@ fn sv_expr_natural_width(
                 )?),
         ),
         sv::ir::Expr::Inside { .. } => Some(1),
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len()).map(|(width, _)| width)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().map(|(width, _)| width),
     }
 }
 

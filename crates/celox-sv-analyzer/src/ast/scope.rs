@@ -564,8 +564,8 @@ impl Renamer<'_> {
                 expr: Box::new(self.const_expr(*expr)),
                 bit: Box::new(self.const_expr(*bit)),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: self.name(&name),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.map_subroutine(|name| self.name(&name)),
                 args: args.into_iter().map(|arg| self.const_expr(arg)).collect(),
                 site,
             },
@@ -650,12 +650,12 @@ impl Renamer<'_> {
                 else_expr: boxed(else_expr),
             },
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: self.name(&name),
+                callee: callee.map_subroutine(|name| self.name(&name)),
                 args: args
                     .into_iter()
                     .map(|arg| arg.map(|arg| self.expr(arg)))

@@ -3612,7 +3612,7 @@ fn package_functions_give_shapes_to_instance_connections() {
         .unwrap();
     let connection = &top.instances()[0].port_connections()[0];
     assert!(
-        matches!(connection.actual_expr(), Some(ir::Expr::Call { name, .. }) if name == "p::sum"),
+        matches!(connection.actual_expr(), Some(ir::Expr::Call { callee: ir::Callee::Subroutine(name), .. }) if name == "p::sum"),
         "{connection:?}"
     );
 }
