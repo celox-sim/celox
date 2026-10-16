@@ -326,6 +326,32 @@ describe("Simulation", () => {
 		expect(mock.handle.noteHostWrites).toHaveBeenCalledTimes(3);
 	});
 
+	test("bounded runUntil at the current time settles host writes", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		let pending = false;
+		vi.mocked(mock.handle.noteHostWrites!).mockImplementation(() => {
+			pending = true;
+		});
+		vi.mocked(mock.handle.nextEventTime).mockImplementation(() =>
+			pending ? mock.handle.time() : null,
+		);
+		vi.mocked(mock.handle.runUntilBounded!).mockImplementation(() => {
+			pending = false;
+			return true;
+		});
+
+		sim.runUntil(sim.time(), { maxSteps: 5 });
+		expect(mock.handle.runUntilBounded).not.toHaveBeenCalled();
+
+		sim.dut.d = 3n;
+		sim.runUntil(sim.time(), { maxSteps: 5 });
+		expect(mock.handle.noteHostWrites).toHaveBeenCalledTimes(1);
+		expect(mock.handle.runUntilBounded).toHaveBeenCalledWith(sim.time(), 5);
+	});
+
 	test("runUntil with maxSteps: fast path when omitted", () => {
 		const mock = createMockNative();
 		const sim = Simulation.create(TopModule, {

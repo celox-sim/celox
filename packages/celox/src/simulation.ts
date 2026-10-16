@@ -452,10 +452,17 @@ export class Simulation<P = Record<string, unknown>> {
 			return;
 		}
 		const max = opts.maxSteps;
-		// Nothing is due before the target: keep pending inputs for lazy
-		// evaluation.
-		if (this._handle.time() >= endTime) return;
+		if (!this._handle.runUntilBounded) {
+			throw new Error("This simulation does not support bounded runs");
+		}
+		// Host writes are work of the current time, also at the target.
 		this.noteHostWrites();
+		if (this._handle.time() >= endTime) {
+			// Nothing is due at the target: keep pending inputs for lazy
+			// evaluation.
+			const next = this._handle.nextEventTime();
+			if (next == null || next > endTime) return;
+		}
 		if (!this._handle.runUntilBounded(endTime, max)) {
 			// A step took the pending inputs unless none was allowed.
 			if (max > 0) this._state.dirty = false;

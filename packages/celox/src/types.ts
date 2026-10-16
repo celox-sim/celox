@@ -203,7 +203,7 @@ export interface NativeSimulationHandle {
 	 * Advance until `endTime` taking at most `maxSteps` steps; `false` when
 	 * the steps ran out first, at the time of the last step.
 	 */
-	runUntilBounded(endTime: number, maxSteps: number): boolean;
+	runUntilBounded?(endTime: number, maxSteps: number): boolean;
 	/**
 	 * Report that the host wrote the shared memory: the next step settles the
 	 * current time when a process may see the writes or an event signal
