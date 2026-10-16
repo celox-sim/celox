@@ -555,6 +555,16 @@ impl Backend for ObservedBackend {
             .take_output()
             .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
     }
+    fn run_until(&mut self, time: u64) -> Result<()> {
+        self.backend
+            .run_until(time)
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
+    fn run_to_finish(&mut self) -> Result<()> {
+        self.backend
+            .run_to_finish()
+            .inspect_err(|_| self.failed.store(true, Ordering::Relaxed))
+    }
 }
 
 /// How a runner builds a case for a tool: a design for the process
@@ -604,13 +614,10 @@ fn run_script(
         );
     }
     match backend.run_testbench() {
-        Ok(()) => {
-            let log = std::fs::read(directory.join("protocol.log")).unwrap_or_default();
-            match crate::script::sv::check_output(&log) {
-                Ok(()) => ("passed", "execute", String::new()),
-                Err(detail) => ("mismatch", "execute", detail),
-            }
-        }
+        Ok(()) => match crate::script::sv::check_run(directory) {
+            Ok(()) => ("passed", "execute", String::new()),
+            Err(detail) => ("mismatch", "execute", detail),
+        },
         Err(error) => {
             // HDL output can contain arbitrary bytes. Decode only assertion
             // diagnostics so unrelated binary output cannot discard markers.
