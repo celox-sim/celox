@@ -122,6 +122,18 @@ impl PeriodicEventKey {
     }
 }
 
+/// The level of an event signal: its value bits, without the unused bits
+/// above its width that share its storage byte. Backends need not keep those
+/// bits clear (a four-state X initialization sets them), so a one-bit clock
+/// that reads as a whole byte would stay "high" after it falls.
+fn event_level<B: SimBackend>(backend: &B, signal: SignalRef) -> u8 {
+    let value: u8 = backend.get_as(signal);
+    match signal.width {
+        width @ 1..8 => value & ((1u8 << width) - 1),
+        _ => value,
+    }
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
@@ -146,8 +158,7 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = backend.get_as(*signal);
-            if value != 0 {
+            if event_level(backend, *signal) != 0 {
                 self.last_clock_values.insert(*id);
             }
         }
@@ -158,7 +169,7 @@ impl<B: SimBackend> SimulationState<B> {
             return true;
         };
         let was_nonzero = self.last_clock_values.contains(id);
-        let is_nonzero = backend.get_as::<u8>(*signal) != 0;
+        let is_nonzero = event_level(backend, *signal) != 0;
         match self.domain_kinds[id] {
             Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
                 !was_nonzero && is_nonzero
@@ -177,8 +188,7 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             let was_nonzero = self.last_clock_values.contains(*id);
-            let value: u8 = backend.get_as(*signal);
-            let is_nonzero = value != 0;
+            let is_nonzero = event_level(backend, *signal) != 0;
             let triggered = match self.domain_kinds[*id] {
                 Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
                     !was_nonzero && is_nonzero
@@ -211,8 +221,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             signal_to_id.insert(signal, id);
             signal_index_by_id[id] = index;
-            let value: u8 = backend.get_as(signal);
-            if value != 0 {
+            if event_level(backend, signal) != 0 {
                 last_clock_values.insert(id);
             }
         }
@@ -428,14 +437,14 @@ impl<B: SimBackend> SimulationState<B> {
             let before: Vec<u8> = self
                 .topo_signals
                 .iter()
-                .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                .map(|(signal, _, _)| event_level(executor.backend(), *signal))
                 .collect();
             self.run_processes(executor, current_time, ready_processes)?;
             for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                 if *id == usize::MAX {
                     continue;
                 }
-                let value: u8 = executor.backend().get_as(*signal);
+                let value = event_level(executor.backend(), *signal);
                 if value != before {
                     process_driven.push((*id, value != 0));
                 }
@@ -597,8 +606,7 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = executor.backend().get_as(*signal);
-            if value != 0 {
+            if event_level(executor.backend(), *signal) != 0 {
                 self.last_clock_values.insert(*id);
             } else {
                 self.last_clock_values.remove(*id);

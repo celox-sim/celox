@@ -1768,26 +1768,28 @@ fn unify_clock_domains(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
 
+        let width = |module: &SimModule, var: SourceVarId| {
+            module
+                .variables
+                .get(&var)
+                .map(|variable| variable.metadata.width)
+        };
+
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
-            // Only unify direct aliases, not complex logic like gated clocks
-            if matches!(logic_path.target, celox_slt::LogicPathTarget::Var(_))
-                && logic_path.sources.len() == 1
-            {
-                let expr_node = sim_module.arena.get(logic_path.expr);
-                let is_alias = matches!(
-                    expr_node,
-                    celox_slt::SLTNode::Input { .. } | celox_slt::SLTNode::Slice { .. }
-                );
-                if is_alias {
-                    let Some(target) = logic_path.target.var() else {
-                        continue;
-                    };
-                    let target_abs = bindings.locate(*id, target.id);
-                    let source_abs =
-                        bindings.locate(*id, logic_path.sources.iter().next().unwrap().id);
-                    drive_graph.entry(source_abs).or_default().push(target_abs);
-                }
+            // Only unify whole-variable copies. Gated clocks and part-selects
+            // such as `let divided = counter[0];` are clocks of their own: the
+            // runtime edge-senses the canonical variable as a whole.
+            if let Some((target, source)) = whole_variable_copy(
+                &sim_module.arena,
+                logic_path,
+                |target| width(sim_module, target),
+                |source| width(sim_module, source),
+            ) {
+                drive_graph
+                    .entry(bindings.locate(*id, source))
+                    .or_default()
+                    .push(bindings.locate(*id, target));
             }
         }
         for (inst_name, glue_blocks) in &sim_module.glue_blocks {
@@ -1795,29 +1797,39 @@ fn unify_clock_domains(
                 let mut child_path = path.0.clone();
                 child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
                 let child_id = expanded[&InstancePath(child_path)];
+                let child_module = &modules[&glue_block.module_id];
+                let glue_width = |var: GlueAddr| match var {
+                    GlueAddr::Parent(var) => width(sim_module, var),
+                    GlueAddr::Child(var) => width(child_module, var),
+                };
 
                 // Inputs: Parent -> Child (Parent drives Child)
-                for (parent_vars, logic_path) in &glue_block.input_ports {
-                    if let Some(target) = logic_path.target.var()
-                        && let GlueAddr::Child(child_var_id) = target.id
+                for (_, logic_path) in &glue_block.input_ports {
+                    if let Some((GlueAddr::Child(child_var), GlueAddr::Parent(parent_var))) =
+                        whole_variable_copy(&glue_block.arena, logic_path, glue_width, glue_width)
                     {
-                        let child_abs = bindings.locate(child_id, child_var_id);
-                        for parent_var in parent_vars {
-                            let parent_abs = bindings.locate(*id, *parent_var);
-                            drive_graph.entry(parent_abs).or_default().push(child_abs);
-                        }
+                        drive_graph
+                            .entry(bindings.locate(*id, parent_var))
+                            .or_default()
+                            .push(bindings.locate(child_id, child_var));
                     }
                 }
                 // Outputs: Child -> Parent (Child drives Parent)
                 for (parent_vars, logic_path) in &glue_block.output_ports {
-                    for parent_var in parent_vars {
-                        let parent_abs = bindings.locate(*id, *parent_var);
-                        for source in &logic_path.sources {
-                            if let GlueAddr::Child(child_var_id) = source.id {
-                                let child_abs = bindings.locate(child_id, child_var_id);
-                                drive_graph.entry(child_abs).or_default().push(parent_abs);
-                            }
-                        }
+                    let [parent_var] = parent_vars.as_slice() else {
+                        continue;
+                    };
+                    let parent_width = width(sim_module, *parent_var);
+                    if let Some((_, GlueAddr::Child(child_var))) = whole_variable_copy(
+                        &glue_block.arena,
+                        logic_path,
+                        |_| parent_width,
+                        glue_width,
+                    ) {
+                        drive_graph
+                            .entry(bindings.locate(child_id, child_var))
+                            .or_default()
+                            .push(bindings.locate(*id, *parent_var));
                     }
                 }
             }
@@ -1867,6 +1879,44 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+/// The `(target, source)` of a path that copies one whole variable into
+/// another variable of the same width, unchanged.
+///
+/// Only such a copy is the same signal as its source, so only it may share the
+/// source's clock domain. A part-select, an element of an array, a resized
+/// read, or an assignment to part of the target is a different value, whose
+/// edges are not the edges of the source variable as a whole.
+fn whole_variable_copy<A: Copy + std::hash::Hash + Eq>(
+    arena: &SLTNodeArena<A>,
+    path: &LogicPath<A>,
+    target_width: impl Fn(A) -> Option<usize>,
+    source_width: impl Fn(A) -> Option<usize>,
+) -> Option<(A, A)> {
+    let target = path.target.var()?;
+    let [source] = path.sources.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let width = source_width(source.id).filter(|&width| width > 0)?;
+    let whole = |access: &BitAccess| access.lsb == 0 && access.msb + 1 == width;
+    let reads_whole_source = |mut node: NodeId| loop {
+        match arena.get(node) {
+            celox_slt::SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => break *variable == source.id && index.is_empty() && whole(access),
+            celox_slt::SLTNode::Slice { expr, access } if whole(access) => node = *expr,
+            _ => break false,
+        }
+    };
+    (target_width(target.id) == Some(width)
+        && whole(&target.access)
+        && whole(&source.access)
+        && reads_whole_source(path.expr))
+    .then_some((target.id, source.id))
 }
 
 fn build_fused_ff_actions(

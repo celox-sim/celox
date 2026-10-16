@@ -24,6 +24,10 @@ always_ff (gclk) {
 When `clk` and `gclk` trigger together, `cnt2` reads the pre-update value of
 `cnt1`. Evaluation order therefore does not change the result.
 
+Only a copy of a whole variable joins its source's domain. A clock taken from
+part of a wider signal, such as `let divided: '_ clock = counter[0];`, is a
+derived clock of its own and is edge-sensed on the selected bit.
+
 ## Cascaded clocks
 
 A sequential update may itself create another clock edge:
@@ -53,6 +57,11 @@ Conceptually, each round is:
 The runtime may use a combined evaluate-and-commit kernel when exactly one domain
 can run without affecting cascade consistency. This is an implementation
 optimization and does not change the ordering model above.
+
+Cascade discovery belongs to the timed `Simulation` step. The event-based
+`Simulator::tick` applies only the event it is given, and
+`Simulator::tick_events` applies a given set of coincident events; neither
+discovers domains clocked by the state they change.
 
 ## Boundaries
 

@@ -785,6 +785,65 @@ mod process_tests {
             check(build().build_native().unwrap());
         }
     }
+    /// A clock taken from one bit of a register is edge-sensed on that bit on
+    /// every backend, not on the register as a whole. In four-state mode the
+    /// WebAssembly backend leaves the X-initialized bits above the one-bit
+    /// clock set, which the scheduler must not read as a high level.
+    #[test]
+    fn register_bit_clocks_follow_the_selected_bit_on_every_backend() {
+        fn check<B: crate::SimBackend>(backend: crate::Simulator<B>, step: u64, bit: u64) {
+            let mut sim = Simulation::new(backend);
+            let a = sim.signal("cnt1");
+            let b = sim.signal("cnt2");
+            sim.schedule("rst", 0, 0).unwrap();
+            sim.schedule("clk", 0, 0).unwrap();
+            sim.step().unwrap();
+            sim.schedule("rst", 5, 1).unwrap();
+            sim.step().unwrap();
+            let mut count = 0u64;
+            for edge in 1..=12u64 {
+                sim.schedule("clk", edge * 20 - 10, 1).unwrap();
+                sim.step().unwrap();
+                let (before, after) = (((edge - 1) * step) >> bit, (edge * step) >> bit);
+                count += u64::from(before & 1 == 0 && after & 1 == 1);
+                assert_eq!(sim.get(a), ((edge * step) & 0xff).into());
+                assert_eq!(sim.get(b), count.into(), "a[{bit}] after edge {edge}");
+                sim.schedule("clk", edge * 20, 0).unwrap();
+                sim.step().unwrap();
+            }
+        }
+        for (step, bit) in [(1, 0), (2, 0), (1, 2)] {
+            let code = format!(
+                "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
+                             cnt1: output logic<8>, cnt2: output logic<8>) {{
+                    var a: logic<8>;
+                    var b: logic<8>;
+                    always_ff (clk, rst) {{ if_reset {{ a = 0; }} else {{ a = a + 8'd{step}; }} }}
+                    let divided: '_ clock = a[{bit}];
+                    always_ff (divided, rst) {{ if_reset {{ b = 0; }} else {{ b = b + 8'd1; }} }}
+                    assign cnt1 = a;
+                    assign cnt2 = b;
+                }}"
+            );
+            for four_state in [false, true] {
+                let build = || {
+                    crate::Simulator::builder(&code, "Top")
+                        .four_state(four_state)
+                        .emit_triggers()
+                };
+                check(build().build_interpreter().unwrap(), step, bit);
+                check(build().build_cranelift().unwrap(), step, bit);
+                check(build().build_wasm().unwrap(), step, bit);
+                check(build().build_tiered().unwrap(), step, bit);
+                #[cfg(any(
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+                ))]
+                check(build().build_native().unwrap(), step, bit);
+            }
+        }
+    }
+
     #[cfg(feature = "systemverilog")]
     const GENERATED_ALIAS_SOURCE: &str = r#"
 module Generator(input logic clk, output logic g);
