@@ -1471,6 +1471,11 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.eval_comb()?;
                             if round.track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
+                                // Pulses of the publications end where they
+                                // started; the filter cannot see them.
+                                for id in round.occurrences.iter() {
+                                    executor.backend_mut().mark_triggered_bit(id);
+                                }
                             }
                             if !self.counted.is_empty() {
                                 self.mark_counted_domains(executor.backend_mut(), &mut round);

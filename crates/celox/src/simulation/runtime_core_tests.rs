@@ -1311,3 +1311,46 @@ fn dead_store_elimination_keeps_signals_a_wait_watches() {
         });
     }
 }
+
+/// A scheduled `clk` edge triggers one domain, and the process it wakes
+/// pulses `p` with two nonblocking assignments: the domain of `p` sees the
+/// pulse although only one domain evaluated in front of it.
+fn nba_pulse_after_one_domain(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("NbaPulseOneDomain", four_state);
+    let clk = d.input("clk", 1);
+    let p = d.internal("p", 1, 0);
+    let a_count = d.output("a_count", 8, 0);
+    let b_count = d.output("b_count", 8, 0);
+    d.counter(a_count, clk);
+    d.counter(b_count, p);
+    let one = d.constant(1, 1);
+    let zero = d.constant(0, 1);
+    let body = vec![Statement::Forever {
+        body: vec![
+            wait(clk, EventEdge::Posedge),
+            d.nonblocking(p, one),
+            d.nonblocking(p, zero),
+        ],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn nonblocking_pulses_after_a_single_domain_trigger_their_domain() {
+    for four_state in [false, true] {
+        let artifact = nba_pulse_after_one_domain(four_state);
+        on_every_backend!(builder(&artifact, four_state), "NbaPulseOneDomain", |sim| {
+            sim.schedule("clk", 0, 0).unwrap();
+            sim.run_until(0).unwrap();
+            for edge in 1..=3u64 {
+                sim.schedule("clk", 2 * edge - 1, 1).unwrap();
+                sim.schedule("clk", 2 * edge, 0).unwrap();
+                sim.run_until(2 * edge).unwrap();
+                assert_eq!(value(&mut sim, "a_count"), edge);
+                assert_eq!(value(&mut sim, "p"), 0);
+                assert_eq!(value(&mut sim, "b_count"), edge, "edge {edge}");
+            }
+        });
+    }
+}
