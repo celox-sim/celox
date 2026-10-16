@@ -71,6 +71,7 @@
             pkgs.cmake
             pkgs.pkg-config
             pkgs.openssl
+            pkgs.cargo-deny
             pkgs.cargo-insta
             pkgs.cargo-nextest
             pkgs.git
