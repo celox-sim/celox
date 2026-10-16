@@ -37,7 +37,7 @@ LYDITE_SOLVER=finite ../target/release/lydite audit/lemma_candidates/counter.lyd
 - The selected 4-stage RV32I implementation passes all 436 preservation conditions
   and 7 global obligations with hand-written lemmas, including composition with
   4/16/64-word memories. Without lemmas, automatic search reaches 431/436.
-- The reusable Celox Veryl test suite (737 cases) runs proof-backed in CI: 713 pass and
+- The reusable Celox Veryl test suite (745 cases) runs proof-backed in CI: 721 pass and
   24 are recorded exceptions (see `conformance/veryl-proof/case-exceptions.json`).
 
 The Rust translation, obligation generation, kernel and selected solver are trusted;
