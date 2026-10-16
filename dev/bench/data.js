@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792127755498,
+  "lastUpdate": 1792128431643,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -378990,6 +378990,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-aarch64/heliodor_suite_smp_linux_boot_2hart_execution",
             "unit": "ms",
             "value": 490542.314401
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "renovate[bot]",
+            "email": "29139614+renovate[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "f54bd5ca9aba4a9ea00f21a812ef628a5ed45885",
+          "message": "chore(deps): update dependency @playwright/test to v1.64.0 (#1284)",
+          "timestamp": "2026-10-14T23:12:33Z",
+          "url": "https://github.com/celox-sim/celox/commit/f54bd5ca9aba4a9ea00f21a812ef628a5ed45885"
+        },
+        "date": 1792128431643,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_2hart_startup",
+            "unit": "ms",
+            "value": 46934.633914
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 621251.541033
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_2hart_end_to_end",
+            "unit": "ms",
+            "value": 668228.9994
           }
         ]
       }
