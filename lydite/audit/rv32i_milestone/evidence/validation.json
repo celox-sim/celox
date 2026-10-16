@@ -1,0 +1,168 @@
+{
+  "authentication_or_signature_claimed": false,
+  "compiled_tool_payloads_included": false,
+  "default_verifier_command": {
+    "command": "python3 audit/rv32i_milestone/verify_evidence.py",
+    "result": {
+      "archive_bytes_verified": 11315304,
+      "archives_verified": 5,
+      "extracted_to": null,
+      "members_verified": 23347,
+      "original_files_verified": null,
+      "recorded_artifact_maps": [
+        {
+          "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-baseline/certificate.json",
+          "entries": 1381,
+          "json_path": [
+            "artifacts"
+          ],
+          "verified": true
+        },
+        {
+          "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-onehot/certificate.json",
+          "entries": 1525,
+          "json_path": [
+            "artifacts"
+          ],
+          "verified": true
+        },
+        {
+          "document": "rv32i-selected-ci-accepted-final/selected-proof/run-status.json",
+          "entries": 7131,
+          "json_path": [
+            "artifacts"
+          ],
+          "verified": true
+        },
+        {
+          "document": "rv32i-split-refinement-proof-program-final/result.json",
+          "entries": 3098,
+          "json_path": [
+            "artifacts"
+          ],
+          "verified": true
+        }
+      ],
+      "recorded_artifact_references_verified": 13135,
+      "saved_reports_create_proof_handles": false,
+      "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization",
+      "status": "verified",
+      "uncompressed_bytes_verified": 930964395
+    }
+  },
+  "deterministic_rebuild": {
+    "archive_count": 5,
+    "files_compared": [
+      "final-proof-3db713fd9f4b3204b7e0574688e556d39166c67d8b3f3876f6b20f611f17fd8b.tar.xz",
+      "final-proof.members.json",
+      "independent-audit-f246bf3e70c558ac2dad87a6058de10e28f0bb51c9c2e5135fb99bacb3a42330.tar.xz",
+      "independent-audit.members.json",
+      "independent-session-dbd0456494ea8fc2b62e2c9c56a430f27eec3b19e84a1504d781869b5be668a7.tar.xz",
+      "independent-session.members.json",
+      "legacy-symbolic-83e4437bc6ecc29f1c3a5096a498e3652c4b4279e3af57c8f3845ee7ad4f65dc.tar.xz",
+      "legacy-symbolic.members.json",
+      "manifest.json",
+      "selected-ci-23e1ee734fc548f23be50e73ebd10250eb3eaeeb1af80e8dc4949796db631889.tar.xz",
+      "selected-ci.members.json"
+    ],
+    "manifest_count": 6,
+    "status": "byte-identical"
+  },
+  "full_integrity_originals_and_extraction": {
+    "archive_bytes_verified": 11315304,
+    "archives_verified": 5,
+    "extracted_to": "/tmp/rv32i-evidence-extracted-final",
+    "members_verified": 23347,
+    "original_files_verified": 23347,
+    "recorded_artifact_maps": [
+      {
+        "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-baseline/certificate.json",
+        "entries": 1381,
+        "json_path": [
+          "artifacts"
+        ],
+        "verified": true
+      },
+      {
+        "document": "rv32i-selected-ci-accepted-final/selected-proof/latency-onehot/certificate.json",
+        "entries": 1525,
+        "json_path": [
+          "artifacts"
+        ],
+        "verified": true
+      },
+      {
+        "document": "rv32i-selected-ci-accepted-final/selected-proof/run-status.json",
+        "entries": 7131,
+        "json_path": [
+          "artifacts"
+        ],
+        "verified": true
+      },
+      {
+        "document": "rv32i-split-refinement-proof-program-final/result.json",
+        "entries": 3098,
+        "json_path": [
+          "artifacts"
+        ],
+        "verified": true
+      }
+    ],
+    "recorded_artifact_references_verified": 13135,
+    "saved_reports_create_proof_handles": false,
+    "scope": "Byte integrity and recorded artifact hash maps; no proof rerun or composition authorization",
+    "status": "verified",
+    "uncompressed_bytes_verified": 930964395
+  },
+  "independent_readback": {
+    "archives": [
+      {
+        "archive_id": "selected-ci",
+        "gnu_tar_member_list_matches_manifest": true,
+        "members_direct_byte_compared": 7136,
+        "xz_integrity": "passed"
+      },
+      {
+        "archive_id": "final-proof",
+        "gnu_tar_member_list_matches_manifest": true,
+        "members_direct_byte_compared": 3099,
+        "xz_integrity": "passed"
+      },
+      {
+        "archive_id": "legacy-symbolic",
+        "gnu_tar_member_list_matches_manifest": true,
+        "members_direct_byte_compared": 10008,
+        "xz_integrity": "passed"
+      },
+      {
+        "archive_id": "independent-session",
+        "gnu_tar_member_list_matches_manifest": true,
+        "members_direct_byte_compared": 3098,
+        "xz_integrity": "passed"
+      },
+      {
+        "archive_id": "independent-audit",
+        "gnu_tar_member_list_matches_manifest": true,
+        "members_direct_byte_compared": 6,
+        "xz_integrity": "passed"
+      }
+    ],
+    "files_compared_by_byte_equality": 23347,
+    "status": "passed"
+  },
+  "input_source_trees_modified": false,
+  "manifest_sha256": "87fc99d764c3a131835e199d490f5ff5ae98158f98353f267ee52d759c678cfd",
+  "saved_reports_create_proof_handles": false,
+  "schema": "rv32i-evidence-validation-v1",
+  "status": "passed",
+  "test_source_sha256": "45d1413c9c2c9e8a048fdd505acc3359ccc8476917fd88b7322f32ad8f04b809",
+  "validation_date_utc": "2026-10-03",
+  "verifier_sha256": "bd21c8052cbacd385e7dbfdd3f5e6bbc0ef649769be55442c4b32e8d932e1449",
+  "verifier_tests": {
+    "command": "python3 audit/rv32i_milestone/test_verify_evidence.py",
+    "errors": 0,
+    "failures": 0,
+    "status": "passed",
+    "tests_run": 30
+  }
+}

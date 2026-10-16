@@ -1,0 +1,101 @@
+{
+  "status": "pass",
+  "scope": "concrete evaluator independent of Z3 and Rust rewriting; every final v0.5 SAT counterexample, including auto guard membership",
+  "runs": [
+    {
+      "case": "auto_array_sum_bad_program",
+      "replayed": [
+        "program_invariant_preserved_auto_pc_1_auto_idx_240",
+        "program_invariant_preserved_auto_pc_1_auto_idx_241",
+        "program_invariant_preserved_auto_pc_1_auto_idx_242",
+        "program_invariant_preserved_auto_pc_1_auto_idx_243",
+        "program_invariant_preserved_auto_pc_1_auto_idx_244",
+        "program_invariant_preserved_auto_pc_1_auto_idx_245",
+        "program_invariant_preserved_auto_pc_1_auto_idx_246",
+        "program_invariant_preserved_auto_pc_1_auto_idx_247",
+        "program_invariant_preserved_auto_pc_1_auto_idx_248",
+        "program_invariant_preserved_auto_pc_1_auto_idx_249",
+        "program_invariant_preserved_auto_pc_1_auto_idx_250",
+        "program_invariant_preserved_auto_pc_1_auto_idx_251",
+        "program_invariant_preserved_auto_pc_1_auto_idx_252",
+        "program_invariant_preserved_auto_pc_1_auto_idx_253",
+        "program_invariant_preserved_auto_pc_1_auto_idx_254"
+      ]
+    },
+    {
+      "case": "auto_array_sum_bad_rank",
+      "replayed": [
+        "program_rank_decreases"
+      ]
+    },
+    {
+      "case": "auto_array_sum_false_invariant",
+      "replayed": [
+        "program_initialization"
+      ]
+    },
+    {
+      "case": "auto_array_sum_wrong_indexed_load",
+      "replayed": [
+        "microstep_refinement"
+      ]
+    },
+    {
+      "case": "disjunction_bound_bad",
+      "replayed": [
+        "program_invariant_preserved_auto_x_9"
+      ]
+    },
+    {
+      "case": "implication_bound_bad",
+      "replayed": [
+        "program_invariant_preserved_auto_x_10"
+      ]
+    },
+    {
+      "case": "inverted_bound_bad",
+      "replayed": [
+        "program_invariant_preserved_auto_x_7"
+      ]
+    },
+    {
+      "case": "memory_increment_bad_alias",
+      "replayed": [
+        "microstep_refinement"
+      ]
+    },
+    {
+      "case": "memory_increment_bad_shadow",
+      "replayed": [
+        "microstep_refinement"
+      ]
+    },
+    {
+      "case": "multiplier_hang_capture",
+      "replayed": [
+        "noncommit_rank_decreases"
+      ]
+    },
+    {
+      "case": "multiplier_missing_decrement",
+      "replayed": [
+        "program_invariant_preserved",
+        "program_rank_decreases"
+      ]
+    },
+    {
+      "case": "multiplier_wrong_capture",
+      "replayed": [
+        "microstep_refinement"
+      ]
+    },
+    {
+      "case": "wrapped_literal_bad",
+      "replayed": [
+        "program_invariant_preserved_auto_y_0_auto_x_7",
+        "program_invariant_preserved_auto_y_other_auto_x_2"
+      ]
+    }
+  ],
+  "total_witnesses": 29
+}
