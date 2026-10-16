@@ -2,126 +2,127 @@
 
 These abstract custom-ISA fixtures are distinct from the imported [selected RV32I implementation](rv32i.md). Historical timings and run logs remain in `audit/` and `results/`; fresh validation commands are in the [audit index](../audit/README.md).
 
-## 今回の対象
+## Pipeline model
 
-`examples/pipeline.lyd` / `pipeline.json` は実際に最大3命令を同時に保持する
-in-order CPUの宣言的モデル。従来のfetch→executeを1命令ずつ交互に動かす例とは別。
+`examples/pipeline.lyd` / `pipeline.json` is a declarative model of an in-order CPU
+that actually holds up to three instructions at once. It is separate from the earlier
+example that alternates fetch→execute one instruction at a time.
 
-- D: fetch済み命令。レジスタまたはforwarding経由でoperandを読み、Xへ送る
-- X: 演算。ALU結果はDへforwardできる。LOAD結果はWへの登録までDへ渡せない
-- W: 命令順にretire。ここだけがarchitectural registerとretirement PCを更新する
-- 同一cycleでW retire、X→W、D→X、次命令fetchが可能
-- DがXのLOAD結果を使う場合、D/fetchを保持しXへbubbleを挿入。XのLOADはWへ進む
-- X/W両方がDのsource registerへ書く場合、若いXを優先。次cycleのload-useはWからforward
-- 外部stallは全実装stateを保持。同期resetがstallより優先し、全stageを空にする
+- D: fetched instruction. Reads operands from registers or via forwarding and sends them to X
+- X: computation. ALU results can be forwarded to D. LOAD results cannot be passed to D until they are registered in W
+- W: retires in program order. Only W updates the architectural registers and the retirement PC
+- W retire, X→W, D→X and fetch of the next instruction can happen in the same cycle
+- If D uses a LOAD result in X, D/fetch is held and a bubble is inserted into X. The LOAD in X advances to W
+- If both X and W write D's source register, the younger X wins. A load-use on the next cycle forwards from W
+- An external stall holds all implementation state. Synchronous reset takes priority over stall and empties all stages
 
-データ幅4bit、レジスタ2本、PC2bit、4命令の循環ROM、readonly data4word。
-ROMとdataは**任意の入力**をreset時にcaptureし、その後は不変。特定のprogramだけを
-仮定しない。PC・加算はwrapする。分岐、HALT、STORE、例外、cache、予測、OoOは含まない。
-実行長は4命令で止めず、PCがwrapしながら任意回数実行する。
+Data width 4 bits, 2 registers, 2-bit PC, a circular 4-instruction ROM, readonly data of 4 words.
+ROM and data capture **arbitrary inputs** at reset and are immutable afterwards. No particular
+program is assumed. PC and addition wrap. Branches, HALT, STORE, exceptions, caches, prediction and OoO are not included.
+Execution does not stop after 4 instructions; it runs an arbitrary number of times while the PC wraps.
 
-命令8bit: `op[7:6] rd[5] rs[4] imm[3:0]`。
+Instruction 8 bits: `op[7:6] rd[5] rs[4] imm[3:0]`.
 
-| op | 命令 | 意味 |
+| op | Instruction | Meaning |
 |---|---|---|
 | 0 | MOVI | r[rd] = imm |
 | 1 | ADDI | r[rd] = r[rs] + imm (mod16) |
 | 2 | XORI | r[rd] = r[rs] xor imm |
 | 3 | LOAD | r[rd] = data[imm & 3] |
 
-## 普遍的な検証の意味
+## Meaning of the unbounded verification
 
-ISAは1命令を原子的に実行する。実装のW retire時だけISAを1step進め、それ以外はstutter。
-次の関係をresetから帰納的に保存する。
+The ISA executes one instruction atomically. The ISA takes one step only when the implementation retires in W; otherwise it stutters.
+The following relation is preserved inductively from reset.
 
-1. ISAと実装のarchitectural register、retirement PC、ROM/dataが一致
-2. validなWは現在のretirement PCの命令で、W.resultは現在ISA状態でのその命令の結果
-3. validなXはWの後、validなDはXの後という順番。各IRは対応するROM[PC]と一致
-4. Xがsourceを使う場合、operandは現在registerにpending Wの書込みを適用した値
-5. fetch PCはretirement PC + valid stage数 (mod4)
+1. The architectural registers, retirement PC and ROM/data of the ISA and the implementation agree
+2. A valid W holds the instruction at the current retirement PC, and W.result is that instruction's result in the current ISA state
+3. Ordering: a valid X follows W, and a valid D follows X. Each IR matches the corresponding ROM[PC]
+4. When X uses a source, its operand equals the current register value with the pending W write applied
+5. The fetch PC is the retirement PC + number of valid stages (mod4)
 
-invalidなstageのpayloadには意味を与えない。現在入力、具体実行観測、到達状態の推定を
-bindingへ加えない。ISAとbindingを弱めて悪い実装を通すこともしない。
+The payload of an invalid stage is given no meaning. Current inputs, concrete execution observations and guesses about reachable states
+are not added to the binding. Nor are the ISA and binding weakened to let a bad implementation pass.
 
-8義務はbinding非空、reset、microstep refinement、commit eligibility、stall保持、
-progress非空、commit非空、非commit時rank減少。rankはW/X/Dの一番古いvalid stageから
-0/1/2/3。stallしない非commit cycleでは必ず減る。したがって外部stallが解除され続ける
-条件下で次のretireへ進む。無限stallがなくなることやprogramの停止を証明したものではない。
+The 8 obligations are binding nonvacuity, reset, microstep refinement, commit eligibility, stall hold,
+progress nonvacuity, commit nonvacuity, and rank decrease on noncommit. The rank is 0/1/2/3 according to the oldest
+valid stage among W/X/D. It always decreases on a non-stalled noncommit cycle. Therefore, under the condition that
+the external stall keeps being released, execution advances to the next retire. This does not prove that infinite stalls go away or that the program terminates.
 
-この検証は有限サイズの状態空間に対する**1step帰納証明**であり、有限cycleまで展開した
-BMCやsimulationのみの成功ではない。一方、仕様・bindingの適切さや実際のRTLとの一致は
-別の問題であり、この例もRTL import / synthesisではない。
+This verification is a **one-step inductive proof** over a finite-size state space, not merely a success of
+BMC unrolled to a finite number of cycles or of simulation. On the other hand, the adequacy of the specification and binding and agreement with actual RTL are
+separate issues, and this example is not RTL import / synthesis either.
 
-## 対象と命令
+## Branch pipeline targets and instructions
 
-`examples/build_branch_pipeline.py` は従来の `build_pipeline.py` と別のgenerator。
-`branch_pipeline_w{4,8,16,32}.{json,lyd}` は同じD/X/W制御構造を持ち、データ幅だけを変える。
-既存のpipeline例・過去の監査結果は変更しない。RTL importやout-of-order CPUのモデルではない。
+`examples/build_branch_pipeline.py` is a generator separate from the earlier `build_pipeline.py`.
+`branch_pipeline_w{4,8,16,32}.{json,lyd}` share the same D/X/W control structure and vary only the data width.
+The existing pipeline example and past audit results are unchanged. This is not RTL import or a model of an out-of-order CPU.
 
-全幅で2レジスタ、2bit PC、4命令ROM、readonly data 4word。ROM/dataは任意の入力をreset時に
-captureし、その後の入力変化を無視する。特定プログラムだけを仮定しない。
-4命令で実行を停止せず、wrap・分岐・自己ループを含む任意回数の実行が対象。
+At every width: 2 registers, 2-bit PC, 4-instruction ROM, readonly data of 4 words. ROM/data capture arbitrary inputs at reset
+and ignore later input changes. No particular program is assumed.
+Execution does not stop after 4 instructions; the target is an arbitrary number of executions including wrap, branches and self-loops.
 
-データ幅をWとすると命令幅はW+5bit。
-`op[W+4:W+2] rd[W+1] rs[W] imm[W-1:0]`。
+With data width W, the instruction width is W+5 bits.
+`op[W+4:W+2] rd[W+1] rs[W] imm[W-1:0]`.
 
-| op | 命令 | 意味 |
+| op | Instruction | Meaning |
 |---|---|---|
-| 0 | MOVI | r[rd] = imm、PC = PC+1 |
-| 1 | ADDI | r[rd] = r[rs]+imm (mod 2^W)、PC = PC+1 |
-| 2 | XORI | r[rd] = r[rs] xor imm、PC = PC+1 |
-| 3 | LOAD | r[rd] = data[imm & 3]、PC = PC+1 |
-| 4 | BZ | r[rs]=0ならPC=imm & 3、それ以外PC=PC+1。レジスタ書込みなし |
-| 5–7 | NOP | レジスタ書込みなし、PC = PC+1 |
+| 0 | MOVI | r[rd] = imm, PC = PC+1 |
+| 1 | ADDI | r[rd] = r[rs]+imm (mod 2^W), PC = PC+1 |
+| 2 | XORI | r[rd] = r[rs] xor imm, PC = PC+1 |
+| 3 | LOAD | r[rd] = data[imm & 3], PC = PC+1 |
+| 4 | BZ | if r[rs]=0 then PC=imm & 3, otherwise PC=PC+1. No register write |
+| 5–7 | NOP | No register write, PC = PC+1 |
 
-PCはmod4でwrap。BZのtargetは相対offsetではなく絶対2bit addressで、rdと即値の上位bitは
-動作に影響しない。非分岐命令の意味は旧pipelineと同じだが、命令encodingは異なる。
-STORE、mutable memory、例外、HALT、cache、予測器学習、OoOは対象外。
+The PC wraps mod4. The BZ target is an absolute 2-bit address, not a relative offset; rd and the upper bits of the immediate
+do not affect behavior. Non-branch instructions have the same meaning as in the old pipeline, but the instruction encoding differs.
+STORE, mutable memory, exceptions, HALT, caches, predictor training and OoO are out of scope.
 
-## X解決とflushのcycle semantics
+## Cycle semantics of X resolution and flush
 
-- fetchでは常にPC+1へ進むalways-not-taken予測を使う
-- Dはレジスタ、XのALU結果、Wの結果からsourceを選ぶ。若いXがWより優先
-- BZもsourceを消費する。直前LOADに依存するとD/fetchを保持し、Xへbubbleを挿入。
-  LOADがWへ進んだ次cycleにはWからforwardできる
-- branch/NOPは書込み命令ではないため、X/Wのforward候補にもRAW producerにもならない
-- validなXのBZがtakenなら、現在Dと同cycleの順次fetchを捨てる。
-  次X/Dはinvalid、fetch PCはtargetへredirectする。payloadをゼロにする必要はない
-- 同じcycleでも古いWは通常どおりretireする。解決したXの分岐自身はWへ進む
-- Wには`w_next_pc`を保持し、分岐のretireで初めてarchitectural retirement PCを更新する。
-  fetch PCのredirect自体はarchitectural effectではない
-- not-takenでは通常のD→X、fetch→Dを継続する
-- 外部stallではredirect/flushを含む全実装stateを保持。同期resetがstallより優先し、
-  全stageをinvalidにしてPC/registerを0へ戻し、ROM/dataを取り直す
+- Fetch always uses always-not-taken prediction, advancing to PC+1
+- D selects its source from the registers, the ALU result in X, or the result in W. The younger X takes priority over W
+- BZ also consumes a source. If it depends on the immediately preceding LOAD, D/fetch is held and a bubble is inserted into X.
+  On the cycle after the LOAD advances to W, it can forward from W
+- Branch/NOP are not writing instructions, so they are neither X/W forwarding candidates nor RAW producers
+- If a valid BZ in X is taken, the current D and the sequential fetch of the same cycle are discarded.
+  The next X/D are invalid and the fetch PC is redirected to the target. Payloads need not be zeroed
+- Even in the same cycle, an older W retires normally. The resolved branch in X itself advances to W
+- W holds `w_next_pc`, and the architectural retirement PC is updated only when the branch retires.
+  The fetch PC redirect itself is not an architectural effect
+- On not-taken, normal D→X and fetch→D continue
+- An external stall holds all implementation state, including redirect/flush. Synchronous reset takes priority over stall,
+  invalidates all stages, returns PC/registers to 0 and recaptures ROM/data
 
-Xの命令は同時にLOADとBZにはならないため、taken branchと同じXに起因するload-use hazardの
-同時成立はない。確認すべき相互作用はLOAD→BZの待機と、分岐解決時の外部stall/resetである。
+An instruction in X is never both LOAD and BZ, so a taken branch and a load-use hazard caused by the same X
+cannot occur simultaneously. The interactions to check are waiting on LOAD→BZ, and external stall/reset at branch resolution.
 
-## 帰納関係と主張
+## Inductive relation and claims
 
-ISAは1命令を原子的に実行し、実装のW commit時だけ1step進める。それ以外はstutter。
-現在stateだけで次のbindingを記述する。現在入力やsimulation観測を仮定へ入れない。
+The ISA executes one instruction atomically and takes one step only on an implementation W commit. Otherwise it stutters.
+The next binding is described using only the current state. Current inputs and simulation observations are not put into the assumptions.
 
-1. architectural register、retirement PC、capture済みROM/dataがISAと実装で一致
-2. validなWは現在PCのROM命令。writerならW.resultがISAの結果と一致し、
-   全命令でW.next_pcがISAの次PCと一致
-3. validなXはWの解決済みnext_pc（Wがなければ現在PC）の命令。
-   sourceを使うXのoperandは現在registerにpending Wの有効な書込みを適用した値
-4. DとfetchはXの後の予測上の順次位置。Xがtakenでもまだ未解決なのでDのwrong-path命令を許す。
-   次stateではXの解決に従いそれをkillする
-5. invalid stageのpayloadと非writerのW.resultには意味を与えない
+1. The architectural registers, retirement PC and captured ROM/data agree between the ISA and the implementation
+2. A valid W holds the ROM instruction at the current PC. If it is a writer, W.result matches the ISA result, and
+   for every instruction W.next_pc matches the ISA's next PC
+3. A valid X holds the instruction at W's resolved next_pc (the current PC if there is no W).
+   For an X that uses a source, its operand equals the current register value with the pending W's effective write applied
+4. D and fetch are at the predicted sequential positions after X. Even if X is taken, it is not yet resolved, so a wrong-path instruction in D is allowed.
+   In the next state it is killed according to X's resolution
+5. The payload of an invalid stage and W.result of a non-writer are given no meaning
 
-これによりwrong-path命令がDに存在してもarchitectural registerへの書込みには至らず、
-古いWの正当な書込みと分岐自身のretireを失わないことを1step保存で検査する。
-architectural effectはWのvalid/write guardだけに集約している。
+With this, one-step preservation checks that even when a wrong-path instruction exists in D it never reaches a write to
+the architectural registers, and that the legitimate write of an older W and the retirement of the branch itself are not lost.
+Architectural effects are concentrated solely in W's valid/write guard.
 
-従来と同じ8義務（binding非空、reset、microstep refinement、commit eligibility、stall保持、
-progress非空、commit非空、非commit時rank減少）を使用。rankはW/X/Dの最古validに従い0/1/2/3。
-非stall・非commitなら次rankが厳密に減るので、外部stallが解除され続ける条件下で次retireへ進む。
-program停止、branch targetへの到達、無限stallの解消は主張しない。
-非空性SATは関係の非空性であり、SATで得た任意stateのreset到達性証明ではない。
+The same 8 obligations as before are used (binding nonvacuity, reset, microstep refinement, commit eligibility, stall hold,
+progress nonvacuity, commit nonvacuity, rank decrease on noncommit). The rank is 0/1/2/3 according to the oldest valid among W/X/D.
+On a non-stall, noncommit cycle the next rank strictly decreases, so under the condition that the external stall keeps being released, execution advances to the next retire.
+Program termination, reaching a branch target, and resolution of infinite stalls are not claimed.
+Nonvacuity SAT shows the relation is nonempty; it is not a proof of reset reachability for an arbitrary state obtained from SAT.
 
-これは有限bit幅の状態空間に対する時間無制限の1step帰納refinement。
-有限cycleのsimulation/BMCだけを成功させたものではない。
-有限solverのUNSATには独立certificateがなく、Rust bit-blast/CDCL、構造的kernel、loweringと
-bindingの適切さを信頼する。既存Leanのメモリ定理が新モデルやsolverを証明したとは主張しない。
+This is a time-unbounded one-step inductive refinement over a finite-bit-width state space.
+It is not merely a success of finite-cycle simulation/BMC.
+UNSAT from the finite solver has no independent certificate; the Rust bit-blast/CDCL, the structural kernel, lowering and
+the adequacy of the binding are trusted. The existing Lean memory theorems are not claimed to prove the new model or the solver.

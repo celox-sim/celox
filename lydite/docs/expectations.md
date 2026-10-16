@@ -1,10 +1,10 @@
-# 期待する関係と、量化を明示した有限trace（0.9.1）
+# Expected relations and finite traces with explicit quantifiers (0.9.1)
 
-`operation` は実行手順ではなく、許す現在／次状態の関係を書く。
-`example` はその関係の有限traceを、入力値と実行について指定した量化で検査する。
-この二つは別の役割であり、どちらもクロックイベントの宣言ではない。
+An `operation` describes the allowed current/next-state relation, not an execution procedure.
+An `example` checks a finite trace of that relation under the quantifiers given for input values and executions.
+The two have separate roles, and neither declares a clock event.
 
-## 現在値と次の値
+## Current and next values
 
 ```
 spec Counter(input amount: bv<4>, output count: bv<4>) {
@@ -17,23 +17,23 @@ spec Counter(input amount: bv<4>, output count: bv<4>) {
 }
 ```
 
-scoped `spec` の関係式では、裸の状態名 `value` は現在値、`value'` は次状態を表す。
-出力も `count` は現在値、`count'` は次の出力。ASCIIの `'` を一つだけ付ける。
-`invariant` でも裸の名前は現在値のままで、操作内だからといって意味を切り替えない。
-次状態のinvariantは検証器が別途同じ関係を次フレームに適用する。
+In scoped `spec` relations, a bare state name `value` denotes the current value and `value'` the next state.
+Likewise for outputs: `count` is the current value and `count'` the next output. Add exactly one ASCII `'`.
+In `invariant` a bare name is still the current value; its meaning does not switch inside an operation.
+For the next-state invariant, the checker separately applies the same relation to the next frame.
 
-入力 `amount` は今回の操作で与える値であり、`amount'` はエラー。
-`value''`、`s.value'`、`(value)'`、曲がった引用符 `value’` も受理しない。
-メモリでは `memory'[address]` は次のメモリを読み出す。
+The input `amount` is the value supplied for this operation; `amount'` is an error.
+`value''`, `s.value'`, `(value)'` and the curly quote `value’` are also rejected.
+For memories, `memory'[address]` reads the next memory.
 
-互換表記 `s.value` / `n.value` / `i.amount` / `o.count` / `no.count` は引き続き使える。
-状態とポートが同名の古い仕様も明示prefixなら有効だが、曖昧な裸の参照は拒否する。
-例えば状態 `count` と出力 `count` が同居するなら `s.count` と `o.count` を使う。
-`init` / `invariant` は現在状態と現在出力だけを参照でき、入力・次状態・次出力を拒否する。
-この制限は名前付き期待の間接参照にも適用する。
-version 2の機械や実装のreset/next/bindingに、この裸名・prime規則を持ち込まない。
+The compatibility forms `s.value` / `n.value` / `i.amount` / `o.count` / `no.count` remain available.
+Older specs in which a state and a port share a name stay valid with explicit prefixes, but ambiguous bare references are rejected.
+For example, if a state `count` and an output `count` coexist, use `s.count` and `o.count`.
+`init` / `invariant` may reference only the current state and current outputs; inputs, next state and next outputs are rejected.
+This restriction also applies to indirect references through named expectations.
+These bare-name and prime rules do not carry over to version 2 machines or to implementation reset/next/binding.
 
-## 名前付きの期待とAND/OR
+## Named expectations and AND/OR
 
 ```
 expectation grows { expect value' == value + amount; }
@@ -50,27 +50,27 @@ operation add {
 }
 ```
 
-- `operation` / `expectation` の直下に並んだ条件はAND
-- `all { ... }` は子条件のAND、`any { ... }` は子条件のOR
-- 入れ子を保つ。上の例は `(amount <= 2 AND grows) OR (amount > 2 AND holds)` を要求する
-- 一つの `expect` に `grows || holds` のような通常のBoolean式も書ける
-- 各期待はBoolean関係。状態更新や順序付き手続きとして実行しない
-- 空のoperation/expectation/all/anyは拒否する。意図的な無制約は `expect true;`、不可能な関係は `expect false;`
-- 省略した状態や出力には保持を補わない。保持が必要なら `expect value' == value;` と書く
+- Conditions listed directly under an `operation` / `expectation` are ANDed
+- `all { ... }` is the AND of its children; `any { ... }` is the OR of its children
+- Nesting is preserved. The example above requires `(amount <= 2 AND grows) OR (amount > 2 AND holds)`
+- A single `expect` can also contain an ordinary Boolean expression such as `grows || holds`
+- Each expectation is a Boolean relation. It is not executed as a state update or an ordered procedure
+- Empty operation/expectation/all/any blocks are rejected. Write `expect true;` for an intentionally unconstrained relation and `expect false;` for an impossible one
+- Omitted states and outputs are not implicitly held. If holding is required, write `expect value' == value;`
 
-名前付き期待は一つの `spec` 内だけで利用でき、先に参照して後で定義してもよい。
-引数、可変束縛、他specからの参照、動的なマクロは持たない。
-状態・input・outputと同名の期待、重複定義、未使用を含む循環や型エラーを拒否する。
-同じspecを二回使っても、各インスタンスの局所状態で解釈する。
-展開前に全依存グラフを検査し、依存64段、all/anyの入れ子64段、
-一specの関係展開262144ノードの上限を設ける。上限超過は入力エラーであり、成功にしない。
+Named expectations are usable only within one `spec`, and may be referenced before they are defined.
+They have no parameters, mutable bindings, references from other specs, or dynamic macros.
+Expectations sharing a name with a state, input or output, duplicate definitions, and cycles or type errors (including in unused ones) are rejected.
+If the same spec is used twice, each instance interprets it in terms of its own local state.
+The whole dependency graph is checked before expansion, with limits of 64 dependency levels, 64 levels of all/any nesting,
+and 262144 nodes of relation expansion per spec. Exceeding a limit is an input error, never a success.
 
-`operation add = relation;` は互換表記として残る。
-名前付き期待はfrontendで既存の関係に展開され、独立した操作やsolverの仮定を追加しない。
-primeとexpectationだけの変更ではJSON version 4のschemaやaction集合の意味は変わらない。
-例は [expectation_counter.lyd](../examples/expectation_counter.lyd)。
+`operation add = relation;` remains as a compatibility form.
+Named expectations are expanded into ordinary relations in the frontend and add no separate operations or solver assumptions.
+Changes consisting only of primes and expectations do not alter the JSON version 4 schema or the meaning of the action set.
+See [expectation_counter.lyd](../examples/expectation_counter.lyd) for an example.
 
-## 一回の操作を読みやすく書く
+## Writing a single operation readably
 
 ```
 example every_input {
@@ -84,16 +84,16 @@ example every_input {
 }
 ```
 
-`add(amount: a) => count == a;` は「この入力でaddを一回選んだ後の出力について、
-右辺を検査する」と読む。量化の意味は外側の `execution` と入力量化で定まる。
-ここで `count` は矢印後のフレームの出力であり、private stateは参照できない。
-右辺は出力名（version 3では `o.count`）と、`forall` / `exists` で束縛した変数から成るBoolean式。
-入力引数が空なら `add() => predicate;` と書く。
-操作名が `actions` の場合だけは、action集合構文と区別するため
-`actions { inputs { ... } ensure ...; }` というブロック表記を使う。
-入力名の重複、未宣言の入力、型の違いを拒否する。
+Read `add(amount: a) => count == a;` as "check the right-hand side against the outputs after add is
+selected once with this input". The quantifier meaning is fixed by the enclosing `execution` and input quantifiers.
+Here `count` is the output of the frame after the arrow; private state cannot be referenced.
+The right-hand side is a Boolean expression over output names (`o.count` in version 3) and variables bound by `forall` / `exists`.
+With no input arguments, write `add() => predicate;`.
+Only when the operation is named `actions` is the block form
+`actions { inputs { ... } ensure ...; }` used, to distinguish it from the action-set syntax.
+Duplicate input names, undeclared inputs and type mismatches are rejected.
 
-この表記は従来の一操作traceブロックに `ensure` を付けたものと同じ:
+This form is equivalent to the existing single-operation trace block with an `ensure` added:
 
 ```
 add {
@@ -102,17 +102,17 @@ add {
 }
 ```
 
-同時実行・非選択は従来の `actions(left, right) { ensure ...; }` / `actions() { ensure ...; }` を使う。
-`observe { count = expression; }` は出力との等式を検査する互換表記で、
-`ensure` と併記すれば両方を要求する。`initial` は開始状態に課す前提。
-traceのフレーム順序は維持され、二つの操作呼出しを同時実行にはしない。
+For simultaneous execution or no selection, use the existing `actions(left, right) { ensure ...; }` / `actions() { ensure ...; }`.
+`observe { count = expression; }` is a compatibility form that checks equality with an output;
+combined with `ensure`, both are required. `initial` is an assumption imposed on the starting state.
+Trace frame order is preserved; two operation calls are not executed simultaneously.
 
-## 入力と実行を別々に量化する
+## Quantifying inputs and executions separately
 
-`forall a: bv<4>;` / `exists b: bool;` を書いた順に、外側から内側へ束縛する。
-最後の `execution` が、その値のもとで許される有限実行を量化する。
-量化変数は宣言した名前のまま `a` のように参照し、必要な入力引数に明示的に渡す。
-量化変数を宣言しただけでは、同名の入力ポートに自動接続しない。
+`forall a: bv<4>;` / `exists b: bool;` bind from outermost to innermost in the order written.
+The final `execution` quantifies over the finite executions allowed under those values.
+Quantified variables are referenced by their declared names, such as `a`, and passed explicitly to the input arguments that need them.
+Declaring a quantified variable does not automatically connect it to an input port of the same name.
 
 ```
 forall a: bv<2>;
@@ -120,60 +120,60 @@ exists b: bv<2>;
 execution forall;
 ```
 
-この順序なら `b` は `a` に応じて選べる。
-逆の `exists b; forall a;` では全ての `a` に使える一つの `b` が必要になる。
-同じ量化の変数は `forall { a: bv<2>; flag: bool; }` とまとめてもよい。
-重複名やshadowingは拒否し、入力量化はexecution/expectの前に書く。
-束縛変数はそのexampleだけに局所的で、別のexampleには漏れない。
-`initial`・入力引数・`inputs`・`observe` の値の式では、裸の名前はそのexampleの束縛変数だけを参照する。
-`ensure` と矢印の右辺では、version 4の出力名も裸で参照できる。
-束縛変数と出力が同名の場合、その名前を裸で書くと曖昧なのでエラーになる。
-束縛変数に別の名前を付けるか、出力を意図するなら `o.count` のように明示する。
-version 3の出力は従来通り `o.count` と書くため、束縛変数と同名でも区別できる。
-旧表記の `q.a` は互換性のため引き続き受理するが、通常のソースでprefixは不要。
-内部のJSONでは束縛参照を従来通り `q.a` として保持し、型・量化順序・SMTの意味を変えない。
-JSON printerも裸の名前を出力する。version 4で出力と衝突する束縛名は、宣言とその参照だけを
-未使用の名前（例: `count_value`）へ一貫して変更し、出力参照・量化順序・グループ・型は保持する。
-JSONでのみ使える予約語や数字始まりの束縛名も、ソースで使える未使用名に変更する。
-型は `bool` / `bv<N>` / `mem<A,W>` を使え、入力量化のグループは256個まで。
-領域を有限値に列挙して検査する実装ではなく、型付きの量化をSMTへ渡す。
+In this order `b` can be chosen depending on `a`.
+In the reverse order `exists b; forall a;`, a single `b` that works for every `a` is required.
+Variables with the same quantifier may be grouped as `forall { a: bv<2>; flag: bool; }`.
+Duplicate names and shadowing are rejected, and input quantifiers must precede execution/expect.
+Bound variables are local to their example and do not leak into other examples.
+In the value expressions of `initial`, input arguments, `inputs` and `observe`, bare names refer only to that example's bound variables.
+In `ensure` and on the right-hand side of an arrow, version 4 output names can also be referenced bare.
+If a bound variable and an output share a name, writing that name bare is ambiguous and is an error.
+Rename the bound variable, or, if the output is intended, qualify it explicitly as in `o.count`.
+Version 3 outputs are still written as `o.count`, so they remain distinguishable even when a bound variable has the same name.
+The old form `q.a` is still accepted for compatibility, but ordinary source needs no prefix.
+Internal JSON keeps bound references as `q.a` as before, without changing types, quantifier order or SMT meaning.
+The JSON printer also emits bare names. In version 4, a bound name that collides with an output is consistently renamed,
+in its declaration and its references only, to an unused name (e.g. `count_value`); output references, quantifier order, groups and types are preserved.
+Bound names that are reserved words or start with a digit, which are usable only in JSON, are likewise renamed to unused names valid in source.
+The types `bool` / `bv<N>` / `mem<A,W>` are available, with up to 256 input quantifier groups.
+The implementation does not enumerate the domain into finite values; it passes typed quantifiers to SMT.
 
-現在／次の状態・出力と、省略された入力値の全フレーム分を `H` とする。
-`R` はinit/invariant、初期指定、操作関係、指定入力から成る有限実行の条件。
-`P` は各ステップのobserve/ensureを全てANDした、検査対象の条件。
-**期待結果 `P` は実行を選ぶ前提 `R` に混ぜない。**
+Let `H` be the current/next states and outputs together with the omitted input values over all frames.
+`R` is the condition on finite executions, made of init/invariant, the initial specification, the operation relations and the specified inputs.
+`P` is the condition being checked: the AND of every step's observe/ensure.
+**The expected result `P` is not mixed into the premise `R` that selects executions.**
 
-- `execution exists`: `∃H (R ∧ P)`。期待に合う有限実行が一つはある
-- `execution not_exists`: `¬∃H (R ∧ P)`。期待に合う有限実行が一つもない
-- `execution forall`: `(∃H R) ∧ ∀H (R ⇒ P)`。実行が存在し、許される全実行で期待が成立する
+- `execution exists`: `∃H (R ∧ P)`. At least one finite execution meets the expectation
+- `execution not_exists`: `¬∃H (R ∧ P)`. No finite execution meets the expectation
+- `execution forall`: `(∃H R) ∧ ∀H (R ⇒ P)`. An execution exists, and the expectation holds on every allowed execution
 
-記述順の入力量化prefixはこの式全体の外側に掛かる。
-`forall` は実行不能な入力で空虚に成功しない。可実行性は期待値を外した別の問い合わせでも報告する。
-`not_exists` は実行そのものが不可能でも真になり得るので、実行存在の主張ではない。
+The input quantifier prefix, in written order, scopes over this entire formula.
+`forall` does not succeed vacuously on inputs that admit no execution. Feasibility is also reported by a separate query with the expectation removed.
+`not_exists` can be true even when no execution is possible at all, so it is not a claim that an execution exists.
 
-旧 `expect positive;` は `exists`、`expect negative;` は `not_exists` と同じ存在条件を保つ。
-これらは矢印/ensureと併用でき、検査条件を失わない。
-`execution positive;` / `execution negative;` は曖昧な新表記として認めず、旧形式には `expect` を使う。
-一つのexampleにexecution/expectを二回書くことはできない。
-入力量化を指定する場合は、空prefixでも新しいexecutionモードを明示する。
-旧positive/negativeと `quantifiers` を組み合わせることは認めない。
+The old `expect positive;` keeps the same existence condition as `exists`, and `expect negative;` as `not_exists`.
+These can be combined with arrows/ensure without losing the checked conditions.
+`execution positive;` / `execution negative;` are not accepted, as an ambiguous new form; use `expect` for the old forms.
+An example cannot contain execution/expect twice.
+When input quantifiers are specified, the new execution mode must be stated explicitly, even with an empty prefix.
+Combining the old positive/negative with `quantifiers` is not allowed.
 
-未指定入力は `H` の一部なので、`execution exists` では良い補完を選べる。
-`execution forall` では実際に許される実行の補完全てを検査するが、全ての生入力の組合せで
-操作が可能だと保証するわけではない。全入力で可実行性も要求したいときは、
-対象入力を `forall` で明示して引数に渡す。
+Unspecified inputs are part of `H`, so `execution exists` may choose a favorable completion.
+`execution forall` checks every completion of the executions actually allowed, but does not guarantee
+that the operation is possible for every combination of raw inputs. To also require feasibility for all inputs,
+quantify the relevant inputs explicitly with `forall` and pass them as arguments.
 
-この版は **入力量化prefix → 一つの最内実行量化** に限定する。
-実行量化と入力量化を任意に交互配置する言語、オンライン戦略・因果性の合成、
-無限実行のlivenessを実装したものではない。
-`forall` も指定された有限長の検査であり、任意の長さの帰納的証明ではない。
-初期条件は引き続き前提として扱う。ユーザーの意図した仕様の完全性は別の問題である。
+This version is limited to **an input quantifier prefix followed by a single innermost execution quantifier**.
+It does not implement a language with arbitrary alternation of execution and input quantifiers, synthesis of online strategies or causality,
+or liveness over infinite executions.
+`forall` is also a check of the given finite length, not an inductive proof for arbitrary lengths.
+Initial conditions are still treated as assumptions. Whether the specification completely captures the user's intent is a separate question.
 
-## 実例と結果の確認
+## Examples and checking results
 
-- [quantified_counter.lyd](../examples/quantified_counter.lyd): 全4-bit入力で二回の加算、wraparound、入力ごとに選べる補正値
-- [quantified_counter_bad_order.lyd](../examples/quantified_counter_bad_order.lyd): 補正値を入力より先に選ぶため失敗する例
-- [quantified_counter_impossible.lyd](../examples/quantified_counter_impossible.lyd): 実行不能な入力があり、右辺がtrueでもforallが失敗する例
+- [quantified_counter.lyd](../examples/quantified_counter.lyd): two additions over all 4-bit inputs, wraparound, and a correction value chosen per input
+- [quantified_counter_bad_order.lyd](../examples/quantified_counter_bad_order.lyd): fails because the correction value is chosen before the input
+- [quantified_counter_impossible.lyd](../examples/quantified_counter_impossible.lyd): forall fails because some input admits no execution, even though the right-hand side is true
 
 ```
 cargo run --locked -- examples/quantified_counter.lyd --out /tmp/quantified --z3 /path/to/z3
@@ -181,24 +181,24 @@ cargo run --locked -- examples/quantified_counter_bad_order.lyd --out /tmp/bad-o
 cargo run --locked -- examples/quantified_counter_impossible.lyd --out /tmp/impossible --z3 /path/to/z3 # exit 1
 ```
 
-量化式はZ3へ直接送り、元のSMT式と問い合わせ結果を保存する。
-各問い合わせのtimeoutは10秒。量化経路では構造的UNSATカーネルを使わない。
-UNKNOWN、異常終了、取得したwitnessの再確認失敗は成功にしない。
-reportの `valid` は命題の真偽または未確定、`feasibility.holds` は期待値を外した実行存在、
-`nonvacuous.holds` は同じ外側の選択で実行存在と検査条件を満たせるかを示す。
-別々の存在量化問い合わせで異なる入力を選べる点を混同しない。
-量化の外側にある選択関数・戦略を具体witnessとして抽出した、という主張はしない。
+Quantified formulas are sent directly to Z3, and the original SMT formulas and query results are saved.
+Each query has a 10-second timeout. The quantified path does not use the structural UNSAT kernel.
+UNKNOWN, abnormal termination, and failure to recheck an obtained witness are never treated as success.
+In the report, `valid` shows whether the proposition is true, false or undetermined; `feasibility.holds` shows execution existence with the expectation removed;
+and `nonvacuous.holds` shows whether execution existence and the checked condition can be satisfied under the same outer choices.
+Do not conflate these: separate existential queries may choose different inputs.
+No claim is made that choice functions or strategies outside the quantifiers have been extracted as concrete witnesses.
 
-## JSONと移行
+## JSON and migration
 
-schema version 3/4のexampleに任意の `quantifiers` 配列を追加する。
-各要素は `{"kind":"forall"|"exists","variables":{"name":type,...}}`。
-`expect` は旧 `positive` / `negative` に加えて `exists` / `not_exists` / `forall` を受理する。
-各traceフレームには任意のBoolean `ensure` を追加し、`inputs` / `observe` は従来通りmap。
-明示的な空配列 `quantifiers: []` はDSLで `quantifiers {}` と表せる。
+Schema version 3/4 examples gain an optional `quantifiers` array.
+Each element is `{"kind":"forall"|"exists","variables":{"name":type,...}}`.
+`expect` accepts `exists` / `not_exists` / `forall` in addition to the old `positive` / `negative`.
+Each trace frame gains an optional Boolean `ensure`; `inputs` / `observe` remain maps as before.
+An explicit empty array `quantifiers: []` can be written in the DSL as `quantifiers {}`.
 
-JSON printerは旧形式も扱い、入力量化の順序とグループ、式木、trace順序を保持する。
-一つのoperationに一つのexpectを出力して、既存のBoolean木を勝手に平坦化しない。
-名前付き期待の名はcanonical JSONに残らないので、自動で名前を再構成しない。
-状態とポートが同名の旧JSONの裸ポート参照だけは `i.` / `o.` に明示修飾して曖昧さを解消する。
-この場合は等価な参照綴りへの変換となり、文字列まで同じJSONへの往復ではない。
+The JSON printer also handles the old forms and preserves input quantifier order and groups, expression trees and trace order.
+It emits one expect per operation and does not flatten existing Boolean trees on its own.
+Named expectation names do not survive in canonical JSON, so names are not reconstructed automatically.
+Only bare port references in old JSON where a state and a port share a name are explicitly qualified with `i.` / `o.` to resolve the ambiguity.
+In that case the conversion is to an equivalent reference spelling, not a round trip to byte-identical JSON.
