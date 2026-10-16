@@ -1648,9 +1648,11 @@ fn compile_binary_narrow(
         BinaryOp::Xor => instrs.push(Instruction::I64Xor),
         BinaryOp::Shl => {
             instrs.push(Instruction::I64Shl);
+            emit_logical_shift_saturation(instrs, r.value_idx);
         }
         BinaryOp::Shr => {
             instrs.push(Instruction::I64ShrU);
+            emit_logical_shift_saturation(instrs, r.value_idx);
         }
         BinaryOp::Sar => {
             // Arithmetic shift right — need sign extension first.
@@ -2629,8 +2631,14 @@ fn compile_binary_mask_narrow(
                 instrs.push(Instruction::LocalGet(rhs.value_idx));
             }
             match op {
-                BinaryOp::Shl => instrs.push(Instruction::I64Shl),
-                BinaryOp::Shr => instrs.push(Instruction::I64ShrU),
+                BinaryOp::Shl => {
+                    instrs.push(Instruction::I64Shl);
+                    emit_logical_shift_saturation(instrs, rhs.value_idx);
+                }
+                BinaryOp::Shr => {
+                    instrs.push(Instruction::I64ShrU);
+                    emit_logical_shift_saturation(instrs, rhs.value_idx);
+                }
                 BinaryOp::Sar => instrs.push(Instruction::I64ShrS),
                 _ => unreachable!(),
             }
@@ -5943,6 +5951,16 @@ fn emit_sar_count(instrs: &mut Vec<Instruction<'static>>, count: u32) {
     instrs.push(Instruction::I64Const(63));
     instrs.push(Instruction::LocalGet(count));
     instrs.push(Instruction::I64Const(63));
+    instrs.push(Instruction::I64LtU);
+    instrs.push(Instruction::Select);
+}
+
+/// Replaces the shifted value on the stack with zero when the logical shift
+/// count is at least 64. Wasm shifts use the count modulo 64.
+fn emit_logical_shift_saturation(instrs: &mut Vec<Instruction<'static>>, count: u32) {
+    instrs.push(Instruction::I64Const(0));
+    instrs.push(Instruction::LocalGet(count));
+    instrs.push(Instruction::I64Const(64));
     instrs.push(Instruction::I64LtU);
     instrs.push(Instruction::Select);
 }
