@@ -13,7 +13,8 @@ pub(super) fn dimensions_system_function_call_value(
 ) -> Option<usize> {
     match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
-            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions"
+            if SystemFunction::from_name(syntax_tree.get_str(&call.nodes.0.nodes.0)?)
+                != Some(SystemFunction::Dimensions)
                 || call.nodes.1.nodes.1.1.is_some()
             {
                 return None;
@@ -34,7 +35,9 @@ pub(super) fn dimensions_system_function_call_value(
             Some(ty.unpacked_ranges().len() + ty.packed_ranges().len())
         }
         sv_parser::SystemTfCall::ArgExpression(call) => {
-            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$dimensions" {
+            if SystemFunction::from_name(syntax_tree.get_str(&call.nodes.0.nodes.0)?)
+                != Some(SystemFunction::Dimensions)
+            {
                 return None;
             }
             let arguments = call.nodes.1.nodes.1.0.contents();
@@ -278,7 +281,10 @@ fn expression_dimensions(
         }
     }
     let expression = expr_from_expression_with_types(argument, syntax_tree, dimensions).ok()?;
-    if let Expr::Call { name, .. } = &expression
+    if let Expr::Call {
+        callee: Callee::Subroutine(name),
+        ..
+    } = &expression
         && let Some(metadata) = dimensions.function_return_types.get(name)
     {
         return metadata.dimensions;
@@ -309,7 +315,8 @@ pub(super) fn unpacked_dimensions_call_value(
 ) -> Option<usize> {
     match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
-            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$unpacked_dimensions"
+            if SystemFunction::from_name(syntax_tree.get_str(&call.nodes.0.nodes.0)?)
+                != Some(SystemFunction::UnpackedDimensions)
                 || call.nodes.1.nodes.1.1.is_some()
             {
                 return None;
@@ -328,7 +335,9 @@ pub(super) fn unpacked_dimensions_call_value(
                 .map(|ty| ty.unpacked_ranges().len())
         }
         sv_parser::SystemTfCall::ArgExpression(call) => {
-            if syntax_tree.get_str(&call.nodes.0.nodes.0)? != "$unpacked_dimensions" {
+            if SystemFunction::from_name(syntax_tree.get_str(&call.nodes.0.nodes.0)?)
+                != Some(SystemFunction::UnpackedDimensions)
+            {
                 return None;
             }
             let arguments = call.nodes.1.nodes.1.0.contents();
@@ -595,9 +604,14 @@ pub(super) fn size_system_function_call_type(
             .flatten()
             .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))
     };
-    let (name, r#type, dimension) = match call {
+    let function = called_system_function(call, syntax_tree)?;
+    let size = match function {
+        SystemFunction::Bits => false,
+        SystemFunction::Size => true,
+        _ => return None,
+    };
+    let (r#type, dimension) = match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
-            let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
             let (data_type, dimension) = &call.nodes.1.nodes.1;
             let dimension = match dimension {
                 Some((_, dimension)) => Some(dimension_argument(dimension)?),
@@ -615,19 +629,16 @@ pub(super) fn size_system_function_call_type(
                     type_aliases,
                 ),
             }?;
-            (name, r#type, dimension)
+            (r#type, dimension)
         }
         // sv-parser classifies an unqualified typedef argument as an
         // expression because its grammar cannot know whether the identifier
         // names a type. Resolve that ambiguity from the module alias table.
         sv_parser::SystemTfCall::ArgExpression(call) => {
-            let name = syntax_tree.get_str(&call.nodes.0.nodes.0)?;
             let arguments = call.nodes.1.nodes.1.0.contents();
             // `$size(x, n)`: the number of elements of dimension `n`, counted
             // from the outermost unpacked dimension (IEEE 1800-2023 20.7).
-            if name == "$size"
-                && let [Some(argument), Some(dimension)] = arguments.as_slice()
-            {
+            if size && let [Some(argument), Some(dimension)] = arguments.as_slice() {
                 let identifier = match const_expr_from_expr(argument, syntax_tree).ok().flatten()? {
                     ConstExpr::Ident(identifier) => identifier,
                     _ => return None,
@@ -655,9 +666,6 @@ pub(super) fn size_system_function_call_type(
                 return None;
             }
             let argument = arguments[0].as_ref()?;
-            if name != "$bits" && name != "$size" {
-                return None;
-            }
             // An unqualified typedef is parsed as an expression. Once the
             // lexical scope is complete, distinguish it from a visible value
             // before falling back to enclosing-declaration discovery.
@@ -672,7 +680,7 @@ pub(super) fn size_system_function_call_type(
                 && !dimensions.parameter_values.contains_key(&identifier)
                 && let Some(r#type) = type_aliases.get(&identifier)
             {
-                return size_query_for_type(r#type, const_env, name == "$size");
+                return size_query_for_type(r#type, const_env, size);
             }
             if let Some(dimensions) = dimensions
                 && let Some(ty) = size_function_expression_type(
@@ -680,7 +688,7 @@ pub(super) fn size_system_function_call_type(
                     syntax_tree,
                     const_env,
                     type_aliases,
-                    name == "$size",
+                    size,
                     Some(dimensions),
                 )
             {
@@ -698,7 +706,7 @@ pub(super) fn size_system_function_call_type(
             {
                 let dimensions = PackedDimensions::new(dimensions, const_env, type_aliases);
                 let expression = Expr::Ident(identifier.clone());
-                let width = if name == "$size" {
+                let width = if size {
                     selected_expression_first_dimension_width(argument, syntax_tree, &dimensions)
                 } else {
                     expr_static_width(&expression, &dimensions)
@@ -712,8 +720,7 @@ pub(super) fn size_system_function_call_type(
             // found by the enclosing-module scan used for complex expressions.
             if let Ok(Some(ConstExpr::Ident(identifier))) =
                 const_expr_from_expr(argument, syntax_tree)
-                && let Some(width) =
-                    variable_size_function_width(const_env, &identifier, name == "$size")
+                && let Some(width) = variable_size_function_width(const_env, &identifier, size)
             {
                 return Some(ExprType {
                     width,
@@ -729,7 +736,7 @@ pub(super) fn size_system_function_call_type(
                 syntax_tree,
                 const_env,
                 type_aliases,
-                name == "$size",
+                size,
                 None,
             ) {
                 return Some(r#type);
@@ -738,11 +745,10 @@ pub(super) fn size_system_function_call_type(
             if let ConstExpr::Ident(alias) = &argument
                 && let Some(r#type) = type_aliases.get(alias)
             {
-                (name, r#type.clone(), None)
+                (r#type.clone(), None)
             } else {
                 if let ConstExpr::Ident(identifier) = &argument
-                    && let Some(width) =
-                        variable_size_function_width(const_env, identifier, name == "$size")
+                    && let Some(width) = variable_size_function_width(const_env, identifier, size)
                 {
                     return Some(ExprType {
                         width,
@@ -761,10 +767,10 @@ pub(super) fn size_system_function_call_type(
     };
     // $bits covers every unpacked and packed dimension; $size covers one
     // dimension, by default the outermost one.
-    if name == "$size" {
+    if size {
         return type_dimension_size(&r#type, dimension, const_env);
     }
-    if name != "$bits" || dimension.is_some() {
+    if dimension.is_some() {
         return None;
     }
     size_query_for_type(&r#type, const_env, false)
@@ -945,16 +951,17 @@ fn size_function_expression_type_from_dimensions(
                 // (IEEE 1800-2023 6.20.2), even without explicit dimensions.
                 Expr::Ident(name) => variable_size_function_width(const_env, name, true)
                     .or_else(|| parameter_type_from_const_env(const_env, name).map(|ty| ty.width)),
-                Expr::Call { name, args, .. } => {
-                    typecheck::bit_vector_function_return_type(name, args.len())
-                        .map(|(width, _)| width)
-                        .or_else(|| {
-                            packed_dimensions
-                                .function_return_types
-                                .get(name)
-                                .and_then(|metadata| metadata.first_packed_dimension_width)
-                        })
-                }
+                Expr::Call {
+                    callee: Callee::System(function),
+                    ..
+                } => function.result_type().map(|(width, _)| width),
+                Expr::Call {
+                    callee: Callee::Subroutine(name),
+                    ..
+                } => packed_dimensions
+                    .function_return_types
+                    .get(name)
+                    .and_then(|metadata| metadata.first_packed_dimension_width),
                 _ => expr_static_width(&expression, packed_dimensions),
             },
         )

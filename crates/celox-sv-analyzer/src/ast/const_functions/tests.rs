@@ -73,7 +73,7 @@ fn functions() -> ConstantFunctions {
         vec![Stmt::Return(Some(binary(
             Expr::Call {
                 arg_order: Vec::new(),
-                name: "read".into(),
+                callee: Callee::Subroutine("read".into()),
                 args: vec![],
             },
             BinaryOp::Add,
@@ -89,7 +89,7 @@ fn functions() -> ConstantFunctions {
             else_body: vec![Stmt::Return(Some(binary(
                 Expr::Call {
                     arg_order: Vec::new(),
-                    name: "recursive".into(),
+                    callee: Callee::Subroutine("recursive".into()),
                     args: vec![Some(binary(ident("n"), BinaryOp::Sub, literal("1")))],
                 },
                 BinaryOp::Add,
@@ -331,7 +331,7 @@ fn literal_probes_do_not_execute_user_functions_and_recursion_is_not_repeated() 
     let _installed = install(functions());
     let env = environment(0);
     let expr = crate::ir::ConstExpr::Function {
-        name: "recursive".into(),
+        callee: Callee::Subroutine("recursive".into()),
         args: vec![crate::ir::ConstExpr::Literal("12".into())],
         site: None,
     };

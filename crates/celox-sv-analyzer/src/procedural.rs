@@ -7,6 +7,8 @@
 //! generic over the expression and lvalue representation so the AST and the IR
 //! share one definition.
 
+use crate::system_functions::SystemTask;
+
 /// One procedural statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtBase<E, L> {
@@ -59,7 +61,7 @@ pub enum StmtBase<E, L> {
     Eval(E),
     /// A system task call statement such as `$display`.
     SystemTask {
-        name: String,
+        task: SystemTask,
         args: Vec<SystemTaskArg<E>>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
@@ -238,8 +240,8 @@ impl<E, L> StmtBase<E, L> {
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
             StmtBase::Eval(expr) => StmtBase::Eval(fe(expr)),
-            StmtBase::SystemTask { name, args } => StmtBase::SystemTask {
-                name,
+            StmtBase::SystemTask { task, args } => StmtBase::SystemTask {
+                task,
                 args: args
                     .into_iter()
                     .map(|arg| match arg {

@@ -754,42 +754,41 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
                     .ok_or_else(|| unsupported("system task or function name"))?;
-                let tf = system_functions::check_call(
+                let task = match system_functions::check_call(
                     name,
                     args.as_deref(),
                     system_functions::CallSite::Statement(self.body),
-                )?;
-                if name == "$printtimescale" {
-                    return Ok(vec![Stmt::SystemTask {
-                        name: "$display".into(),
-                        args: vec![SystemTaskArg::Str(timescales::print_message(
-                            system_call,
-                            self.tree,
-                            system_functions::CallSite::Statement(self.body),
-                        )?)],
-                    }]);
-                }
-                if tf.expression {
-                    // A system function called as a statement is converted
-                    // and checked like the same call in an expression, then
-                    // its value is discarded. `$bits` and `$size` become
-                    // constants and do not evaluate their operands
-                    // (IEEE 1800-2023 20.6.2).
-                    let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
-                    self.rename_expr(&mut value);
-                    return Ok(vec![Stmt::Eval(value)]);
-                }
-                let call = system_call;
-                let (name, args) = match &**call {
-                    sv_parser::SystemTfCall::ArgOptionl(call) => (
-                        self.tree.get_str(&call.nodes.0.nodes.0),
-                        call.nodes
-                            .1
-                            .as_ref()
-                            .map(|paren| self.system_task_arguments(&paren.nodes.1))
-                            .transpose()?
-                            .unwrap_or_default(),
-                    ),
+                )? {
+                    system_functions::SystemCall::Function(_) => {
+                        // A system function called as a statement is
+                        // converted and checked like the same call in an
+                        // expression, then its value is discarded. `$bits`
+                        // and `$size` become constants and do not evaluate
+                        // their operands (IEEE 1800-2023 20.6.2).
+                        let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
+                        self.rename_expr(&mut value);
+                        return Ok(vec![Stmt::Eval(value)]);
+                    }
+                    system_functions::SystemCall::Task(SystemTask::Printtimescale) => {
+                        return Ok(vec![Stmt::SystemTask {
+                            task: SystemTask::Display(system_functions::Radix::Decimal),
+                            args: vec![SystemTaskArg::Str(timescales::print_message(
+                                system_call,
+                                self.tree,
+                                system_functions::CallSite::Statement(self.body),
+                            )?)],
+                        }]);
+                    }
+                    system_functions::SystemCall::Task(task) => task,
+                };
+                let args = match &**system_call {
+                    sv_parser::SystemTfCall::ArgOptionl(call) => call
+                        .nodes
+                        .1
+                        .as_ref()
+                        .map(|paren| self.system_task_arguments(&paren.nodes.1))
+                        .transpose()?
+                        .unwrap_or_default(),
                     sv_parser::SystemTfCall::ArgExpression(call) => {
                         let mut args = Vec::new();
                         for arg in call.nodes.1.nodes.1.0.contents() {
@@ -798,16 +797,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         if args.len() == 1 && args[0] == SystemTaskArg::Empty {
                             args.clear();
                         }
-                        (self.tree.get_str(&call.nodes.0.nodes.0), args)
+                        args
                     }
                     sv_parser::SystemTfCall::ArgDataType(_) => {
                         return Err(unsupported("system task with a data type argument"));
                     }
                 };
-                let name = name.ok_or_else(|| unsupported("system task"))?.to_string();
                 // Keep Veryl's assertion calls as calls: their message arguments
                 // execute even on success, unlike an SV assertion's fail action.
-                Ok(vec![Stmt::SystemTask { name, args }])
+                Ok(vec![Stmt::SystemTask { task, args }])
             }
             _ => Err(unsupported("method or randomize call")),
         }
@@ -1320,7 +1318,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         let fail = fail.unwrap_or_else(|| {
             vec![Stmt::SystemTask {
-                name: "$error".to_string(),
+                task: SystemTask::Severity(system_functions::Severity::Error),
                 args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
             }]
         });

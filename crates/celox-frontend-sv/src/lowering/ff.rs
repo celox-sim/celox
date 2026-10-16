@@ -194,8 +194,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
                 }
                 // `$readmemh` writes its destination immediately.
-                sv::ir::Stmt::SystemTask { name, args } => {
-                    if let Some(destination) = readmem_destination(name, args) {
+                sv::ir::Stmt::SystemTask { task, args } => {
+                    if let Some(destination) = readmem_destination(*task, args) {
                         writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
                     }
                 }
@@ -211,13 +211,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
-        while let Some((name, args)) = calls.pop() {
-            if name == "$urandom" && self.random.is_none() {
-                let (id, name) = self.m.temp("urandom_state", 33, false, false);
-                self.working.insert(id);
-                self.targets.push((id, BitAccess::new(0, 32)));
-                self.random = Some((id, name));
-            }
+        while let Some((callee, args)) = calls.pop() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    if function == sv::ir::SystemFunction::Urandom && self.random.is_none() {
+                        let (id, name) = self.m.temp("urandom_state", 33, false, false);
+                        self.working.insert(id);
+                        self.targets.push((id, BitAccess::new(0, 32)));
+                        self.random = Some((id, name));
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+            };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -502,33 +508,31 @@ impl<'p, 'a> Ff<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
-            ConstExpr::Function { name, args, .. } if self.m.is_callee(name) => {
+            ConstExpr::Function { callee, args, .. } if self.m.is_callee(callee) => {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
                     let arg = self.hoist_const(arg, calls)?;
-                    lowered.push(
-                        expr_from_const_expr(&arg).ok_or_else(|| {
-                            unsupported(format!("argument of `{name}` in a select"))
-                        })?,
-                    );
+                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                        unsupported(format!("argument of `{callee}` in a select"))
+                    })?);
                 }
                 let call = sv::ir::Expr::Call {
                     arg_order: Vec::new(),
-                    name: name.clone(),
+                    callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
-                    return Err(unsupported(format!("call of `{name}` in a select")));
+                    return Err(unsupported(format!("call of `{callee}` in a select")));
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
                 result
             }
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.hoist_const(arg, calls))
@@ -734,8 +738,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 expr: Box::new(self.freeze_const(expr, copies)?),
                 bit: Box::new(self.freeze_const(bit, copies)?),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.freeze_const(arg, copies))
@@ -782,9 +786,13 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, args, .. } if name == "$urandom" => self.urandom(args)?,
             Expr::Call {
-                name,
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
+                args,
+                ..
+            } => self.urandom(args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
             } if self.m.dpi_imports.contains_key(name) => {
@@ -808,7 +816,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Expr::Ident(temp_name)
             }
             Expr::Call {
-                name,
+                callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
             } if self.m.subroutines.contains_key(name) => {
@@ -865,12 +873,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: name.clone(),
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| arg.as_ref().map(|arg| self.hoist(arg)).transpose())
@@ -1707,7 +1715,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.eval(expr, None)?;
                 Ok(true)
             }
-            sv::ir::Stmt::SystemTask { name, args } => self.system_task(name, args),
+            sv::ir::Stmt::SystemTask { task, args } => self.system_task(*task, args),
         }
     }
 
@@ -1715,10 +1723,10 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// simulation with an error.
     fn system_task(
         &mut self,
-        name: &str,
+        task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
     ) -> Result<bool, sv::AnalyzerError> {
-        if readmem_destination(name, args).is_some() {
+        if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
             for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
                 let sv::ir::SystemTaskArg::Expr(expr) = arg else {
@@ -1727,7 +1735,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(expr);
                 let (value, width) = self
                     .eval_const(expr)?
-                    .ok_or_else(|| unsupported(format!("`{name}` address that is not constant")))?;
+                    .ok_or_else(|| unsupported(format!("`{task}` address that is not constant")))?;
                 let value = num_bigint::BigInt::from(value);
                 let value = if signed && width > 0 && value.bit(width as u64 - 1) {
                     value - (num_bigint::BigInt::from(1u8) << width)
@@ -1737,10 +1745,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 *slot = Some(
                     value
                         .to_i128()
-                        .ok_or_else(|| unsupported(format!("`{name}` address")))?,
+                        .ok_or_else(|| unsupported(format!("`{task}` address")))?,
                 );
             }
-            let (id, words) = self.m.readmem(name, args, addresses[0], addresses[1])?;
+            let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
             for word in words {
                 let width = word.access.msb - word.access.lsb + 1;
                 let reg = if word.mask.is_zero() {
@@ -1758,7 +1766,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(true);
         }
         let kind =
-            system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
+            system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         // A process ends the simulation itself; the rest of its body does not
         // run.
         if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
@@ -1767,7 +1775,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
-                return Err(unsupported(format!("condition of `{name}`")));
+                return Err(unsupported(format!("condition of `{task}`")));
             };
             Some(self.eval_truth(condition)?)
         } else {
@@ -1802,7 +1810,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Empty => {
-                    return Err(unsupported(format!("empty argument of `{name}`")));
+                    return Err(unsupported(format!("empty argument of `{task}`")));
                 }
             }
         }
@@ -1846,7 +1854,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if kind.is_fatal() {
             let code = self
                 .m
-                .runtime_error(template.unwrap_or_else(|| "$fatal".to_string()));
+                .runtime_error(template.unwrap_or_else(|| sv::ir::SystemTask::Fatal.to_string()));
             self.b.seal_block(SIRTerminator::Error(code));
             if resume.is_none() {
                 return Ok(false);
@@ -2742,8 +2750,8 @@ fn substitute_overlay_const(
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),
         },
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name: name.clone(),
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
             site: *site,
             args: args.iter().map(go).collect(),
         },
@@ -2833,12 +2841,12 @@ fn substitute_overlay(
             else_expr: Box::new(go(else_expr)),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => Expr::Call {
             arg_order: arg_order.clone(),
-            name: name.clone(),
+            callee: callee.clone(),
             args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {

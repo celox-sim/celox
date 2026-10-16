@@ -97,16 +97,21 @@ pub(super) fn expr_signedness_with_return_types(
             )?,
         ),
         Expr::Inside { .. } => Some(false),
-        Expr::Call { name, args, .. } => {
-            typecheck::bit_vector_function_return_type(name, args.len())
-                .map(|(_, signed)| signed)
-                .or_else(|| functions.get(name).map(|function| function.return_signed))
-                .or_else(|| {
-                    function_return_types
-                        .get(name)
-                        .map(|metadata| metadata.signed)
-                })
-        }
+        Expr::Call {
+            callee: Callee::System(function),
+            ..
+        } => function.result_type().map(|(_, signed)| signed),
+        Expr::Call {
+            callee: Callee::Subroutine(name),
+            ..
+        } => functions
+            .get(name)
+            .map(|function| function.return_signed)
+            .or_else(|| {
+                function_return_types
+                    .get(name)
+                    .map(|metadata| metadata.signed)
+            }),
     }
 }
 
@@ -114,8 +119,8 @@ pub(super) fn expr_signedness_with_return_types(
 pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
-            ConstExpr::Function { name, args, .. } => {
-                !system_functions::is_system_name(name) || args.iter().any(constant)
+            ConstExpr::Function { callee, args, .. } => {
+                callee.subroutine().is_some() || args.iter().any(constant)
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
                 constant(expr) || constant(msb) || constant(lsb)
@@ -132,8 +137,8 @@ pub(super) fn calls_subroutine(expr: &Expr) -> bool {
         }
     }
     match expr {
-        Expr::Call { name, args, .. } => {
-            !system_functions::is_system_name(name) || args.iter().flatten().any(calls_subroutine)
+        Expr::Call { callee, args, .. } => {
+            callee.subroutine().is_some() || args.iter().flatten().any(calls_subroutine)
         }
         Expr::Ident(_) | Expr::Literal(_) => false,
         Expr::Select { expr, msb, lsb, .. } => {
@@ -315,7 +320,7 @@ pub(super) fn expand_expr_calls(
                 .collect(),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => {
@@ -333,16 +338,16 @@ pub(super) fn expand_expr_calls(
                     })
                 })
                 .collect::<Vec<_>>();
-            let Some(function) = functions.get(&name) else {
+            let Some(function) = callee.subroutine().and_then(|name| functions.get(name)) else {
                 return Expr::Call {
-                    name,
+                    callee,
                     args,
                     arg_order,
                 };
             };
             let Some(function_body) = &function.body else {
                 return Expr::Call {
-                    name,
+                    callee,
                     args,
                     arg_order,
                 };
@@ -355,7 +360,7 @@ pub(super) fn expand_expr_calls(
                 || args.iter().flatten().any(calls_subroutine)
             {
                 return Expr::Call {
-                    name,
+                    callee,
                     args,
                     arg_order,
                 };
@@ -401,7 +406,7 @@ pub(super) fn expand_expr_calls(
             if calls_subroutine(&expanded) {
                 return Expr::Call {
                     arg_order,
-                    name,
+                    callee,
                     args: call_args,
                 };
             }
@@ -499,12 +504,12 @@ pub(super) fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) ->
                 .collect(),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => Expr::Call {
             arg_order: arg_order.clone(),
-            name,
+            callee,
             args: args
                 .into_iter()
                 .map(|arg| arg.map(|arg| substitute_expr_idents(arg, env)))

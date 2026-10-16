@@ -5,6 +5,9 @@ use crate::{ast, symbol::ModuleId, typecheck};
 pub use crate::procedural::{
     CaseKind, CaseLabel, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
 };
+pub use crate::system_functions::{
+    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
+};
 
 /// A procedural statement of the analyzed IR.
 pub type Stmt = StmtBase<Expr, LValue>;
@@ -666,7 +669,7 @@ pub enum ConstExpr {
         signed: bool,
     },
     Function {
-        name: String,
+        callee: Callee,
         args: Vec<ConstExpr>,
         /// Tells a user subroutine call apart from a call written alike: a
         /// select repeats its index in its bounds and range checks, and the
@@ -974,7 +977,7 @@ pub enum Expr {
         else_expr: Box<Expr>,
     },
     Call {
-        name: String,
+        callee: Callee,
         /// Missing actuals retain their formal slots for declaration-scope defaults.
         args: Vec<Option<Expr>>,
         /// Formal positions in source evaluation/copy-out order; empty means positional.
@@ -1049,8 +1052,8 @@ impl From<ast::ConstExpr> for ConstExpr {
                 lsb: Box::new((*lsb).into()),
                 signed,
             },
-            ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name,
+            ast::ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
@@ -1105,8 +1108,8 @@ impl From<ConstExpr> for ast::ConstExpr {
                 lsb: Box::new((*lsb).into()),
                 signed,
             },
-            ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
-                name,
+            ConstExpr::Function { callee, args, site } => ast::ConstExpr::Function {
+                callee,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
@@ -1309,12 +1312,12 @@ impl From<ast::Expr> for Expr {
                 else_expr: Box::new((*else_expr).into()),
             },
             ast::Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name,
+                callee,
                 args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
