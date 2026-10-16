@@ -545,3 +545,30 @@
     (assert_eq calls 1)
     (assert_eq literal_q 0)
     (assert_eq known_q 2)))
+
+; IEEE 1800-2023 9.4.2.1: each event in an OR list can trigger the body.
+(case reset_first_edge_lists_preserve_sequential_behavior
+  (source "reset_first_sequential.sv" #"
+    module Top(input logic clk, rst_n, input logic [7:0] d,
+      output logic [7:0] reset_first, clock_first, by_case, by_mux, explicit_ff);
+      always @(negedge rst_n or posedge clk)
+        if (!rst_n) reset_first <= 0; else reset_first <= d;
+      always @(posedge clk or negedge rst_n)
+        if (!rst_n) clock_first <= 0; else clock_first <= d;
+      always @(negedge rst_n or posedge clk)
+        case (rst_n) 0: by_case <= 0; default: by_case <= d; endcase
+      always @(negedge rst_n or posedge clk) by_mux <= rst_n ? d : 0;
+      always_ff @(negedge rst_n or posedge clk)
+        if (!rst_n) explicit_ff <= 0; else explicit_ff <= d;
+    endmodule
+  "#)
+  (top Top)
+  (for data (list 0x5a 0xa5 0xff)
+    (modify (set rst_n 1) (set d data))
+    (tick clk)
+    (expand signal (reset_first clock_first by_case by_mux explicit_ff)
+      (assert_eq {signal} data))
+    (modify (set rst_n 0))
+    (tick rst_n)
+    (expand signal (reset_first clock_first by_case by_mux explicit_ff)
+      (assert_eq {signal} 0))))

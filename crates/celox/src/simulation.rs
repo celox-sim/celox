@@ -429,9 +429,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
         } else if was_dirty && !self.simulator.dirty && !self.state.is_finished() {
-            self.state
-                .sample_waiting_events(&mut self.simulator)
-                .unwrap();
+            self.state.probe_waiting(&mut self.simulator).unwrap();
             self.state.capture_host_edges(&self.simulator.backend);
         }
     }
@@ -647,7 +645,7 @@ impl<B: SimBackend> Simulation<B> {
         if self.simulator.has_pending_runtime_finish() {
             self.state.finish();
         }
-        self.state.sample_waiting_events(&mut self.simulator)?;
+        self.state.probe_waiting(&mut self.simulator)?;
         self.state.capture_host_edges(&self.simulator.backend);
         self.pending_host_work = false;
         Ok(())
@@ -4619,6 +4617,99 @@ mod pr1158_merge_regressions {
         }
         backends!(
             "module Top(input bit a,output bit q);assign q=a;endmodule",
+            check
+        );
+    }
+    #[test]
+    fn settled_level_waits_remain_visible_until_polled() {
+        fn settle<B: SimBackend>(sim: &mut Simulation<B>, mode: usize, eager: bool) {
+            match mode {
+                0 => sim.eval_comb().unwrap(),
+                1 => {
+                    sim.get(sim.signal("q"));
+                }
+                2 => {
+                    sim.drain_runtime_events();
+                }
+                3 => sim.try_dump(0).unwrap(),
+                _ if !eager => sim.eval_comb().unwrap(),
+                _ => {}
+            }
+        }
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            let clean = sim.checkpoint().unwrap();
+            let go = sim.signal("go");
+            let q = sim.signal("q");
+            for mode in 0..5 {
+                sim.restore(&clean).unwrap();
+                let drain = if mode == 4 {
+                    sim.simulator.runtime_event_drain()
+                } else {
+                    None
+                };
+                let eager = drain.is_some();
+                sim.modify(|io| io.set(go, 1u8)).unwrap();
+                settle(&mut sim, mode, eager);
+                for _ in 0..2 {
+                    assert_eq!(sim.next_event_time(), Some(0), "settle mode {mode}");
+                    assert_eq!(sim.simulator.backend.get(q), 0u8.into());
+                }
+                let ready = sim.checkpoint().unwrap();
+                assert_eq!(sim.step_until(0).unwrap(), Some(0));
+                assert_eq!(sim.get(q), 1u8.into());
+                assert_eq!(sim.next_event_time(), None);
+                sim.restore(&ready).unwrap();
+                assert_eq!(sim.next_event_time(), Some(0));
+                assert_eq!(sim.step().unwrap(), Some(0));
+                assert_eq!(sim.get(q), 1u8.into());
+                sim.restore(&clean).unwrap();
+                // A level wait is rechecked: a settled transient must not latch.
+                sim.modify(|io| io.set(go, 1u8)).unwrap();
+                settle(&mut sim, mode, eager);
+                assert_eq!(sim.next_event_time(), Some(0));
+                sim.modify(|io| io.set(go, 0u8)).unwrap();
+                settle(&mut sim, mode, eager);
+                assert_eq!(sim.next_event_time(), None);
+                assert_eq!(sim.step().unwrap(), None);
+                assert_eq!(sim.get(q), 0u8.into());
+                drop(drain);
+            }
+        }
+        backends!(
+            "module Top(input bit go,output bit[7:0]q);initial forever begin wait(go);q++;wait(!go);end endmodule",
+            check
+        );
+    }
+    #[test]
+    fn reset_first_plain_always_preserves_clock_and_async_reset_roles() {
+        fn check<B: SimBackend>(mut sim: Simulation<B>) {
+            sim.run_until(0).unwrap();
+            assert!(!sim.has_processes());
+            let clk = sim.signal("clk");
+            let rst_n = sim.signal("rst_n");
+            let d = sim.signal("d");
+            let q = sim.signal("q");
+            for (clock, reset, data, expected) in [
+                (0u8, 1u8, 0x5au8, 0u8),
+                (1, 1, 0x5a, 0x5a),
+                (0, 1, 0x5a, 0x5a),
+                (0, 0, 0x5a, 0),
+                (0, 1, 0xa5, 0),
+                (1, 1, 0xa5, 0xa5),
+            ] {
+                sim.modify(|io| {
+                    io.set(clk, clock);
+                    io.set(rst_n, reset);
+                    io.set(d, data);
+                })
+                .unwrap();
+                sim.run_until(0).unwrap();
+                assert_eq!(sim.get(q), expected.into());
+            }
+        }
+        backends!(
+            "module Top(input bit clk,rst_n,input bit[7:0]d,output bit[7:0]q);always @(negedge rst_n or posedge clk)if(!rst_n)q<=0;else q<=d;endmodule",
             check
         );
     }

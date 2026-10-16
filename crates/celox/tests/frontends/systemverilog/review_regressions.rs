@@ -94,6 +94,10 @@ fn rejects_self_reads_hidden_in_comb_function_calls() {
 }
 
 sv_backends! {
+    fn reset_first_edge_lists_preserve_sequential_behavior(sim) {
+        @case "procedural::reset_first_edge_lists_preserve_sequential_behavior";
+    }
+
     fn repeat_signed_counts_with_unknown_bits_skip_the_body(sim) {
         @case "procedural::repeat_signed_counts_with_unknown_bits_skip_the_body";
     }
@@ -2049,14 +2053,13 @@ fn rejects_ambiguous_multi_event_always_ff_roles() {
     for source in [
         r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
-            always_ff @(posedge rst or posedge clk)
-                if (rst) q <= 1'b0; else q <= d;
+            always_ff @(posedge rst or posedge clk) q <= d;
         endmodule
         "#,
         r#"
         module Top(input logic clk, input logic rst_n, input logic d, output logic q);
             always_ff @(posedge clk or negedge rst_n)
-                if (clk) q <= d; else q <= 1'b0;
+                if (clk && rst_n) q <= d; else q <= 1'b0;
         endmodule
         "#,
     ] {

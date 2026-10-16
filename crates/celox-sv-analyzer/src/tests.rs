@@ -2679,6 +2679,40 @@ fn records_always_ff_case_branches() {
 }
 
 #[test]
+fn sequential_reset_classification_is_independent_of_event_order() {
+    for keyword in ["always", "always_ff"] {
+        for clock in ["posedge", "negedge"] {
+            for reset in ["posedge", "negedge"] {
+                let active = if reset == "posedge" { "rst" } else { "!rst" };
+                for reset_first in [false, true] {
+                    let events = if reset_first {
+                        format!("{reset} rst or {clock} clk")
+                    } else {
+                        format!("{clock} clk or {reset} rst")
+                    };
+                    for body in [
+                        format!("if({active})q<=0;else q<=d;"),
+                        format!("q<=({active})?0:d;"),
+                        format!("case({active})1:q<=0;default:q<=d;endcase"),
+                    ] {
+                        let source = format!(
+                            "module Top(input logic clk,rst,d,output logic q);{keyword} @({events}) {body} endmodule"
+                        );
+                        let ir =
+                            analyze_source(&source, Path::new("reset-event-order.sv")).unwrap();
+                        assert_eq!(ir.modules()[0].ff_processes().len(), 1, "{source}");
+                        assert!(ir.modules()[0].initial_processes().is_empty(), "{source}");
+                    }
+                }
+            }
+        }
+    }
+    let ir = analyze_source("module Top(input logic a,b,d,output logic q);always @(posedge a or posedge b) q=d;endmodule", Path::new("independent-events.sv")).unwrap();
+    assert!(ir.modules()[0].ff_processes().is_empty());
+    assert_eq!(ir.modules()[0].initial_processes().len(), 1);
+}
+
+#[test]
 fn always_blocks_with_timing_controls_are_processes() {
     let ir = analyze_source(
         r#"

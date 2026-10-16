@@ -7153,16 +7153,15 @@ fn insert_or_merge_ff_unit(
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
-    let clock = process.events().first()?;
     if process.events().len() == 1 {
-        return Some(clock);
+        return process.events().first();
     }
-
-    (!ff_event_used_as_condition(process, clock)
-        && process.events()[1..]
-            .iter()
-            .all(|event| ff_event_used_as_condition(process, event)))
-    .then_some(clock)
+    let mut clocks = process
+        .events()
+        .iter()
+        .filter(|event| !ff_event_used_as_condition(process, event));
+    let clock = clocks.next()?;
+    clocks.next().is_none().then_some(clock)
 }
 
 fn ff_event_used_as_condition(process: &sv::ir::FfProcess, event: &sv::ir::FfEvent) -> bool {

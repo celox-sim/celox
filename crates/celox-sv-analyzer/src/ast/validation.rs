@@ -109,12 +109,13 @@ pub(super) fn always_kind(
                                             }
                                         }
                                     }
-                                    events.first().is_some_and(|clock| {
-                                        !conditions.contains(clock.signal())
-                                            && events[1..]
-                                                .iter()
-                                                .all(|event| conditions.contains(event.signal()))
-                                    })
+                                    // Clock/reset roles come from the body, not
+                                    // the order of alternatives in the event OR.
+                                    events
+                                        .iter()
+                                        .filter(|event| !conditions.contains(event.signal()))
+                                        .count()
+                                        == 1
                                 });
                         if !edge_sensitive
                             || !supported
