@@ -5,16 +5,18 @@ name: lydite
 # linted by ci.yml; this workflow owns Lydite tests and conformance gates.
 
 on:
-  # Select affected lanes on changes; run every lane weekly and on demand.
+  # PRs select affected lanes; the heavy bridge runs on PRs only for Lydite-owned
+  # changes. Daily and manual runs enable every lane and report failures.
   pull_request:
   merge_group:
   schedule:
-    - cron: "41 3 * * 1"
+    - cron: "41 3 * * *"
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push must not cancel the daily full run halfway through its corpus.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'changes' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -129,31 +131,8 @@ jobs:
         timeout-minutes: 5
         run: xvfb-run -a npm test --prefix editor/vscode
 
-  # celox-replay and veryl-proof use the in-tree Celox; the narrow veryl gate
-  # checks lydite's own Veryl lowering against a pinned upstream corpus.
-  celox-replay:
-    needs: changes
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.bridge == 'true')
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          components: rustfmt
-      - name: Reproduce source violations and AXI4-Lite protocol regressions with Celox
-        run: ./conformance/axi4lite/run_ci.sh "$RUNNER_TEMP/celox-replay"
-      - name: Upload complete replay evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: celox-replay-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/celox-replay/
-          if-no-files-found: error
-          retention-days: 14
-
+  # The narrow veryl gate checks lydite's own Veryl lowering against a pinned
+  # upstream corpus.
   veryl-fv:
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.core == 'true')
@@ -181,12 +160,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  veryl-proof-corpus:
+  # The bridge lanes use the in-tree Celox and share one release build.
+  bridge:
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.bridge == 'true')
     runs-on: ubuntu-26.04
-    # Cold builds plus the sequential proof/mutation gates can exceed one hour.
-    timeout-minutes: 120
+    # Cold builds plus replay and the sequential proof/mutation gates.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
         with:
@@ -194,29 +174,50 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      - name: Reproduce source violations and AXI4-Lite protocol regressions with Celox
+        run: ./conformance/axi4lite/run_ci.sh "$RUNNER_TEMP/celox-replay"
+      - name: Upload complete replay evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: celox-replay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/celox-replay/
+          if-no-files-found: error
+          retention-days: 14
+
+      # Keep collecting proof evidence after a replay failure.
       # The conformance gates are pinned to Python 3.12.
       - uses: actions/setup-python@v7
+        if: ${{ !cancelled() }}
         with:
           python-version: "3.12"
       - name: Run every reusable suite case with proof-backed reads
+        if: ${{ !cancelled() }}
         run: ./conformance/veryl-proof/run_ci.sh "$RUNNER_TEMP/veryl-proof"
       - name: Verify symbolic Veryl pipeline against ISA and reject RTL mutants
+        if: ${{ !cancelled() }}
         run: ./conformance/veryl-symbolic/run_ci.sh "$RUNNER_TEMP/veryl-symbolic"
       - name: Verify typed lemma candidates and proof-use diagnostics
+        if: ${{ !cancelled() }}
         run: python3 -m audit.lemma_candidates.ci --out "$RUNNER_TEMP/lemma-candidates"
       - name: Verify selected RV32I architecture, memory, latency and mutations
+        if: ${{ !cancelled() }}
         run: ./conformance/veryl-symbolic/run_rv32i_ci.sh "$RUNNER_TEMP/selected-rv32i"
       - name: Verify fixed automatic-proof held-outs and original-formula mutants
+        if: ${{ !cancelled() }}
         run: ./conformance/veryl-symbolic/run_automatic_ci.sh "$RUNNER_TEMP/automatic-proof"
       - name: Verify checked equality sharing and retain explicit Unknown diagnostics
+        if: ${{ !cancelled() }}
         run: |
           python3 -m unittest audit.equality_sharing.test_generate audit.equality_sharing.test_evidence audit.equality_sharing.test_ci
           python3 -m audit.equality_sharing.ci --checker ../target/release/lydite --out "$RUNNER_TEMP/equality-sharing"
       - name: Verify whole-word frontier controls and original-formula mutants
+        if: ${{ !cancelled() }}
         run: |
           python3 -m unittest audit.word_frontier.test_generate audit.word_frontier.test_ci
           python3 -m audit.word_frontier.ci --checker ../target/release/lydite --expected-checker-sha256 "$(sha256sum ../target/release/lydite | cut -d' ' -f1)" --out "$RUNNER_TEMP/word-frontier"
       - name: Verify guarded word expansion and reject escaped guards
+        if: ${{ !cancelled() }}
         run: |
           cargo test --release --locked -p lydite-solver equality_sharing::tests
           python3 -m unittest audit.guarded_expansion.test_generate audit.guarded_expansion.test_ci
@@ -240,7 +241,7 @@ jobs:
 
   result:
     name: Lydite checks
-    needs: [changes, rust, documentation, editor, celox-replay, veryl-fv, veryl-proof-corpus]
+    needs: [changes, rust, documentation, editor, veryl-fv, bridge]
     if: always()
     runs-on: ubuntu-26.04
     defaults:
@@ -256,8 +257,36 @@ jobs:
           needs = json.loads(os.environ["NEEDS"])
           assert needs["changes"]["result"] == "success", needs
           assert all(needs["changes"]["outputs"].get(key) in ("true", "false") for key in ("core", "bridge")), needs
-          for job, lane in {"rust": None, "documentation": "core", "editor": "core", "celox-replay": "bridge", "veryl-fv": "core", "veryl-proof-corpus": "bridge"}.items():
+          for job, lane in {"rust": None, "documentation": "core", "editor": "core", "veryl-fv": "core", "bridge": "bridge"}.items():
               outputs = needs["changes"]["outputs"]
               selected = outputs.get(lane) == "true" if lane else any(outputs.get(key) == "true" for key in ("core", "bridge"))
               assert needs[job]["result"] == ("success" if selected else "skipped"), (job, needs[job])
           PYCODE
+
+  # Report daily/manual runs; the bridge does not gate Celox PRs.
+  report:
+    name: Report Lydite validation
+    needs: [changes, rust, documentation, editor, veryl-fv, bridge, result]
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'master' || github.ref_name == 'develop') }}
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      issues: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      - name: Open, update, or close the Lydite issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_NAME: Lydite validation
+        run: node scripts/report-full-ci.mjs
