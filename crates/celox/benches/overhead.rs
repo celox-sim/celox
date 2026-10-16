@@ -48,6 +48,46 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
         });
     }
 
+    // Benchmark 1b/1c: Simulator::tick with a derived clock domain: a gated
+    // clock (`clk & en`) and a register-driven divider.
+    for (name, derived) in [
+        (
+            "simulator_tick_gated_x10000",
+            "let gated: '_ clock = clk & en; always_ff (gated) { extra += 1; }",
+        ),
+        (
+            "simulator_tick_divided_x10000",
+            "var half: logic; always_ff (clk) { half = ~half; }
+             let divided: '_ clock = half; always_ff (divided) { extra += 1; }",
+        ),
+    ] {
+        let code = CODE.replace(
+            "cnt: output logic<32>[N],\n    ) {",
+            &format!(
+                "cnt: output logic<32>[N],\n        en: input logic,\n        extra: output logic<32>,\n    ) {{\n        {derived}"
+            ),
+        );
+        let mut sim = Simulator::builder(&code, "Top").build().unwrap();
+        let clk = sim.event("clk");
+        let rst = sim.signal("rst");
+        let en = sim.signal("en");
+        sim.modify(|io| {
+            io.set(rst, 0u8);
+            io.set(en, 1u8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                for _ in 0..10000 {
+                    sim.tick(clk).unwrap();
+                }
+            })
+        });
+    }
+
     // Benchmark 2: Simulation::step
     {
         let mut sim = Simulation::builder(CODE, "Top").build().unwrap();
