@@ -487,3 +487,17 @@ test("version-only Release Please PRs defer product tests to queue validation", 
   assert.deepEqual(classifyFiles(releasePullRequestFiles, { releasePlease: true }), none);
   assert.equal(classifyFiles([...releasePullRequestFiles, "crates/celox/src/lib.rs"], { releasePlease: true }).rust, true);
 });
+
+test("queue configuration runs script checks without rebuilding the product", () => {
+  assert.deepEqual(classifyFiles([".mergify.yml"]), { ...none, scripts: true });
+  assert.deepEqual(classifyFiles([".mergify.yml", "CONTRIBUTING.md"]), {
+    ...none,
+    scripts: true,
+    docs: true,
+  });
+  assert.deepEqual(classifyFiles([".mergify.yml", "Cargo.lock"]), {
+    ...all,
+    docs: false,
+  });
+  assert.deepEqual(classifyFiles([".mergify.yml", "unknown/new-source"]), all);
+});
