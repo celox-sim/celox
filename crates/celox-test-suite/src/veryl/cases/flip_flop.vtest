@@ -3012,3 +3012,276 @@
       (set col j))
     (tick clk)
     (assert_eq out_q expected)))
+
+(case test_ff_register_bit_clock_follows_the_selected_bit
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            cnt1: output logic<8>,
+            bit0_count: output logic<8>,
+            bit1_count: output logic<8>
+        ) {
+            var a: logic<8>;
+            var b0: logic<8>;
+            var b1: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; } else { a = a + 8'd1; }
+            }
+            let bit0: '_ clock = a[0];
+            let bit1: '_ clock = a[1];
+            always_ff (bit0, rst) {
+                if_reset { b0 = 0; } else { b0 = b0 + 8'd1; }
+            }
+            always_ff (bit1, rst) {
+                if_reset { b1 = 0; } else { b1 = b1 + 8'd1; }
+            }
+            assign cnt1 = a;
+            assign bit0_count = b0;
+            assign bit1_count = b1;
+        }
+    "#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; a[0] rises at a = 1, 3, 5, ...; a[1] at a = 2, 6, 10, ...
+  (for edge (range 1 13)
+    (tick clk)
+    (assert_eq cnt1 edge)
+    (assert_eq bit0_count (/ (+ edge 1) 2) "a[0] rising edges")
+    (assert_eq bit1_count (/ (+ edge 2) 4) "a[1] rising edges")))
+
+(case test_ff_register_bit_clock_ignores_other_bits
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            cnt1: output logic<8>,
+            cnt2: output logic<8>
+        ) {
+            var a: logic<8>;
+            var b: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; } else { a = a + 8'd2; }
+            }
+            let divided: '_ clock = a[0];
+            always_ff (divided, rst) {
+                if_reset { b = 0; } else { b = b + 8'd1; }
+            }
+            assign cnt1 = a;
+            assign cnt2 = b;
+        }
+    "#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; a leaves zero but a[0] never rises.
+  (for edge (range 1 7)
+    (tick clk)
+    (assert_eq cnt1 (* 2 edge))
+    (assert_eq cnt2 0 "a[0] stays low")))
+
+(case test_ff_divider_of_a_divider
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            cnt2: output logic<8>
+        ) {
+            var half: logic;
+            var quarter: logic;
+            var b: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { half = 0; } else { half = ~half; }
+            }
+            let half_clk: '_ clock = half;
+            always_ff (half_clk, rst) {
+                if_reset { quarter = 0; } else { quarter = ~quarter; }
+            }
+            let quarter_clk: '_ clock = quarter;
+            always_ff (quarter_clk, rst) {
+                if_reset { b = 0; } else { b = b + 8'd1; }
+            }
+            assign cnt2 = b;
+        }
+    "#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; quarter rises on clk edges 1, 5, 9.
+  (for edge (range 1 13)
+    (tick clk)
+    (assert_eq cnt2 (/ (+ edge 3) 4))))
+
+(case test_ff_gated_clock_follows_its_enable
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            en: input logic,
+            cnt1: output logic<8>,
+            cnt2: output logic<8>
+        ) {
+            var a: logic<8>;
+            var b: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; } else { a = a + 8'd1; }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset { b = 0; } else { b = b + 8'd1; }
+            }
+            assign cnt1 = a;
+            assign cnt2 = b;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set en 0))
+  (tick clk)
+  (modify (set rst 1))
+  (let count 0)
+  (for (edge enable) (list (1 1) (2 1) (3 0) (4 0) (5 1) (6 0) (7 1) (8 1))
+    (modify (set en enable))
+    (tick clk)
+    (set! count (+ count enable))
+    (assert_eq cnt1 edge)
+    (assert_eq cnt2 count "a closed gate passes no edge")))
+
+(case test_ff_gated_clock_samples_pre_edge_state
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            en: input logic,
+            cnt1: output logic<8>,
+            sampled: output logic<8>
+        ) {
+            var a: logic<8>;
+            var b: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; } else { a = a + 8'd1; }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset { b = 0; } else { b = a; }
+            }
+            assign cnt1 = a;
+            assign sampled = b;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set en 0))
+  (tick clk)
+  (modify (set rst 1))
+  (let last 0)
+  ; The gated domain shares the edge of `clk`: it reads `a` before `clk`'s
+  ; domain commits.
+  (for (edge enable) (list (1 1) (2 0) (3 1) (4 1) (5 0) (6 1))
+    (modify (set en enable))
+    (tick clk)
+    (if enable (set! last (- edge 1)))
+    (assert_eq cnt1 edge)
+    (assert_eq sampled last "gated domain samples the pre-edge counter")))
+
+(case test_ff_register_gated_clock_uses_the_pre_edge_enable
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            en_in: input logic,
+            cnt1: output logic<8>,
+            sampled: output logic<8>,
+            fired: output logic<8>
+        ) {
+            var a: logic<8>;
+            var en: logic;
+            var b: logic<8>;
+            var c: logic<8>;
+            always_ff (clk, rst) {
+                if_reset {
+                    a = 0;
+                    en = 1;
+                } else {
+                    a = a + 8'd1;
+                    en = en_in;
+                }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset {
+                    b = 0;
+                    c = 0;
+                } else {
+                    b = a;
+                    c = c + 8'd1;
+                }
+            }
+            assign cnt1 = a;
+            assign sampled = b;
+            assign fired = c;
+        }
+    "#)
+  (top Top)
+  (modify
+    (set rst 0)
+    (set en_in 1))
+  (tick clk)
+  (modify (set rst 1))
+  ; `en` is a register of `clk`'s own domain. Each edge is gated by the
+  ; enable from before it, so the edge that clears `en` still passes, and
+  ; the gated domain reads `a` before `clk`'s domain commits. The enable
+  ; only falls here: a rising enable register makes `clk & en` rise after
+  ; the commit, which SystemVerilog schedulers report as a separate edge.
+  (let gate 1)
+  (let last 0)
+  (let count 0)
+  (for (edge enable) (list (1 1) (2 1) (3 0) (4 0) (5 0))
+    (modify (set en_in enable))
+    (tick clk)
+    (if gate
+      (do
+        (set! last (- edge 1))
+        (set! count (+ count 1))))
+    (set! gate enable)
+    (assert_eq cnt1 edge)
+    (assert_eq sampled last "gated domain samples the pre-edge counter")
+    (assert_eq fired count "the edge is gated by the pre-edge enable")))
+
+(case test_ff_inverted_clock_samples_after_the_rising_edge
+  (source "test.veryl" #"
+        module Top (
+            clk: input '_ clock,
+            rst: input '_ reset_async_low,
+            cnt1: output logic<8>,
+            sampled: output logic<8>
+        ) {
+            var a: logic<8>;
+            var b: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; } else { a = a + 8'd1; }
+            }
+            let inverted: '_ clock = ~clk;
+            always_ff (inverted, rst) {
+                if_reset { b = 0; } else { b = a; }
+            }
+            assign cnt1 = a;
+            assign sampled = b;
+        }
+    "#)
+  (top Top)
+  (modify (set rst 0))
+  (tick clk)
+  (modify (set rst 1))
+  ; A tick is one clock cycle: `inverted` rises when `clk` returns low, after
+  ; `clk`'s domain has committed.
+  (for edge (range 1 6)
+    (tick clk)
+    (assert_eq cnt1 edge)
+    (assert_eq sampled edge "the falling half of the cycle sees the new counter")))

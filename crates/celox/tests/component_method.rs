@@ -2828,7 +2828,9 @@ fn split_derived_event_stages_component_inputs_with_canonical_event() {
                 q,
             );
             initial {
-                clk.next();
+                // `div_clk` is judged at the clock edge from the state before
+                // it: the first edge opens the gate, the second passes.
+                clk.next(2);
                 $assert(q == 1, "derived component observed committed input: %d", q);
                 $finish();
             }

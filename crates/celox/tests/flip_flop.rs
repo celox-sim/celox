@@ -5344,3 +5344,39 @@ fn test_benchmark_loop_sir() {
     let output = trace.format_program().unwrap();
     assert_snapshot!("benchmark_loop_sir", output);
 }
+
+all_backends! {
+
+fn test_ff_register_bit_clock_follows_the_selected_bit(sim) {
+    @case "flip_flop::test_ff_register_bit_clock_follows_the_selected_bit";
+}
+
+fn test_ff_register_bit_clock_ignores_other_bits(sim) {
+    @case "flip_flop::test_ff_register_bit_clock_ignores_other_bits";
+}
+
+fn test_ff_divider_of_a_divider(sim) {
+    @case "flip_flop::test_ff_divider_of_a_divider";
+}
+
+fn test_ff_gated_clock_follows_its_enable(sim) {
+    @case "flip_flop::test_ff_gated_clock_follows_its_enable";
+}
+
+}
+
+all_backends! {
+
+fn test_ff_gated_clock_samples_pre_edge_state(sim) {
+    @case "flip_flop::test_ff_gated_clock_samples_pre_edge_state";
+}
+
+fn test_ff_register_gated_clock_uses_the_pre_edge_enable(sim) {
+    @case "flip_flop::test_ff_register_gated_clock_uses_the_pre_edge_enable";
+}
+
+fn test_ff_inverted_clock_samples_after_the_rising_edge(sim) {
+    @case "flip_flop::test_ff_inverted_clock_samples_after_the_rising_edge";
+}
+
+}

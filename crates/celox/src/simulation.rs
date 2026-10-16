@@ -88,6 +88,10 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.eval_only_ff_at_checked(event)
     }
 
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        self.eval_comb_apply_ff_at_checked(event)
+    }
+
     fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
         self.apply_ff_at_checked(event)
     }
@@ -250,13 +254,33 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         })
         .collect();
 
-    SimulationState::new(
+    let mut state = SimulationState::new(
         &simulator.backend,
         topo_signals,
         domain_kinds,
         event_info,
         processes,
-    )
+    );
+    let events = &simulator.program.design.events;
+    if !events.combinational_derived.is_empty() {
+        let derived = simulator
+            .backend
+            .id_to_addr_slice()
+            .iter()
+            .map(|address| {
+                events
+                    .combinational_derived
+                    .get(&events.canonical(*address))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|derived| simulator.backend.resolve_event_opt(&derived.clock))
+                    .map(|event| event.id())
+                    .collect()
+            })
+            .collect();
+        state.set_combinational_derived(derived);
+    }
+    state
 }
 
 impl<B: SimBackend> Simulation<B> {
@@ -840,6 +864,179 @@ mod process_tests {
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
                 ))]
                 check(build().build_native().unwrap(), step, bit);
+            }
+        }
+    }
+
+    /// Clocks computed from `clk` share its edge: `clk & en` is gated by the
+    /// enable from before the edge (here a register of `clk`'s own domain)
+    /// and its domain reads the state from before `clk`'s domain commits,
+    /// while `~clk` rises on the return of `clk`. Timed steps and
+    /// event-based ticks agree on every backend, in both state modes; the
+    /// four-state ticks judge the gate by settling the design.
+    #[test]
+    fn gated_clocks_share_their_source_edge_on_every_backend() {
+        const CODE: &str = "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
+                en_in: input logic, cnt1: output logic<8>, sampled: output logic<8>,
+                fired: output logic<8>, inverted_sampled: output logic<8>) {
+            var a: logic<8>;
+            var en: logic;
+            var b: logic<8>;
+            var c: logic<8>;
+            var d: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; en = 1; } else { a = a + 8'd1; en = en_in; }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset { b = 0; c = 0; } else { b = a; c = c + 8'd1; }
+            }
+            let inverted: '_ clock = ~clk;
+            always_ff (inverted, rst) { if_reset { d = 0; } else { d = a; } }
+            assign cnt1 = a;
+            assign sampled = b;
+            assign fired = c;
+            assign inverted_sampled = d;
+        }";
+        const ENABLES: [u8; 8] = [1, 1, 0, 0, 1, 1, 0, 1];
+        fn expected() -> Vec<[u64; 4]> {
+            let (mut gate, mut sampled, mut fired) = (1, 0, 0);
+            ENABLES
+                .iter()
+                .zip(1u64..)
+                .map(|(&enable, edge)| {
+                    if gate == 1 {
+                        sampled = edge - 1;
+                        fired += 1;
+                    }
+                    gate = enable;
+                    [edge, sampled, fired, edge]
+                })
+                .collect()
+        }
+        fn observe<B: crate::SimBackend>(sim: &mut crate::Simulator<B>) -> [u64; 4] {
+            ["cnt1", "sampled", "fired", "inverted_sampled"].map(|name| {
+                let signal = sim.signal(name);
+                sim.get(signal).try_into().unwrap()
+            })
+        }
+        fn timed<B: crate::SimBackend>(backend: crate::Simulator<B>) -> Vec<[u64; 4]> {
+            let mut sim = Simulation::new(backend);
+            let en_in = sim.signal("en_in");
+            // Assert the reset with an edge, then release it.
+            for (port, time, value) in [("rst", 0, 1), ("clk", 0, 0), ("rst", 2, 0), ("rst", 5, 1)]
+            {
+                sim.schedule(port, time, value).unwrap();
+                sim.step().unwrap();
+            }
+            ENABLES
+                .iter()
+                .zip(1u64..)
+                .map(|(&enable, edge)| {
+                    sim.modify(|io| io.set(en_in, enable)).unwrap();
+                    sim.schedule("clk", edge * 20 - 10, 1).unwrap();
+                    sim.step().unwrap();
+                    sim.schedule("clk", edge * 20, 0).unwrap();
+                    sim.step().unwrap();
+                    observe(&mut sim.simulator)
+                })
+                .collect()
+        }
+        fn ticked<B: crate::SimBackend>(mut sim: crate::Simulator<B>) -> Vec<[u64; 4]> {
+            let clk = sim.event("clk");
+            let (rst, en_in) = (sim.signal("rst"), sim.signal("en_in"));
+            sim.modify(|io| io.set(rst, 0u8)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.modify(|io| io.set(rst, 1u8)).unwrap();
+            ENABLES
+                .iter()
+                .map(|&enable| {
+                    sim.modify(|io| io.set(en_in, enable)).unwrap();
+                    let clk_before = sim.get_four_state(sim.signal("clk"));
+                    sim.tick(clk).unwrap();
+                    let observed = observe(&mut sim);
+                    assert_eq!(
+                        sim.get_four_state(sim.signal("clk")),
+                        clk_before,
+                        "a tick leaves clk as it was"
+                    );
+                    observed
+                })
+                .collect()
+        }
+        let want = expected();
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::builder(CODE, "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            let context = |mode: &str| format!("{mode}, four_state={four_state}");
+            assert_eq!(
+                timed(build().build_interpreter().unwrap()),
+                want,
+                "{}",
+                context("interp timed")
+            );
+            assert_eq!(
+                ticked(build().build_interpreter().unwrap()),
+                want,
+                "{}",
+                context("interp tick")
+            );
+            assert_eq!(
+                timed(build().build_cranelift().unwrap()),
+                want,
+                "{}",
+                context("cranelift timed")
+            );
+            assert_eq!(
+                ticked(build().build_cranelift().unwrap()),
+                want,
+                "{}",
+                context("cranelift tick")
+            );
+            assert_eq!(
+                timed(build().build_wasm().unwrap()),
+                want,
+                "{}",
+                context("wasm timed")
+            );
+            assert_eq!(
+                ticked(build().build_wasm().unwrap()),
+                want,
+                "{}",
+                context("wasm tick")
+            );
+            assert_eq!(
+                timed(build().build_tiered().unwrap()),
+                want,
+                "{}",
+                context("tiered timed")
+            );
+            assert_eq!(
+                ticked(build().build_tiered().unwrap()),
+                want,
+                "{}",
+                context("tiered tick")
+            );
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                assert_eq!(
+                    timed(build().build_native().unwrap()),
+                    want,
+                    "{}",
+                    context("native timed")
+                );
+                assert_eq!(
+                    ticked(build().build_native().unwrap()),
+                    want,
+                    "{}",
+                    context("native tick")
+                );
             }
         }
     }

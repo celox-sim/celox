@@ -53,6 +53,9 @@ module Reg (
 - `Simulator.create(Module)` creates a simulator instance from a Veryl module definition.
 - Signal values are read and written via `sim.dut.<port>`.
 - `sim.tick()` advances the simulation by one clock cycle.
+  Clock domains derived from that clock run in the same tick when their clock
+  rises: a gated `clk & en` together with `clk`'s own domain, a
+  register-driven divider after it.
 - `sim.dispose()` frees the native resources.
 
 ::: tip Combinational logic
