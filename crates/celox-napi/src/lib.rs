@@ -1909,6 +1909,18 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Advance until `end_time` taking at most `max_steps` steps. Returns
+    /// false, at the time of the last step, when the steps ran out first.
+    #[napi]
+    pub fn run_until_bounded(&mut self, end_time: f64, max_steps: f64) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.run_until_bounded(end_time as u64, max_steps as u64)
+            .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
     /// Advance to the next event. Returns the new time, or null if no events.
     #[napi]
     pub fn step(&mut self) -> Result<Option<f64>> {

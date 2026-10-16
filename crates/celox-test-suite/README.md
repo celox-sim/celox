@@ -268,6 +268,15 @@ after the first `run_until`, or generate it in the design. For the same
 reason the design does not call `$finish` at time zero, and the target of the
 first `run_until` does not read the design.
 
+Within a time slot the standard orders regions, not processes (IEEE 1800-2023
+4.5): a process woken by `@(posedge clk)` runs in the active region of that
+edge, before the edge's nonblocking assignments publish, so it reads flip-flop
+outputs from before the edge. Its blocking writes, however, race with the
+flip-flops that the same edge triggers. A shared case must not depend on that
+race: a process that drives a flip-flop input at the edge uses a nonblocking
+assignment or a delay, and a check of the race's outcome belongs to no
+shared case.
+
 After that, reads, output collection and `eval` settle processes due at the
 current timestamp without advancing time. External scripted adapters use an
 Icarus read/write synchronization callback or a Verilator clocking event

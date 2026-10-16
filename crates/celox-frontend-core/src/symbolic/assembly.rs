@@ -9,11 +9,11 @@ use crate::{
     SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
-    BitAccess, CombDerivedClock, DomainKind, ElaboratedDesign, EventTopology, ExternFunction,
-    GateOp, InitialStateValue, InstanceId, ModuleId, ProcessSlots, RegionedAbsoluteAddrBase,
-    RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
-    VariableMetadata,
+    BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
+    EventTopology, EventWatch, ExternFunction, GateOp, InitialStateValue, InstanceId, ModuleId,
+    NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
+    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -645,7 +645,7 @@ pub fn schedule_symbolic_rtl(
         runtime_event_sites,
         extern_functions,
         next_runtime_error_code,
-        processes,
+        mut processes,
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -663,6 +663,39 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
+    let timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let counted = {
+        // Flip-flop event domains and the aliases that resolve to them.
+        let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .keys()
+            .copied()
+            .chain(
+                clock_domains
+                    .iter()
+                    .filter(|(_, canonical)| eval_apply_ffs.contains_key(canonical))
+                    .map(|(alias, _)| *alias),
+            )
+            .collect();
+        let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
+            .iter()
+            .flat_map(|(&instance, module)| {
+                modules[module].variables.iter().map(move |(&var_id, var)| {
+                    (
+                        bindings.locate(instance, var_id),
+                        (var.metadata.width, var.metadata.is_4state),
+                    )
+                })
+            })
+            .collect();
+        instrument_counted_signals(
+            &timing,
+            &event_addresses,
+            &variables,
+            four_state,
+            &mut processes,
+            &mut comb_blocks,
+        )
+    };
     check_package_variable_drivers(
         bindings,
         &instance_modules,
@@ -1145,7 +1178,12 @@ pub fn schedule_symbolic_rtl(
         .values()
         .filter(|units| !units.is_empty())
         .count();
-    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    // With process kernels, a round in which a zero delay is pending after
+    // domains triggered evaluates them before the inactive region and
+    // publishes them in the NBA region (IEEE 1800-2023 4.5). Only those
+    // rounds use the split units; the fused units stay the default.
+    let needs_split_path =
+        active_ff_domains > 1 || !cascaded_clocks.is_empty() || !processes.is_empty();
     let parallel_sir = parallel.enabled().then(|| {
         let mut events = eval_apply_ffs
             .iter()
@@ -1238,6 +1276,11 @@ pub fn schedule_symbolic_rtl(
         .into_iter()
         .map(|process| (process.kernel, process.slots))
         .unzip();
+    let TimingMetadata {
+        wait_sites,
+        nba_sites,
+        ..
+    } = timing;
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
@@ -1432,6 +1475,57 @@ pub fn schedule_symbolic_rtl(
         .into_iter()
         .map(|slots| slots.map(project))
         .collect();
+    let watches: Vec<EventWatch<StateAddr>> = {
+        let event_kinds = ElaboratedDesign {
+            state_objects: state_objects.clone(),
+            events: events.clone(),
+            initial_state: Vec::new(),
+        }
+        .event_kinds();
+        counted
+            .values()
+            .map(|slots| {
+                let signal = project(slots.signal);
+                let object = &state_objects[&signal];
+                let canonical = events.canonical(signal);
+                let domains = event_kinds
+                    .get(&canonical)
+                    .filter(|_| events.ordered_events.contains(&signal) || canonical != signal)
+                    .map(|&kind| (canonical, CounterKind::for_domain(kind)))
+                    .into_iter()
+                    .collect();
+                EventWatch {
+                    signal,
+                    width: object.width,
+                    four_state: object.is_4state,
+                    changes: Some(project(slots.changes)),
+                    rises: Some(project(slots.rises)),
+                    falls: Some(project(slots.falls)),
+                    domains,
+                }
+            })
+            .collect()
+    };
+    let wait_sites: Vec<WaitSite<StateAddr>> =
+        wait_sites.iter().map(|site| site.map(project)).collect();
+    let nba_sites: Vec<NbaSite<StateAddr>> =
+        nba_sites.iter().map(|site| site.map(project)).collect();
+    // The runtime reads counters and staged nonblocking values directly.
+    let timing_read_roots = watches
+        .iter()
+        .flat_map(|watch| {
+            watch
+                .counters()
+                .map(|(_, counter)| counter)
+                .collect::<Vec<_>>()
+        })
+        .chain(
+            nba_sites
+                .iter()
+                .flat_map(|site| [Some(site.value), site.offset, site.pending])
+                .flatten(),
+        )
+        .collect();
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -1465,13 +1559,16 @@ pub fn schedule_symbolic_rtl(
             runtime_event_sites,
             extern_functions,
             comb_observers,
-            testbench_read_roots: Default::default(),
+            testbench_read_roots: timing_read_roots,
             rtl_writes,
             comb_writes: Default::default(),
             persistent_comb_state,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            watches,
+            wait_sites,
+            nba_sites,
         },
     };
 
@@ -2516,6 +2613,7 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    key: (*id, index),
                 },
             ));
         }
@@ -2606,6 +2704,128 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    /// The instance and the module-local index of the process.
+    key: (InstanceId, usize),
+}
+
+/// Counter slots, wait sites and nonblocking sites of the whole design.
+struct TimingMetadata {
+    counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
+    wait_sites: Vec<WaitSite<AbsoluteAddr>>,
+    nba_sites: Vec<NbaSite<AbsoluteAddr>>,
+}
+
+/// Place the timing metadata of every instance. Sites name the global index
+/// of their process; a kernel numbers its sites in the order they appear
+/// here, which is the module's order.
+fn relocate_timing(
+    bindings: &PackageBindings,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    processes: &[RelocatedProcess],
+) -> TimingMetadata {
+    let process_index: HashMap<(InstanceId, usize), usize> = processes
+        .iter()
+        .enumerate()
+        .map(|(index, process)| (process.key, index))
+        .collect();
+    let mut instances = instance_modules.iter().collect::<Vec<_>>();
+    instances.sort_unstable_by_key(|(instance, _)| **instance);
+    let mut metadata = TimingMetadata {
+        counter_slots: Vec::new(),
+        wait_sites: Vec::new(),
+        nba_sites: Vec::new(),
+    };
+    for (&instance, module) in instances {
+        let module = &modules[module];
+        let locate = |var_id| bindings.locate(instance, var_id);
+        metadata
+            .counter_slots
+            .extend(module.counter_slots.iter().map(|slots| slots.map(locate)));
+        metadata
+            .wait_sites
+            .extend(module.wait_sites.iter().map(|site| WaitSite {
+                process: process_index[&(instance, site.process)],
+                ..site.map(locate)
+            }));
+        metadata
+            .nba_sites
+            .extend(module.nba_sites.iter().map(|site| NbaSite {
+                process: process_index[&(instance, site.process)],
+                ..site.map(locate)
+            }));
+    }
+    metadata
+}
+
+/// Counted signals: those a unit may store twice between two runtime checks
+/// (a frontend declared counters for them) and that a flip-flop domain or a
+/// wait watches. Returns their counters by signal and instruments the
+/// process kernels and combinational process units that write them; no
+/// other unit changes.
+fn instrument_counted_signals(
+    timing: &TimingMetadata,
+    event_addresses: &HashSet<AbsoluteAddr>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    processes: &mut [RelocatedProcess],
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
+    let waited: HashSet<AbsoluteAddr> = timing
+        .wait_sites
+        .iter()
+        .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+        .collect();
+    let counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> = timing
+        .counter_slots
+        .iter()
+        .filter(|slots| event_addresses.contains(&slots.signal) || waited.contains(&slots.signal))
+        .map(|slots| (slots.signal, *slots))
+        .collect();
+    if counted.is_empty() {
+        return counted;
+    }
+    let code = |signal: AbsoluteAddr| {
+        let slots = counted.get(&signal)?;
+        let (width, is_4state) = variables[&signal];
+        Some((slots, width, four_state && is_4state))
+    };
+    for process in processes {
+        crate::watch::instrument_unit(&mut process.kernel, |address| {
+            if address.region != STABLE_REGION {
+                return None;
+            }
+            let (slots, width, four_state) = code(address.absolute_addr())?;
+            let stable =
+                |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+            Some(crate::watch::WatchCode {
+                signal: stable(slots.signal),
+                width,
+                four_state,
+                counters: CounterKind::ALL
+                    .into_iter()
+                    .map(|kind| (kind, stable(slots.counter(kind))))
+                    .collect(),
+            })
+        });
+    }
+    for path in comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            crate::watch::instrument_unit(unit, |address| {
+                let (slots, width, four_state) = code(*address)?;
+                Some(crate::watch::WatchCode {
+                    signal: slots.signal,
+                    width,
+                    four_state,
+                    counters: CounterKind::ALL
+                        .into_iter()
+                        .map(|kind| (kind, slots.counter(kind)))
+                        .collect(),
+                })
+            });
+        }
+    }
+    counted
 }
 
 fn build_comb_observer_capture_paths(

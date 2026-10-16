@@ -1,0 +1,867 @@
+//! The event-driven process phase of the timed scheduler on every backend:
+//! waits, counted signals, the inactive and NBA regions, finish and
+//! checkpoints. Designs are built with the frontend SDK, whose processes are
+//! lowered by `ProcessKernelBuilder`.
+
+use celox_frontend_sdk::{
+    BinaryOp, Constant, Edge, EventEdge, EventTerm, ExprId, FrontendArtifact, ModuleBuilder,
+    SignalId, Statement, ValueType,
+};
+
+use super::Simulation;
+use crate::{SimBackend, Simulator, SimulatorBuilder};
+
+/// Run `$body` with `$sim` bound to a timed simulation of `$builder` on
+/// every backend, including a native program image that went through its
+/// container.
+macro_rules! on_every_backend {
+    ($builder:expr, $top:expr, |$sim:ident| $body:block) => {{
+        fn run<B: SimBackend>(mut $sim: Simulation<B>) $body
+        run(Simulation::new($builder.build_interpreter().unwrap()));
+        run(Simulation::new($builder.build_cranelift().unwrap()));
+        run(Simulation::new($builder.build_wasm().unwrap()));
+        run(Simulation::new($builder.build_tiered().unwrap()));
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        {
+            run(Simulation::new($builder.build_native().unwrap()));
+            let image = $builder.compile_native().unwrap().into_program_image();
+            let image = crate::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            run(Simulation::new(
+                Simulator::from_sources(Vec::new(), $top)
+                    .emit_triggers()
+                    .build_native_from_image(image)
+                    .unwrap(),
+            ));
+        }
+    }};
+}
+
+/// A flat SDK module under construction.
+struct Design {
+    module: ModuleBuilder,
+    four_state: bool,
+}
+
+impl Design {
+    fn new(name: &str, four_state: bool) -> Self {
+        Self {
+            module: ModuleBuilder::new(name).unwrap(),
+            four_state,
+        }
+    }
+
+    fn ty(&self, width: usize) -> ValueType {
+        ValueType::new(width, false, self.four_state).unwrap()
+    }
+
+    /// An internal signal starting at `initial`.
+    fn internal(&mut self, name: &str, width: usize, initial: u64) -> SignalId {
+        let ty = self.ty(width);
+        let signal = self.module.internal(name, ty).unwrap();
+        self.init(signal, width, initial);
+        signal
+    }
+
+    fn output(&mut self, name: &str, width: usize, initial: u64) -> SignalId {
+        let ty = self.ty(width);
+        let signal = self.module.output(name, ty).unwrap();
+        self.init(signal, width, initial);
+        signal
+    }
+
+    fn input(&mut self, name: &str, width: usize) -> SignalId {
+        let ty = self.ty(width);
+        self.module.input(name, ty).unwrap()
+    }
+
+    fn init(&mut self, signal: SignalId, width: usize, value: u64) {
+        self.module
+            .set_initial(signal, Constant::two_state(value, width).unwrap())
+            .unwrap();
+    }
+
+    fn constant(&mut self, value: u64, width: usize) -> ExprId {
+        self.module
+            .constant(Constant::two_state(value, width).unwrap())
+    }
+
+    fn read(&mut self, signal: SignalId) -> ExprId {
+        self.module.read(signal).unwrap()
+    }
+
+    fn width(&self, signal: SignalId) -> usize {
+        self.module.whole(signal).unwrap().width()
+    }
+
+    /// `signal = value;`
+    fn set(&mut self, signal: SignalId, value: u64) -> Statement {
+        let width = self.width(signal);
+        let value = self.constant(value, width);
+        self.assign(signal, value)
+    }
+
+    fn assign(&mut self, signal: SignalId, value: ExprId) -> Statement {
+        Statement::Assign {
+            target: self.module.whole(signal).unwrap(),
+            value,
+        }
+    }
+
+    /// `signal <= value;`
+    fn nonblocking(&mut self, signal: SignalId, value: ExprId) -> Statement {
+        Statement::Nonblocking {
+            target: self.module.whole(signal).unwrap(),
+            value,
+        }
+    }
+
+    fn plus_one(&mut self, signal: SignalId) -> ExprId {
+        let width = self.width(signal);
+        let current = self.read(signal);
+        let one = self.constant(1, width);
+        let ty = self.ty(width);
+        self.module.binary(BinaryOp::Add, current, one, ty).unwrap()
+    }
+
+    /// `signal = signal + 1;`
+    fn increment(&mut self, signal: SignalId) -> Statement {
+        let next = self.plus_one(signal);
+        self.assign(signal, next)
+    }
+
+    fn delay(&mut self, amount: u64) -> Statement {
+        Statement::Delay {
+            amount: self.constant(amount, 8),
+        }
+    }
+
+    /// `#amount` with the IEEE inactive-region meaning of `#0`.
+    fn inactive_delay(&mut self, amount: u64) -> Statement {
+        Statement::InactiveDelay {
+            amount: self.constant(amount, 8),
+        }
+    }
+
+    /// `always_ff @(edge clock) target <= next;`
+    fn register(&mut self, target: SignalId, next: ExprId, clock: SignalId, edge: Edge) {
+        let target = self.module.whole(target).unwrap();
+        self.module
+            .register(target, next, clock, edge, None, None)
+            .unwrap();
+    }
+
+    /// `always_ff @(posedge clock) target <= target + 1;`
+    fn counter(&mut self, target: SignalId, clock: SignalId) {
+        let next = self.plus_one(target);
+        self.register(target, next, clock, Edge::Posedge);
+    }
+
+    fn finish(self) -> FrontendArtifact {
+        self.module.finish()
+    }
+}
+
+fn wait(signal: SignalId, edge: EventEdge) -> Statement {
+    Statement::WaitEvent {
+        terms: vec![EventTerm::new(signal, edge)],
+    }
+}
+
+fn builder(artifact: &FrontendArtifact, four_state: bool) -> SimulatorBuilder<'static, Simulator> {
+    Simulator::from_frontend(artifact.clone())
+        .four_state(four_state)
+        .emit_triggers()
+}
+
+fn value<B: SimBackend>(sim: &mut Simulation<B>, name: &str) -> u64 {
+    let signal = sim.signal(name);
+    let value = sim.get(signal);
+    u64::try_from(value).unwrap()
+}
+
+/// A process writes 0→1→0 to `clk` without suspending: `@(posedge clk)`
+/// and the flip-flops of `clk` see the pulse exactly once.
+fn pulse(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Pulse", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let waits = d.output("waits", 8, 0);
+    let ffs = d.output("ffs", 8, 0);
+    d.counter(ffs, clk);
+    let body = vec![d.delay(1), d.set(clk, 1), d.set(clk, 0)];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(clk, EventEdge::Posedge), d.increment(waits)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn a_pulse_within_one_process_run_wakes_posedge_once() {
+    for four_state in [false, true] {
+        let artifact = pulse(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Pulse", |sim| {
+            sim.run_until(0).unwrap();
+            assert_eq!(value(&mut sim, "waits"), 0);
+            sim.run_until(5).unwrap();
+            assert_eq!(value(&mut sim, "clk"), 0);
+            assert_eq!(value(&mut sim, "waits"), 1, "the wait sees the pulse once");
+            assert_eq!(
+                value(&mut sim, "ffs"),
+                1,
+                "the flip-flop sees the pulse once"
+            );
+        });
+    }
+}
+
+/// `clk` rises twice in one time slot, separated by `#0`: the flip-flop
+/// domain evaluates twice before the NBA region and both updates publish
+/// in order.
+fn repeated_edges(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Repeated", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let data = d.internal("data", 8, 0);
+    let q = d.output("q", 8, 0);
+    let wakes = d.output("wakes", 8, 0);
+    let read = d.read(data);
+    d.register(q, read, clk, Edge::Posedge);
+    let body = vec![
+        d.delay(1),
+        d.set(data, 1),
+        d.set(clk, 1),
+        d.inactive_delay(0),
+        d.set(clk, 0),
+        d.set(data, 2),
+        d.inactive_delay(0),
+        d.set(clk, 1),
+        d.inactive_delay(0),
+        d.set(clk, 0),
+    ];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(clk, EventEdge::Posedge), d.increment(wakes)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn repeated_edges_in_one_slot_trigger_a_domain_repeatedly() {
+    for four_state in [false, true] {
+        let artifact = repeated_edges(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Repeated", |sim| {
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 2);
+            // Both evaluations publish, the later one last.
+            assert_eq!(value(&mut sim, "q"), 2);
+        });
+    }
+}
+
+/// Host writes of an input clock trigger its flip-flops and wake a
+/// process waiting on it at the current time.
+fn host_clock(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("HostClock", four_state);
+    let clk = d.input("clk", 1);
+    let ffs = d.output("ffs", 8, 0);
+    let waits = d.output("waits", 8, 0);
+    d.counter(ffs, clk);
+    let body = vec![Statement::Forever {
+        body: vec![wait(clk, EventEdge::Posedge), d.increment(waits)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn host_writes_trigger_registers_and_wake_waits() {
+    for four_state in [false, true] {
+        let artifact = host_clock(four_state);
+        on_every_backend!(builder(&artifact, four_state), "HostClock", |sim| {
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set(clk, 0u8)).unwrap();
+            sim.run_until(0).unwrap();
+            for edge in 1..=3u64 {
+                sim.modify(|io| io.set(clk, 1u8)).unwrap();
+                sim.run_until(2 * edge - 1).unwrap();
+                assert_eq!(value(&mut sim, "ffs"), edge);
+                assert_eq!(value(&mut sim, "waits"), edge);
+                sim.modify(|io| io.set(clk, 0u8)).unwrap();
+                sim.run_until(2 * edge).unwrap();
+                assert_eq!(value(&mut sim, "ffs"), edge);
+            }
+            // A pulse inside one host update wakes the wait as well.
+            sim.modify(|io| {
+                io.set(clk, 1u8);
+                io.set(clk, 0u8);
+            })
+            .unwrap();
+            sim.run_until(10).unwrap();
+            assert_eq!(value(&mut sim, "waits"), 4);
+        });
+    }
+}
+
+/// `wait (ready)` blocks until another process sets `ready` and passes at
+/// once when it already holds.
+fn level(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Level", four_state);
+    let ready = d.internal("ready", 1, 0);
+    let first = d.output("first", 8, 0);
+    let second = d.output("second", 8, 0);
+    let condition = d.read(ready);
+    let body = vec![Statement::WaitLevel { condition }, d.set(first, 1)];
+    d.module.process(body).unwrap();
+    let body = vec![d.delay(3), d.set(ready, 1)];
+    d.module.process(body).unwrap();
+    let body = vec![
+        d.delay(5),
+        Statement::WaitLevel { condition },
+        d.set(second, 1),
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn level_waits_block_until_their_condition_holds() {
+    for four_state in [false, true] {
+        let artifact = level(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Level", |sim| {
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "first"), 0);
+            sim.run_until(3).unwrap();
+            assert_eq!(value(&mut sim, "first"), 1);
+            sim.run_until(4).unwrap();
+            assert_eq!(value(&mut sim, "second"), 0);
+            sim.run_until(5).unwrap();
+            assert_eq!(value(&mut sim, "second"), 1);
+            assert_eq!(sim.next_event_time(), None);
+        });
+    }
+}
+
+/// IEEE 1800-2023 4.5: the domains an edge triggers evaluate before an
+/// inactive-region `#0` resumes, and nonblocking assignments publish only
+/// after the inactive region; a zero `Delay` resumes after them.
+fn zero_delays(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("ZeroDelays", four_state);
+    let clk = d.internal("clk", 1, 0);
+    let data = d.internal("data", 8, 3);
+    let q = d.output("q", 8, 0);
+    let x = d.internal("x", 8, 0);
+    let y = d.internal("y", 8, 0);
+    let inactive_seen = d.output("inactive_seen", 8, 9);
+    let post_nba_seen = d.output("post_nba_seen", 8, 9);
+    let read = d.read(data);
+    d.register(q, read, clk, Edge::Posedge);
+    let body = vec![
+        d.delay(1),
+        d.set(clk, 1),
+        d.inactive_delay(0),
+        d.set(data, 5),
+    ];
+    d.module.process(body).unwrap();
+    let one = d.constant(1, 8);
+    let read_x = d.read(x);
+    let read_y = d.read(y);
+    let body = vec![
+        d.delay(1),
+        d.nonblocking(x, one),
+        d.inactive_delay(0),
+        d.assign(inactive_seen, read_x),
+    ];
+    d.module.process(body).unwrap();
+    let body = vec![
+        d.delay(1),
+        d.nonblocking(y, one),
+        d.delay(0),
+        d.assign(post_nba_seen, read_y),
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn zero_delays_order_against_flip_flops_and_nonblocking_assignments() {
+    for four_state in [false, true] {
+        let artifact = zero_delays(four_state);
+        on_every_backend!(builder(&artifact, four_state), "ZeroDelays", |sim| {
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "q"), 3, "the domain evaluated before #0");
+            assert_eq!(
+                value(&mut sim, "inactive_seen"),
+                0,
+                "#0 runs before the NBA region"
+            );
+            assert_eq!(
+                value(&mut sim, "post_nba_seen"),
+                1,
+                "a zero Delay runs after it"
+            );
+            assert_eq!(value(&mut sim, "x"), 1);
+        });
+    }
+}
+
+/// Two nonblocking assignments to one watched destination in one slot
+/// publish in order, each as its own update; so do three executions of a
+/// single-site assignment.
+fn nonblocking(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Nonblocking", four_state);
+    let q = d.output("q", 8, 0);
+    let r = d.output("r", 8, 0);
+    let i = d.internal("i", 8, 0);
+    let q_changes = d.output("q_changes", 8, 0);
+    let r_changes = d.output("r_changes", 8, 0);
+    let one = d.constant(1, 8);
+    let zero = d.constant(0, 8);
+    let body = vec![d.delay(1), d.nonblocking(q, one), d.nonblocking(q, zero)];
+    d.module.process(body).unwrap();
+    let read_i = d.read(i);
+    let three = d.constant(3, 8);
+    let ty = d.ty(1);
+    let below = d
+        .module
+        .binary(BinaryOp::LessUnsigned, read_i, three, ty)
+        .unwrap();
+    let loop_body = vec![d.nonblocking(r, read_i), d.increment(i)];
+    let body = vec![
+        d.delay(2),
+        Statement::While {
+            condition: below,
+            body: loop_body,
+        },
+    ];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(q, EventEdge::Change), d.increment(q_changes)],
+    }];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(r, EventEdge::Change), d.increment(r_changes)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn nonblocking_assignments_publish_in_order() {
+    for four_state in [false, true] {
+        let artifact = nonblocking(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Nonblocking", |sim| {
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "q"), 0);
+            assert_eq!(
+                value(&mut sim, "q_changes"),
+                1,
+                "q was 1 between the updates"
+            );
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "r"), 2, "the last assignment wins");
+            assert_eq!(value(&mut sim, "r_changes"), 1);
+        });
+    }
+}
+
+/// A process writes `a`, finishes and would write it again; a register
+/// counts clock edges. Nothing changes after the finish.
+fn finishing(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Finishing", four_state);
+    let clk = d.input("clk", 1);
+    let a = d.output("a", 8, 0);
+    let edges = d.output("edges", 8, 0);
+    d.counter(edges, clk);
+    let body = vec![d.delay(4), d.set(a, 1), Statement::Finish, d.set(a, 2)];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn finish_freezes_the_simulation() {
+    for four_state in [false, true] {
+        let artifact = finishing(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Finishing", |sim| {
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set(clk, 0u8)).unwrap();
+            sim.add_clock("clk", 2, 1);
+            sim.run_until(20).unwrap();
+            assert!(sim.is_finished());
+            assert_eq!(sim.time(), 4);
+            assert_eq!(value(&mut sim, "a"), 1);
+            // Edges at 1 and 3; the one at 5 is after the finish.
+            assert_eq!(value(&mut sim, "edges"), 2);
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 7u8)).unwrap();
+            sim.eval_comb().unwrap();
+            assert_eq!(value(&mut sim, "a"), 1, "host writes are ignored");
+            assert_eq!(sim.step().unwrap(), None);
+            assert_eq!(sim.next_event_time(), None);
+        });
+    }
+}
+
+/// A process waiting on `go` survives a checkpoint: restoring returns it to
+/// waiting, and the next edge wakes it again.
+fn waiting(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("Waiting", four_state);
+    let go = d.input("go", 1);
+    let wakes = d.output("wakes", 8, 0);
+    let body = vec![Statement::Forever {
+        body: vec![wait(go, EventEdge::Posedge), d.increment(wakes)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn checkpoints_restore_a_waiting_process() {
+    for four_state in [false, true] {
+        let artifact = waiting(four_state);
+        on_every_backend!(builder(&artifact, four_state), "Waiting", |sim| {
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 0u8)).unwrap();
+            sim.run_until(1).unwrap();
+            let saved = sim.checkpoint().unwrap();
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 1);
+            sim.restore(&saved).unwrap();
+            assert_eq!(sim.time(), 1);
+            assert_eq!(value(&mut sim, "wakes"), 0);
+            sim.run_until(3).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 0, "restored waiting, not woken");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.run_until(4).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 1);
+        });
+    }
+}
+
+#[test]
+fn state_files_carry_waiting_processes_across_backends() {
+    // Saved on the interpreter, loaded into every backend.
+    let artifact = waiting(true);
+    let mut source = Simulation::new(builder(&artifact, true).build_interpreter().unwrap());
+    let go = source.signal("go");
+    source.modify(|io| io.set(go, 0u8)).unwrap();
+    source.run_until(1).unwrap();
+    source.modify(|io| io.set(go, 1u8)).unwrap();
+    source.run_until(2).unwrap();
+    source.modify(|io| io.set(go, 0u8)).unwrap();
+    source.run_until(3).unwrap();
+    let file = source.save_state().unwrap();
+    let mut bytes = Vec::new();
+    file.write_to(&mut bytes).unwrap();
+    let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
+    STATE.with(|state| *state.borrow_mut() = Some(file));
+    on_every_backend!(builder(&artifact, true), "Waiting", |sim| {
+        let file = STATE.with(|state| state.borrow().clone().unwrap());
+        sim.load_state(&file).unwrap();
+        assert_eq!(sim.time(), 3);
+        assert_eq!(value(&mut sim, "wakes"), 1);
+        sim.run_until(4).unwrap();
+        assert_eq!(value(&mut sim, "wakes"), 1);
+        let go = sim.signal("go");
+        sim.modify(|io| io.set(go, 1u8)).unwrap();
+        sim.run_until(5).unwrap();
+        assert_eq!(
+            value(&mut sim, "wakes"),
+            2,
+            "the loaded process still waits"
+        );
+    });
+}
+
+thread_local! {
+    static STATE: std::cell::RefCell<Option<celox_runtime::StateFile>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// IEEE 1800-2023 4.5: a process woken by `@(posedge clk)` runs in the
+/// active region of that edge, before the edge's NBA region, so it reads the
+/// flip-flop output from before the edge.
+fn edge_order(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("EdgeOrder", four_state);
+    let clk = d.input("clk", 1);
+    let q = d.output("q", 8, 0);
+    let seen = d.output("seen", 8, 99);
+    d.counter(q, clk);
+    let read = d.read(q);
+    let body = vec![Statement::Forever {
+        body: vec![wait(clk, EventEdge::Posedge), d.assign(seen, read)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn edge_woken_processes_read_flip_flops_before_the_edge_publishes() {
+    for four_state in [false, true] {
+        let artifact = edge_order(four_state);
+        on_every_backend!(builder(&artifact, four_state), "EdgeOrder", |sim| {
+            let clk = sim.signal("clk");
+            sim.modify(|io| io.set(clk, 0u8)).unwrap();
+            sim.add_clock("clk", 10, 5);
+            for edge in 1..=4u64 {
+                sim.run_until(10 * edge - 5).unwrap();
+                assert_eq!(value(&mut sim, "q"), edge);
+                assert_eq!(value(&mut sim, "seen"), edge - 1);
+            }
+        });
+    }
+}
+
+/// A combinational process writes `y = 0; if (a) y = 1;`. With `a` steady,
+/// settling again and reading does not re-run it, so `@(posedge y)` and the
+/// flip-flops of `y` are not woken; a change of another input re-runs it and
+/// the 1→0→1 pulse is an edge (IEEE 1800-2023 9.2.2.2).
+fn comb_pulse(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("CombPulse", four_state);
+    let a = d.input("a", 1);
+    let b = d.input("b", 1);
+    let y = d.output("y", 1, 0);
+    let z = d.output("z", 1, 0);
+    let ffs = d.output("ffs", 8, 0);
+    let waits = d.output("waits", 8, 0);
+    let read_a = d.read(a);
+    let read_b = d.read(b);
+    let body = vec![
+        d.set(y, 0),
+        Statement::If {
+            condition: read_a,
+            then_body: vec![d.set(y, 1)],
+            else_body: Vec::new(),
+        },
+        d.assign(z, read_b),
+    ];
+    d.module.comb_process(body).unwrap();
+    d.counter(ffs, y);
+    let body = vec![Statement::Forever {
+        body: vec![wait(y, EventEdge::Posedge), d.increment(waits)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn comb_processes_pulse_only_when_an_input_changes() {
+    for four_state in [false, true] {
+        let artifact = comb_pulse(four_state);
+        on_every_backend!(builder(&artifact, four_state), "CombPulse", |sim| {
+            let a = sim.signal("a");
+            let b = sim.signal("b");
+            sim.modify(|io| {
+                io.set(a, 0u8);
+                io.set(b, 0u8);
+            })
+            .unwrap();
+            sim.run_until(0).unwrap();
+            sim.modify(|io| io.set(a, 1u8)).unwrap();
+            sim.run_until(1).unwrap();
+            assert_eq!(value(&mut sim, "y"), 1);
+            assert_eq!(value(&mut sim, "ffs"), 1);
+            assert_eq!(value(&mut sim, "waits"), 1);
+            // Steady inputs: settles and reads do not re-run the process.
+            for time in 2..6 {
+                sim.eval_comb().unwrap();
+                assert_eq!(value(&mut sim, "y"), 1);
+                sim.run_until(time).unwrap();
+            }
+            assert_eq!(value(&mut sim, "ffs"), 1, "no spurious edge");
+            assert_eq!(value(&mut sim, "waits"), 1, "no spurious wakeup");
+            sim.modify(|io| io.set(b, 1u8)).unwrap();
+            sim.run_until(6).unwrap();
+            assert_eq!(value(&mut sim, "z"), 1);
+            assert_eq!(value(&mut sim, "ffs"), 2, "the re-run pulses y");
+            assert_eq!(value(&mut sim, "waits"), 2);
+        });
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+mod systemverilog {
+    use super::*;
+
+    /// An imperative SystemVerilog combinational unit (one calling
+    /// `$urandom`) keeps its default-then-override writes; it is gated on
+    /// its inputs, so a steady input never pulses `y`.
+    const SOURCE: &str = r#"
+module Top(input logic a, b, output logic y, output logic [31:0] r, output logic [7:0] n);
+    always_comb begin
+        y = 1'b0;
+        if (a) y = 1'b1;
+        r = b ? $urandom(7) : 32'd0;
+    end
+    initial n = 8'd0;
+    always_ff @(posedge y) n <= n + 8'd1;
+endmodule
+"#;
+
+    #[test]
+    fn imperative_comb_units_pulse_only_when_an_input_changes() {
+        for four_state in [false, true] {
+            let build = || {
+                Simulator::from_sv_sources(
+                    vec![(SOURCE, std::path::Path::new("comb_pulse.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .emit_triggers()
+            };
+            on_every_backend!(build(), "Top", |sim| {
+                let a = sim.signal("a");
+                let b = sim.signal("b");
+                sim.modify(|io| {
+                    io.set(a, 0u8);
+                    io.set(b, 0u8);
+                })
+                .unwrap();
+                sim.run_until(0).unwrap();
+                sim.modify(|io| io.set(a, 1u8)).unwrap();
+                sim.run_until(1).unwrap();
+                assert_eq!(value(&mut sim, "n"), 1);
+                for time in 2..6 {
+                    sim.eval_comb().unwrap();
+                    assert_eq!(value(&mut sim, "y"), 1);
+                    sim.run_until(time).unwrap();
+                }
+                assert_eq!(value(&mut sim, "n"), 1, "no spurious edge");
+                sim.modify(|io| io.set(b, 1u8)).unwrap();
+                sim.run_until(6).unwrap();
+                assert_eq!(value(&mut sim, "n"), 2, "the re-run pulses y");
+            });
+        }
+    }
+}
+
+/// Records the entry points a timed step calls on a simulator.
+struct Recording<'a, B: SimBackend> {
+    sim: &'a mut Simulator<B>,
+    calls: Vec<&'static str>,
+}
+
+impl<B: SimBackend> celox_runtime::SimulationExecutor for Recording<'_, B> {
+    type Backend = B;
+
+    fn backend(&self) -> &B {
+        &self.sim.backend
+    }
+
+    fn backend_mut(&mut self) -> &mut B {
+        &mut self.sim.backend
+    }
+
+    fn eval_comb(&mut self) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("comb");
+        celox_runtime::SimulationExecutor::eval_comb(self.sim)
+    }
+
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("eval_apply");
+        celox_runtime::SimulationExecutor::eval_apply_ff_at(self.sim, event)
+    }
+
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("eval_only");
+        celox_runtime::SimulationExecutor::eval_only_ff_at(self.sim, event)
+    }
+
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("apply");
+        celox_runtime::SimulationExecutor::apply_ff_at(self.sim, event)
+    }
+
+    fn run_process(&mut self, index: usize) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("process");
+        celox_runtime::SimulationExecutor::run_process(self.sim, index)
+    }
+}
+
+/// Two registers on `clk`, a combinational output, and with `testbench`
+/// a process that counts rising edges of `clk` and one that sleeps.
+fn rtl(testbench: bool) -> FrontendArtifact {
+    let mut d = Design::new("Rtl", false);
+    let clk = d.input("clk", 1);
+    let a = d.output("a", 8, 0);
+    let b = d.output("b", 8, 0);
+    let sum = d.output("sum", 8, 0);
+    d.counter(a, clk);
+    let read_a = d.read(a);
+    d.register(b, read_a, clk, Edge::Posedge);
+    let read_b = d.read(b);
+    let ty = d.ty(8);
+    let added = d.module.binary(BinaryOp::Add, read_a, read_b, ty).unwrap();
+    let target = d.module.whole(sum).unwrap();
+    d.module.assign(target, added).unwrap();
+    if testbench {
+        let edges = d.output("edges", 8, 0);
+        let body = vec![Statement::Forever {
+            body: vec![wait(clk, EventEdge::Posedge), d.increment(edges)],
+        }];
+        d.module.process(body).unwrap();
+        let body = vec![d.inactive_delay(200)];
+        d.module.process(body).unwrap();
+    }
+    d.finish()
+}
+
+fn recorded_steps<B: SimBackend>(mut sim: Simulation<B>, steps: usize) -> Vec<Vec<&'static str>> {
+    let clk = sim.signal("clk");
+    sim.modify(|io| io.set(clk, 0u8)).unwrap();
+    sim.add_clock("clk", 10, 5);
+    sim.run_until(1).unwrap();
+    (0..steps)
+        .map(|_| {
+            let mut recording = Recording {
+                sim: &mut sim.simulator,
+                calls: Vec::new(),
+            };
+            sim.state.step(&mut recording).unwrap();
+            recording.calls
+        })
+        .collect()
+}
+
+#[test]
+fn processes_leave_the_flip_flop_path_of_a_time_slot_unchanged() {
+    let check = |threads: usize| {
+        let build = |testbench| {
+            builder(&rtl(testbench), false)
+                .threads(threads)
+                .build_native()
+                .unwrap()
+        };
+        let plain = recorded_steps(Simulation::new(build(false)), 4);
+        let timed = recorded_steps(Simulation::new(build(true)), 4);
+        // Rising and falling edges of a plain design: one settle, the fused
+        // evaluate-and-apply of the domain, and the settle after it.
+        assert_eq!(plain[0], ["comb", "eval_apply", "comb"]);
+        assert_eq!(plain[1], ["comb"]);
+        // With a waiting testbench process, the rising edge additionally runs
+        // the woken process in front of the same flip-flop path; no extra
+        // settle or split evaluation.
+        for (plain, timed) in plain.iter().zip(&timed).step_by(2) {
+            let mut expected = vec!["process"];
+            expected.extend(plain);
+            assert_eq!(timed, &expected);
+        }
+        for (plain, timed) in plain.iter().zip(&timed).skip(1).step_by(2) {
+            assert_eq!(timed, plain, "a falling edge wakes nothing");
+        }
+    };
+    #[cfg(any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    ))]
+    for threads in [1, 4] {
+        check(threads);
+    }
+}

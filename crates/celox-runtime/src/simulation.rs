@@ -1,14 +1,26 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 
 use bit_set::BitSet;
-use celox_design::{DomainKind, ProcessStatus};
+use celox_design::{CounterKind, DomainKind, ProcessStatus};
 use fxhash::FxHashMap;
 
 use crate::{
     AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
     scheduler::{ClockDef, Scheduler, SimEvent},
+    timing::{
+        Baseline, CountedDomainRefs, Halt, NbaUpdate, ProcessRefs, ProcessState, StateView, Value,
+        copy_planes, encode_planes, kind_index, occurs, planes, planes_equal, planes_occur, read,
+    },
 };
+
+/// Kernel returns a round may spend on `Yield` and nonblocking staging
+/// before the runtime reports a process that never suspends.
+const SLOT_RETURN_BUDGET: u64 = 1 << 24;
+
+/// Rounds one time slot may run before the runtime reports processes that
+/// keep resuming at that time, such as `forever #0`.
+const SLOT_ROUND_BUDGET: u64 = 1 << 20;
 
 /// Backend execution hooks needed by the timed simulation engine.
 ///
@@ -19,30 +31,32 @@ pub trait SimulationExecutor {
 
     fn backend(&self) -> &Self::Backend;
     fn backend_mut(&mut self) -> &mut Self::Backend;
-    fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
-    fn eval_apply_ff_at(
-        &mut self,
-        event: <Self::Backend as SimBackend>::Event,
-    ) -> Result<(), SimulatorErrorCode>;
-    fn eval_only_ff_at(
-        &mut self,
-        event: <Self::Backend as SimBackend>::Event,
-    ) -> Result<(), SimulatorErrorCode>;
+    fn eval_comb(&mut self) -> Result<(), Halt>;
+    fn eval_apply_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event)
+    -> Result<(), Halt>;
+    fn eval_only_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event) -> Result<(), Halt>;
     /// Settle combinational logic, then evaluate and commit one domain.
     fn eval_comb_apply_ff_at(
         &mut self,
         event: <Self::Backend as SimBackend>::Event,
-    ) -> Result<(), SimulatorErrorCode> {
+    ) -> Result<(), Halt> {
         self.eval_comb()?;
         self.eval_apply_ff_at(event)
     }
-    fn apply_ff_at(
-        &mut self,
-        event: <Self::Backend as SimBackend>::Event,
-    ) -> Result<(), SimulatorErrorCode>;
-    fn run_process(&mut self, index: usize) -> Result<(), SimulatorErrorCode> {
-        self.backend_mut().run_process(index)
+    fn apply_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event) -> Result<(), Halt>;
+    fn run_process(&mut self, index: usize) -> Result<(), Halt> {
+        Ok(self.backend_mut().run_process(index)?)
     }
+
+    /// Values the host wrote to signals that a wait watches since the last
+    /// call, in write order (see [`crate::HostWatch`]).
+    fn take_host_writes(&mut self) -> Vec<(SignalRef, Value)> {
+        Vec::new()
+    }
+
+    /// The design finished the simulation: further evaluation must not
+    /// change its state.
+    fn freeze(&mut self) {}
 
     /// Snapshot external-component inputs immediately before an event domain
     /// evaluates its sequential logic.
@@ -66,13 +80,6 @@ pub trait SimulationExecutor {
 
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
-}
-
-/// Control slots of one process kernel, resolved to signals of the backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessRefs {
-    pub status: SignalRef,
-    pub delay: SignalRef,
 }
 
 /// A process waiting for simulation time to reach `time`. Ordered so that a
@@ -164,11 +171,71 @@ pub struct SimulationState<B: SimBackend> {
     signal_index_by_id: Vec<usize>,
     processes: Vec<ProcessRefs>,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    /// Counted signals and the domains their counters trigger.
+    counted: Vec<CountedDomainRefs>,
+    counted_by_offset: FxHashMap<usize, usize>,
+    /// Whether any process has a nonblocking site with a pending flag.
+    has_pending_nba_sites: bool,
+    process_state: ProcessState,
+    /// The host changed state that the next step must settle at the
+    /// current time: an event signal, or a signal a wait watches.
+    host_pending: bool,
     /// A process requested the end of the simulation.
     finished: bool,
     /// Per event ID, the event IDs of clocks computed combinationally from
     /// the event's signal. Empty when the design has none.
     combinational_derived: Vec<Box<[usize]>>,
+    /// Buffers of the round in progress, kept between rounds.
+    scratch: Option<Box<Round>>,
+    /// The design has process kernels or counted signals. Without either, a
+    /// round is exactly the batch step and skips every process check.
+    timed: bool,
+}
+
+/// Bookkeeping of one round of a time slot.
+#[derive(Default)]
+struct Round {
+    /// Event ids whose trigger survives the settling filter.
+    scheduled_trigger_ids: BitSet,
+    track_stable_edges: bool,
+    /// Event ids a counter triggered; they bypass the stable-edge test of
+    /// cascaded domains, since a counted pulse may end at its old value.
+    counted_triggered: BitSet,
+    /// Domains evaluated before an inactive region, in evaluation order,
+    /// with the working image of an evaluation that a later one of the
+    /// same domain superseded (IEEE 1800-2023 4.5: their nonblocking
+    /// assignments wait for the NBA region).
+    deferred: Vec<(usize, Option<Vec<u8>>)>,
+    /// Kernels ran in this round, so pending nonblocking flags may be set.
+    kernels_ran: bool,
+    nba_published: bool,
+    /// Event-signal values scheduled or written by processes, not yet
+    /// marked.
+    transitions: Vec<(usize, bool)>,
+    /// Event-signal values before and after a process run.
+    before: Vec<u8>,
+    after: Vec<u8>,
+    /// Event ids whose level change gates combinationally derived clocks,
+    /// not yet judged.
+    gating_sources: Vec<usize>,
+    /// Derived clocks whose edge was judged at their source's change; they
+    /// bypass the stable-edge test of cascaded domains.
+    edge_approved: BitSet,
+}
+
+impl Round {
+    /// Start a round, keeping the buffers of earlier ones.
+    fn reset(&mut self, track_stable_edges: bool) {
+        self.scheduled_trigger_ids.make_empty();
+        self.track_stable_edges = track_stable_edges;
+        self.counted_triggered.make_empty();
+        self.gating_sources.clear();
+        self.edge_approved.make_empty();
+        self.deferred.clear();
+        self.kernels_ran = false;
+        self.nba_published = false;
+        self.transitions.clear();
+    }
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -240,6 +307,10 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        let has_processes = !processes.is_empty();
+        let has_pending_nba_sites = processes
+            .iter()
+            .any(|process| process.nba_sites.iter().any(|site| site.pending.is_some()));
         Self {
             scheduler: Scheduler::new(),
             periodic_events: FxHashMap::default(),
@@ -253,9 +324,35 @@ impl<B: SimBackend> SimulationState<B> {
                 .map(|process| Reverse((0, process)))
                 .collect(),
             processes,
+            counted: Vec::new(),
+            counted_by_offset: FxHashMap::default(),
+            has_pending_nba_sites,
+            process_state: ProcessState::default(),
+            host_pending: false,
             finished: false,
             combinational_derived: Vec::new(),
+            scratch: None,
+            timed: has_processes,
         }
+    }
+
+    /// Count the occurrences of `counted` signals, whose counters trigger
+    /// the listed domains instead of edge detection by value.
+    pub fn with_counted(mut self, backend: &B, counted: Vec<CountedDomainRefs>) -> Self {
+        self.counted_by_offset = counted
+            .iter()
+            .enumerate()
+            .map(|(index, counted)| (counted.refs.signal.offset, index))
+            .collect();
+        self.process_state.domain_counters = counted
+            .iter()
+            .map(|counted| {
+                CounterKind::ALL.map(|kind| backend.get_as::<u32>(counted.refs.counter(kind)))
+            })
+            .collect();
+        self.timed |= !counted.is_empty();
+        self.counted = counted;
+        self
     }
 
     pub fn add_clock(
@@ -297,13 +394,39 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.push(event);
     }
 
+    /// Settle the current time or advance to the next scheduled time and
+    /// run it. Returns that time, or `None` when nothing is scheduled.
     pub fn step<E>(&mut self, executor: &mut E) -> Result<Option<u64>, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match self.step_time(executor) {
+            Ok(time) => Ok(time),
+            Err(Halt::Finish) => {
+                self.finish(executor);
+                Ok(Some(self.scheduler.time))
+            }
+            Err(Halt::Error(error)) => Err(error),
+        }
+    }
+
+    /// End the simulation where it is.
+    pub fn finish<E>(&mut self, executor: &mut E)
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.finished = true;
+        executor.freeze();
+    }
+
+    fn step_time<E>(&mut self, executor: &mut E) -> Result<Option<u64>, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
         let Some(current_time) = self.next_event_time() else {
             return Ok(None);
         };
+        self.host_pending = false;
         let events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -313,18 +436,45 @@ impl<B: SimBackend> SimulationState<B> {
             Vec::new()
         };
         let ready = self.take_ready_processes(current_time);
-        self.step_round(executor, current_time, events_to_process, ready)?;
-        // A process that waited for zero time resumes in a later round of
-        // this time, after the previous round's edges have been handled.
-        while !self.finished {
+        self.step_round(executor, current_time, events_to_process, ready, true)?;
+        // A process that waited for zero time, or that the round woke,
+        // resumes in a later round of this time, after the previous round's
+        // edges have been handled.
+        let mut returns = 0;
+        loop {
             let ready = self.take_ready_processes(current_time);
-            if ready.is_empty() {
+            if ready.is_empty() && self.process_state.ready.is_empty() {
                 break;
             }
-            self.step_round(executor, current_time, Vec::new(), ready)?;
+            returns += 1;
+            self.charge(returns, None)?;
+            self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
         executor.finish_timed_step(current_time);
         Ok(Some(current_time))
+    }
+
+    fn charge(&self, returns: u64, process: Option<usize>) -> Result<(), Halt> {
+        let budget = if process.is_some() {
+            SLOT_RETURN_BUDGET
+        } else {
+            SLOT_ROUND_BUDGET
+        };
+        if returns <= budget {
+            return Ok(());
+        }
+        Err(Halt::Error(SimulatorErrorCode::Runtime {
+            message: match process {
+                Some(process) => {
+                    format!("process {process} does not suspend within one time slot")
+                }
+                None => format!(
+                    "time {} does not settle: processes keep resuming",
+                    self.scheduler.time
+                ),
+            },
+            signals: Vec::new(),
+        }))
     }
 
     /// Remove the processes waiting for `time`, in declaration order.
@@ -340,41 +490,656 @@ impl<B: SimBackend> SimulationState<B> {
         ready
     }
 
-    /// Run `ready` processes in order until each suspends or ends. A process
-    /// that waits for zero time is queued for the next round of this time.
-    fn run_processes<E>(
+    /// Run process `process` until it suspends or ends, and file it where
+    /// it resumes.
+    fn run_process<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
-        ready: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+        process: usize,
+        returns: &mut u64,
+    ) -> Result<(), Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
-        for process in ready {
+        loop {
             executor.run_process(process)?;
-            let refs = self.processes[process];
-            let status: u8 = executor.backend().get_as(refs.status);
+            let status: u8 = executor.backend().get_as(self.processes[process].status);
+            let delay = || -> u64 { executor.backend().get_as(self.processes[process].delay) };
             match ProcessStatus::from_code(status) {
                 Some(ProcessStatus::Delay) => {
-                    let delay: u64 = executor.backend().get_as(refs.delay);
-                    let time = current_time.checked_add(delay).ok_or_else(|| {
-                        SimulatorErrorCode::Runtime {
-                            message: format!("process {process} delay overflows simulation time"),
-                            signals: Vec::new(),
-                        }
-                    })?;
-                    self.process_wakeups.push(Reverse((time, process)));
+                    let delay = delay();
+                    self.wake_after(current_time, delay, process)?;
+                }
+                Some(ProcessStatus::InactiveDelay) => {
+                    let delay = delay();
+                    if delay == 0 {
+                        self.process_state.inactive.insert(process);
+                    } else {
+                        self.wake_after(current_time, delay, process)?;
+                    }
                 }
                 Some(ProcessStatus::Done) => {}
-                Some(ProcessStatus::Finish) => {
-                    self.finished = true;
-                    break;
+                Some(ProcessStatus::Finish) => return Err(Halt::Finish),
+                Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
+                    let site = delay() as usize;
+                    self.register_waiter(executor.backend(), process, site)?;
                 }
-                None => return Err(SimulatorErrorCode::InternalError),
+                Some(ProcessStatus::Nba) => {
+                    let site = delay() as usize;
+                    self.queue_nba(executor.backend_mut(), process, site)?;
+                    *returns += 1;
+                    self.charge(*returns, Some(process))?;
+                    continue;
+                }
+                Some(ProcessStatus::Yield) => {
+                    *returns += 1;
+                    self.charge(*returns, Some(process))?;
+                    continue;
+                }
+                None => return Err(SimulatorErrorCode::InternalError.into()),
+            }
+            return Ok(());
+        }
+    }
+
+    fn wake_after(&mut self, current_time: u64, delay: u64, process: usize) -> Result<(), Halt> {
+        let time = current_time.checked_add(delay).ok_or_else(|| {
+            Halt::Error(SimulatorErrorCode::Runtime {
+                message: format!("process {process} delay overflows simulation time"),
+                signals: Vec::new(),
+            })
+        })?;
+        self.process_wakeups.push(Reverse((time, process)));
+        Ok(())
+    }
+
+    fn site_error(process: usize, site: usize) -> Halt {
+        Halt::Error(SimulatorErrorCode::Runtime {
+            message: format!("process {process} reported unknown site {site}"),
+            signals: Vec::new(),
+        })
+    }
+
+    /// Process `process` waits at its wait site `site`: remember what each
+    /// term compares against from now on.
+    fn register_waiter(&mut self, backend: &B, process: usize, site: usize) -> Result<(), Halt> {
+        let terms = self.processes[process]
+            .wait_sites
+            .get(site)
+            .ok_or_else(|| Self::site_error(process, site))?;
+        let driven = terms.iter().any(|term| term.driven);
+        self.process_state
+            .waiters
+            .register(process, driven, |waiter| {
+                // Re-arming at the same site reuses the baselines' storage.
+                let reuse = waiter.site == site && waiter.baselines.len() == terms.len();
+                waiter.site = site;
+                if !reuse {
+                    waiter.baselines.clear();
+                    waiter
+                        .baselines
+                        .extend(terms.iter().map(|_| Baseline::Counter(0)));
+                }
+                for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                    match term.counter {
+                        Some(counter) => *baseline = Baseline::Counter(backend.get_as(counter)),
+                        None => match planes(backend, term.signal) {
+                            Some(image) => {
+                                if let Baseline::Raw(raw) = baseline {
+                                    copy_planes(raw, image, term.signal.width);
+                                } else {
+                                    let mut raw = Vec::with_capacity(image.len());
+                                    copy_planes(&mut raw, image, term.signal.width);
+                                    *baseline = Baseline::Raw(raw);
+                                }
+                            }
+                            None => *baseline = Baseline::Value(read(backend, term.signal)),
+                        },
+                    }
+                }
+            });
+        Ok(())
+    }
+
+    /// Move the value staged at nonblocking site `site` of `process` into
+    /// the ordered queue.
+    fn queue_nba(&mut self, backend: &mut B, process: usize, site: usize) -> Result<(), Halt> {
+        let refs = *self.processes[process]
+            .nba_sites
+            .get(site)
+            .ok_or_else(|| Self::site_error(process, site))?;
+        if let Some(pending) = refs.pending {
+            // The flag is set: the kernel reached the site again before the
+            // NBA region and returned before staging over the earlier value.
+            backend.set(pending, 0u8);
+        }
+        let offset = refs
+            .offset
+            .map_or(0, |offset| backend.get_as::<u64>(offset) as usize);
+        self.process_state.nba_queue.push(NbaUpdate {
+            target: refs.target,
+            lsb: refs.lsb + offset,
+            width: refs.width,
+            value: read(backend, refs.value),
+        });
+        Ok(())
+    }
+
+    /// Write `signal` on behalf of the runtime, counting a counted signal's
+    /// occurrences and showing the value to the waits on it.
+    #[inline]
+    fn write_signal(&mut self, backend: &mut B, signal: SignalRef, write: impl FnOnce(&mut B)) {
+        if self.counted.is_empty() && self.process_state.waiters.is_empty() {
+            write(backend);
+            return;
+        }
+        match self.counted_by_offset.get(&signal.offset).copied() {
+            Some(counted) => {
+                let old = read(backend, signal);
+                write(backend);
+                let new = read(backend, signal);
+                self.counted[counted].refs.bump(backend, &old, &new);
+            }
+            None => write(backend),
+        }
+        if !self.process_state.waiters.is_empty() {
+            self.observe(backend, Some(signal));
+        }
+    }
+
+    /// Test the waits against the current state, or only their terms on
+    /// signal `only` after a write of it. Woken processes become ready.
+    #[inline]
+    fn observe(&mut self, backend: &B, only: Option<SignalRef>) {
+        self.check_waits(backend, only, false);
+    }
+
+    /// Like [`Self::observe`], at a point where only design code wrote
+    /// state: terms on signals that only the host and the scheduler write
+    /// cannot have changed.
+    #[inline]
+    fn observe_driven(&mut self, backend: &B) {
+        if !self.process_state.waiters.none_driven() {
+            self.check_waits(backend, None, true);
+        }
+    }
+
+    #[inline(never)]
+    fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
+        let processes = &self.processes;
+        let state = StateView::new(backend);
+        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        waiters.retain(driven_only, |process, waiter| {
+            let terms = &processes[process].wait_sites[waiter.site];
+            let mut wake = false;
+            for (index, term) in terms.iter().enumerate() {
+                if only.is_some_and(|signal| signal != term.signal) || (driven_only && !term.driven)
+                {
+                    continue;
+                }
+                let baseline = &mut waiter.baselines[index];
+                wake |= match baseline {
+                    Baseline::Counter(seen) => term
+                        .counter
+                        .is_some_and(|counter| backend.get_as::<u32>(counter) != *seen),
+                    Baseline::Raw(last) => {
+                        let now = state.planes(term.signal).expect("a plain signal");
+                        Self::advance(term.kind, last, now, term.signal.width)
+                    }
+                    Baseline::Value(last) => match state.planes(term.signal) {
+                        // A baseline loaded from a state file.
+                        Some(now) => {
+                            let mut raw = encode_planes(last, term.signal.width, now.len());
+                            let hit = Self::advance(term.kind, &mut raw, now, term.signal.width);
+                            *baseline = Baseline::Raw(raw);
+                            hit
+                        }
+                        None => {
+                            let now = read(backend, term.signal);
+                            let hit = occurs(term.kind, last, &now);
+                            *last = now;
+                            hit
+                        }
+                    },
+                };
+            }
+            if wake {
+                ready.insert(process);
+            }
+            !wake
+        });
+    }
+
+    /// Whether the change from the image `last` to `now` is an occurrence of
+    /// `kind`; `last` becomes `now`.
+    #[inline]
+    fn advance(kind: CounterKind, last: &mut Vec<u8>, now: &[u8], width: usize) -> bool {
+        if planes_equal(last, now, width) {
+            return false;
+        }
+        let hit = planes_occur(kind, last, now, width);
+        copy_planes(last, now, width);
+        hit
+    }
+
+    /// Show the waits one value the host wrote to `signal`.
+    fn observe_host_write(&mut self, signal: SignalRef, value: &Value) {
+        let processes = &self.processes;
+        let ProcessState { waiters, ready, .. } = &mut self.process_state;
+        waiters.retain(false, |process, waiter| {
+            let terms = &processes[process].wait_sites[waiter.site];
+            let mut wake = false;
+            for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                if term.signal != signal {
+                    continue;
+                }
+                match baseline {
+                    // Counters are bumped by the write itself.
+                    Baseline::Counter(_) => {}
+                    Baseline::Raw(last) => {
+                        let now = encode_planes(value, signal.width, last.len());
+                        wake |= Self::advance(term.kind, last, &now, signal.width);
+                    }
+                    Baseline::Value(last) => {
+                        wake |= occurs(term.kind, last, value);
+                        *last = value.clone();
+                    }
+                }
+            }
+            if wake {
+                ready.insert(process);
+            }
+            !wake
+        });
+    }
+
+    /// Mark the domains whose counters moved since they last triggered.
+    fn mark_counted_domains(&mut self, backend: &mut B, round: &mut Round) {
+        for (index, counted) in self.counted.iter().enumerate() {
+            for &(id, kind) in &counted.domains {
+                let value: u32 = backend.get_as(counted.refs.counter(kind));
+                let seen = &mut self.process_state.domain_counters[index][kind_index(kind)];
+                if value != *seen {
+                    *seen = value;
+                    backend.mark_triggered_bit(id);
+                    round.scheduled_trigger_ids.insert(id);
+                    round.counted_triggered.insert(id);
+                    round.track_stable_edges = true;
+                }
             }
         }
+    }
+
+    /// Mark the domains a scheduled or process-driven value of an event
+    /// signal triggers, against the values of the last settled round.
+    #[inline]
+    fn mark_scheduled_edges(&self, backend: &mut B, round: &mut Round, values: &[(usize, bool)]) {
+        for &(id, is_nonzero) in values {
+            round.track_stable_edges = true;
+            let was_nonzero = self.last_clock_values.contains(id);
+            if was_nonzero != is_nonzero
+                && self
+                    .combinational_derived
+                    .get(id)
+                    .is_some_and(|derived| !derived.is_empty())
+            {
+                round.gating_sources.push(id);
+            }
+            let triggered = match self.domain_kinds[id] {
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                    !was_nonzero && is_nonzero
+                }
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    was_nonzero && !is_nonzero
+                }
+                _ => !was_nonzero && is_nonzero,
+            };
+            if triggered {
+                round.scheduled_trigger_ids.insert(id);
+                backend.mark_triggered_bit(id);
+            }
+        }
+    }
+
+    /// Settle combinational logic after the round's sources changed, and
+    /// keep the triggers the round considers stable.
+    #[inline]
+    fn settle_marked<E>(&mut self, executor: &mut E, round: &mut Round) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        executor.eval_comb()?;
+        if round.track_stable_edges {
+            // Combinational settling before an active scheduled source domain
+            // commits may expose transient derived-clock edges. In that case,
+            // keep only the source event and rediscover stable edges after the
+            // commit. If the source edge is inactive, preserve derived edges
+            // while filtering out the scheduled signal's own transition.
+            if round.scheduled_trigger_ids.is_empty() {
+                self.replace_triggers_with_stable_edges(executor.backend_mut());
+            } else {
+                executor.backend_mut().clear_triggered_bits();
+                for id in round.scheduled_trigger_ids.iter() {
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
+            }
+        }
+        if !round.gating_sources.is_empty() {
+            self.judge_derived_edges(executor.backend_mut(), round);
+        }
+        if !self.counted.is_empty() {
+            self.mark_counted_domains(executor.backend_mut(), round);
+        }
         Ok(())
+    }
+
+    /// Clocks computed from a changed scheduled or process-driven signal,
+    /// such as `clk & enable`, change at the same instant, in the active
+    /// region before any nonblocking update (IEEE 1800-2023 4.4.2, 4.5):
+    /// their edges are judged now, from the state before any domain commits,
+    /// and their domains evaluate together with the source's. Their levels
+    /// at this instant become the baseline for the rounds after the commit,
+    /// where a gate the commit moves (an enable register rising with the
+    /// edge) gives a further edge, as the update events of the NBA region do.
+    fn judge_derived_edges(&mut self, backend: &mut B, round: &mut Round) {
+        for source in std::mem::take(&mut round.gating_sources) {
+            for &id in self.combinational_derived[source].iter() {
+                if self.stable_edge_triggered(backend, id) {
+                    backend.mark_triggered_bit(id);
+                    round.edge_approved.insert(id);
+                }
+                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
+                else {
+                    continue;
+                };
+                if event_level(backend, *signal) != 0 {
+                    self.last_clock_values.insert(id);
+                } else {
+                    self.last_clock_values.remove(id);
+                }
+            }
+        }
+    }
+
+    fn event_values(&self, backend: &B, values: &mut Vec<u8>) {
+        values.clear();
+        values.extend(
+            self.topo_signals
+                .iter()
+                .map(|(signal, _, _)| event_level(backend, *signal)),
+        );
+    }
+
+    /// Run the ready processes in declaration order, including those they
+    /// wake, recording the event signals each one changes.
+    fn run_ready<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        round: &mut Round,
+        returns: &mut u64,
+    ) -> Result<bool, Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.process_state.ready.is_empty() {
+            return Ok(false);
+        }
+        self.event_values(executor.backend(), &mut round.before);
+        while let Some(process) = self.process_state.ready.pop_first() {
+            self.run_process(executor, current_time, process, returns)?;
+            // Each run is a separate update of the event signals, so a pulse
+            // across two processes is an edge.
+            self.event_values(executor.backend(), &mut round.after);
+            for (((_, id, _), &old), &new) in self
+                .topo_signals
+                .iter()
+                .zip(&round.before)
+                .zip(&round.after)
+            {
+                if *id != usize::MAX && old != new {
+                    round.transitions.push((*id, new != 0));
+                }
+            }
+            std::mem::swap(&mut round.before, &mut round.after);
+            // Before the next process runs, its edges must be seen. After
+            // the last one, the check following the settle sees them: a
+            // settle does not write what processes write.
+            if !self.process_state.ready.is_empty() {
+                self.observe_driven(executor.backend());
+            }
+        }
+        Ok(true)
+    }
+
+    /// Evaluate the triggered domains before an inactive region runs. Their
+    /// nonblocking assignments stay in the working state until the NBA
+    /// region.
+    fn evaluate_before_inactive<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        round: &mut Round,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let marked = executor.backend().get_triggered_bits();
+        executor.backend_mut().clear_triggered_bits();
+        let mut evaluated = BitSet::new();
+        let mut unsplit = Vec::new();
+        for id in marked.iter() {
+            let info = self.event_info[id];
+            if info.canonical_id == usize::MAX || evaluated.contains(info.canonical_id) {
+                continue;
+            }
+            if info.is_cascaded
+                && !round.counted_triggered.contains(id)
+                && !self.stable_edge_triggered(executor.backend(), id)
+            {
+                continue;
+            }
+            evaluated.insert(info.canonical_id);
+            if info.eval_only_event.is_none() {
+                // Without a separate evaluation unit the domain cannot
+                // publish later; it evaluates with the remaining domains.
+                unsplit.push(id);
+                continue;
+            }
+            self.evaluate_deferred(executor, current_time, round, info)?;
+        }
+        // The edges are consumed: later rounds compare against the values
+        // they were evaluated at.
+        self.synchronize_event_values(executor.backend());
+        round.scheduled_trigger_ids.make_empty();
+        round.counted_triggered.make_empty();
+        for id in unsplit {
+            executor.backend_mut().mark_triggered_bit(id);
+            round.scheduled_trigger_ids.insert(id);
+        }
+        Ok(())
+    }
+
+    fn evaluate_deferred<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        round: &mut Round,
+        info: EventInfo<B>,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.supersede(executor.backend(), round, info.canonical_id);
+        let Some(event) = info.eval_only_event else {
+            return Err(SimulatorErrorCode::InternalError.into());
+        };
+        executor.stage_external_event(info.eval_ff_event.unwrap_or(event), current_time)?;
+        executor.eval_only_ff_at(event)?;
+        round.deferred.push((info.canonical_id, None));
+        Ok(())
+    }
+
+    /// A domain with an unpublished evaluation is evaluated again: keep the
+    /// earlier evaluation's working state for the NBA region.
+    #[inline(never)]
+    fn supersede(&self, backend: &B, round: &mut Round, canonical: usize) {
+        if let Some((_, image)) = round
+            .deferred
+            .iter_mut()
+            .rev()
+            .find(|(id, image)| *id == canonical && image.is_none())
+        {
+            *image = Some(working_image(backend));
+        }
+    }
+
+    /// Publish the queued and flagged nonblocking assignments of process
+    /// kernels (the NBA region, IEEE 1800-2023 4.5).
+    #[inline(never)]
+    fn publish_nba<E>(&mut self, executor: &mut E, round: &mut Round) -> bool
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if round.nba_published {
+            return false;
+        }
+        round.nba_published = true;
+        let flagged = round.kernels_ran && self.has_pending_nba_sites;
+        if self.process_state.nba_queue.is_empty() && !flagged {
+            return false;
+        }
+        let mut updates = std::mem::take(&mut self.process_state.nba_queue);
+        if flagged {
+            let backend = executor.backend_mut();
+            for process in &self.processes {
+                for site in &process.nba_sites {
+                    let Some(pending) = site.pending else {
+                        continue;
+                    };
+                    if backend.get_as::<u8>(pending) == 0 {
+                        continue;
+                    }
+                    backend.set(pending, 0u8);
+                    let offset = site
+                        .offset
+                        .map_or(0, |offset| backend.get_as::<u64>(offset) as usize);
+                    updates.push(NbaUpdate {
+                        target: site.target,
+                        lsb: site.lsb + offset,
+                        width: site.width,
+                        value: read(backend, site.value),
+                    });
+                }
+            }
+        }
+        if updates.is_empty() {
+            return false;
+        }
+        for update in updates {
+            let backend = executor.backend_mut();
+            let merged = update.merge_into(&read(backend, update.target));
+            let target = update.target;
+            self.write_signal(backend, target, |backend| {
+                if target.is_4state {
+                    backend.set_four_state(target, merged.0, merged.1);
+                } else {
+                    backend.set_wide(target, merged.0);
+                }
+            });
+        }
+        round.track_stable_edges = true;
+        true
+    }
+
+    /// Apply the domains evaluated before an inactive region.
+    #[inline(never)]
+    fn apply_deferred<E>(&mut self, executor: &mut E, round: &mut Round) -> Result<Vec<usize>, Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let deferred = std::mem::take(&mut round.deferred);
+        if deferred.is_empty() {
+            return Ok(Vec::new());
+        }
+        if deferred.iter().any(|(_, image)| image.is_some()) {
+            let live = working_image(executor.backend());
+            for (id, image) in &deferred {
+                if let Some(image) = image {
+                    restore_working_image(executor.backend_mut(), image);
+                    if let Some(event) = self.event_info[*id].apply_event {
+                        executor.apply_ff_at(event)?;
+                    }
+                }
+            }
+            restore_working_image(executor.backend_mut(), &live);
+        }
+        let mut applied = Vec::new();
+        for (id, image) in deferred {
+            if image.is_none() {
+                if let Some(event) = self.event_info[id].apply_event {
+                    executor.apply_ff_at(event)?;
+                }
+                applied.push(id);
+            }
+        }
+        Ok(applied)
+    }
+
+    /// The process phase of a round: the active and inactive regions before
+    /// any domain publishes (IEEE 1800-2023 4.5). Without ready processes,
+    /// waits or counted signals this is one settle, the batch step's.
+    #[inline(never)]
+    fn process_phase<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        round: &mut Round,
+        mut entry: bool,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let mut returns = 0;
+        let mut first = true;
+        loop {
+            // Processes run after this time's scheduled values are applied
+            // and see the state settled at the previous time. The event
+            // signals they change are edges of this time, like scheduled
+            // events.
+            let ran = self.run_ready(executor, current_time, round, &mut returns)?;
+            round.kernels_ran |= ran;
+            if first || ran {
+                let transitions = std::mem::take(&mut round.transitions);
+                self.mark_scheduled_edges(executor.backend_mut(), round, &transitions);
+                round.transitions = transitions;
+                round.transitions.clear();
+                self.settle_marked(executor, round)?;
+                first = false;
+            }
+            if entry {
+                // Scheduled and host values, including raw writes of the
+                // host's view of the state, and what the settle derived.
+                entry = false;
+                if !self.process_state.waiters.is_empty() {
+                    self.observe(executor.backend(), None);
+                }
+            } else {
+                self.observe_driven(executor.backend());
+            }
+            if !self.process_state.ready.is_empty() {
+                continue;
+            }
+            if self.process_state.inactive.is_empty() {
+                return Ok(());
+            }
+            // The active region is empty: the domains it triggered evaluate
+            // before the inactive region's processes resume.
+            self.evaluate_before_inactive(executor, current_time, round)?;
+            let inactive = std::mem::take(&mut self.process_state.inactive);
+            self.process_state.ready.extend(inactive);
+        }
     }
 
     /// Whether a process requested the end of the simulation.
@@ -392,20 +1157,70 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        self.step_round(executor, time, Vec::new(), Vec::new())?;
-        executor.finish_timed_step(time);
-        Ok(Some(time))
+        match self.step_round(executor, time, Vec::new(), Vec::new(), true) {
+            Ok(()) => {
+                executor.finish_timed_step(time);
+                Ok(Some(time))
+            }
+            Err(Halt::Finish) => {
+                self.finish(executor);
+                Ok(Some(self.scheduler.time))
+            }
+            Err(Halt::Error(error)) => Err(error),
+        }
     }
 
-    /// Apply `events_to_process`, run `ready_processes`, and settle the
+    /// The host changed state since the last step: note whether the next
+    /// step must settle the current time first because an event signal
+    /// changed or a process may be woken.
+    pub fn note_host_writes(&mut self, backend: &B, logged: bool) {
+        if self.finished {
+            return;
+        }
+        // With processes or counted signals, a write may reach a waited or
+        // counted signal through combinational logic that has not settled
+        // yet; only settling the current time tells.
+        if logged || !self.processes.is_empty() || !self.counted.is_empty() {
+            self.host_pending = true;
+            return;
+        }
+        if self.counted.iter().enumerate().any(|(index, counted)| {
+            CounterKind::ALL.into_iter().any(|kind| {
+                backend.get_as::<u32>(counted.refs.counter(kind))
+                    != self.process_state.domain_counters[index][kind_index(kind)]
+            })
+        }) {
+            self.host_pending = true;
+            return;
+        }
+        for (signal, id, _) in &self.topo_signals {
+            if *id != usize::MAX
+                && (event_level(backend, *signal) != 0) != self.last_clock_values.contains(*id)
+            {
+                self.host_pending = true;
+                return;
+            }
+        }
+    }
+
+    /// Apply `events_to_process`, run the ready processes, and settle the
     /// edges they cause.
+    ///
+    /// A round is the batch step of a time slot with a process phase in
+    /// front of the flip-flop domains (IEEE 1800-2023 4.5): processes run
+    /// in the active region, the domains they and the scheduled values
+    /// trigger evaluate, zero-delay processes run in the inactive region,
+    /// and only then are nonblocking assignments published. A round
+    /// without ready processes and counted signals does exactly the batch
+    /// step.
     fn step_round<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         events_to_process: Vec<SimEvent<B>>,
         ready_processes: Vec<usize>,
-    ) -> Result<(), SimulatorErrorCode>
+        entry: bool,
+    ) -> Result<(), Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -439,125 +1254,79 @@ impl<B: SimBackend> SimulationState<B> {
             "periodic event sidecar fell behind the scheduler"
         );
 
-        let num_events = executor.backend().num_events();
-        for event in &events_to_process {
-            executor.backend_mut().set(event.signal, event.next_val);
+        let timed = self.timed;
+        if timed {
+            // Host writes the waits must see one at a time.
+            for (signal, value) in executor.take_host_writes() {
+                self.observe_host_write(signal, &value);
+            }
         }
 
-        // Processes run after this time's scheduled values are applied and
-        // see the state settled at the previous time. The event signals they
-        // change are edges of this time, like scheduled events.
-        let mut process_driven = Vec::new();
-        if !ready_processes.is_empty() {
-            let before: Vec<u8> = self
-                .topo_signals
-                .iter()
-                .map(|(signal, _, _)| event_level(executor.backend(), *signal))
-                .collect();
-            self.run_processes(executor, current_time, ready_processes)?;
-            for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
-                if *id == usize::MAX {
-                    continue;
-                }
-                let value = event_level(executor.backend(), *signal);
-                if value != before {
-                    process_driven.push((*id, value != 0));
-                }
+        let num_events = executor.backend().num_events();
+        for (index, event) in events_to_process.iter().enumerate() {
+            let signal = event.signal;
+            let value = event.next_val;
+            if !timed {
+                executor.backend_mut().set(signal, value);
+                continue;
             }
+            if let Some(&counted) = self.counted_by_offset.get(&signal.offset) {
+                let backend = executor.backend_mut();
+                let old = read(backend, signal);
+                backend.set(signal, value);
+                let new = read(backend, signal);
+                self.counted[counted].refs.bump(backend, &old, &new);
+            } else {
+                executor.backend_mut().set(signal, value);
+            }
+            // A signal the batch writes again pulses: its waits see each
+            // value. Otherwise one check after the batch sees the edge.
+            if !self.process_state.waiters.is_empty()
+                && events_to_process[index + 1..]
+                    .iter()
+                    .any(|later| later.signal == signal)
+            {
+                self.observe(executor.backend(), Some(signal));
+            }
+        }
+        if timed && !self.process_state.waiters.is_empty() && !events_to_process.is_empty() {
+            // The scheduled values wake their processes before the process
+            // phase runs.
+            self.observe(executor.backend(), None);
+        }
+
+        let mut round = self.scratch.take().unwrap_or_default();
+        round.reset(events_to_process.is_empty());
+        if timed {
+            self.process_state.ready.extend(ready_processes);
+        }
+        executor.backend_mut().clear_triggered_bits();
+        // An external drive may already have been combinationally evaluated
+        // by a testbench read. Compare against our saved baseline even if that
+        // evaluation's transient trigger bits have since been cleared.
+        round
+            .transitions
+            .extend(events_to_process.iter().filter_map(|event| {
+                self.signal_to_id
+                    .get(&event.signal)
+                    .map(|&id| (id, event.next_val != 0))
+            }));
+
+        if timed {
+            // The check after the batch already saw every signal.
+            let entry = entry && events_to_process.is_empty();
+            self.process_phase(executor, current_time, &mut round, entry)?;
+        } else {
+            let transitions = std::mem::take(&mut round.transitions);
+            self.mark_scheduled_edges(executor.backend_mut(), &mut round, &transitions);
+            round.transitions = transitions;
+            self.settle_marked(executor, &mut round)?;
         }
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
-        let mut scheduled_trigger_ids = BitSet::with_capacity(num_events);
-        // An external drive may already have been combinationally evaluated
-        // by a testbench read. Compare against our saved baseline even if that
-        // evaluation's transient trigger bits have since been cleared.
-        let mut track_stable_edges = events_to_process.is_empty();
-        executor.backend_mut().clear_triggered_bits();
-
-        let scheduled = events_to_process
-            .iter()
-            .filter_map(|event| {
-                self.signal_to_id
-                    .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0))
-            })
-            .chain(process_driven);
-        // Scheduled signals that changed level and gate derived clocks.
-        let mut gating_sources = Vec::new();
-        for (id, is_nonzero) in scheduled {
-            track_stable_edges = true;
-            let was_nonzero = self.last_clock_values.contains(id);
-            if was_nonzero != is_nonzero
-                && self
-                    .combinational_derived
-                    .get(id)
-                    .is_some_and(|derived| !derived.is_empty())
-            {
-                gating_sources.push(id);
-            }
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
-            if triggered {
-                scheduled_trigger_ids.insert(id);
-                executor.backend_mut().mark_triggered_bit(id);
-            }
-        }
-
-        executor.eval_comb()?;
-        if track_stable_edges {
-            // Combinational settling before an active scheduled source domain
-            // commits may expose transient derived-clock edges. In that case,
-            // keep only the source event and rediscover stable edges after the
-            // commit. If the source edge is inactive, preserve derived edges
-            // while filtering out the scheduled signal's own transition.
-            if scheduled_trigger_ids.is_empty() {
-                self.replace_triggers_with_stable_edges(executor.backend_mut());
-            } else {
-                executor.backend_mut().clear_triggered_bits();
-                for id in scheduled_trigger_ids.iter() {
-                    executor.backend_mut().mark_triggered_bit(id);
-                }
-            }
-        }
-        // Clocks computed from a changed scheduled signal, such as
-        // `clk & enable`, change at the same instant, in the active region
-        // before any nonblocking update (IEEE 1800-2023 4.4.2, 4.5): their
-        // edges are judged now, from the state before any domain commits, and
-        // their domains evaluate together with the scheduled ones. Their
-        // levels at this instant become the baseline for the rounds after the
-        // commit, where a gate the commit moves (an enable register rising
-        // with the edge) gives a further edge, as the update events of the
-        // NBA region do.
-        let mut edge_approved: Option<BitSet> = None;
-        for &source in &gating_sources {
-            for &id in self.combinational_derived[source].iter() {
-                if self.stable_edge_triggered(executor.backend(), id) {
-                    executor.backend_mut().mark_triggered_bit(id);
-                    edge_approved
-                        .get_or_insert_with(|| BitSet::with_capacity(num_events))
-                        .insert(id);
-                }
-                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
-                else {
-                    continue;
-                };
-                if event_level(executor.backend(), *signal) != 0 {
-                    self.last_clock_values.insert(id);
-                } else {
-                    self.last_clock_values.remove(id);
-                }
-            }
-        }
-
         let mut comb_already_done = false;
+        let mut deferred_pending = !round.deferred.is_empty();
         loop {
             let mut any_new_outer_loop_trigger = false;
             let mut newly_triggered = Vec::new();
@@ -568,7 +1337,7 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().clear_triggered_bits();
 
                 let mut can_use_eval_apply =
-                    triggered_domains.is_empty() && marked_bits.count() == 1;
+                    !deferred_pending && triggered_domains.is_empty() && marked_bits.count() == 1;
                 if can_use_eval_apply {
                     let single_id = marked_bits.iter().next().expect("one marked trigger");
                     let info = self.event_info[single_id];
@@ -581,9 +1350,15 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
+                            if timed {
+                                self.publish_nba(executor, &mut round);
+                            }
                             executor.eval_comb()?;
-                            if track_stable_edges {
+                            if round.track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
+                            }
+                            if !self.counted.is_empty() {
+                                self.mark_counted_domains(executor.backend_mut(), &mut round);
                             }
                             comb_already_done = true;
                             break;
@@ -603,7 +1378,8 @@ impl<B: SimBackend> SimulationState<B> {
                     // working-region write before its commit. A derived clock
                     // must have the requested stable edge before its FFs run.
                     if info.is_cascaded
-                        && !edge_approved.as_ref().is_some_and(|ids| ids.contains(id))
+                        && !round.counted_triggered.contains(id)
+                        && !round.edge_approved.contains(id)
                         && !self.stable_edge_triggered(executor.backend(), id)
                     {
                         continue;
@@ -613,6 +1389,9 @@ impl<B: SimBackend> SimulationState<B> {
                     any_new_sequential_trigger = true;
                     newly_triggered.push(info.canonical_id);
 
+                    if !round.deferred.is_empty() {
+                        self.supersede(executor.backend(), &mut round, info.canonical_id);
+                    }
                     if let Some(event) = info.eval_only_event {
                         executor.stage_external_event(
                             info.eval_ff_event.unwrap_or(event),
@@ -634,7 +1413,28 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
 
+            let mut published = false;
+            if deferred_pending {
+                deferred_pending = false;
+                // Domains evaluated before an inactive region that did not
+                // trigger again publish with this NBA region.
+                for id in self.apply_deferred(executor, &mut round)? {
+                    if !newly_triggered.contains(&id)
+                        && let Some(event) = self.event_info[id].eval_ff_event
+                    {
+                        executor.fire_external_event(event, current_time)?;
+                    }
+                }
+                published = true;
+            }
+
             if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
+                // The NBA region still publishes the processes' assignments,
+                // which may trigger further domains.
+                if (timed && self.publish_nba(executor, &mut round)) || published {
+                    self.settle_marked(executor, &mut round)?;
+                    continue;
+                }
                 break;
             }
 
@@ -648,13 +1448,19 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
+            if timed {
+                self.publish_nba(executor, &mut round);
+            }
 
             if comb_already_done {
                 comb_already_done = false;
             } else {
                 executor.eval_comb()?;
-                if track_stable_edges {
+                if round.track_stable_edges {
                     self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
+                if !self.counted.is_empty() {
+                    self.mark_counted_domains(executor.backend_mut(), &mut round);
                 }
             }
         }
@@ -670,6 +1476,11 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        // Processes the published values wake run in the next round.
+        if timed {
+            self.observe_driven(executor.backend());
+        }
+
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
             if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
@@ -678,13 +1489,12 @@ impl<B: SimBackend> SimulationState<B> {
                 // A clock needs at least one time unit in each phase.
                 let period = clock.period.max(2);
                 let half = (period / 2) + ((period & 1) & u64::from(event.next_val != 0));
-                let time =
-                    current_time
-                        .checked_add(half)
-                        .ok_or_else(|| SimulatorErrorCode::Runtime {
-                            message: format!("event {event_id} overflows simulation time"),
-                            signals: Vec::new(),
-                        })?;
+                let time = current_time.checked_add(half).ok_or_else(|| {
+                    Halt::Error(SimulatorErrorCode::Runtime {
+                        message: format!("event {event_id} overflows simulation time"),
+                        signals: Vec::new(),
+                    })
+                })?;
                 self.push_periodic_event(SimEvent {
                     time,
                     event_ref: event.event_ref,
@@ -694,6 +1504,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
+        self.scratch = Some(round);
         Ok(())
     }
 
@@ -710,6 +1521,10 @@ impl<B: SimBackend> SimulationState<B> {
     pub fn next_event_time(&self) -> Option<u64> {
         if self.finished {
             return None;
+        }
+        // Host writes and woken processes are work of the current time.
+        if self.host_pending || !self.process_state.ready.is_empty() {
+            return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);
         match (self.scheduler.next_event_time(), process) {
@@ -738,6 +1553,8 @@ impl<B: SimBackend> SimulationState<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            process_state: self.process_state.clone(),
+            host_pending: self.host_pending,
             finished: self.finished,
         }
     }
@@ -771,6 +1588,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.last_clock_values
             .clone_from(&snapshot.last_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
+        self.process_state.clone_from(&snapshot.process_state);
+        self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
         Ok(())
     }
@@ -791,6 +1610,11 @@ pub struct ScheduleParts<B: SimBackend> {
     pub high_events: Vec<B::Event>,
     /// Suspended processes and the time each resumes at.
     pub process_wakeups: Vec<(usize, u64)>,
+    /// Waiting and ready processes, queued nonblocking assignments and the
+    /// counter values counted domains last triggered on.
+    pub process_state: ProcessState,
+    /// The host changed state the next step settles at the current time.
+    pub host_pending: bool,
     /// A process requested the end of the simulation.
     pub finished: bool,
 }
@@ -834,6 +1658,8 @@ impl<B: SimBackend> SimulationState<B> {
                 wakeups.sort_unstable();
                 wakeups
             },
+            process_state: self.process_state.clone(),
+            host_pending: self.host_pending,
             finished: self.finished,
         }
     }
@@ -865,6 +1691,8 @@ impl<B: SimBackend> SimulationState<B> {
             .into_iter()
             .map(|(process, time)| Reverse((time, process)))
             .collect();
+        self.process_state = parts.process_state;
+        self.host_pending = parts.host_pending;
         self.finished = parts.finished;
     }
 }
@@ -877,6 +1705,8 @@ pub struct SimulationSnapshot<B: SimBackend> {
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
+    process_state: ProcessState,
+    host_pending: bool,
     finished: bool,
 }
 
@@ -889,6 +1719,8 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
+            process_state: self.process_state.clone(),
+            host_pending: self.host_pending,
             finished: self.finished,
         }
     }
@@ -899,4 +1731,21 @@ impl<B: SimBackend> SimulationSnapshot<B> {
     pub fn time(&self) -> u64 {
         self.time
     }
+}
+
+/// The working and sparse working state: the next-state values of
+/// evaluated but unpublished flip-flop domains.
+fn working_image<B: SimBackend>(backend: &B) -> Vec<u8> {
+    let layout = backend.layout();
+    let range = layout.working_base_offset..layout.triggered_bits_offset;
+    let (ptr, len) = backend.memory_as_ptr();
+    assert!(range.end <= len, "working state exceeds the memory image");
+    // Safety: the backend exposes `len` readable bytes at `ptr`.
+    let memory = unsafe { std::slice::from_raw_parts(ptr, len) };
+    memory[range].to_vec()
+}
+
+fn restore_working_image<B: SimBackend>(backend: &mut B, image: &[u8]) {
+    let offset = backend.layout().working_base_offset;
+    backend.write_memory(offset, image);
 }

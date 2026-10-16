@@ -34,6 +34,7 @@ use crate::{
     AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
     simulation::{SimulationExecutor, event_level, stable_edge},
+    timing::Halt,
 };
 
 /// The kernels of one event domain.
@@ -465,6 +466,24 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
     {
+        match self.tick_domains(executor, scratch, settle) {
+            // An RTL `$finish` ends only a timed simulation, which does not
+            // tick; a tick leaves it to the host.
+            Ok(()) | Err(Halt::Finish) => Ok(()),
+            Err(Halt::Error(error)) => Err(error),
+        }
+    }
+
+    fn tick_domains<X>(
+        &self,
+        executor: &mut X,
+        scratch: &mut DerivedTickScratch,
+        settle: bool,
+    ) -> Result<(), Halt>
+    where
+        X: SimulationExecutor,
+        X::Backend: SimBackend<Event = E>,
+    {
         scratch.prepare(self.domains.len() + self.gated.len(), self.levers.len());
         // The baseline is the state settled after the previous operation,
         // as the timed scheduler keeps it between steps.
@@ -487,7 +506,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
         settle: bool,
-    ) -> Result<(), SimulatorErrorCode>
+    ) -> Result<(), Halt>
     where
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
@@ -519,7 +538,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
         settle: bool,
-    ) -> Result<(), SimulatorErrorCode>
+    ) -> Result<(), Halt>
     where
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
@@ -584,7 +603,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor: &mut X,
         settle: bool,
         ready: &[usize],
-    ) -> Result<(), SimulatorErrorCode>
+    ) -> Result<(), Halt>
     where
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
@@ -638,7 +657,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
         phase: Phase,
-    ) -> Result<(), SimulatorErrorCode>
+    ) -> Result<(), Halt>
     where
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
@@ -707,7 +726,7 @@ fn fire<'a, X, E>(
     executor: &mut X,
     settle: bool,
     domains: impl Iterator<Item = &'a EventDomain<E>> + Clone,
-) -> Result<(), SimulatorErrorCode>
+) -> Result<(), Halt>
 where
     X: SimulationExecutor,
     X::Backend: SimBackend<Event = E>,
@@ -762,23 +781,23 @@ impl<B: SimBackend> SimulationExecutor for BackendExecutor<'_, B> {
         self.0
     }
 
-    fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        self.0.eval_comb()
+    fn eval_comb(&mut self) -> Result<(), Halt> {
+        Ok(self.0.eval_comb()?)
     }
 
-    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), SimulatorErrorCode> {
-        self.0.eval_apply_ff_at(event)
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        Ok(self.0.eval_apply_ff_at(event)?)
     }
 
-    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), SimulatorErrorCode> {
-        self.0.eval_comb_apply_ff_at(event)
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        Ok(self.0.eval_comb_apply_ff_at(event)?)
     }
 
-    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), SimulatorErrorCode> {
-        self.0.eval_only_ff_at(event)
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        Ok(self.0.eval_only_ff_at(event)?)
     }
 
-    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), SimulatorErrorCode> {
-        self.0.apply_ff_at(event)
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        Ok(self.0.apply_ff_at(event)?)
     }
 }

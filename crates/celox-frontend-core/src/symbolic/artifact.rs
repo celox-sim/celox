@@ -1,8 +1,9 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    ExternFunction, InitialStateValue, ModuleId, ProcessSlots, RegionedAbsoluteAddrBase,
-    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet, VariableMetadata,
+    CounterSlots, ExternFunction, InitialStateValue, ModuleId, NbaSite, ProcessSlots,
+    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
+    VariableMetadata, WaitSite,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, SLTNodeArena};
@@ -87,6 +88,17 @@ pub struct SimModule {
     /// 1800-2023 26.2). Every instance of the module refers to that one
     /// object instead of a state object of its own.
     pub package_bindings: HashMap<SourceVarId, PackageBinding>,
+    /// Counter objects of the signals that a unit of the module may store
+    /// twice between two runtime checks (see
+    /// `crate::watch::multi_store_candidates`). Assembly counts a signal's
+    /// occurrences only if a flip-flop domain or a wait watches it.
+    pub counter_slots: Vec<CounterSlots<SourceVarId>>,
+    /// Wait sites of the module's processes; `process` indexes
+    /// [`Self::processes`].
+    pub wait_sites: Vec<WaitSite<SourceVarId>>,
+    /// Nonblocking sites of the module's processes; `process` indexes
+    /// [`Self::processes`].
+    pub nba_sites: Vec<NbaSite<SourceVarId>>,
 }
 
 /// The package variable a module variable denotes.

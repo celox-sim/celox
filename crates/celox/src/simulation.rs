@@ -7,7 +7,8 @@ use crate::{
     },
 };
 use celox_runtime::{
-    EventInfo, ProcessRefs, SimulationExecutor, SimulationSnapshot, SimulationState,
+    CountedDomainRefs, CountedRefs, EventInfo, Halt, HostWatch, NbaSiteRefs, ProcessRefs,
+    SimulationExecutor, SimulationSnapshot, SimulationState, TermRefs,
 };
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -76,30 +77,49 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         &mut self.backend
     }
 
-    fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.eval_comb_checked()
+    #[inline]
+    fn eval_comb(&mut self) -> Result<(), Halt> {
+        self.eval_comb_checked()?;
+        self.runtime_finish()
     }
 
-    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.eval_apply_ff_at_checked(event)
+    #[inline]
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_apply_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.eval_only_ff_at_checked(event)
+    #[inline]
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_only_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.eval_comb_apply_ff_at_checked(event)
+    #[inline]
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_comb_apply_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.apply_ff_at_checked(event)
+    #[inline]
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.apply_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+    fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         self.backend
             .run_process(index)
-            .map_err(|e| self.decorate_runtime_error(e))
+            .map_err(|e| self.decorate_runtime_error(e))?;
+        self.runtime_finish()
+    }
+
+    fn take_host_writes(&mut self) -> Vec<(SignalRef, celox_runtime::timing::Value)> {
+        self.host_watch.take_log()
+    }
+
+    fn freeze(&mut self) {
+        self.frozen = true;
     }
 
     fn stage_external_event(
@@ -133,6 +153,22 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
+    }
+}
+
+impl<B: SimBackend> Simulator<B> {
+    /// A `$finish` the design's flip-flop or combinational code executed
+    /// ends a timed simulation (IEEE 1800-2023 20.2).
+    #[inline]
+    fn runtime_finish(&mut self) -> Result<(), Halt> {
+        if !self.finish_sites {
+            return Ok(());
+        }
+        if self.take_runtime_finish() {
+            Err(Halt::Finish)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -243,16 +279,70 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         }
     }
 
-    let processes = simulator
-        .program
-        .runtime_schema
-        .processes
+    let schema = &simulator.program.runtime_schema;
+    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
+    let counted: Vec<CountedDomainRefs> = schema
+        .watches
         .iter()
-        .map(|slots| ProcessRefs {
-            status: simulator.backend.resolve_signal(&slots.status),
-            delay: simulator.backend.resolve_signal(&slots.delay),
+        .filter_map(|watch| {
+            Some(CountedDomainRefs {
+                refs: CountedRefs {
+                    signal: resolve(&watch.signal),
+                    changes: resolve(&watch.changes?),
+                    rises: resolve(&watch.rises?),
+                    falls: resolve(&watch.falls?),
+                },
+                domains: watch
+                    .domains
+                    .iter()
+                    .filter_map(|(event, kind)| {
+                        Some((simulator.backend.resolve_event_opt(event)?.id(), *kind))
+                    })
+                    .collect(),
+            })
         })
         .collect();
+    // Signals design code writes; the rest only the host and the scheduler
+    // write.
+    let driven: crate::HashSet<crate::AbsoluteAddr> =
+        schema.rtl_writes.iter().map(|atom| atom.id).collect();
+    let counter_of = |signal: SignalRef, kind| {
+        counted
+            .iter()
+            .find(|counted| counted.refs.signal == signal)
+            .map(|counted| counted.refs.counter(kind))
+    };
+    let mut processes: Vec<ProcessRefs> = schema
+        .processes
+        .iter()
+        .map(|slots| ProcessRefs::new(resolve(&slots.status), resolve(&slots.delay)))
+        .collect();
+    for site in &schema.wait_sites {
+        let terms = site
+            .terms
+            .iter()
+            .map(|(address, kind)| {
+                let signal = resolve(address);
+                TermRefs {
+                    signal,
+                    kind: *kind,
+                    counter: counter_of(signal, *kind),
+                    driven: driven.contains(address),
+                }
+            })
+            .collect();
+        processes[site.process].wait_sites.push(terms);
+    }
+    for site in &schema.nba_sites {
+        processes[site.process].nba_sites.push(NbaSiteRefs {
+            target: resolve(&site.target),
+            lsb: site.lsb,
+            width: site.width,
+            value: resolve(&site.value),
+            offset: site.offset.as_ref().map(resolve),
+            pending: site.pending.as_ref().map(resolve),
+        });
+    }
 
     let mut state = SimulationState::new(
         &simulator.backend,
@@ -260,7 +350,8 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         domain_kinds,
         event_info,
         processes,
-    );
+    )
+    .with_counted(&simulator.backend, counted);
     let events = &simulator.program.design.events;
     if !events.combinational_derived.is_empty() {
         let derived = simulator
@@ -283,9 +374,41 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
     state
 }
 
+/// Host writes a timed simulation of `simulator` observes one at a time:
+/// those of counted signals and of signals a wait watches.
+fn host_watch<B: SimBackend>(simulator: &Simulator<B>) -> HostWatch {
+    let schema = &simulator.program.runtime_schema;
+    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
+    HostWatch::new(
+        schema.watches.iter().filter_map(|watch| {
+            Some(CountedRefs {
+                signal: resolve(&watch.signal),
+                changes: resolve(&watch.changes?),
+                rises: resolve(&watch.rises?),
+                falls: resolve(&watch.falls?),
+            })
+        }),
+        schema
+            .wait_sites
+            .iter()
+            .flat_map(|site| site.terms.iter().map(|(signal, _)| resolve(signal).offset))
+            .collect(),
+    )
+}
+
 impl<B: SimBackend> Simulation<B> {
-    pub(crate) fn new(simulator: Simulator<B>) -> Self {
+    pub(crate) fn new(mut simulator: Simulator<B>) -> Self {
         let state = simulation_state(&simulator);
+        simulator.host_watch = host_watch(&simulator);
+        // Only a timed simulation ends at an RTL `$finish`; a bare
+        // `Simulator`, ticks included, leaves that to the host.
+        simulator.finish_sites = simulator
+            .program
+            .runtime_schema
+            .runtime_event_sites
+            .iter()
+            .any(|site| matches!(site.kind, crate::ir::RuntimeEventKind::Finish));
+        simulator.skip_runtime_finish();
         Self { simulator, state }
     }
 
@@ -305,9 +428,6 @@ impl<B: SimBackend> Simulation<B> {
     /// Save the value of every state object by path, together with the
     /// simulation time, clocks and pending events by name.
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
-        if self.has_processes() {
-            return Err(StateError::Processes);
-        }
         let mut file = self.simulator.save_state()?;
         let parts = self.state.export_schedule(&self.simulator.backend);
         file.schedule = Some(self.simulator.name_schedule(parts));
@@ -318,9 +438,6 @@ impl<B: SimBackend> Simulation<B> {
     /// clocks and pending events. See [`Simulator::load_state`] for how
     /// objects are matched.
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
-        if self.has_processes() {
-            return Err(StateError::Processes);
-        }
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
         let parts = self.simulator.resolve_schedule(record)?;
@@ -380,11 +497,18 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
+    ///
+    /// A write that changes an event signal or a signal a process waits on
+    /// is an update of the current time: the next [`Self::step`] or
+    /// [`Self::run_until`] settles the current time before advancing.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
-        self.simulator.modify(f)
+        self.simulator.modify(f)?;
+        let logged = self.simulator.host_watch.has_log();
+        self.state.note_host_writes(&self.simulator.backend, logged);
+        Ok(())
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
@@ -443,13 +567,35 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
-    fn has_processes(&self) -> bool {
-        !self.simulator.program.runtime_schema.processes.is_empty()
-    }
-
     /// Whether a process of the design requested the end of the simulation.
     /// Once it has, [`Self::step`] returns `None` and [`Self::run_until`]
     /// stops at the time of the request.
+    /// Like [`Self::run_until`], but takes at most `max_steps` steps.
+    /// Returns `false`, with the simulation at the time of its last step,
+    /// when another step would be needed to reach `end_time`.
+    pub fn run_until_bounded(
+        &mut self,
+        end_time: u64,
+        max_steps: u64,
+    ) -> Result<bool, RuntimeErrorCode> {
+        if end_time < self.state.time() {
+            return Ok(true);
+        }
+        let mut steps = 0;
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > end_time {
+                break;
+            }
+            if steps >= max_steps {
+                return Ok(false);
+            }
+            self.step()?;
+            steps += 1;
+        }
+        self.run_until(end_time)?;
+        Ok(true)
+    }
+
     pub fn is_finished(&self) -> bool {
         self.state.is_finished()
     }
@@ -1187,3 +1333,6 @@ endmodule
         }
     }
 }
+
+#[cfg(all(test, feature = "host-runtime"))]
+mod runtime_core_tests;

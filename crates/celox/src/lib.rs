@@ -103,15 +103,26 @@ mod host_api {
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
         pub(crate) backend: &'a mut B,
+        /// Writes a timed simulation observes one at a time; empty
+        /// otherwise.
+        pub(crate) watch: &'a mut celox_runtime::HostWatch,
     }
 
     impl<'a, B: SimBackend> IOContext<'a, B> {
+        fn write(&mut self, signal: crate::SignalRef, write: impl FnOnce(&mut B)) {
+            if self.watch.is_empty() {
+                write(self.backend);
+            } else {
+                self.watch.write(self.backend, signal, write);
+            }
+        }
+
         pub fn set<T: Copy>(&mut self, signal: crate::SignalRef, val: T) {
-            self.backend.set(signal, val);
+            self.write(signal, |backend| backend.set(signal, val));
         }
 
         pub fn set_wide(&mut self, signal: crate::SignalRef, val: crate::BigUint) {
-            self.backend.set_wide(signal, val);
+            self.write(signal, |backend| backend.set_wide(signal, val));
         }
 
         pub fn set_four_state(
@@ -120,7 +131,7 @@ mod host_api {
             val: crate::BigUint,
             mask: crate::BigUint,
         ) {
-            self.backend.set_four_state(signal, val, mask);
+            self.write(signal, |backend| backend.set_four_state(signal, val, mask));
         }
     }
 

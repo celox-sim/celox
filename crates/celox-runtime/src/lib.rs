@@ -10,6 +10,7 @@ pub mod scheduler;
 mod simulation;
 mod state_file;
 mod testbench;
+pub mod timing;
 mod vcd;
 
 pub use derived_tick::{
@@ -23,13 +24,17 @@ pub use reflection::{
     SignalDirection,
 };
 pub use simulation::{
-    EventInfo, ProcessRefs, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
+    EventInfo, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
 };
 pub use state_file::{
-    ScheduleRecord, ScheduledEvent, StateDifference, StateFile, StateFileError, StateObject,
-    StateRole, format_state_value,
+    BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,
+    StateFile, StateFileError, StateObject, StateRole, WaiterRecord, format_state_value,
 };
 pub use testbench::bind_testbench_program;
+pub use timing::{
+    CountedDomainRefs, CountedRefs, Halt, HostWatch, NbaSiteRefs, NbaUpdate, ProcessRefs,
+    ProcessState, TermRefs, Waiter, Waiters,
+};
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
 
 pub type AbsoluteAddr = celox_design::StateAddr;

@@ -12,8 +12,10 @@ use std::sync::Arc;
 use crate::HashMap;
 
 use celox_runtime::scheduler::SimEvent;
+use celox_runtime::timing::Baseline;
 use celox_runtime::{
-    ScheduleParts, ScheduleRecord, ScheduledEvent, StateFile, StateObject, StateRole,
+    BaselineRecord, NbaRecord, ProcessRecord, ProcessState, ScheduleParts, ScheduleRecord,
+    ScheduledEvent, StateFile, StateObject, StateRole, WaiterRecord,
 };
 use num_bigint::BigUint;
 
@@ -34,8 +36,8 @@ pub enum StateError {
     MissingSchedule,
     #[error("evaluating combinational logic failed: {0}")]
     Runtime(RuntimeErrorCode),
-    /// A suspended process is not a named state object, so a state file
-    /// cannot record where it resumes.
+    /// Not returned since state files record suspended processes; kept so
+    /// that matching code keeps compiling.
     #[error("state files are not supported for simulations with processes")]
     Processes,
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
@@ -367,6 +369,7 @@ impl<B: SimBackend> Simulator<B> {
             signal: signal_path(event),
             value: event.next_val,
         };
+        let processes = self.name_processes(&parts, &signal_paths);
         ScheduleRecord {
             time: parts.time,
             clocks: parts
@@ -381,7 +384,253 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (named(event), *count))
                 .collect(),
             high_events: parts.high_events.into_iter().map(event_path).collect(),
+            processes,
         }
+    }
+
+    /// The status slot of each process, by which a state file names it.
+    fn process_statuses(&self) -> Vec<SignalRef> {
+        self.program
+            .runtime_schema
+            .processes
+            .iter()
+            .map(|slots| self.backend.resolve_signal(&slots.status))
+            .collect()
+    }
+
+    /// The signal of each counted signal, in counter order.
+    fn counted_signals(&self) -> Vec<SignalRef> {
+        self.program
+            .runtime_schema
+            .watches
+            .iter()
+            .map(|watch| self.backend.resolve_signal(&watch.signal))
+            .collect()
+    }
+
+    fn name_processes(
+        &self,
+        parts: &ScheduleParts<B>,
+        signal_paths: &HashMap<usize, String>,
+    ) -> ProcessRecord {
+        let path = |signal: SignalRef| {
+            signal_paths
+                .get(&signal.offset)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let statuses = self.process_statuses();
+        let process = |index: usize| path(statuses[index]);
+        let state = &parts.process_state;
+        ProcessRecord {
+            wakeups: parts
+                .process_wakeups
+                .iter()
+                .map(|&(index, time)| (process(index), time))
+                .collect(),
+            waiters: state
+                .waiters
+                .iter()
+                .map(|(index, waiter)| {
+                    // The widths of the site's term signals split a plane
+                    // image into its value and mask.
+                    let widths: Vec<usize> = self
+                        .program
+                        .runtime_schema
+                        .wait_sites
+                        .iter()
+                        .filter(|site| site.process == index)
+                        .nth(waiter.site)
+                        .map(|site| {
+                            site.terms
+                                .iter()
+                                .map(|(signal, _)| self.backend.resolve_signal(signal).width)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    WaiterRecord {
+                        process: process(index),
+                        site: waiter.site as u64,
+                        baselines: waiter
+                            .baselines
+                            .iter()
+                            .enumerate()
+                            .map(|(term, baseline)| match baseline {
+                                Baseline::Counter(value) => BaselineRecord::Counter(*value),
+                                Baseline::Value((value, mask)) => BaselineRecord::Value {
+                                    value: value.to_bytes_le(),
+                                    mask: mask.to_bytes_le(),
+                                },
+                                Baseline::Raw(image) => {
+                                    let bytes = widths
+                                        .get(term)
+                                        .map_or(image.len(), |width| width.div_ceil(8).max(1))
+                                        .min(image.len());
+                                    BaselineRecord::Value {
+                                        value: image[..bytes].to_vec(),
+                                        mask: image[bytes..].to_vec(),
+                                    }
+                                }
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
+            ready: state.ready.iter().map(|&index| process(index)).collect(),
+            inactive: state.inactive.iter().map(|&index| process(index)).collect(),
+            nba_queue: state
+                .nba_queue
+                .iter()
+                .map(|update| NbaRecord {
+                    target: path(update.target),
+                    lsb: update.lsb as u64,
+                    width: update.width as u64,
+                    value: update.value.0.to_bytes_le(),
+                    mask: update.value.1.to_bytes_le(),
+                })
+                .collect(),
+            domain_counters: self
+                .counted_signals()
+                .into_iter()
+                .zip(&state.domain_counters)
+                .map(|(signal, counters)| (path(signal), *counters))
+                .collect(),
+            host_pending: parts.host_pending,
+            finished: parts.finished,
+        }
+    }
+
+    /// Resolve the process section of a schedule, or the names and sites
+    /// this design does not declare.
+    fn resolve_processes(
+        &self,
+        record: &ProcessRecord,
+        signals: &HashMap<String, SignalRef>,
+    ) -> Result<(Vec<(usize, u64)>, ProcessState), Vec<String>> {
+        let statuses = self.process_statuses();
+        let processes: HashMap<String, usize> = statuses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, status)| {
+                let path = signals
+                    .iter()
+                    .find(|(_, signal)| signal.offset == status.offset)?
+                    .0;
+                Some((path.clone(), index))
+            })
+            .collect();
+        let mut unknown: Vec<String> = record
+            .wakeups
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&record.ready)
+            .chain(&record.inactive)
+            .chain(record.waiters.iter().map(|waiter| &waiter.process))
+            .filter(|name| !processes.contains_key(*name))
+            .cloned()
+            .collect();
+        let process = |name: &String| processes.get(name).copied();
+        let wakeups: Vec<_> = record
+            .wakeups
+            .iter()
+            .filter_map(|(name, time)| Some((process(name)?, *time)))
+            .collect();
+        let ready = record.ready.iter().filter_map(process).collect();
+        let inactive = record.inactive.iter().filter_map(process).collect();
+        let mut waiters = celox_runtime::timing::Waiters::default();
+        for waiter in &record.waiters {
+            let Some(index) = process(&waiter.process) else {
+                continue;
+            };
+            let sites = self
+                .program
+                .runtime_schema
+                .wait_sites
+                .iter()
+                .filter(|site| site.process == index)
+                .collect::<Vec<_>>();
+            let site = usize::try_from(waiter.site).ok();
+            if !site
+                .and_then(|site| sites.get(site))
+                .is_some_and(|site| site.terms.len() == waiter.baselines.len())
+            {
+                unknown.push(format!("{} wait site {}", waiter.process, waiter.site));
+                continue;
+            }
+            let driven = self
+                .program
+                .runtime_schema
+                .wait_sites
+                .iter()
+                .filter(|site| site.process == index)
+                .nth(site.unwrap_or_default())
+                .is_some_and(|site| {
+                    site.terms.iter().any(|(signal, _)| {
+                        self.program
+                            .runtime_schema
+                            .rtl_writes
+                            .iter()
+                            .any(|atom| atom.id == *signal)
+                    })
+                });
+            waiters.insert(
+                index,
+                driven,
+                celox_runtime::timing::Waiter {
+                    site: site.unwrap_or_default(),
+                    baselines: waiter
+                        .baselines
+                        .iter()
+                        .map(|baseline| match baseline {
+                            BaselineRecord::Counter(value) => Baseline::Counter(*value),
+                            BaselineRecord::Value { value, mask } => Baseline::Value((
+                                BigUint::from_bytes_le(value),
+                                BigUint::from_bytes_le(mask),
+                            )),
+                        })
+                        .collect(),
+                },
+            );
+        }
+        let mut nba_queue = Vec::new();
+        for update in &record.nba_queue {
+            match signals.get(&update.target) {
+                Some(&target) => nba_queue.push(celox_runtime::NbaUpdate {
+                    target,
+                    lsb: update.lsb as usize,
+                    width: update.width as usize,
+                    value: (
+                        BigUint::from_bytes_le(&update.value),
+                        BigUint::from_bytes_le(&update.mask),
+                    ),
+                }),
+                None => unknown.push(update.target.clone()),
+            }
+        }
+        let counted = self.counted_signals();
+        let mut domain_counters = vec![[0; 3]; counted.len()];
+        for (name, counters) in &record.domain_counters {
+            let index = signals
+                .get(name)
+                .and_then(|signal| counted.iter().position(|counted| counted == signal));
+            match index {
+                Some(index) => domain_counters[index] = *counters,
+                None => unknown.push(name.clone()),
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(unknown);
+        }
+        Ok((
+            wakeups,
+            ProcessState {
+                waiters,
+                ready,
+                inactive,
+                nba_queue,
+                domain_counters,
+            },
+        ))
     }
 
     /// Resolve a named schedule into this design's handles. Fails with the
@@ -420,6 +669,10 @@ impl<B: SimBackend> Simulator<B> {
             )
             .cloned()
             .collect();
+        let processes = self.resolve_processes(&record.processes, &signals);
+        if let Err(names) = &processes {
+            unknown.extend(names.iter().cloned());
+        }
         if !unknown.is_empty() {
             unknown.sort();
             unknown.dedup();
@@ -428,6 +681,7 @@ impl<B: SimBackend> Simulator<B> {
                 ..Default::default()
             }));
         }
+        let (process_wakeups, process_state) = processes.expect("checked above");
         let resolve = |event: &ScheduledEvent| SimEvent {
             time: event.time,
             event_ref: events[&event.event],
@@ -448,9 +702,10 @@ impl<B: SimBackend> Simulator<B> {
                 .map(|(event, count)| (resolve(event), *count))
                 .collect(),
             high_events: record.high_events.iter().map(|name| events[name]).collect(),
-            // State files are rejected for designs with processes.
-            process_wakeups: Vec::new(),
-            finished: false,
+            process_wakeups,
+            process_state,
+            host_pending: record.processes.host_pending,
+            finished: record.processes.finished,
         })
     }
 }
