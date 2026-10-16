@@ -11,17 +11,24 @@ pub struct CompiledExpr {
     bytecode: ExprBytecode,
 }
 
-/// Stack value: either a native u64 or a heap-allocated BigUint.
+/// Stack value: integer bits or a dynamically sized byte string.
 #[derive(Clone, Debug)]
 pub enum TestbenchValue {
     U64(u64),
     Wide(BigUint),
+    String(Vec<u8>),
 }
 
 impl TestbenchValue {
     #[inline]
     pub fn to_u64(&self) -> u64 {
         match self {
+            TestbenchValue::String(v) => v
+                .iter()
+                .rev()
+                .take(8)
+                .enumerate()
+                .fold(0, |value, (i, byte)| value | (u64::from(*byte) << (i * 8))),
             TestbenchValue::U64(v) => *v,
             TestbenchValue::Wide(v) => {
                 let digits = v.to_u64_digits();
@@ -33,6 +40,7 @@ impl TestbenchValue {
     #[inline]
     pub fn is_zero(&self) -> bool {
         match self {
+            TestbenchValue::String(v) => v.is_empty(),
             TestbenchValue::U64(v) => *v == 0,
             TestbenchValue::Wide(v) => *v == BigUint::ZERO,
         }
@@ -41,6 +49,7 @@ impl TestbenchValue {
     #[inline]
     pub fn to_biguint(&self) -> BigUint {
         match self {
+            TestbenchValue::String(v) => BigUint::from_bytes_be(v),
             TestbenchValue::U64(v) => BigUint::from(*v),
             TestbenchValue::Wide(v) => v.clone(),
         }
@@ -72,7 +81,9 @@ impl CompiledExpr {
         if self.bytecode.ops().iter().any(|op| {
             matches!(
                 op,
-                TbOpcode::LoadU64 { .. }
+                TbOpcode::StoreString { .. }
+                    | TbOpcode::LoadString { .. }
+                    | TbOpcode::LoadU64 { .. }
                     | TbOpcode::LoadWide { .. }
                     | TbOpcode::LoadIndexed { .. }
                     | TbOpcode::LoadBitSelect { .. }
@@ -97,6 +108,17 @@ impl CompiledExpr {
     pub fn eval_value_with_write_observer(
         &self,
         memory: *mut u8,
+        on_write: impl FnMut(usize, usize),
+    ) -> TestbenchValue {
+        self.eval_with_strings(memory, &mut crate::TestbenchStrings::new(), on_write)
+    }
+
+    /// Evaluate using the simulator-owned string storage. Values are copied on
+    /// load so assigning another variable cannot alias a mutable string.
+    pub fn eval_with_strings(
+        &self,
+        memory: *mut u8,
+        strings: &mut crate::TestbenchStrings,
         mut on_write: impl FnMut(usize, usize),
     ) -> TestbenchValue {
         let mut stack: Vec<TestbenchValue> = Vec::with_capacity(16);
@@ -104,7 +126,7 @@ impl CompiledExpr {
         let ops = self.bytecode.ops();
 
         while pc < ops.len() {
-            self.exec_at(ops, &mut pc, &mut stack, memory, &mut on_write);
+            self.exec_at(ops, &mut pc, &mut stack, memory, strings, &mut on_write);
         }
         stack.pop().unwrap_or_else(|| {
             debug_assert!(false, "testbench bytecode: stack empty after evaluation");
@@ -121,9 +143,34 @@ impl CompiledExpr {
         pc: &mut usize,
         stack: &mut Vec<TestbenchValue>,
         memory: *mut u8,
+        strings: &mut crate::TestbenchStrings,
         on_write: &mut impl FnMut(usize, usize),
     ) {
         match &ops[*pc] {
+            TbOpcode::ConstString(value) => {
+                stack.push(TestbenchValue::String(value.clone()));
+                *pc += 1;
+            }
+            TbOpcode::LoadString { location, elements } => {
+                let index = stack.pop().expect("string index").to_u64() as usize;
+                let value = if index < *elements {
+                    strings
+                        .get(&(*location, index))
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                stack.push(TestbenchValue::String(value));
+                *pc += 1;
+            }
+            TbOpcode::StoreString { location } => {
+                let TestbenchValue::String(value) = stack.pop().expect("string store value") else {
+                    unreachable!("string store requires a string value");
+                };
+                strings.insert((*location, 0), value);
+                *pc += 1;
+            }
             TbOpcode::ConstU64(v) => {
                 stack.push(TestbenchValue::U64(*v));
                 *pc += 1;
@@ -258,14 +305,14 @@ impl CompiledExpr {
                 if !cond.is_zero() {
                     let then_end = *pc + then_len;
                     while *pc < then_end {
-                        self.exec_at(ops, pc, stack, memory, on_write);
+                        self.exec_at(ops, pc, stack, memory, strings, on_write);
                     }
                     *pc += else_len; // skip else block
                 } else {
                     *pc += then_len; // skip then block
                     let else_end = *pc + else_len;
                     while *pc < else_end {
-                        self.exec_at(ops, pc, stack, memory, on_write);
+                        self.exec_at(ops, pc, stack, memory, strings, on_write);
                     }
                 }
             }
@@ -382,6 +429,18 @@ unsafe fn read_bits(ptr: *const u8, bit_offset: usize, width: usize) -> Testbenc
 #[inline]
 fn eval_binop(l: TestbenchValue, op: Op, r: TestbenchValue) -> TestbenchValue {
     match (&l, &r) {
+        (TestbenchValue::String(l), TestbenchValue::String(r)) => {
+            let result = match op {
+                Op::Eq => l == r,
+                Op::Ne => l != r,
+                Op::Less => l < r,
+                Op::LessEq => l <= r,
+                Op::Greater => l > r,
+                Op::GreaterEq => l >= r,
+                _ => unreachable!("invalid string operator: {op:?}"),
+            };
+            TestbenchValue::U64(u64::from(result))
+        }
         (TestbenchValue::U64(lv), TestbenchValue::U64(rv)) => {
             TestbenchValue::U64(eval_binop_u64(*lv, op, *rv))
         }

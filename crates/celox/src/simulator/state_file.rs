@@ -38,6 +38,8 @@ pub enum StateError {
     /// cannot record where it resumes.
     #[error("state files are not supported for simulations with processes")]
     Processes,
+    #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
+    TestbenchStrings,
 }
 
 /// Differences between a state file and the design it is loaded into.
@@ -241,6 +243,9 @@ impl<B: SimBackend> Simulator<B> {
     /// Combinational values are settled first, so the file shows the values
     /// a read would return.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
+        if !self.testbench_strings.is_empty() {
+            return Err(StateError::TestbenchStrings);
+        }
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
@@ -261,6 +266,9 @@ impl<B: SimBackend> Simulator<B> {
     /// ignored. An attached VCD writer records the loaded values as changes
     /// at the next dump.
     pub fn load_state(&mut self, file: &StateFile) -> Result<(), StateError> {
+        if !self.testbench_strings.is_empty() {
+            return Err(StateError::TestbenchStrings);
+        }
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }

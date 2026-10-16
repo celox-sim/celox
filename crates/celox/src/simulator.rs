@@ -97,6 +97,8 @@ mod host {
     /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
+        /// Dynamic testbench strings, keyed by the bound variable location.
+        pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
         pub(crate) program: RuntimeProgram,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
@@ -683,6 +685,7 @@ mod host {
                 vcd_writer: None,
                 dirty: false,
                 warnings,
+                testbench_strings: Default::default(),
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),

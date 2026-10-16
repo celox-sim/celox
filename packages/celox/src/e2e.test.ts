@@ -3534,6 +3534,35 @@ module CounterTbPassSecond {
 `;
 
 describe("E2E: native testbench (runTest)", () => {
+	test("dynamic strings retain their length in native testbench assertions", () => {
+		const result = runTest(
+			[
+				{
+					path: "strings.veryl",
+					content: `
+            #[test(Top)] module Top {
+                var text: string;
+                initial {
+                    text = "a dynamic string longer than eight bytes";
+                    $assert(text == "a dynamic string longer than eight bytes", "[%s]", text);
+                    text = "";
+                    $assert(text == "", "[%s]", text);
+                    $finish();
+                }
+            }
+        `,
+				},
+			],
+			"Top",
+		);
+		expect(result.passed).toBe(true);
+		expect(
+			result.assertions.map((assertion) =>
+				new TextDecoder().decode(assertion.message!),
+			),
+		).toEqual(["[a dynamic string longer than eight bytes]", "[]"]);
+	});
+
 	const addon = loadNativeAddon();
 
 	test("passing testbench returns passed=true with all assertions passed", () => {

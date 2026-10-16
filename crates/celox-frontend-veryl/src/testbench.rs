@@ -1167,6 +1167,13 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
         context: Option<ValueContext>,
     ) -> ValueContext {
+        // A string's declared width is nominal; its runtime length must never
+        // pass through integer context sizing or assignment truncation.
+        let context = if expr.comptime().r#type.is_string() {
+            None
+        } else {
+            context
+        };
         match expr {
             Expression::Term(f) => {
                 self.emit_factor(f, ops);
@@ -1242,6 +1249,19 @@ impl ExprCompiler<'_> {
                     return self.resize_result(ops, casted, context);
                 }
 
+                if lhs.comptime().r#type.is_string() && rhs.comptime().r#type.is_string() {
+                    self.emit_in_context(lhs, ops, None);
+                    self.emit_in_context(rhs, ops, None);
+                    ops.push(TbOpcode::BinOp(lower_testbench_operator(*op)));
+                    return self.resize_result(
+                        ops,
+                        ValueContext {
+                            width: 1,
+                            signed: false,
+                        },
+                        context,
+                    );
+                }
                 let lhs_width = self.natural_width(lhs);
                 let rhs_width = self.natural_width(rhs);
                 let semantics = binary_semantics(
@@ -1351,6 +1371,40 @@ impl ExprCompiler<'_> {
     }
 
     fn emit_factor(&self, factor: &Factor, ops: &mut Vec<UnboundTbOpcode>) {
+        if factor.comptime().r#type.is_string() {
+            match factor {
+                Factor::Variable(id, index, select, comptime) if !comptime.is_const => {
+                    let (address, info) =
+                        self.local_variable(*id).expect("string variable metadata");
+                    self.emit_string_access(address, info, index, select, ops);
+                    return;
+                }
+                Factor::HierVariable(reference) => {
+                    let (address, info) = self
+                        .hierarchical_variable(reference)
+                        .expect("string variable metadata");
+                    self.emit_string_access(
+                        address,
+                        info,
+                        &reference.index,
+                        &reference.select,
+                        ops,
+                    );
+                    return;
+                }
+                _ => {
+                    if let Ok(value) = factor.comptime().get_value() {
+                        let len = value.width().div_ceil(8);
+                        let bytes = value.payload().to_bytes_be();
+                        let mut result = vec![0; len];
+                        let copied = len.min(bytes.len());
+                        result[len - copied..].copy_from_slice(&bytes[bytes.len() - copied..]);
+                        ops.push(TbOpcode::ConstString(result));
+                        return;
+                    }
+                }
+            }
+        }
         match factor {
             Factor::Variable(var_id, index, select, comptime) => {
                 if comptime.is_const
@@ -1400,6 +1454,36 @@ impl ExprCompiler<'_> {
                 self.emit_constant_value(value, ops);
             }
         }
+    }
+
+    fn emit_string_access(
+        &self,
+        address: StateAddr,
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
+        let target = self
+            .resolve_target_parts(
+                SemanticSignal {
+                    address,
+                    width: info.width,
+                },
+                info,
+                index,
+                select,
+            )
+            .expect("validated string access");
+        if let Some(selection) = target.selection {
+            ops.extend_from_slice(selection.offset.ops());
+        } else {
+            ops.push(TbOpcode::ConstU64(0));
+        }
+        ops.push(TbOpcode::LoadString {
+            location: Self::state_location_at(address, 0),
+            elements: info.width,
+        });
     }
 
     fn emit_constant_value(
@@ -1452,10 +1536,16 @@ impl ExprCompiler<'_> {
                             signed: expression_signed(arg_expr),
                         }),
                     );
-                    ops.push(TbOpcode::StoreU64 {
-                        location: self.state_location(arg_var_id, 0),
-                        byte_size: get_byte_size(sig.width),
-                    });
+                    if arg_expr.comptime().r#type.is_string() {
+                        ops.push(TbOpcode::StoreString {
+                            location: self.state_location(arg_var_id, 0),
+                        });
+                    } else {
+                        ops.push(TbOpcode::StoreU64 {
+                            location: self.state_location(arg_var_id, 0),
+                            byte_size: get_byte_size(sig.width),
+                        });
+                    }
                 }
             }
         }
@@ -1473,10 +1563,16 @@ impl ExprCompiler<'_> {
                                 signed: expression_signed(&a.expr),
                             }),
                         );
-                        ops.push(TbOpcode::StoreU64 {
-                            location: self.state_location(first_dst.id, 0),
-                            byte_size: get_byte_size(dst_sig.width),
-                        });
+                        if a.expr.comptime().r#type.is_string() {
+                            ops.push(TbOpcode::StoreString {
+                                location: self.state_location(first_dst.id, 0),
+                            });
+                        } else {
+                            ops.push(TbOpcode::StoreU64 {
+                                location: self.state_location(first_dst.id, 0),
+                                byte_size: get_byte_size(dst_sig.width),
+                            });
+                        }
                     }
                 }
             }
@@ -1487,7 +1583,15 @@ impl ExprCompiler<'_> {
         // 3. Load return value
         if let Some(ret_var_id) = &func_body.ret {
             if let Some(sig) = self.resolve_var(ret_var_id) {
-                self.emit_load(*ret_var_id, 0, sig.width, ops);
+                if fc.comptime.r#type.is_string() {
+                    ops.push(TbOpcode::ConstU64(0));
+                    ops.push(TbOpcode::LoadString {
+                        location: self.state_location(*ret_var_id, 0),
+                        elements: 1,
+                    });
+                } else {
+                    self.emit_load(*ret_var_id, 0, sig.width, ops);
+                }
             } else {
                 ops.push(TbOpcode::ConstU64(0));
             }
