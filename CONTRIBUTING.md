@@ -70,12 +70,11 @@ minimum safety net, not the definition of validation completeness.
 
 ### Code scanning
 
-`.github/workflows/codeql.yml` scans Actions on pull requests that change
-workflow or local action files. Other ordinary PRs and Mergify queue drafts
-do not run this workflow's analysis. Every Sunday at 04:17 UTC, and on manual
+`.github/workflows/codeql.yml` does not gate merges, so pull requests and
+Mergify queue drafts do not run it. Every Sunday at 04:17 UTC, and on manual
 dispatch, it scans Actions, C/C++, JavaScript/TypeScript, Python, and Rust, with
 at most two analyses running concurrently. Compiled languages use CodeQL's
-`none` build mode. There is no push-triggered full scan or merge requirement.
+`none` build mode. There is no push-triggered scan.
 
 The workflow is inactive until the repository variable
 `CODEQL_ADVANCED_ENABLED` is set to `true`. To replace the existing automatic
@@ -88,9 +87,8 @@ scans after this workflow merges:
    using runners on PRs and pushes.
 3. Set the repository Actions variable `CODEQL_ADVANCED_ENABLED` to `true`,
    then manually dispatch `codeql.yml` on `master`.
-4. Confirm that all five analyses upload results and that an Actions-changing
-   PR runs only the Actions analysis. Rust/application-only PRs should not
-   start CodeQL or Code Quality scans.
+4. Confirm that all five analyses upload results and that PRs no longer start
+   CodeQL or Code Quality scans.
 
 For rollback, unset `CODEQL_ADVANCED_ENABLED` and re-enable default setup.
 This variable allows the replacement to be reviewed without running both
@@ -151,7 +149,7 @@ This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
 See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
-Lydite tests use the independent change-selected and weekly cadence described
+Lydite tests use the independent change-selected and daily cadence described
 below, including on Mergify queue draft PRs.
 The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
@@ -191,6 +189,10 @@ Job selection:
   including unit tests mixed with implementation, remain conservative.
 - Cargo manifests and lockfiles retain broad coverage. Mixed changes combine
   their requirements; unknown paths and failed change detection run all jobs.
+- Workflow, `scripts/` and `.updatecli/` changes run the repository script
+  tests in `Lint & Format`, including the Heliodor fixture and Updatecli
+  selector tests. A test that runs on pull requests must be a required check
+  or feed one; otherwise it belongs to a scheduled workflow.
 - Rust-only changes still pass through the existing `Rust Test & NAPI Build`
   required check. Only explicitly unneeded producers may be skipped; failures
   and cancellations fail the check.
@@ -198,13 +200,19 @@ Job selection:
 Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
 
 - Lydite sources and fixtures run its core and bridge lanes. The core lane owns
-  the proof-engine Rust tests, editor and standalone Veryl conformance.
-- Celox changes run only the bridge lane when Cargo's dependency graph reaches
-  `lydite-celox`. This includes replay and proof-backed Veryl/symbolic corpus
-  gates, which use the in-tree exporter. Upstream private tests and Markdown
-  do not trigger consumer checks. NAPI/JS changes do not reach Lydite.
-- Shared dependency/toolchain configuration and an unreadable diff or dependency
-  graph run both lanes. The graph includes optional, build and dev edges.
+  the proof-engine Rust tests, editor and standalone Veryl conformance. The
+  bridge lane (`bridge` job) runs replay and proof-backed Veryl/symbolic corpus
+  gates against the in-tree Celox exporter in one job sharing a release build.
+- The bridge takes about an hour of runner time, so Celox changes do not run it
+  on PRs or queue drafts even when Cargo's dependency graph reaches
+  `lydite-celox`. The daily and manual runs on `master` (scheduled) and
+  `develop` (dispatched by `nightly.yml`) enable every lane and report failures
+  in the issue "Lydite validation is failing on <branch>", closed by the next
+  passing run. NAPI/JS changes, upstream private tests and Markdown do not
+  reach Lydite.
+- Shared dependency/toolchain configuration runs the core lane; an unreadable
+  diff or dependency graph runs both lanes. The graph includes optional, build
+  and dev edges.
 - Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
   formatting/lint/build checks remain there. The dedicated workflow tests the
   selected Lydite packages, including doctests, and installs its solver.
@@ -223,9 +231,9 @@ uses the finer behavior-based matrix above.
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
-| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
+| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Affected pull requests and merge groups; weekly Monday at 03:41 UTC (12:41 JST); on demand | `lydite.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Weekly and manual runs enable all lanes. |
+| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { lyditeScope, isLydite } from "./ci-lydite-changes.mjs";
+import { lyditeScope, isLydite, pullRequestScope } from "./ci-lydite-changes.mjs";
 import { celoxRustTestScope } from "./ci-changes.mjs";
 import { readWorkspace } from "./ci-rust-scope.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -64,6 +64,26 @@ test("unrelated consumers and upstream private tests do not select Lydite", () =
   );
 });
 
+test("PRs run the bridge only for Lydite-owned changes", () => {
+  const pr = (...files) => pullRequestScope(files, packages);
+  for (const path of [
+    "crates/celox/src/lib.rs",
+    "crates/celox-test-suite/src/veryl/cases/flip_flop.vtest",
+  ])
+    assert.deepEqual(pr(path), neither, path);
+  for (const path of ["Cargo.lock", "rust-toolchain.toml", ".github/workflows/ci.yml"])
+    assert.deepEqual(pr(path), { core: true, bridge: false }, path);
+  for (const path of [
+    "crates/lydite-celox/src/lib.rs",
+    "crates/lydite/src/main.rs",
+    "lydite/conformance/veryl-proof/case-exceptions.json",
+    ".github/workflows/lydite.yml",
+    "scripts/ci-lydite-changes.mjs",
+  ])
+    assert.equal(pr(path).bridge, true, path);
+  assert.deepEqual(pullRequestScope(null, packages), both);
+});
+
 test("dependency selection follows new transitive edges automatically", () => {
   const graph = [
     { name: "lydite", dir: "crates/lydite", dependencies: [] },
@@ -96,7 +116,7 @@ test("Celox packages do not consume the excluded Lydite packages", () => {
   }
 });
 
-test("weekly, manual and unknown-diff invocations run every lane", () => {
+test("daily, manual and unknown-diff invocations run every lane", () => {
   for (const event of ["schedule", "workflow_dispatch", "merge_group"]) {
     const output = execFileSync(
       process.execPath,
@@ -124,14 +144,13 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
   const workflow = readFileSync(`${root}.github/workflows/lydite.yml`, "utf8");
   assert.match(
     workflow,
-    /pull_request:\n  merge_group:\n  schedule:\n    - cron: "41 3 \* \* 1"/,
+    /pull_request:\n  merge_group:\n  schedule:\n    - cron: "41 3 \* \* \*"/,
   );
   for (const [job, lane] of [
     ["documentation", "core"],
     ["editor", "core"],
     ["veryl-fv", "core"],
-    ["celox-replay", "bridge"],
-    ["veryl-proof-corpus", "bridge"],
+    ["bridge", "bridge"],
   ]) {
     assert.ok(
       workflow.includes(
@@ -141,6 +160,10 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
     );
   }
   assert.match(workflow, /cargo test --locked "\$\{args\[@\]\}"/);
+  assert.match(
+    workflow,
+    /  report:\n    name: Report Lydite validation\n[\s\S]*REPORT_NAME: Lydite validation\n        run: node scripts\/report-full-ci\.mjs/,
+  );
   // Execute the actual required-check script for all selected/skipped combinations.
   const script = workflow
     .split("          python3 - <<'PYCODE'\n")[1]
@@ -159,8 +182,7 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
         ["documentation", core],
         ["editor", core],
         ["veryl-fv", core],
-        ["celox-replay", bridge],
-        ["veryl-proof-corpus", bridge],
+        ["bridge", bridge],
       ])
         needs[job] = { result: selected ? "success" : "skipped" };
       const run = () =>

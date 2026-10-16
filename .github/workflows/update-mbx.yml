@@ -4,23 +4,16 @@ on:
   schedule:
     - cron: "37 5 * * *"
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/update-mbx.yml"
-  merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: update-mbx-${{ github.event.pull_request.number || github.ref }}
+  group: update-mbx-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   update:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -79,13 +72,14 @@ jobs:
             `${{ steps.update.outputs.old-version }}` to `${{ steps.update.outputs.new-version }}`.
 
             Validated the locked flake for both Linux architectures and built
-            and ran mbx on x86_64. PR checks also run mbx on ARM64.
+            and ran mbx on x86_64. The daily run also builds and runs the
+            committed mbx on ARM64.
             Other flake inputs remain pinned. Package-definition changes may
             update the lock even when the mbx version is unchanged.
 
+  # Not a merge gate: check the committed lock on both architectures daily.
   validate:
     name: Validate mbx (${{ matrix.runner }})
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     strategy:
       fail-fast: false
       matrix:

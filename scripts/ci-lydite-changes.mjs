@@ -84,6 +84,20 @@ export function lyditeScope(files, packages) {
   return result;
 }
 
+// Celox dependency changes reach the bridge, but its replay and proof corpus
+// are too heavy for every Celox PR. PRs run the bridge only for Lydite-owned
+// changes; daily runs cover Celox changes and report failures in an issue.
+const ownsBridge = (path) =>
+  ["lydite/", "crates/lydite", "scripts/ci-lydite-changes."].some((prefix) =>
+    path.replace(/^\.\//, "").startsWith(prefix),
+  ) || path.replace(/^\.\//, "") === ".github/workflows/lydite.yml";
+
+export function pullRequestScope(files, packages) {
+  const scope = lyditeScope(files, packages);
+  if (files === null) return scope;
+  return { ...scope, bridge: scope.bridge && files.some(ownsBridge) };
+}
+
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
@@ -93,7 +107,7 @@ if (
     !["schedule", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME)
   ) {
     try {
-      scope = lyditeScope(
+      scope = pullRequestScope(
         changedFilesBetween(process.argv[2] ?? "", process.argv[3] ?? ""),
         readWorkspace(fileURLToPath(new URL("../", import.meta.url))),
       );
