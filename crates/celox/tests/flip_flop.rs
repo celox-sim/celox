@@ -5344,3 +5344,57 @@ fn test_benchmark_loop_sir() {
     let output = trace.format_program().unwrap();
     assert_snapshot!("benchmark_loop_sir", output);
 }
+
+all_backends! {
+
+fn test_ff_register_bit_clock_follows_the_selected_bit(sim) {
+    @case "flip_flop::test_ff_register_bit_clock_follows_the_selected_bit";
+}
+
+fn test_ff_register_bit_clock_ignores_other_bits(sim) {
+    @case "flip_flop::test_ff_register_bit_clock_ignores_other_bits";
+}
+
+fn test_ff_divider_of_a_divider(sim) {
+    @case "flip_flop::test_ff_divider_of_a_divider";
+}
+
+fn test_ff_gated_clock_follows_its_enable(sim) {
+    @case "flip_flop::test_ff_gated_clock_follows_its_enable";
+}
+
+}
+
+all_backends! {
+
+fn test_ff_gated_clock_samples_pre_edge_state(sim) {
+    @case "flip_flop::test_ff_gated_clock_samples_pre_edge_state";
+}
+
+fn test_ff_register_gated_clock_uses_the_pre_edge_enable(sim) {
+    @case "flip_flop::test_ff_register_gated_clock_uses_the_pre_edge_enable";
+}
+
+fn test_ff_inverted_clock_samples_after_the_rising_edge(sim) {
+    // The suite pulses a clock for each `tick`: `~clk` rises on its return.
+    // Celox's harness drives `Simulator::tick`, which is the active edge of
+    // `clk` only, so `~clk` never rises there.
+    @ignore_on(native, cranelift, wasm, interp, sv);
+    @case "flip_flop::test_ff_inverted_clock_samples_after_the_rising_edge";
+}
+
+}
+
+all_backends! {
+
+fn test_ff_register_gated_clock_rises_after_the_commit(sim) {
+    // Veryl 0.22.0's simulator holds a master-gated clock's enable for the
+    // whole edge, as a clock-gating cell does: the enable register rising
+    // with the edge does not raise `clk & en` until the next edge. Celox
+    // follows the SystemVerilog Veryl emits (IEEE 1800-2023 4.4.2, 4.5), as
+    // Verilator and Icarus do.
+    @ignore_on(veryl);
+    @case "flip_flop::test_ff_register_gated_clock_rises_after_the_commit";
+}
+
+}

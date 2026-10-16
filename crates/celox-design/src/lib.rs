@@ -3,7 +3,10 @@
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainKind {
@@ -360,6 +363,111 @@ pub struct EventTopology<A> {
     pub cascaded_events: BTreeSet<A>,
     /// Canonical asynchronous/synchronous reset to its canonical clock.
     pub reset_clocks: HashMap<A, A>,
+    /// Canonical event to the state-derived event domains an occurrence of
+    /// it can trigger after its domain commits, in
+    /// [`Self::ordered_events`] order: domains whose clock is computed from
+    /// state written by the event's domain, or by a domain it triggers in
+    /// turn, such as a register bit or a divider. Clocks listed in
+    /// [`Self::combinational_derived`] for the same event are excluded.
+    /// Events that trigger nothing are absent.
+    #[serde(default)]
+    pub derived_events: BTreeMap<A, Vec<A>>,
+    /// Canonical event to the clocks computed combinationally from its own
+    /// signal, such as `clk & enable` or `~clk`, in
+    /// [`Self::ordered_events`] order. Their edges coincide with a change of
+    /// the event's signal: they are judged from the state before that edge
+    /// and their domains evaluate together with the event's own. A change the
+    /// commit then causes is a further edge in the cascade rounds.
+    #[serde(default)]
+    pub combinational_derived: BTreeMap<A, Vec<CombDerivedClock<A>>>,
+    /// Canonical events whose [`Self::combinational_derived`] domains can
+    /// run one after another, those first and the event's own last, with the
+    /// result of evaluating them together: no domain reads or writes state
+    /// an earlier one writes, and none has side effects.
+    #[serde(default)]
+    pub independent_derived: BTreeSet<A>,
+}
+
+/// A clock computed combinationally from an event's signal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombDerivedClock<A> {
+    /// The canonical derived clock.
+    pub clock: A,
+    /// The clock's value as a function of the event's signal and of state
+    /// variables, when its combinational cone is small enough. It lets an
+    /// event-based tick judge the edge without settling the design.
+    pub gate: Option<Vec<GateOp<A>>>,
+}
+
+/// One step of a postfix program computing a derived clock from its source
+/// event's signal and from state variables. Values are at most 64 bits wide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GateOp<A> {
+    /// Push the level of the source event's signal, 0 or 1.
+    Source,
+    /// Push `width` bits of a state variable starting at bit `lsb`.
+    Load {
+        address: A,
+        lsb: u32,
+        width: u32,
+    },
+    Const(u64),
+    /// Bitwise complement within `width` bits.
+    Not {
+        width: u32,
+    },
+    LogicNot,
+    ReduceAnd {
+        width: u32,
+    },
+    ReduceOr,
+    ReduceXor,
+    And,
+    Or,
+    Xor,
+    Eq,
+    Ne,
+    LogicAnd,
+    LogicOr,
+    /// Keep `width` bits starting at bit `lsb`.
+    Slice {
+        lsb: u32,
+        width: u32,
+    },
+    /// Pop the else value, the then value and the condition.
+    Mux,
+}
+
+impl<A> GateOp<A> {
+    pub fn map_addr<B>(self, f: impl FnOnce(A) -> B) -> GateOp<B> {
+        match self {
+            GateOp::Source => GateOp::Source,
+            GateOp::Load {
+                address,
+                lsb,
+                width,
+            } => GateOp::Load {
+                address: f(address),
+                lsb,
+                width,
+            },
+            GateOp::Const(value) => GateOp::Const(value),
+            GateOp::Not { width } => GateOp::Not { width },
+            GateOp::LogicNot => GateOp::LogicNot,
+            GateOp::ReduceAnd { width } => GateOp::ReduceAnd { width },
+            GateOp::ReduceOr => GateOp::ReduceOr,
+            GateOp::ReduceXor => GateOp::ReduceXor,
+            GateOp::And => GateOp::And,
+            GateOp::Or => GateOp::Or,
+            GateOp::Xor => GateOp::Xor,
+            GateOp::Eq => GateOp::Eq,
+            GateOp::Ne => GateOp::Ne,
+            GateOp::LogicAnd => GateOp::LogicAnd,
+            GateOp::LogicOr => GateOp::LogicOr,
+            GateOp::Slice { lsb, width } => GateOp::Slice { lsb, width },
+            GateOp::Mux => GateOp::Mux,
+        }
+    }
 }
 
 impl<A> Default for EventTopology<A> {
@@ -369,6 +477,9 @@ impl<A> Default for EventTopology<A> {
             ordered_events: Vec::new(),
             cascaded_events: BTreeSet::new(),
             reset_clocks: HashMap::default(),
+            derived_events: BTreeMap::new(),
+            combinational_derived: BTreeMap::new(),
+            independent_derived: BTreeSet::new(),
         }
     }
 }
