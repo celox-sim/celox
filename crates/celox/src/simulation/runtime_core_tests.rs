@@ -1488,3 +1488,45 @@ fn raw_host_writes_wake_waits_at_the_current_time() {
         });
     }
 }
+
+/// `v[1] = a` drives one bit of `v`, a combinational process copies it to
+/// `v[0]`: the process reads the bit it does not write, so it runs again
+/// when `a` changes (IEEE 1800-2023 9.2.2.2.1).
+fn comb_reads_unwritten_bits(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("CombBits", four_state);
+    let a = d.input("a", 1);
+    let ty = d.ty(2);
+    let v = d.module.internal("v", ty).unwrap();
+    let y = d.output("y", 2, 0);
+    let high = d.module.slice(v, 1, 1).unwrap();
+    let read_a = d.read(a);
+    d.module.assign(high, read_a).unwrap();
+    let low = d.module.slice(v, 0, 1).unwrap();
+    let read_v = d.read(v);
+    let bit = d.module.expr_slice(read_v, 1, 1).unwrap();
+    d.module
+        .comb_process(vec![Statement::Assign {
+            target: low,
+            value: bit,
+        }])
+        .unwrap();
+    let read_v = d.read(v);
+    let whole_y = d.module.whole(y).unwrap();
+    d.module.assign(whole_y, read_v).unwrap();
+    d.finish()
+}
+
+#[test]
+fn comb_processes_rerun_on_bits_they_do_not_write() {
+    for four_state in [false, true] {
+        let artifact = comb_reads_unwritten_bits(four_state);
+        on_every_backend!(builder(&artifact, four_state), "CombBits", |sim| {
+            let a = sim.signal("a");
+            for (time, input, expected) in [(1, 0u8, 0u64), (2, 1, 3), (3, 0, 0), (4, 1, 3)] {
+                sim.modify(|io| io.set(a, input)).unwrap();
+                sim.run_until(time).unwrap();
+                assert_eq!(value(&mut sim, "y"), expected, "a = {input}");
+            }
+        });
+    }
+}

@@ -51,6 +51,17 @@ fn load<A: Clone>(
     width: usize,
     four_state: bool,
 ) -> RegisterId {
+    load_bits(b, address, 0, width, four_state)
+}
+
+/// Load bits `lsb..lsb + width` of `address`.
+fn load_bits<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    address: &A,
+    lsb: usize,
+    width: usize,
+    four_state: bool,
+) -> RegisterId {
     let register = if four_state {
         b.alloc_logic(width)
     } else {
@@ -59,7 +70,7 @@ fn load<A: Clone>(
     b.emit(SIRInstruction::Load(
         register,
         address.clone(),
-        SIROffset::Static(0),
+        SIROffset::Static(lsb),
         width,
     ));
     register
@@ -210,11 +221,13 @@ fn bump<A: Clone>(b: &mut SIRBuilder<A>, counter: &A, occurred: RegisterId) {
     ));
 }
 
-/// One input of a change-gated unit: the input's stable state and a private
-/// object of the same width and representation that remembers its value.
+/// One input of a change-gated unit: bits `lsb..lsb + width` of the input's
+/// stable state and a private object of that width and representation that
+/// remembers their value.
 #[derive(Clone, Debug)]
 pub struct GateInput<A> {
     pub input: A,
+    pub lsb: usize,
     pub shadow: A,
     pub width: usize,
     pub four_state: bool,
@@ -243,7 +256,13 @@ pub fn gate_on_input_change<A: Clone>(
     let mut run = first;
     let mut currents = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let current = load(&mut b, &input.input, input.width, input.four_state);
+        let current = load_bits(
+            &mut b,
+            &input.input,
+            input.lsb,
+            input.width,
+            input.four_state,
+        );
         let previous = load(&mut b, &input.shadow, input.width, input.four_state);
         let differs = binary(&mut b, current, BinaryOp::NeCase, previous);
         run = binary(&mut b, run, BinaryOp::Or, differs);

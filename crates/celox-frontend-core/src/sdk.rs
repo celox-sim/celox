@@ -1383,6 +1383,36 @@ fn lower_comb_statements(
     Ok(())
 }
 
+/// The bits of `atom` outside every range of `written`.
+fn unwritten_bits(
+    atom: VarAtomBase<SourceVarId>,
+    written: &[VarAtomBase<SourceVarId>],
+) -> Vec<VarAtomBase<SourceVarId>> {
+    let mut ranges = vec![(atom.access.lsb, atom.access.msb)];
+    for written in written.iter().filter(|written| written.id == atom.id) {
+        ranges = ranges
+            .into_iter()
+            .flat_map(|(lsb, msb)| {
+                if written.access.msb < lsb || written.access.lsb > msb {
+                    return vec![(lsb, msb)];
+                }
+                let mut kept = Vec::new();
+                if lsb < written.access.lsb {
+                    kept.push((lsb, written.access.lsb - 1));
+                }
+                if written.access.msb < msb {
+                    kept.push((written.access.msb + 1, msb));
+                }
+                kept
+            })
+            .collect();
+    }
+    ranges
+        .into_iter()
+        .map(|(lsb, msb)| VarAtomBase::new(atom.id, lsb, msb))
+        .collect()
+}
+
 fn statement_sources(
     artifact: &FrontendArtifact,
     statements: &[Statement],
@@ -1422,8 +1452,8 @@ fn stable_signal(address: &RegionedSourceAddr, signals: usize) -> Option<SourceV
 }
 
 /// Lower each combinational process to one unit that runs only when it has
-/// not run yet or a signal it reads (and does not write) changed (IEEE
-/// 1800-2023 9.2.2.2, 9.2.2.2.1), and to a path for each slice it assigns.
+/// not run yet or bits it reads and does not write changed (IEEE 1800-2023
+/// 9.2.2.2, 9.2.2.2.1), and to a path for each slice it assigns.
 fn lower_comb_processes(
     artifact: &FrontendArtifact,
     hidden: &mut HiddenObjects<'_>,
@@ -1464,33 +1494,47 @@ fn lower_comb_processes(
             }
         }
         let targets = merged;
-        let written: HashSet<SourceVarId> = targets.iter().map(|atom| atom.id).collect();
+        // A process is not sensitive to what it writes (IEEE 1800-2023
+        // 9.2.2.2.1): its inputs are the bits it reads outside its targets.
         let mut reads = HashSet::default();
         statement_sources(artifact, process.body(), &mut reads)?;
-        let mut inputs: Vec<SourceVarId> = reads
-            .iter()
-            .map(|atom| atom.id)
-            .filter(|id| !written.contains(id))
+        let mut sources: Vec<VarAtomBase<SourceVarId>> = reads
+            .into_iter()
+            .flat_map(|atom| unwritten_bits(atom, &targets))
             .collect();
-        inputs.sort_unstable();
-        inputs.dedup();
+        sources.sort_unstable_by_key(|atom| (atom.id, atom.access.lsb, atom.access.msb));
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for source in sources {
+            match merged.last_mut() {
+                Some(last) if last.id == source.id && source.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(source.access.msb);
+                }
+                _ => merged.push(source),
+            }
+        }
+        let sources = merged;
         let name = |slot: String| vec![format!("$comb[{index}]"), slot];
-        let gate_inputs = inputs
+        let gate_inputs = sources
             .iter()
-            .map(|&input| {
+            .map(|atom| {
                 let value_type = artifact
                     .signals()
-                    .get(input.0 as usize)
-                    .ok_or(FrontendArtifactError::UnknownSignal(input.0))?
+                    .get(atom.id.0 as usize)
+                    .ok_or(FrontendArtifactError::UnknownSignal(atom.id.0))?
                     .value_type();
+                let width = atom.access.msb - atom.access.lsb + 1;
                 Ok(crate::watch::GateInput {
-                    input: stable(input),
+                    input: stable(atom.id),
+                    lsb: atom.access.lsb,
                     shadow: stable(hidden.declare(
-                        name(format!("input[{}]", input.0)),
-                        value_type.width(),
+                        name(format!(
+                            "input[{}][{}:{}]",
+                            atom.id.0, atom.access.msb, atom.access.lsb
+                        )),
+                        width,
                         value_type.is_four_state(),
                     )),
-                    width: value_type.width(),
+                    width,
                     four_state: value_type.is_four_state(),
                 })
             })
@@ -1498,10 +1542,7 @@ fn lower_comb_processes(
         let ran = hidden.declare(name("ran".to_string()), 1, false);
         let unit = crate::watch::gate_on_input_change(&body, &gate_inputs, &stable(ran))
             .into_map_addr(&mut |address| address.var_id);
-        let sources: HashSet<_> = reads
-            .into_iter()
-            .filter(|atom| !written.contains(&atom.id))
-            .collect();
+        let sources: HashSet<_> = sources.into_iter().collect();
         for target in targets {
             let expr = arena.alloc(SLTNode::Input {
                 variable: target.id,
