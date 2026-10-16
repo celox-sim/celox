@@ -314,3 +314,43 @@ fn systemverilog_posedge_and_negedge_on_one_clock() {
     assert_eq!(timed.get(p), 4u8.into(), "rising edges at 5, 15, 25, 35");
     assert_eq!(timed.get(n), 4u8.into(), "falling edges at 10, 20, 30, 40");
 }
+
+/// The edge plans that WASM hosts run name every derived domain of an event
+/// by its kernel's event name.
+#[test]
+fn edge_plans_describe_derived_domains_by_event_name() {
+    let path = std::path::Path::new("counters.veryl");
+    let (program, _) = celox::compile_to_sir(
+        &[(COUNTERS, path)],
+        "Top",
+        &[],
+        &[],
+        false,
+        &Default::default(),
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &Default::default(),
+    )
+    .unwrap();
+    let plans = celox::edge_plans(&program.into_laid_out(false));
+    let clk = &plans.events["clk"];
+    assert_eq!(clk.edge, "posedge");
+    let mut gated: Vec<_> = clk
+        .gated
+        .iter()
+        .map(|domain| domain.event.as_str())
+        .collect();
+    gated.sort_unstable();
+    assert_eq!(gated, ["gated", "inverted"]);
+    assert!(
+        clk.gated
+            .iter()
+            .all(|domain| plans.events.contains_key(&domain.event))
+    );
+    assert!(clk.comb_read);
+    let json = serde_json::to_value(&plans).unwrap();
+    assert_eq!(json["events"]["clk"]["combRead"], true);
+}
