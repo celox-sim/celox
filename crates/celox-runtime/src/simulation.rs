@@ -227,14 +227,17 @@ struct Round {
     /// Derived clocks whose edge was judged at their source's change; they
     /// bypass the stable-edge test of cascaded domains.
     edge_approved: BitSet,
-    /// The latest value of each event signal among the transitions being
-    /// marked, valid where the stamp equals `generation`.
+    /// The latest value of each event signal among the transitions marked
+    /// since the baseline (`last_clock_values`) was last taken, valid where
+    /// the stamp equals `generation`: a value written in one wave of the
+    /// active region is the previous value of the next wave's write.
     latest: Vec<(u32, bool)>,
     generation: u32,
 }
 
 impl Round {
-    /// Start a scan of transitions over `events` event ids.
+    /// Start a scan of transitions over `events` event ids against a new
+    /// baseline.
     fn begin_scan(&mut self, events: usize) {
         if self.latest.len() < events {
             self.latest.resize(events, (0, false));
@@ -247,8 +250,8 @@ impl Round {
         }
     }
 
-    /// The value event `id` had before this transition: its preceding value
-    /// in the scan, or `baseline`; records `value` as its latest.
+    /// The value event `id` had before this transition: its latest value in
+    /// the scan, or `baseline`; records `value` as its latest.
     fn previous(&mut self, id: usize, value: bool, baseline: impl FnOnce() -> bool) -> bool {
         let (stamp, latest) = std::mem::replace(&mut self.latest[id], (self.generation, value));
         if stamp == self.generation {
@@ -816,10 +819,6 @@ impl<B: SimBackend> SimulationState<B> {
     /// signal triggers, against the values of the last settled round.
     #[inline]
     fn mark_scheduled_edges(&self, backend: &mut B, round: &mut Round, values: &[(usize, bool)]) {
-        if values.is_empty() {
-            return;
-        }
-        round.begin_scan(self.domain_kinds.len());
         for &(id, is_nonzero) in values {
             round.track_stable_edges = true;
             // A signal written again compares with its preceding value.
@@ -1009,6 +1008,7 @@ impl<B: SimBackend> SimulationState<B> {
         // The edges are consumed: later rounds compare against the values
         // they were evaluated at.
         self.synchronize_event_values(executor.backend());
+        round.begin_scan(self.domain_kinds.len());
         round.scheduled_trigger_ids.make_empty();
         round.counted_triggered.make_empty();
         for id in unsplit {
@@ -1185,7 +1185,6 @@ impl<B: SimBackend> SimulationState<B> {
     /// signals end at their old values, and keep them marked through the
     /// settles of this round.
     fn mark_occurrences(&self, backend: &mut B, round: &mut Round, transitions: &[(usize, bool)]) {
-        round.begin_scan(self.domain_kinds.len());
         for &(id, is_nonzero) in transitions {
             let was_nonzero =
                 round.previous(id, is_nonzero, || self.last_clock_values.contains(id));
@@ -1412,6 +1411,7 @@ impl<B: SimBackend> SimulationState<B> {
 
         let mut round = self.scratch.take().unwrap_or_default();
         round.reset(events_to_process.is_empty());
+        round.begin_scan(self.domain_kinds.len());
         if timed {
             self.process_state.ready.extend(ready_processes);
         }

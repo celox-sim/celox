@@ -1354,3 +1354,33 @@ fn nonblocking_pulses_after_a_single_domain_trigger_their_domain() {
         });
     }
 }
+
+/// `s` falls in one wave of the active region and rises again in the next,
+/// written by the process the fall woke: the domain of `s` sees the rise.
+fn pulse_across_waves(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("PulseAcrossWaves", four_state);
+    let s = d.internal("s", 1, 1);
+    let rises = d.output("rises", 8, 0);
+    d.counter(rises, s);
+    let body = vec![d.delay(1), d.set(s, 0)];
+    d.module.process(body).unwrap();
+    let body = vec![Statement::Forever {
+        body: vec![wait(s, EventEdge::Negedge), d.set(s, 1)],
+    }];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn a_pulse_across_two_waves_of_a_slot_is_an_edge() {
+    for four_state in [false, true] {
+        let artifact = pulse_across_waves(four_state);
+        on_every_backend!(builder(&artifact, four_state), "PulseAcrossWaves", |sim| {
+            sim.run_until(0).unwrap();
+            assert_eq!(value(&mut sim, "rises"), 0);
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "s"), 1);
+            assert_eq!(value(&mut sim, "rises"), 1);
+        });
+    }
+}
