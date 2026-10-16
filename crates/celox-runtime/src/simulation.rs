@@ -28,6 +28,14 @@ pub trait SimulationExecutor {
         &mut self,
         event: <Self::Backend as SimBackend>::Event,
     ) -> Result<(), SimulatorErrorCode>;
+    /// Settle combinational logic, then evaluate and commit one domain.
+    fn eval_comb_apply_ff_at(
+        &mut self,
+        event: <Self::Backend as SimBackend>::Event,
+    ) -> Result<(), SimulatorErrorCode> {
+        self.eval_comb()?;
+        self.eval_apply_ff_at(event)
+    }
     fn apply_ff_at(
         &mut self,
         event: <Self::Backend as SimBackend>::Event,
@@ -122,6 +130,28 @@ impl PeriodicEventKey {
     }
 }
 
+/// The level of an event signal: its value bits, without the unused bits
+/// above its width that share its storage byte. Backends need not keep those
+/// bits clear (a four-state X initialization sets them), so a one-bit clock
+/// that reads as a whole byte would stay "high" after it falls.
+pub(crate) fn event_level<B: SimBackend>(backend: &B, signal: SignalRef) -> u8 {
+    let value: u8 = backend.get_as(signal);
+    match signal.width {
+        width @ 1..8 => value & ((1u8 << width) - 1),
+        _ => value,
+    }
+}
+
+/// Whether a settled level change from `was` to `is` is an active edge of a
+/// domain of `kind`. A domain of unknown kind reacts to any change.
+pub(crate) fn stable_edge(kind: Option<DomainKind>, was: bool, is: bool) -> bool {
+    match kind {
+        Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => !was && is,
+        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => was && !is,
+        _ => was != is,
+    }
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
@@ -136,9 +166,22 @@ pub struct SimulationState<B: SimBackend> {
     process_wakeups: BinaryHeap<ProcessWakeup>,
     /// A process requested the end of the simulation.
     finished: bool,
+    /// Per event ID, the event IDs of clocks computed combinationally from
+    /// the event's signal. Empty when the design has none.
+    combinational_derived: Vec<Box<[usize]>>,
 }
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Declare, per event ID, the clocks computed combinationally from the
+    /// event's signal. A change of the signal gives them their edges at the
+    /// same instant: they are judged from the state before it and evaluate
+    /// with the event's own domain. Their levels at that instant are the
+    /// baseline for the rounds after the commit, where a gate the commit
+    /// moves gives a further edge.
+    pub fn set_combinational_derived(&mut self, derived: Vec<Box<[usize]>>) {
+        self.combinational_derived = derived;
+    }
+
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();
@@ -146,8 +189,7 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = backend.get_as(*signal);
-            if value != 0 {
+            if event_level(backend, *signal) != 0 {
                 self.last_clock_values.insert(*id);
             }
         }
@@ -158,16 +200,8 @@ impl<B: SimBackend> SimulationState<B> {
             return true;
         };
         let was_nonzero = self.last_clock_values.contains(id);
-        let is_nonzero = backend.get_as::<u8>(*signal) != 0;
-        match self.domain_kinds[id] {
-            Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                !was_nonzero && is_nonzero
-            }
-            Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                was_nonzero && !is_nonzero
-            }
-            _ => was_nonzero != is_nonzero,
-        }
+        let is_nonzero = event_level(backend, *signal) != 0;
+        stable_edge(self.domain_kinds[id], was_nonzero, is_nonzero)
     }
 
     fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
@@ -177,18 +211,8 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             let was_nonzero = self.last_clock_values.contains(*id);
-            let value: u8 = backend.get_as(*signal);
-            let is_nonzero = value != 0;
-            let triggered = match self.domain_kinds[*id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => was_nonzero != is_nonzero,
-            };
-            if triggered {
+            let is_nonzero = event_level(backend, *signal) != 0;
+            if stable_edge(self.domain_kinds[*id], was_nonzero, is_nonzero) {
                 backend.mark_triggered_bit(*id);
             }
         }
@@ -211,8 +235,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
             signal_to_id.insert(signal, id);
             signal_index_by_id[id] = index;
-            let value: u8 = backend.get_as(signal);
-            if value != 0 {
+            if event_level(backend, signal) != 0 {
                 last_clock_values.insert(id);
             }
         }
@@ -231,6 +254,7 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             processes,
             finished: false,
+            combinational_derived: Vec::new(),
         }
     }
 
@@ -428,14 +452,14 @@ impl<B: SimBackend> SimulationState<B> {
             let before: Vec<u8> = self
                 .topo_signals
                 .iter()
-                .map(|(signal, _, _)| executor.backend().get_as(*signal))
+                .map(|(signal, _, _)| event_level(executor.backend(), *signal))
                 .collect();
             self.run_processes(executor, current_time, ready_processes)?;
             for ((signal, id, _), before) in self.topo_signals.iter().zip(before) {
                 if *id == usize::MAX {
                     continue;
                 }
-                let value: u8 = executor.backend().get_as(*signal);
+                let value = event_level(executor.backend(), *signal);
                 if value != before {
                     process_driven.push((*id, value != 0));
                 }
@@ -459,9 +483,19 @@ impl<B: SimBackend> SimulationState<B> {
                     .map(|&id| (id, event.next_val != 0))
             })
             .chain(process_driven);
+        // Scheduled signals that changed level and gate derived clocks.
+        let mut gating_sources = Vec::new();
         for (id, is_nonzero) in scheduled {
             track_stable_edges = true;
             let was_nonzero = self.last_clock_values.contains(id);
+            if was_nonzero != is_nonzero
+                && self
+                    .combinational_derived
+                    .get(id)
+                    .is_some_and(|derived| !derived.is_empty())
+            {
+                gating_sources.push(id);
+            }
             let triggered = match self.domain_kinds[id] {
                 Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
                     !was_nonzero && is_nonzero
@@ -490,6 +524,35 @@ impl<B: SimBackend> SimulationState<B> {
                 executor.backend_mut().clear_triggered_bits();
                 for id in scheduled_trigger_ids.iter() {
                     executor.backend_mut().mark_triggered_bit(id);
+                }
+            }
+        }
+        // Clocks computed from a changed scheduled signal, such as
+        // `clk & enable`, change at the same instant, in the active region
+        // before any nonblocking update (IEEE 1800-2023 4.4.2, 4.5): their
+        // edges are judged now, from the state before any domain commits, and
+        // their domains evaluate together with the scheduled ones. Their
+        // levels at this instant become the baseline for the rounds after the
+        // commit, where a gate the commit moves (an enable register rising
+        // with the edge) gives a further edge, as the update events of the
+        // NBA region do.
+        let mut edge_approved: Option<BitSet> = None;
+        for &source in &gating_sources {
+            for &id in self.combinational_derived[source].iter() {
+                if self.stable_edge_triggered(executor.backend(), id) {
+                    executor.backend_mut().mark_triggered_bit(id);
+                    edge_approved
+                        .get_or_insert_with(|| BitSet::with_capacity(num_events))
+                        .insert(id);
+                }
+                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
+                else {
+                    continue;
+                };
+                if event_level(executor.backend(), *signal) != 0 {
+                    self.last_clock_values.insert(id);
+                } else {
+                    self.last_clock_values.remove(id);
                 }
             }
         }
@@ -539,7 +602,10 @@ impl<B: SimBackend> SimulationState<B> {
                     // Native trigger bits can be coarse hints raised by a
                     // working-region write before its commit. A derived clock
                     // must have the requested stable edge before its FFs run.
-                    if info.is_cascaded && !self.stable_edge_triggered(executor.backend(), id) {
+                    if info.is_cascaded
+                        && !edge_approved.as_ref().is_some_and(|ids| ids.contains(id))
+                        && !self.stable_edge_triggered(executor.backend(), id)
+                    {
                         continue;
                     }
                     discovered_in_this_step.insert(id);
@@ -597,8 +663,7 @@ impl<B: SimBackend> SimulationState<B> {
             if *id == usize::MAX {
                 continue;
             }
-            let value: u8 = executor.backend().get_as(*signal);
-            if value != 0 {
+            if event_level(executor.backend(), *signal) != 0 {
                 self.last_clock_values.insert(*id);
             } else {
                 self.last_clock_values.remove(*id);

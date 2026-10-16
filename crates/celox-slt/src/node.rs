@@ -139,6 +139,12 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
         self.widths.get(id.0).copied()
     }
 
+    /// The construction-time width of `id`, or `None` when it does not
+    /// belong to this arena.
+    pub fn node_width(&self, id: NodeId) -> Option<usize> {
+        self.width(id)
+    }
+
     pub(super) fn nodes(&self) -> &[SLTNode<A>] {
         &self.nodes
     }

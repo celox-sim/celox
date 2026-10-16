@@ -24,6 +24,49 @@ always_ff (gclk) {
 When `clk` and `gclk` trigger together, `cnt2` reads the pre-update value of
 `cnt1`. Evaluation order therefore does not change the result.
 
+Only a copy of a whole variable joins its source's domain. A clock taken from
+part of a wider signal, such as `let divided: '_ clock = counter[0];`, is a
+derived clock of its own and is edge-sensed on the selected bit.
+
+## Gated clocks
+
+A clock computed combinationally from another clock's signal changes at the
+same instant as that signal:
+
+```veryl
+let gated: '_ clock = clk & en;
+
+always_ff (clk) {
+    cnt1 = cnt1 + 1;
+    en = en_next;
+}
+
+always_ff (gated) {
+    cnt2 = cnt1;
+}
+```
+
+Celox follows the SystemVerilog scheduling of the code Veryl emits (IEEE
+1800-2023 4.4.2, 4.5), for both frontends. When `clk` rises, `clk & en` is
+evaluated in the same active region as `clk`'s processes, before the
+nonblocking updates: its edge is judged from the state before the edge with
+`clk` at its new level, and its domain evaluates together with `clk`'s as a
+simultaneous domain. `cnt2` reads the pre-update `cnt1`, and the edge is gated
+by the `en` from before it.
+
+The nonblocking updates then re-evaluate the gate. If the edge raised `en`
+while `clk` is still high, `gated` rises after the commit; that is a further
+edge, handled in the cascade rounds below, and its domain reads the committed
+state. A gate that falls after the commit is a falling edge in the same way.
+When `clk` returns low, clocks such as `~clk` or a falling edge of `gated` are
+judged from the state the rising edge left, as a separate instant of the timed
+`Simulation`.
+
+Veryl's own simulator holds a gate's enable for the whole edge, like a
+clock-gating cell, and does not report the rise after the commit. Celox does
+not follow it there; the shared suite records the difference for that
+simulator.
+
 ## Cascaded clocks
 
 A sequential update may itself create another clock edge:
@@ -53,6 +96,28 @@ Conceptually, each round is:
 The runtime may use a combined evaluate-and-commit kernel when exactly one domain
 can run without affecting cascade consistency. This is an implementation
 optimization and does not change the ordering model above.
+
+## Event-based ticks
+
+`Simulator::tick` applies the same rules to one active edge of an event.
+Gated clocks of the event are judged from the state before the edge and
+evaluate with the ticked domain; after the commit, the rounds above run the
+domains whose clocks are computed from state and the gated clocks the commit
+moves. `Simulator::tick_events` does
+the same for coincident events, and the native testbench's `clock.next()` and
+the N-API `tick` use the same mechanism.
+
+A tick is the event's active edge only, without simulation time, and does not
+change the event's signal. Domains that react to the signal's opposite edge,
+such as one clocked by `~clk` or by a falling edge of `clk & en`, do not run on
+a tick; the timed `Simulation`, which drives both levels of a clock, runs them.
+
+Which derived domains an event can reach is computed once when the design is
+built, together with a small program for each gate where its combinational
+cone allows: judging a gate then reads only the state it depends on instead of
+settling the design. Larger cones, and four-state designs, settle the design
+with the signal at each level instead. An event that reaches no derived domain
+takes the plain tick path with no added work.
 
 ## Boundaries
 

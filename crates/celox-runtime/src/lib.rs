@@ -1,6 +1,7 @@
 //! Backend-independent executable simulation contracts and utilities.
 
 pub mod backend;
+mod derived_tick;
 mod error;
 mod event_buffer;
 pub mod parallel;
@@ -11,6 +12,10 @@ mod state_file;
 mod testbench;
 mod vcd;
 
+pub use derived_tick::{
+    BackendExecutor, DerivedDomain, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch,
+    EventDomain, Gate, GatedDomain, build_derived_tick_plans,
+};
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
 pub use reflection::{
