@@ -82,13 +82,13 @@ lydite-solver         = { path = "crates/lydite-solver" }
 lydite-syntax         = { path = "crates/lydite-syntax" }
 lydite-verify         = { path = "crates/lydite-verify" }
 
-veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
-veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
-veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
-veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629", default-features = false }
-veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
-veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
-veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "defb2ef3e9afb522fc76acbcc7e334f8daa0f629" }
+veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
+veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
+veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
+veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994", default-features = false }
+veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
+veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
+veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "6eac4e035f30dfae7bb5238a21be91c79253c994" }
 sv-parser = "0.13.5"
 
 bit-set         = "0.11"
