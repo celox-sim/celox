@@ -977,6 +977,7 @@ impl Module {
                     condition: None,
                     body: static_initializers,
                     initializer: true,
+                    synthetic: false,
                 },
             );
         }
@@ -2035,6 +2036,7 @@ pub struct InitialProcess {
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
+    synthetic: bool,
 }
 
 impl InitialProcess {
@@ -2045,6 +2047,11 @@ impl InitialProcess {
 
     pub fn condition(&self) -> Option<&ConstExpr> {
         self.condition.as_ref()
+    }
+
+    /// Compiler-generated storage initialization, without a user static process.
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Whether this process holds variable declaration initializers.

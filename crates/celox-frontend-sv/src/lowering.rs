@@ -2667,6 +2667,8 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
 }
 
 /// Process kind and index identify a thread without merging the lowering paths.
+/// Each instance owns an initialization RNG seeded with the same default
+/// (IEEE 1800-2023 18.14.1); relocation keeps sibling RNG states independent.
 fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
     let mut processes: Vec<_> = module
         .ff_processes()
@@ -2678,7 +2680,7 @@ fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
                 .initial_processes()
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| !p.is_initializer())
+                .filter(|(_, p)| !p.is_synthetic())
                 .map(|(i, p)| (p.creation_order(), 1, i)),
         )
         .chain(

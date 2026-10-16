@@ -203,6 +203,7 @@ impl ArrayParameter<'_> {
                 nonblocking: false,
             }],
             initializer: false,
+            synthetic: true,
         })
     }
 }

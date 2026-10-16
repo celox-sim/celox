@@ -2048,6 +2048,7 @@ pub(super) fn initial_processes_from_module_node(
                     condition: None,
                     body,
                     initializer: true,
+                    synthetic: false,
                 });
             }
             continue;
@@ -2077,6 +2078,7 @@ pub(super) fn initial_processes_from_module_node(
             condition: None,
             body,
             initializer: false,
+            synthetic: false,
         });
     }
     initializers.extend(processes);

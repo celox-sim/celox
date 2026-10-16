@@ -116,6 +116,32 @@ fn urandom_initial_extends_signed_seed_values() {
 }
 
 sv_backends! {
+    fn urandom_sibling_default_streams_have_independent_state(sim) {
+        @setup { let source = r#"
+            module Child(input logic clk, output int unsigned value);
+              always_ff @(posedge clk) value <= $urandom;
+            endmodule
+            module Top(input logic clk_a, clk_b, output int unsigned a, b);
+              Child left(clk_a, a);
+              Child right(clk_b, b);
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_siblings.sv"))], "Top").four_state(false);
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        sim.tick(sim.event("clk_a")).unwrap();
+        let first = sim.get(a);
+        assert_eq!(sim.get(b), 0u8.into());
+        sim.tick(sim.event("clk_b")).unwrap();
+        assert_eq!(sim.get(b), first);
+        sim.tick(sim.event("clk_a")).unwrap();
+        let second = sim.get(a);
+        assert_ne!(first, second);
+        assert_eq!(sim.get(b), first);
+        sim.tick(sim.event("clk_b")).unwrap();
+        assert_eq!(sim.get(b), second);
+    }
+
     fn urandom_comb_runs_when_untimed_initials_are_skipped(sim) {
         @setup { let source = URANDOM_SKIPPED_INITIAL_SOURCE; }
         @build Simulator::from_sv_sources(vec![(source, Path::new("random_skipped_initial.sv"))], "Top").four_state(true);
@@ -2005,4 +2031,58 @@ fn urandom_comb_interpreter_preserves_activation_and_unknown_masks() {
     assert_eq!(sim.get_four_state(value).1, 0u8.into());
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(value), second);
+}
+
+#[test]
+fn urandom_declaration_initializers_have_distinct_stable_streams() {
+    fn run(extra: &str) -> Vec<BigUint> {
+        let source = format!(
+            r#"
+            module Top(output int unsigned first, second, observed_first, observed_second);
+              int unsigned a = $urandom;
+              int unsigned b = $urandom;
+              assign first = a;
+              assign second = b;
+              initial begin observed_first = a; observed_second = b; end
+              {extra}
+            endmodule
+        "#
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        ["first", "second", "observed_first", "observed_second"]
+            .map(|name| sim.get(sim.signal(name)))
+            .to_vec()
+    }
+    let baseline = run("");
+    assert_ne!(baseline[0], 0u8.into());
+    assert_ne!(baseline[1], 0u8.into());
+    assert_ne!(baseline[0], baseline[1]);
+    assert_eq!(baseline[0], baseline[2]);
+    assert_eq!(baseline[1], baseline[3]);
+    assert_eq!(baseline, run("int unsigned later = $urandom;"));
+}
+
+#[test]
+fn urandom_parameter_storage_does_not_consume_default_seeds() {
+    fn run(parameter: &str) -> BigUint {
+        let source = format!(
+            r#"
+            module Top(output int unsigned value);
+              {parameter}
+              initial value = $urandom;
+            endmodule
+        "#
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        sim.get(sim.signal("value"))
+    }
+    let baseline = run("");
+    for parameter in [
+        "parameter logic [7:0] A[0:0] = '{0};",
+        "localparam logic [7:0] A[0:0] = '{0};",
+    ] {
+        assert_eq!(run(parameter), baseline, "{parameter}");
+    }
 }

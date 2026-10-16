@@ -299,6 +299,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect();
             self.signals.push(signal);
@@ -495,6 +496,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect(),
             aliases: HashMap::default(),

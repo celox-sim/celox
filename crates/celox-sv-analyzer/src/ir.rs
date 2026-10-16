@@ -873,6 +873,7 @@ pub struct InitialProcess {
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
+    synthetic: bool,
 }
 
 impl InitialProcess {
@@ -887,7 +888,13 @@ impl InitialProcess {
             condition,
             body,
             initializer,
+            synthetic: false,
         }
+    }
+
+    /// Compiler-generated storage initialization, without a user static process.
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Whether this process holds variable declaration initializers, which
@@ -1233,6 +1240,7 @@ impl From<ast::InitialProcess> for InitialProcess {
             process.is_initializer(),
         );
         result.creation_order = process.creation_order();
+        result.synthetic = process.is_synthetic();
         result
     }
 }
