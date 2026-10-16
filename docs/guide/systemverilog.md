@@ -85,6 +85,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| Random numbers | `$urandom` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed, a 32-bit unsigned result and a separate stream per process |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -370,3 +371,14 @@ resolved using their bound interface type before flattening, including generic
 interface ports and handles declared within a generate block. Scalar paths to
 interface instances inside child modules, such as `child.info`, are resolved
 before those instances are flattened away.
+
+`$urandom` uses a deterministic, full-period 32-bit linear congruential generator
+(IEEE 1800-2023 18.13.1 and 18.14). Reseeding repeats the sequence without
+modifying the seed argument. Calls through subroutines use their caller's
+stream. The generator state participates in checkpoints and state restoration.
+The default seed is implementation-defined; random values need not match those
+of other simulators. In combinational procedures, draws occur when the process
+activates: `always_comb` runs once at time zero and on implicit sensitivity
+changes, while `always @*` waits for a sensitivity change. Repeated evaluation
+with unchanged inputs does not advance the stream. Constant-value contexts
+report a diagnostic.

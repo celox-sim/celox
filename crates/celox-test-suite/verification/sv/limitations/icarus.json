@@ -10,7 +10,7 @@
     "mismatch": 14,
     "emission_error": 0,
     "compile_error": 104,
-    "runtime_error": 3,
+    "runtime_error": 7,
     "unsupported": 0,
     "ignored": 0
   },
@@ -1152,6 +1152,50 @@
       "name": "synthesizable::named_calls_in_constant_contexts",
       "phase": "execute",
       "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_keeps_process_and_instance_streams_independent",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_reseeds_and_shares_the_calling_process_stream",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "system_functions::urandom_extends_signed_seed_values",
+      "phase": "execute",
+      "status": "runtime_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

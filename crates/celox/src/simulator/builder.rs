@@ -3000,8 +3000,11 @@ mod host {
             )))]
             let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
-            let mut sim =
-                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            let mut sim = Simulator::with_backend_and_program_for_simulation(
+                backend,
+                laid_out.into_runtime(),
+                warnings,
+            );
             sim.components.set_injected(self.injected_components);
             sim.diagnostics = self.options.diagnostics.clone();
             if let Some(path) = self.vcd_path {

@@ -409,10 +409,12 @@ fn dump_comb_path_stats_if_requested(
         total_muxes += stats.muxes;
         total_inputs += stats.inputs;
         let target = match &path.target {
-            LogicPathTarget::Var(var) => module.variables.get(&var.id).map_or_else(
-                || var.to_string(),
-                |info| format!("{}[{}:{}]", info.path, var.access.msb, var.access.lsb),
-            ),
+            LogicPathTarget::Var(var) | LogicPathTarget::Process { target: var, .. } => {
+                module.variables.get(&var.id).map_or_else(
+                    || var.to_string(),
+                    |info| format!("{}[{}:{}]", info.path, var.access.msb, var.access.lsb),
+                )
+            }
             LogicPathTarget::CombCaptureEvent { site_id, .. } => {
                 format!("capture_event({site_id})")
             }

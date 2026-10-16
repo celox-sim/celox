@@ -419,6 +419,8 @@ pub struct SubroutineBase<E, L, T> {
     /// a variable inside its body. `None` for a task or a `void` function.
     pub return_var: Option<String>,
     pub body: Vec<StmtBase<E, L>>,
+    /// Non-executable source retained for syntactic implicit sensitivity.
+    pub sensitivity_body: Vec<StmtBase<E, L>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,6 +457,11 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                 .collect(),
             return_var: self.return_var,
             body: self.body.into_iter().map(|stmt| stmt.map(fe, fl)).collect(),
+            sensitivity_body: self
+                .sensitivity_body
+                .into_iter()
+                .map(|stmt| stmt.map(fe, fl))
+                .collect(),
         }
     }
 }

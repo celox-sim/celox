@@ -60,7 +60,384 @@ fn veryl_assert_unknown_conditions_are_eager_on_interpreter() {
     }
 }
 
+const URANDOM_SKIPPED_INITIAL_SOURCE: &str = r#"
+    module Top(input int seed, output int unsigned value, reference);
+      initial $display("skipped initial");
+      always_comb value = $urandom(seed);
+      always_comb reference = $urandom(17);
+    endmodule
+"#;
+
+#[test]
+fn urandom_comb_skipped_initials_work_on_interpreter_and_tiered() {
+    fn check<B: celox::SimBackend>(mut sim: Simulator<B>) {
+        let value = sim.signal("value");
+        assert_ne!(sim.get(value), 0u8.into());
+        let seed = sim.signal("seed");
+        sim.modify(|io| io.set(seed, 17u8)).unwrap();
+        assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+    let builder = || {
+        Simulator::from_sv_sources(
+            vec![(
+                URANDOM_SKIPPED_INITIAL_SOURCE,
+                Path::new("random_skipped_initial.sv"),
+            )],
+            "Top",
+        )
+        .four_state(true)
+    };
+    check(builder().build_interpreter().unwrap());
+    check(builder().build_tiered().unwrap());
+}
+
+#[test]
+fn urandom_initial_extends_signed_seed_values() {
+    let mut sim = initial_simulation(
+        r#"
+        module Top(output logic ok);
+          byte narrow;
+          int wide;
+          int unsigned a, b;
+          initial begin
+            ok = 1;
+            for (int i = -128; i < 128; i++) begin
+              narrow = i; wide = i;
+              a = $urandom(narrow); b = $urandom(wide);
+              ok &= a == b;
+            end
+          end
+        endmodule
+    "#,
+    );
+    sim.step().unwrap();
+    assert_eq!(sim.get(sim.signal("ok")), 1u8.into());
+}
+
 sv_backends! {
+    fn urandom_sibling_default_streams_have_independent_state(sim) {
+        @setup { let source = r#"
+            module Child(input logic clk, output int unsigned value);
+              always_ff @(posedge clk) value <= $urandom;
+            endmodule
+            module Top(input logic clk_a, clk_b, output int unsigned a, b);
+              Child left(clk_a, a);
+              Child right(clk_b, b);
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_siblings.sv"))], "Top").four_state(false);
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        sim.tick(sim.event("clk_a")).unwrap();
+        let first = sim.get(a);
+        assert_eq!(sim.get(b), 0u8.into());
+        sim.tick(sim.event("clk_b")).unwrap();
+        assert_eq!(sim.get(b), first);
+        sim.tick(sim.event("clk_a")).unwrap();
+        let second = sim.get(a);
+        assert_ne!(first, second);
+        assert_eq!(sim.get(b), first);
+        sim.tick(sim.event("clk_b")).unwrap();
+        assert_eq!(sim.get(b), second);
+    }
+
+    fn urandom_comb_runs_when_untimed_initials_are_skipped(sim) {
+        @setup { let source = URANDOM_SKIPPED_INITIAL_SOURCE; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_skipped_initial.sv"))], "Top").four_state(true);
+        let value = sim.signal("value");
+        let seed = sim.signal("seed");
+        assert_ne!(sim.get(value), 0u8.into());
+        sim.modify(|io| io.set(seed, 17u8)).unwrap();
+        assert_eq!(sim.get(value), sim.get(sim.signal("reference")));
+        let saved = sim.checkpoint().unwrap();
+        let first = sim.get(value);
+        sim.modify(|io| io.set(seed, 23u8)).unwrap();
+        assert_ne!(sim.get(value), first);
+        sim.restore(&saved).unwrap();
+        sim.eval_comb().unwrap();
+        assert_eq!(sim.get(value), first);
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn urandom_extends_signed_seed_values(sim) {
+        @case "system_functions::urandom_extends_signed_seed_values";
+    }
+
+    fn urandom_comb_executes_in_statement_order(sim) {
+        @case "system_functions::urandom_comb_executes_in_statement_order";
+    }
+
+    fn urandom_comb_uses_only_process_activations(sim) {
+        @setup { let source = r#"
+            module Top(input logic trigger, unrelated, reseed, output int unsigned value, next_value, replay, expected);
+              function automatic int unsigned draw(); return $urandom; endfunction
+              always_comb begin
+                if (trigger) begin
+                  if (reseed) value = $urandom(17);
+                  else value = draw();
+                  next_value = draw();
+                end else begin value = 0; next_value = 0; end
+              end
+              always_comb begin
+                replay = $urandom(17);
+                replay = draw();
+                expected = draw();
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_comb.sv"))], "Top").four_state(true);
+        let value = sim.signal("value");
+        let next_value = sim.signal("next_value");
+        let trigger = sim.signal("trigger");
+        let reseed = sim.signal("reseed");
+        sim.modify(|io| { io.set(trigger, 1u8); io.set(reseed, 1u8); }).unwrap();
+        let seeded = sim.get(value);
+        let second = sim.get(next_value);
+        assert_eq!(second, sim.get(sim.signal("replay")));
+        for bit in [1u8, 0, 1] {
+            sim.set(sim.signal("unrelated"), bit);
+            sim.eval_comb().unwrap();
+            assert_eq!(sim.get(value), seeded);
+            assert_eq!(sim.get(next_value), second);
+        }
+        let checkpoint = sim.checkpoint().unwrap();
+        let file = sim.save_state().unwrap();
+        assert!(file.objects.iter().filter(|object| object.path.contains("urandom_state")).all(|object| object.role == celox_runtime::StateRole::State));
+        sim.modify(|io| io.set(reseed, 0u8)).unwrap();
+        let third = sim.get(value);
+        assert_eq!(third, sim.get(sim.signal("expected")));
+        let fourth = sim.get(next_value);
+        sim.restore(&checkpoint).unwrap();
+        assert_eq!(sim.get(value), seeded);
+        assert_eq!(sim.get(next_value), second);
+        sim.modify(|io| io.set(reseed, 0u8)).unwrap();
+        assert_eq!(sim.get(value), third);
+        assert_eq!(sim.get(next_value), fourth);
+        sim.load_state(&file).unwrap();
+        assert_eq!(sim.get(value), seeded);
+        assert_eq!(sim.get(next_value), second);
+        sim.modify(|io| io.set(reseed, 0u8)).unwrap();
+        assert_eq!(sim.get(value), third);
+        assert_eq!(sim.get(next_value), fourth);
+        let mut incomplete = file.clone();
+        incomplete.objects.retain(|object| !object.path.contains("urandom_state"));
+        assert!(sim.load_state(&incomplete).is_err());
+    }
+
+    fn urandom_comb_distinguishes_time_zero_and_function_sensitivity(sim) {
+        @setup { let source = r#"
+            module Top(input logic trigger, global_input, output int unsigned a, b, initial_draw, star_draw);
+              function automatic int unsigned draw(input logic unused);
+                if (global_input) return $urandom;
+                return $urandom;
+              endfunction
+              always_comb a = draw(trigger);
+              always @* b = draw(trigger);
+              always_comb initial_draw = $urandom;
+              always @* star_draw = $urandom;
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_sensitivity.sv"))], "Top").four_state(false);
+        let a = sim.signal("a");
+        let b = sim.signal("b");
+        let first = sim.get(a);
+        assert_ne!(first, 0u8.into());
+        assert_eq!(sim.get(b), 0u8.into());
+        let initial_draw = sim.get(sim.signal("initial_draw"));
+        assert_ne!(initial_draw, 0u8.into());
+        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+        let global_input = sim.signal("global_input");
+        sim.modify(|io| io.set(global_input, 1u8)).unwrap();
+        assert_ne!(sim.get(a), first);
+        assert_eq!(sim.get(b), 0u8.into());
+        let trigger = sim.signal("trigger");
+        sim.modify(|io| io.set(trigger, 1u8)).unwrap();
+        assert_ne!(sim.get(b), 0u8.into());
+        assert_eq!(sim.get(sim.signal("initial_draw")), initial_draw);
+        assert_eq!(sim.get(sim.signal("star_draw")), 0u8.into());
+    }
+
+    fn urandom_select_keeps_distinct_source_calls(sim) {
+        @case "system_functions::urandom_select_keeps_distinct_source_calls";
+    }
+
+    fn urandom_comb_tracks_static_bits_dead_branches_and_unknown_changes(sim) {
+        @setup { let source = r#"
+            module Top(input logic [1:0] trigger, input logic dead_input, output logic echo, output int unsigned value);
+              always_comb begin
+                echo = trigger[0];
+                value = $urandom;
+                if (0) $display("%b", dead_input);
+              end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_bits.sv"))], "Top").four_state(true);
+        let trigger = sim.signal("trigger");
+        let value = sim.signal("value");
+        let dead_input = sim.signal("dead_input");
+        sim.modify(|io| { io.set(trigger, 0u8); io.set(dead_input, 0u8); }).unwrap();
+        let first = sim.get(value);
+        sim.modify(|io| io.set(trigger, 2u8)).unwrap();
+        assert_eq!(sim.get(value), first);
+        sim.modify(|io| io.set_four_state(trigger, 2u8.into(), 1u8.into())).unwrap();
+        let second = sim.get(value);
+        assert_ne!(second, first);
+        sim.eval_comb().unwrap();
+        assert_eq!(sim.get(value), second);
+        sim.modify(|io| io.set(dead_input, 1u8)).unwrap();
+        assert_ne!(sim.get(value), second);
+        assert!(sim.drain_runtime_events().is_empty());
+    }
+
+    fn urandom_comb_propagates_all_outputs_and_hierarchical_events(sim) {
+        @setup { let source = r#"
+            module Child(input logic enabled, input int seed, output int unsigned a, b);
+              function automatic int unsigned draw(); return $urandom; endfunction
+              always_comb begin
+                if (enabled) begin
+                  a = $urandom(seed); b = draw(); b[0] = 0;
+                  $display("inside=%0d", seed);
+                end else begin a = 0; b = 0; end
+              end
+            endmodule
+            module Top(input logic clk, enabled, unrelated, input int data, output int unsigned q, b);
+              int unsigned a;
+              wire [31:0] adjusted = data + 1;
+              Child child(enabled, adjusted, a, b);
+              assign q = a ^ b;
+              always_comb if (enabled) $display("observed=%0h", b);
+              always_ff @(posedge clk) $display("clock");
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_events.sv"))], "Top").four_state(true);
+        sim.drain_runtime_events();
+        let enabled = sim.signal("enabled");
+        let data = sim.signal("data");
+        sim.modify(|io| { io.set(enabled, 1u8); io.set(data, 7u8); }).unwrap();
+        let first = sim.get(sim.signal("q"));
+        let messages = sim.drain_runtime_events();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.contains(&celox::RuntimeEvent::Display { message: b"inside=8".to_vec() }));
+        sim.modify(|io| io.set(data, 8u8)).unwrap();
+        assert_ne!(sim.get(sim.signal("q")), first);
+        let messages = sim.drain_runtime_events();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.contains(&celox::RuntimeEvent::Display { message: b"inside=9".to_vec() }));
+        sim.set(sim.signal("unrelated"), 1u8);
+        sim.eval_comb().unwrap();
+        assert!(sim.drain_runtime_events().is_empty());
+        sim.tick(sim.event("clk")).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display { message: b"clock".to_vec() }]);
+    }
+
+    fn urandom_comb_notifies_only_observed_bits(sim) {
+        @setup { let source = r#"
+            module Static(input logic low, input logic [6:0] high, output logic [7:0] q);
+              always_comb begin q[0] = low; q[7:1] = high; void'($urandom); end
+              always_comb $display("static=%b", q[0]);
+            endmodule
+            module Dynamic(input logic low, high, input logic [2:0] index, output logic [7:0] q);
+              always_comb begin
+                q[0] = low; q[7:1] = 0; q[index] = high; void'($urandom);
+              end
+              always_comb $display("dynamic=%b", q[0]);
+            endmodule
+            module Array(input logic low, input logic [6:0] high, input logic [2:0] index, output logic [7:0] q);
+              logic [7:0] words[0:1];
+              always_comb begin
+                words[0] = {high, low}; words[1] = 0;
+                words[(index == 0) ? 0 : 1] = {7'b0, high[0]}; void'($urandom);
+              end
+              assign q = words[0];
+              always_comb $display("array=%b", words[0][0]);
+            endmodule
+            module Top(input logic low, input logic [6:0] high, input logic [2:0] index,
+                       output logic [7:0] q_static, q_dynamic, q_array);
+              Static s(low, high, q_static);
+              Dynamic d(low, high[0], index, q_dynamic);
+              Array a(low, high, index, q_array);
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_observed_bits.sv"))], "Top").four_state(true);
+        let low = sim.signal("low");
+        let high = sim.signal("high");
+        let index = sim.signal("index");
+        sim.modify(|io| { io.set(low, 0u8); io.set(high, 0u8); io.set(index, 4u8); }).unwrap();
+        sim.drain_runtime_events();
+        sim.modify(|io| io.set(high, 1u8)).unwrap();
+        let events = sim.drain_runtime_events();
+        let array_value = sim.get(sim.signal("q_array"));
+        assert!(events.is_empty(), "{events:?}; array={array_value:?}");
+        assert_eq!(array_value, 2u8.into());
+        sim.modify(|io| io.set(low, 1u8)).unwrap();
+        let mut messages: Vec<_> = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect();
+        messages.sort();
+        assert_eq!(messages, vec![b"array=1".to_vec(), b"dynamic=1".to_vec(), b"static=1".to_vec()]);
+        sim.modify(|io| io.set_four_state(high, 1u8.into(), 64u8.into())).unwrap();
+        let events = sim.drain_runtime_events();
+        assert!(events.is_empty(), "{events:?}");
+        sim.modify(|io| { io.set(high, 0u8); io.set(index, 5u8); }).unwrap();
+        let events = sim.drain_runtime_events();
+        assert!(events.is_empty(), "{events:?}");
+        sim.modify(|io| io.set(index, 0u8)).unwrap();
+        let mut messages: Vec<_> = sim.drain_runtime_events().into_iter().map(|event| match event {
+            celox::RuntimeEvent::Display { message } => message,
+            event => panic!("unexpected event: {event:?}"),
+        }).collect();
+        messages.sort();
+        assert_eq!(messages, vec![b"array=0".to_vec(), b"dynamic=0".to_vec()]);
+    }
+
+    fn urandom_has_an_unsigned_self_determined_result(sim) {
+        @case "system_functions::urandom_has_an_unsigned_self_determined_result";
+    }
+
+    fn urandom_respects_short_circuits_and_evaluates_indices_once(sim) {
+        @case "system_functions::urandom_respects_short_circuits_and_evaluates_indices_once";
+    }
+
+    fn urandom_checkpoint_restores_the_stream(sim) {
+        @setup { let source = r#"
+            module Top(input logic clk, reseed, output int unsigned value);
+                always_ff @(posedge clk) begin
+                    if (reseed) value <= $urandom(17);
+                    else value <= $urandom;
+                end
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("random_state.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let reseed = sim.signal("reseed");
+        let value = sim.signal("value");
+        sim.set(reseed, 1u8);
+        sim.tick(clk).unwrap();
+        sim.set(reseed, 0u8);
+        let checkpoint = sim.checkpoint().unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            sim.tick(clk).unwrap();
+            let (value, mask) = sim.get_four_state(value);
+            assert_eq!(mask, 0u8.into());
+            expected.push(value);
+        }
+        sim.restore(&checkpoint).unwrap();
+        for value_expected in expected {
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(value), value_expected);
+        }
+    }
+
+    fn urandom_reseeds_and_shares_the_calling_process_stream(sim) {
+        @case "system_functions::urandom_reseeds_and_shares_the_calling_process_stream";
+    }
+    fn urandom_keeps_process_and_instance_streams_independent(sim) {
+        @case "system_functions::urandom_keeps_process_and_instance_streams_independent";
+    }
+
     fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
 
     fn character_formats_preserve_non_utf8_bytes(sim) { @case "system_functions::character_formats_preserve_non_utf8_bytes"; }
@@ -1510,5 +1887,202 @@ fn dimension_queries_reject_invalid_indices() {
                 ));
             }
         }
+    }
+}
+
+#[test]
+fn urandom_initial_processes_have_separate_default_streams() {
+    let source = r#"
+        module Top(output int unsigned a, b, replay_a, replay_b);
+            function automatic int unsigned draw(); return $urandom(); endfunction
+            initial begin a = draw(); a = draw(); end
+            initial begin b = draw(); b = draw(); end
+            initial begin
+                replay_a = $urandom(123); replay_a = draw();
+                replay_b = $urandom(123); replay_b = draw();
+            end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.step().unwrap();
+    assert_ne!(sim.get(sim.signal("a")), sim.get(sim.signal("b")));
+    assert_eq!(
+        sim.get(sim.signal("replay_a")),
+        sim.get(sim.signal("replay_b"))
+    );
+}
+
+#[test]
+fn urandom_rejects_invalid_seeds_and_constant_value_contexts() {
+    for item in [
+        "always_ff @(posedge clk) y <= $urandom(1, 2);",
+        "always_ff @(posedge clk) y <= $urandom(,);",
+        "always_ff @(posedge clk) y <= $urandom(.seed(1));",
+        "always_ff @(posedge clk) y <= $urandom(int);",
+        "always_ff @(posedge clk) y <= $urandom(1.5);",
+        "int seeds[2]; always_ff @(posedge clk) y <= $urandom(seeds);",
+        "localparam UNUSED = $urandom; assign y=0;",
+        "localparam UNUSED = 0 && $urandom; assign y=0;",
+    ] {
+        let source = format!("module Top(input logic clk, output int y); {item} endmodule");
+        let error = build_error(&source);
+        assert!(error.contains("urandom"), "{item}: {error}");
+    }
+    // A query inspects the return type without executing the RNG; an
+    // element of an unpacked array is still a valid integral seed.
+    let source = "module Top(input logic clk, output int width, value); int seeds[2]; localparam W=$bits($urandom()); assign width=W; always_ff @(posedge clk) value <= $urandom(seeds[0]); endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("random_query.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("width")), 32u32.into());
+}
+
+#[test]
+fn urandom_default_seeds_follow_mixed_static_process_order() {
+    fn draws(extra: &str) -> Vec<BigUint> {
+        let source = format!(
+            r#"
+            module Top(input logic clk, output int unsigned early, comb, clocked, late, extra);
+              initial early = $urandom;
+              always_comb comb = $urandom;
+              always_ff @(posedge clk) clocked <= $urandom;
+              initial late = $urandom;
+              {extra}
+            endmodule
+        "#
+        );
+        let mut sim = initial_simulation(&source);
+        sim.add_clock("clk", 2, 1);
+        sim.step().unwrap();
+        sim.step().unwrap();
+        ["early", "comb", "clocked", "late"]
+            .into_iter()
+            .map(|name| sim.get(sim.signal(name)))
+            .collect()
+    }
+    let baseline = draws("");
+    for extra in [
+        "always_ff @(posedge clk) extra <= $urandom;",
+        "initial extra = $urandom;",
+        "always_comb extra = $urandom;",
+        "always @* extra = $urandom;",
+    ] {
+        assert_eq!(draws(extra), baseline, "appended process: {extra}");
+    }
+    for (i, value) in baseline.iter().enumerate() {
+        for other in &baseline[i + 1..] {
+            assert_ne!(value, other);
+        }
+    }
+}
+
+#[test]
+fn urandom_comb_starts_after_initial_procedures() {
+    let source = r#"
+        module Child(input int seed, output int unsigned value);
+          always_comb begin value = $urandom(seed); $display("comb=%0d", seed); end
+        endmodule
+        module Top(output int unsigned value);
+          int seed;
+          Child child(seed, value);
+          initial begin seed = 17; $display("initial"); end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    assert!(sim.drain_runtime_events().is_empty());
+    sim.step().unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: b"initial".to_vec()
+            },
+            celox::RuntimeEvent::Display {
+                message: b"comb=17".to_vec()
+            },
+        ]
+    );
+    let value = sim.get(sim.signal("value"));
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("value")), value);
+    assert!(sim.drain_runtime_events().is_empty());
+}
+
+#[test]
+fn urandom_comb_interpreter_preserves_activation_and_unknown_masks() {
+    let source = r#"
+        module Top(input logic trigger, output logic echo, output int unsigned value);
+          function automatic int unsigned draw(); return $urandom; endfunction
+          always_comb begin echo = trigger; value = draw(); end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("random_interp.sv"))], "Top")
+        .four_state(true)
+        .build_interpreter()
+        .unwrap();
+    let trigger = sim.signal("trigger");
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(trigger, 0u8)).unwrap();
+    let first = sim.get(value);
+    sim.modify(|io| io.set_four_state(trigger, 0u8.into(), 1u8.into()))
+        .unwrap();
+    let second = sim.get(value);
+    assert_ne!(first, second);
+    assert_eq!(sim.get_four_state(value).1, 0u8.into());
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(value), second);
+}
+
+#[test]
+fn urandom_declaration_initializers_have_distinct_stable_streams() {
+    fn run(extra: &str) -> Vec<BigUint> {
+        let source = format!(
+            r#"
+            module Top(output int unsigned first, second, observed_first, observed_second);
+              int unsigned a = $urandom;
+              int unsigned b = $urandom;
+              assign first = a;
+              assign second = b;
+              initial begin observed_first = a; observed_second = b; end
+              {extra}
+            endmodule
+        "#
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        ["first", "second", "observed_first", "observed_second"]
+            .map(|name| sim.get(sim.signal(name)))
+            .to_vec()
+    }
+    let baseline = run("");
+    assert_ne!(baseline[0], 0u8.into());
+    assert_ne!(baseline[1], 0u8.into());
+    assert_ne!(baseline[0], baseline[1]);
+    assert_eq!(baseline[0], baseline[2]);
+    assert_eq!(baseline[1], baseline[3]);
+    assert_eq!(baseline, run("int unsigned later = $urandom;"));
+}
+
+#[test]
+fn urandom_parameter_storage_does_not_consume_default_seeds() {
+    fn run(parameter: &str) -> BigUint {
+        let source = format!(
+            r#"
+            module Top(output int unsigned value);
+              {parameter}
+              initial value = $urandom;
+            endmodule
+        "#
+        );
+        let mut sim = initial_simulation(&source);
+        sim.step().unwrap();
+        sim.get(sim.signal("value"))
+    }
+    let baseline = run("");
+    for parameter in [
+        "parameter logic [7:0] A[0:0] = '{0};",
+        "localparam logic [7:0] A[0:0] = '{0};",
+    ] {
+        assert_eq!(run(parameter), baseline, "{parameter}");
     }
 }

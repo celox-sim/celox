@@ -55,6 +55,9 @@ impl std::fmt::Display for UnpackedArrayType {
 
 /// Width and signedness of the supported integral system functions.
 pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
+    if name == "$urandom" {
+        return (arity <= 1).then_some((32, false));
+    }
     if matches!(name, "$timeunit" | "$timeprecision") {
         return (arity <= 1).then_some((32, true));
     }

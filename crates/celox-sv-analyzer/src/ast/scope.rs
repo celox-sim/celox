@@ -289,6 +289,7 @@ impl ScopeSymbols {
                 .iter()
                 .filter(|process| initializes(process, target))
                 .map(|process| InitialProcess {
+                    creation_order: process.creation_order,
                     condition: process.condition.clone(),
                     body: process
                         .body
@@ -298,6 +299,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect();
             self.signals.push(signal);
@@ -482,6 +484,7 @@ impl ScopeSymbols {
                 .initial_processes
                 .iter()
                 .map(|process| InitialProcess {
+                    creation_order: process.creation_order,
                     condition: process
                         .condition
                         .clone()
@@ -493,6 +496,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect(),
             aliases: HashMap::default(),
@@ -888,6 +892,11 @@ impl Renamer<'_> {
                 })
                 .collect(),
             return_var: subroutine.return_var.map(|name| self.name(&name)),
+            sensitivity_body: subroutine
+                .sensitivity_body
+                .into_iter()
+                .map(|stmt| self.stmt(stmt))
+                .collect(),
             body: subroutine
                 .body
                 .into_iter()
