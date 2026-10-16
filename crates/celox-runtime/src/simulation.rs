@@ -689,11 +689,16 @@ impl<B: SimBackend> SimulationState<B> {
                     waiter.baselines.clear();
                     waiter
                         .baselines
-                        .extend(terms.iter().map(|_| Baseline::Counter(0)));
+                        .extend(terms.iter().map(|_| Baseline::Value(Value::default())));
                 }
                 for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
                     match term.counter {
-                        Some(counter) => *baseline = Baseline::Counter(backend.get_as(counter)),
+                        Some(counter) => {
+                            *baseline = Baseline::Counter {
+                                seen: backend.get_as(counter),
+                                value: Some(read(backend, term.signal)),
+                            }
+                        }
                         None => match planes(backend, term.signal) {
                             Some(image) => {
                                 if let Baseline::Raw(raw) = baseline {
@@ -789,9 +794,17 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 let baseline = &mut waiter.baselines[index];
                 wake |= match baseline {
-                    Baseline::Counter(seen) => term
-                        .counter
-                        .is_some_and(|counter| backend.get_as::<u32>(counter) != *seen),
+                    Baseline::Counter { seen, value } => {
+                        let counted = term
+                            .counter
+                            .is_some_and(|counter| backend.get_as::<u32>(counter) != *seen);
+                        let now = read(backend, term.signal);
+                        let changed = value
+                            .as_ref()
+                            .is_some_and(|last| occurs(term.kind, last, &now));
+                        *value = Some(now);
+                        counted || changed
+                    }
                     Baseline::Raw(last) => {
                         let now = state.planes(term.signal).expect("a plain signal");
                         Self::advance(term.kind, last, now, term.signal.width)
@@ -832,6 +845,24 @@ impl<B: SimBackend> SimulationState<B> {
         hit
     }
 
+    /// Sample the values that counted terms of waits loaded from a state
+    /// file compare against, once the state is in place.
+    pub fn sample_counted_waits(&mut self, backend: &B) {
+        let processes = &self.processes;
+        for (process, waiter) in self.process_state.waiters.iter_mut() {
+            let terms = &processes[process].wait_sites[waiter.site];
+            for (term, baseline) in terms.iter().zip(&mut waiter.baselines) {
+                if let Baseline::Counter {
+                    value: value @ None,
+                    ..
+                } = baseline
+                {
+                    *value = Some(read(backend, term.signal));
+                }
+            }
+        }
+    }
+
     /// Show the waits one value the host wrote to `signal`.
     fn observe_host_write(&mut self, signal: SignalRef, value: &Value) {
         let processes = &self.processes;
@@ -845,7 +876,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 match baseline {
                     // Counters are bumped by the write itself.
-                    Baseline::Counter(_) => {}
+                    Baseline::Counter { .. } => {}
                     Baseline::Raw(last) => {
                         let now = encode_planes(value, signal.width, last.len());
                         wake |= Self::advance(term.kind, last, &now, signal.width);

@@ -1632,3 +1632,57 @@ fn host_writes_do_not_hold_steps_at_the_current_time() {
         }
     }
 }
+
+/// `v` is counted, since a process stores `v[0]` twice, and a wait watches
+/// it; `v[1]` is driven combinationally from an input. The wait sees the
+/// changes the uncounted writer makes too.
+fn counted_with_comb_writer(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("CountedComb", four_state);
+    let a = d.input("a", 1);
+    let ty = d.ty(2);
+    let v = d.module.internal("v", ty).unwrap();
+    let high = d.module.slice(v, 1, 1).unwrap();
+    let read_a = d.read(a);
+    d.module.assign(high, read_a).unwrap();
+    let changes = d.output("changes", 8, 0);
+    let body = vec![Statement::Forever {
+        body: vec![wait(v, EventEdge::Change), d.increment(changes)],
+    }];
+    d.module.process(body).unwrap();
+    let low = d.module.slice(v, 0, 1).unwrap();
+    let (one, zero) = (d.constant(1, 1), d.constant(0, 1));
+    let body = vec![
+        Statement::Assign {
+            target: low,
+            value: one,
+        },
+        Statement::Assign {
+            target: low,
+            value: zero,
+        },
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn waits_on_counted_signals_see_uncounted_writers() {
+    for four_state in [false, true] {
+        let artifact = counted_with_comb_writer(four_state);
+        on_every_backend!(builder(&artifact, four_state), "CountedComb", |sim| {
+            let a = sim.signal("a");
+            sim.modify(|io| io.set(a, 0u8)).unwrap();
+            sim.run_until(1).unwrap();
+            let base = value(&mut sim, "changes");
+            assert!(base >= 1, "the pulse of v[0] is a change");
+            for (time, input, changes) in [(2, 1u8, base + 1), (4, 0, base + 2)] {
+                sim.modify(|io| io.set(a, input)).unwrap();
+                sim.run_until(time).unwrap();
+                assert_eq!(value(&mut sim, "changes"), changes, "a = {input}");
+                // A loaded wait compares with the loaded value.
+                let file = sim.save_state().unwrap();
+                sim.load_state(&file).unwrap();
+            }
+        });
+    }
+}

@@ -456,7 +456,7 @@ impl<B: SimBackend> Simulator<B> {
                             .iter()
                             .enumerate()
                             .map(|(term, baseline)| match baseline {
-                                Baseline::Counter(value) => BaselineRecord::Counter(*value),
+                                Baseline::Counter { seen, .. } => BaselineRecord::Counter(*seen),
                                 Baseline::Value((value, mask)) => BaselineRecord::Value {
                                     value: value.to_bytes_le(),
                                     mask: mask.to_bytes_le(),
@@ -646,7 +646,11 @@ impl<B: SimBackend> Simulator<B> {
                         .baselines
                         .iter()
                         .map(|baseline| match baseline {
-                            BaselineRecord::Counter(value) => Baseline::Counter(*value),
+                            // The value is sampled once the state is loaded.
+                            BaselineRecord::Counter(seen) => Baseline::Counter {
+                                seen: *seen,
+                                value: None,
+                            },
                             BaselineRecord::Value { value, mask } => Baseline::Value((
                                 BigUint::from_bytes_le(value),
                                 BigUint::from_bytes_le(mask),
