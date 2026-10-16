@@ -1820,6 +1820,20 @@ fn unify_clock_domains(
                 .get(&var)
                 .map(|variable| variable.metadata.width)
         };
+        // A copy sensed at the opposite edge of its source is a clock of its
+        // own: `always_ff @(negedge c)` with `assign c = clk` runs when `clk`
+        // falls, not with `clk`'s rising domain.
+        let polarity = |module: &SimModule, var: SourceVarId| {
+            module
+                .variables
+                .get(&var)
+                .and_then(|variable| match variable.metadata.kind {
+                    DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
+                    DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
+                    _ => None,
+                })
+        };
+        let same_edge = |a: Option<bool>, b: Option<bool>| a.is_none() || b.is_none() || a == b;
 
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
@@ -1831,7 +1845,8 @@ fn unify_clock_domains(
                 logic_path,
                 |target| width(sim_module, target),
                 |source| width(sim_module, source),
-            ) {
+            ) && same_edge(polarity(sim_module, target), polarity(sim_module, source))
+            {
                 drive_graph
                     .entry(bindings.locate(*id, source))
                     .or_default()
@@ -1853,6 +1868,10 @@ fn unify_clock_domains(
                 for (_, logic_path) in &glue_block.input_ports {
                     if let Some((GlueAddr::Child(child_var), GlueAddr::Parent(parent_var))) =
                         whole_variable_copy(&glue_block.arena, logic_path, glue_width, glue_width)
+                        && same_edge(
+                            polarity(child_module, child_var),
+                            polarity(sim_module, parent_var),
+                        )
                     {
                         drive_graph
                             .entry(bindings.locate(*id, parent_var))
@@ -1871,6 +1890,9 @@ fn unify_clock_domains(
                         logic_path,
                         |_| parent_width,
                         glue_width,
+                    ) && same_edge(
+                        polarity(child_module, child_var),
+                        polarity(sim_module, *parent_var),
                     ) {
                         drive_graph
                             .entry(bindings.locate(child_id, child_var))
