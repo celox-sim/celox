@@ -1439,7 +1439,7 @@ fn zero_time_loops_exhaust_the_slot_budget() {
                 .zip(["InactiveLoop", "PingPong", "Spin"])
         {
             on_every_backend!(builder(&artifact, four_state), top, |sim| {
-                sim.state.set_slot_budgets(256, 256);
+                sim.state.set_slot_budgets(256, 2);
                 sim.run_until(0).unwrap();
                 let error = sim.run_until(5).unwrap_err();
                 assert!(
@@ -1745,6 +1745,44 @@ fn waits_see_combinational_pulses_between_flip_flop_waves() {
             sim.run_until(8).unwrap();
             assert_eq!(value(&mut sim, "ffs"), 1);
             assert_eq!(value(&mut sim, "wakes"), 1);
+        });
+    }
+}
+
+/// A loop that may not suspend yields only every 2^16 iterations: a long
+/// finite loop finishes within a return budget of two.
+fn long_loop(four_state: bool) -> FrontendArtifact {
+    let mut d = Design::new("LongLoop", four_state);
+    let i = d.output("i", 32, 0);
+    let done = d.output("done", 1, 0);
+    let read = d.read(i);
+    let limit = d.constant(1 << 17, 32);
+    let ty = d.ty(1);
+    let condition = d
+        .module
+        .binary(BinaryOp::LessUnsigned, read, limit, ty)
+        .unwrap();
+    let body = vec![
+        d.delay(1),
+        Statement::While {
+            condition,
+            body: vec![d.increment(i)],
+        },
+        d.set(done, 1),
+    ];
+    d.module.process(body).unwrap();
+    d.finish()
+}
+
+#[test]
+fn long_finite_loops_yield_rarely() {
+    for four_state in [false, true] {
+        let artifact = long_loop(four_state);
+        on_every_backend!(builder(&artifact, four_state), "LongLoop", |sim| {
+            sim.state.set_slot_budgets(256, 2);
+            sim.run_until(2).unwrap();
+            assert_eq!(value(&mut sim, "i"), 1 << 17);
+            assert_eq!(value(&mut sim, "done"), 1);
         });
     }
 }

@@ -1082,6 +1082,8 @@ struct ProcessLowering<'a, 'h> {
     process: usize,
     process_wait_sites: u32,
     process_nba_sites: u32,
+    /// Loops given an iteration counter so far.
+    counted_loops: usize,
 }
 
 fn collect_nonblocking_targets(statements: &[Statement], targets: &mut Vec<SignalId>) {
@@ -1166,9 +1168,71 @@ fn always_suspends(statements: &[Statement]) -> bool {
     })
 }
 
+/// Iterations, as a power of two, between the yields of a loop that may not
+/// suspend. A finite loop pays one counter update per iteration, and only a
+/// loop of about 2^40 iterations in one time slot exhausts the runtime's
+/// return budget.
+const LOOP_YIELD_BITS: usize = 16;
+
+/// Close a loop iteration that may not suspend: count it, yield every
+/// 2^[`LOOP_YIELD_BITS`] iterations, and continue at `header`. The count
+/// lives in a hidden object, so it survives the yield.
+fn yield_now_and_then(
+    lowering: &mut ProcessLowering<'_, '_>,
+    kernel: &mut ProcessKernelBuilder,
+    header: BlockId,
+) -> Result<(), FrontendArtifactError> {
+    let counter = stable(lowering.hidden.declare(
+        vec![
+            format!("$loop[{}]", lowering.counted_loops),
+            "iterations".to_string(),
+        ],
+        LOOP_YIELD_BITS,
+        false,
+    ));
+    lowering.counted_loops += 1;
+    let builder = kernel.builder();
+    let count = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Load(
+        count,
+        counter,
+        SIROffset::Static(0),
+        LOOP_YIELD_BITS,
+    ));
+    let one = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+    let next = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+    builder.emit(SIRInstruction::Store(
+        counter,
+        SIROffset::Static(0),
+        LOOP_YIELD_BITS,
+        next,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let zero = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+    let wrapped = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(wrapped, next, BinaryOp::Eq, zero));
+    let yield_block = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: wrapped,
+        true_block: (yield_block, Vec::new()),
+        false_block: (header, Vec::new()),
+    });
+    builder.switch_to_block(yield_block);
+    kernel.yield_now()?;
+    kernel
+        .builder()
+        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+    Ok(())
+}
+
 /// Lower `statements` into `kernel`. A loop whose body may not suspend
-/// yields at the end of each iteration, so that the runtime charges it
-/// against the time slot's budget instead of spinning in the kernel.
+/// yields every 2^[`LOOP_YIELD_BITS`] iterations, so that the runtime
+/// charges it against the time slot's budget instead of spinning in the
+/// kernel.
 fn lower_statements(
     lowering: &mut ProcessLowering<'_, '_>,
     kernel: &mut ProcessKernelBuilder,
@@ -1226,12 +1290,13 @@ fn lower_statements(
                 });
                 builder.switch_to_block(body_block);
                 if lower_statements(lowering, kernel, body)? {
-                    if !always_suspends(body) {
-                        kernel.yield_now()?;
+                    if always_suspends(body) {
+                        kernel
+                            .builder()
+                            .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                    } else {
+                        yield_now_and_then(lowering, kernel, header)?;
                     }
-                    kernel
-                        .builder()
-                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
                 }
                 kernel.builder().switch_to_block(exit);
             }
@@ -1241,12 +1306,13 @@ fn lower_statements(
                 builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
                 builder.switch_to_block(header);
                 if lower_statements(lowering, kernel, body)? {
-                    if !always_suspends(body) {
-                        kernel.yield_now()?;
+                    if always_suspends(body) {
+                        kernel
+                            .builder()
+                            .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                    } else {
+                        yield_now_and_then(lowering, kernel, header)?;
                     }
-                    kernel
-                        .builder()
-                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
                 }
                 return Ok(false);
             }
@@ -1634,6 +1700,7 @@ fn lower_processes(
         process: 0,
         process_wait_sites: 0,
         process_nba_sites: 0,
+        counted_loops: 0,
     };
     let mut processes = Vec::new();
     for (index, process) in artifact.processes().iter().enumerate() {
