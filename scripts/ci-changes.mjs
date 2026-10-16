@@ -288,14 +288,22 @@ if (
   });
 }
 
-// Queue drafts, legacy merge groups, releases and daily runs keep
-// the whole workspace. The scope helper remains available outside queue CI.
+// Lydite tests are selected independently by lydite.yml, including its bridge.
+export function celoxRustTestScope(files, packages) {
+  return rustTestScope(
+    files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
+    packages.filter((pkg) => !/^lydite(?:-|$)/.test(pkg.name)),
+  );
+}
+
+// Queue drafts, merge groups, releases and daily runs keep the Celox
+// workspace. Lydite tests run independently in lydite.yml.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {
     try {
       const root = fileURLToPath(new URL("../", import.meta.url));
-      scope = rustTestScope(files, readWorkspace(root));
+      scope = celoxRustTestScope(files, readWorkspace(root));
     } catch (error) {
       console.warn(`Unable to scope the Rust tests: ${error.message}`);
     }
