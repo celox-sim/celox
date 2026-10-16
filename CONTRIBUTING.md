@@ -114,7 +114,7 @@ mixed Rust changes and unknown paths retain their existing coverage.
 
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
-legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
+legacy merge groups, and daily/manual full runs. Queue drafts run the full Celox Rust
 workspace when Rust is affected. Mergify checks up to five batches concurrently
 across three queue rules. Parallel mode separates independent file scopes while
 retaining combined-tree validation for overlapping scopes:
@@ -151,11 +151,8 @@ This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
 See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
-The separate lydite documentation, editor, and Celox replay checks run on queue
-drafts rather than ordinary PRs; develop pushes, weekly runs, and manual dispatch
-remain enabled. The expensive `veryl-fv` and `veryl-proof-corpus` jobs run only
-weekly (Monday at 03:41 UTC / 12:41 JST) or on manual dispatch, never on queue
-drafts or develop pushes. These separate lydite checks are not merge requirements.
+Lydite tests use the independent change-selected and weekly cadence described
+below, including on Mergify queue draft PRs.
 The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
 same coverage on its next push. Unrelated paths may still skip jobs.
@@ -198,20 +195,37 @@ Job selection:
   required check. Only explicitly unneeded producers may be skipped; failures
   and cancellations fail the check.
 
+Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
+
+- Lydite sources and fixtures run its core and bridge lanes. The core lane owns
+  the proof-engine Rust tests, editor and standalone Veryl conformance.
+- Celox changes run only the bridge lane when Cargo's dependency graph reaches
+  `lydite-celox`. This includes replay and proof-backed Veryl/symbolic corpus
+  gates, which use the in-tree exporter. Upstream private tests and Markdown
+  do not trigger consumer checks. NAPI/JS changes do not reach Lydite.
+- Shared dependency/toolchain configuration and an unreadable diff or dependency
+  graph run both lanes. The graph includes optional, build and dev edges.
+- Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
+  formatting/lint/build checks remain there. The dedicated workflow tests the
+  selected Lydite packages, including doctests, and installs its solver.
+- `Lydite checks` accepts skipped lanes only when change detection explicitly
+  excludes them, and fails on selected-job failures or cancellations. Repository
+  branch protection must require this check to make it a merge gate.
+
 The classifier selects CI jobs, not individual Rust tests. Selected Rust CI
-still runs the full workspace suite with CI features, doctests, default-feature
+still runs the Celox workspace suite with CI features, doctests, default-feature
 checks, ARM64 backend checks, and the explicit cocotb test. Local validation
 uses the finer behavior-based matrix above.
 
 | Cadence | Coverage |
 | --- | --- |
-| Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary workspace tests. |
+| Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary Celox workspace tests. |
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Weekly Monday at 03:41 UTC (12:41 JST), or manual dispatch | All `lydite.yml` checks, including Veryl formal verification and proof/mutation corpus gates. The two Veryl jobs run only at this cadence; documentation, editor, and Celox replay checks also run on queue drafts and develop pushes with relevant changes. |
+| Affected pull requests and merge groups; weekly Monday at 03:41 UTC (12:41 JST); on demand | `lydite.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Weekly and manual runs enable all lanes. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 
