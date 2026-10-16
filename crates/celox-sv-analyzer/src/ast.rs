@@ -575,6 +575,13 @@ impl Module {
             );
         }
 
+        let mut _timed_tasks = validation::install_timed_tasks(
+            node.clone(),
+            syntax_tree,
+            &imported,
+            &const_env,
+            &type_aliases,
+        )?;
         match reject_silently_ignored_constructs(
             node.clone(),
             syntax_tree,
@@ -631,6 +638,15 @@ impl Module {
                 array_parameters = array_parameters::array_parameters_from_module_node(
                     node.clone(),
                     syntax_tree,
+                    &const_env,
+                    &type_aliases,
+                )?;
+                // Rebuild classification after resolving type-dependent constants.
+                drop(_timed_tasks);
+                _timed_tasks = validation::install_timed_tasks(
+                    node.clone(),
+                    syntax_tree,
+                    &imported,
                     &const_env,
                     &type_aliases,
                 )?;
@@ -2423,4 +2439,29 @@ fn generate_scope_head(name: &str) -> Option<&str> {
         name.find(['.', '['])?
     };
     Some(&name[..end])
+}
+
+/// Source offsets of always constructs whose controls have the supported FF
+/// shape. Adapter callable analysis separately excludes timed task calls.
+pub fn ff_always_offsets(syntax_tree: &SyntaxTree) -> Vec<usize> {
+    syntax_tree
+        .into_iter()
+        .filter_map(|node| {
+            let RefNode::AlwaysConstruct(always) = node else {
+                return None;
+            };
+            if validation::always_kind(always, syntax_tree) != validation::AlwaysKind::Ff {
+                return None;
+            }
+            RefNode::AlwaysConstruct(always)
+                .into_iter()
+                .find_map(|node| {
+                    if let RefNode::Keyword(keyword) = node {
+                        Some(keyword.nodes.0.offset)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect()
 }

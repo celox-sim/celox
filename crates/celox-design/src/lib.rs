@@ -214,10 +214,26 @@ pub struct RuntimeErrorInfo<A> {
 pub enum ProcessStatus {
     /// Resume after the number of time units stored in [`ProcessSlots::delay`].
     Delay,
+    /// A zero delay resumes in the inactive region, before pending register
+    /// updates. A nonzero delay schedules the next timestamp as usual.
+    InactiveDelay,
     /// The process ran to the end of its body.
     Done,
     /// The process requested the end of the simulation.
     Finish,
+    /// The process ran until an event or level wait whose condition the
+    /// kernel evaluates itself. The runtime resumes the process whenever the
+    /// state may have changed; the kernel then either continues or reports
+    /// [`Self::Pending`].
+    Wait,
+    /// The process was resumed at a wait whose condition does not hold yet.
+    /// It ran no statement, so no state other than its own wait bookkeeping
+    /// changed.
+    Pending,
+    /// An event occurred while sampling queued drives; resume its body after the batch.
+    Ready,
+    /// Resume this process immediately, charging the current time-slot budget.
+    Yield,
 }
 
 impl ProcessStatus {
@@ -226,16 +242,26 @@ impl ProcessStatus {
     pub const fn code(self) -> u8 {
         match self {
             Self::Delay => 1,
+            Self::InactiveDelay => 9,
             Self::Done => 2,
             Self::Finish => 3,
+            Self::Wait => 4,
+            Self::Pending => 5,
+            Self::Ready => 11,
+            Self::Yield => 10,
         }
     }
 
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Delay),
+            9 => Some(Self::InactiveDelay),
             2 => Some(Self::Done),
             3 => Some(Self::Finish),
+            4 => Some(Self::Wait),
+            5 => Some(Self::Pending),
+            11 => Some(Self::Ready),
+            10 => Some(Self::Yield),
             _ => None,
         }
     }
@@ -273,6 +299,17 @@ impl<A> ProcessSlots<A> {
 pub const PROCESS_STATUS_WIDTH: usize = 8;
 /// Width of [`ProcessSlots::delay`].
 pub const PROCESS_DELAY_WIDTH: usize = 64;
+
+pub const PROCESS_EVENT_COUNTER_WIDTH: usize = 32;
+
+/// Kernel-recorded edges on one event-domain signal. Counters retain
+/// transitions hidden by later blocking stores of the same invocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessEventCounters<A> {
+    pub signal: A,
+    pub rises: A,
+    pub falls: A,
+}
 
 /// Controls which combinational stores dead store elimination preserves.
 ///
@@ -319,6 +356,9 @@ pub struct RuntimeSchema<A> {
     pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    pub process_event_counters: Vec<ProcessEventCounters<A>>,
+    /// FF evaluation domains that publish blocking stores into active state.
+    pub active_ff_events: HashSet<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -334,6 +374,8 @@ impl<A> Default for RuntimeSchema<A> {
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),
+            process_event_counters: Vec::new(),
+            active_ff_events: HashSet::default(),
         }
     }
 }

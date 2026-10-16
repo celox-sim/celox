@@ -6,6 +6,11 @@
 //! suspension stores the next resume point, a [`ProcessStatus`] and its wait
 //! amount into the process's control slots and returns to the runtime.
 //!
+//! A delay resumes after a time. An event or level wait resumes at a check
+//! the kernel runs itself: the runtime resumes the process whenever the
+//! state may have changed, and the kernel continues past the wait or
+//! reports that it is still pending.
+//!
 //! The builder is source-independent: a frontend lowers statements and
 //! expressions into [`ProcessKernelBuilder::builder`] and calls the
 //! suspension methods where the source suspends.
@@ -15,8 +20,8 @@ use celox_design::{
     STABLE_REGION,
 };
 use celox_sir::{
-    BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRSwitchCase,
-    SIRTerminator, SIRValue,
+    BinaryOp, BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset,
+    SIRSwitchCase, SIRTerminator, SIRValue,
 };
 use thiserror::Error;
 
@@ -99,17 +104,169 @@ impl ProcessKernelBuilder {
     /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
     /// a new resume point.
     pub fn delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.delay_with_status(amount, ProcessStatus::Delay)
+    }
+
+    /// A delay whose zero value resumes in the inactive region before NBA
+    /// publication, as SystemVerilog requires (IEEE 1800-2023 4.5).
+    pub fn inactive_delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.delay_with_status(amount, ProcessStatus::InactiveDelay)
+    }
+
+    /// Return for a budget check and immediately resume this same process.
+    /// This does not schedule an inactive-region delay or run another process.
+    pub fn yield_events(&mut self) -> Result<(), ProcessKernelError> {
+        let zero = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        self.delay_with_status(zero, ProcessStatus::Yield)
+    }
+
+    fn delay_with_status(
+        &mut self,
+        amount: RegisterId,
+        status: ProcessStatus,
+    ) -> Result<(), ProcessKernelError> {
         let point = self.resume_blocks.len();
         if point > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
         }
         self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
-        self.end(ProcessStatus::Delay);
+        self.end(status);
         let resume = self.builder.new_block();
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);
         Ok(())
+    }
+
+    /// Suspend until a condition the kernel evaluates holds, and continue at
+    /// a new resume point. The caller lowers the condition at that point
+    /// and ends it with [`Self::wake_if`]; the runtime resumes the process
+    /// there whenever the state may have changed. Sampling that an edge
+    /// condition compares against is done by the caller before this call.
+    pub fn begin_wait(&mut self) -> Result<(), ProcessKernelError> {
+        self.begin_event_wait()?;
+        // Sampling a queued drive must not evaluate or release a level wait.
+        let sample = self.sampling_request(Some(1));
+        let pending = self.builder.new_block();
+        let normal = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: sample,
+            true_block: (pending, Vec::new()),
+            false_block: (normal, Vec::new()),
+        });
+        self.builder.switch_to_block(pending);
+        self.end(ProcessStatus::Pending);
+        self.builder.switch_to_block(normal);
+        Ok(())
+    }
+
+    /// Arm an event wait whose samples may be polled between queued drives.
+    pub fn begin_event_wait(&mut self) -> Result<(), ProcessKernelError> {
+        let point = self.resume_blocks.len();
+        if point > MAX_PROCESS_SUSPENSIONS {
+            return Err(ProcessKernelError::TooManySuspensions);
+        }
+        self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
+        self.end(ProcessStatus::Wait);
+        let resume = self.builder.new_block();
+        self.resume_blocks.push(resume);
+        self.builder.switch_to_block(resume);
+        Ok(())
+    }
+
+    /// At the resume point of a [`Self::begin_wait`]: continue when
+    /// `condition`, a one-bit two-state register, holds, otherwise report
+    /// that the wait is still pending and return. The resume point is left
+    /// unchanged, so the runtime resumes the process at the same check. The
+    /// continuation block is open afterwards.
+    pub fn wake_if(&mut self, condition: RegisterId) {
+        let woken = self.builder.new_block();
+        let pending = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (woken, Vec::new()),
+            false_block: (pending, Vec::new()),
+        });
+        self.builder.switch_to_block(pending);
+        self.end(ProcessStatus::Pending);
+        self.builder.switch_to_block(woken);
+        // Readiness probes evaluate a wait's predicate without allowing its
+        // continuation to execute. Queued-drive sampling uses the same hold
+        // for event waits; begin_wait skips level predicates in that mode.
+        let sample = self.sampling_request(None);
+        let sampled = self.builder.new_block();
+        let normal = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: sample,
+            true_block: (sampled, Vec::new()),
+            false_block: (normal, Vec::new()),
+        });
+        self.builder.switch_to_block(sampled);
+        self.end(ProcessStatus::Ready);
+        self.builder.switch_to_block(normal);
+    }
+
+    fn sampling_request(&mut self, mode: Option<u8>) -> RegisterId {
+        // Delay is unused while waiting. The runtime supplies a transient
+        // sampling flag and clears it before ordinary process execution.
+        let request = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder.emit(SIRInstruction::Load(
+            request,
+            stable(self.slots.delay),
+            SIROffset::Static(0),
+            PROCESS_DELAY_WIDTH,
+        ));
+        let expected = self.builder.alloc_bit(PROCESS_DELAY_WIDTH, false);
+        self.builder.emit(SIRInstruction::Imm(
+            expected,
+            SIRValue::new(mode.unwrap_or(0)),
+        ));
+        let flag = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            flag,
+            request,
+            if mode.is_some() {
+                BinaryOp::Eq
+            } else {
+                BinaryOp::Ne
+            },
+            expected,
+        ));
+        flag
+    }
+
+    /// Retain an event occurrence without executing the continuation while
+    /// the runtime is still applying a batch of scheduled signal values.
+    pub fn wake_event_if(&mut self, condition: RegisterId) {
+        let status = self.builder.alloc_bit(PROCESS_STATUS_WIDTH, false);
+        self.builder.emit(SIRInstruction::Load(
+            status,
+            stable(self.slots.status),
+            SIROffset::Static(0),
+            PROCESS_STATUS_WIDTH,
+        ));
+        let ready_code = self.builder.alloc_bit(PROCESS_STATUS_WIDTH, false);
+        self.builder.emit(SIRInstruction::Imm(
+            ready_code,
+            SIRValue::new(ProcessStatus::Ready.code()),
+        ));
+        let ready = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            ready,
+            status,
+            BinaryOp::Eq,
+            ready_code,
+        ));
+        let occurred = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            occurred,
+            condition,
+            BinaryOp::Or,
+            ready,
+        ));
+        self.wake_if(occurred);
     }
 
     /// End the simulation. No block is open afterwards.

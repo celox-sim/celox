@@ -94,6 +94,7 @@ pub struct Checkpoint {
     image: StateImage,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
+    runtime_finish_requested: bool,
 }
 
 impl Checkpoint {
@@ -144,6 +145,7 @@ impl<B: SimBackend> Simulator<B> {
             image: StateImage::capture(&self.backend, self.state_fingerprint()),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
+            runtime_finish_requested: self.has_pending_runtime_finish(),
         })
     }
 
@@ -154,6 +156,17 @@ impl<B: SimBackend> Simulator<B> {
     /// the restored values as changes at the next dump; to record a rewound
     /// simulation, continue in a new file with [`Self::switch_vcd`].
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
+        self.restore_without_evaluation(checkpoint)?;
+        self.settle_dirty_for_runtime_event_drain();
+        Ok(())
+    }
+
+    /// Restore the stored image without running combinational logic. A finished
+    /// Simulation uses this to preserve its terminal outputs and diagnostics.
+    pub(crate) fn restore_without_evaluation(
+        &mut self,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
         let fingerprint = self.state_fingerprint();
         checkpoint
@@ -162,11 +175,11 @@ impl<B: SimBackend> Simulator<B> {
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
+        self.reset_runtime_finish(checkpoint.runtime_finish_requested);
         if let Some(writer) = &mut self.vcd_writer {
             writer.rescan();
         }
         self.dirty = true;
-        self.settle_dirty_for_runtime_event_drain();
         Ok(())
     }
 

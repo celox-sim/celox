@@ -200,6 +200,9 @@ export interface NativeSimulationHandle {
 	schedule(eventId: number, time: number, value: number): void;
 	runUntil(endTime: number): void;
 	step(): number | null;
+	stepUntil?(endTime: number): number | null;
+	hasWaitingProcesses?(): boolean;
+	hasPendingHostWork?(): boolean;
 	time(): number;
 	nextEventTime(): number | null;
 	/** Whether a process requested the end of the simulation. */

@@ -8,6 +8,59 @@
 use super::*;
 use num_traits::{ToPrimitive, Zero};
 
+// Share case matching with timing analysis so wildcard, range and
+// four-state matching cannot diverge from executable lowering.
+pub(super) fn case_item_condition(
+    kind: sv::ir::CaseKind,
+    selector: &sv::ir::Expr,
+    labels: &[sv::ir::CaseLabel<sv::ir::Expr>],
+) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    let mut terms = Vec::new();
+    for label in labels {
+        terms.push(match (kind, label) {
+            (sv::ir::CaseKind::Inside, label) => sv::ir::Expr::Inside {
+                expr: Box::new(selector.clone()),
+                items: vec![match label {
+                    sv::ir::CaseLabel::Value(value) => sv::ir::InsideItem::Value(value.clone()),
+                    sv::ir::CaseLabel::Range { low, high } => sv::ir::InsideItem::Range {
+                        low: low.clone(),
+                        high: high.clone(),
+                    },
+                }],
+            },
+            (sv::ir::CaseKind::X, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Binary {
+                    left: Box::new(selector.clone()),
+                    op: sv::ir::BinaryOp::EqWildcard,
+                    right: Box::new(value.clone()),
+                }),
+                op: sv::ir::BinaryOp::NeCase,
+                right: Box::new(sv::ir::Expr::Literal("1'b0".to_string())),
+            },
+            (_, sv::ir::CaseLabel::Value(value)) => sv::ir::Expr::Binary {
+                left: Box::new(selector.clone()),
+                op: if kind == sv::ir::CaseKind::Exact {
+                    sv::ir::BinaryOp::EqCase
+                } else {
+                    sv::ir::BinaryOp::EqWildcard
+                },
+                right: Box::new(value.clone()),
+            },
+            (_, sv::ir::CaseLabel::Range { .. }) => {
+                return Err(unsupported("range label outside case inside"));
+            }
+        });
+    }
+    Ok(terms
+        .into_iter()
+        .reduce(|left, right| sv::ir::Expr::Binary {
+            left: Box::new(left),
+            op: sv::ir::BinaryOp::LogicOr,
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| sv::ir::Expr::Literal("1'b0".to_string())))
+}
+
 /// Upper bound on the iterations unrolled for one process, matching the
 /// generate-loop bound of the analyzer.
 pub(super) const MAX_UNROLLED_ITERATIONS: usize = 10_000;
@@ -44,10 +97,57 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
+    /// The event expressions some process waits on.
+    pub event_watchers: Vec<EventWatcher>,
+    pub combinational: HashSet<String>,
+    pub hidden_comb_pulses: HashSet<String>,
+    pub comb_bodies: Vec<Vec<sv::ir::Stmt>>,
+    pub event_signals: Vec<String>,
+    pub ff_processes: Vec<sv::ir::FfProcess>,
+    /// The watchers whose expression reads each variable, by index.
+    pub watchers_by_var: HashMap<SourceVarId, Vec<usize>>,
+    /// Every event counter declared, for its zero initial value.
+    pub event_counter_ids: Vec<SourceVarId>,
+    /// The initial values of the `static` locals with initializers, which
+    /// run once, before time zero (IEEE 1800-2023 6.21).
+    pub static_initial_values: Vec<InitialStateValue<SourceVarId>>,
+}
+
+/// An event expression some process waits on, and the hidden state that
+/// records its events: a kernel's store to one of `dependencies` snapshots
+/// the expression before the store and counts the change, rise and fall it
+/// made after it. A waiter compares the counters with the ones it sampled,
+/// so an event a later store of the same kernel run hides is still seen.
+#[derive(Clone)]
+pub(super) struct EventWatcher {
+    pub private: HashMap<SourceVarId, SourceVarId>,
+    pub expr: sv::ir::Expr,
+    pub dependencies: Vec<SourceVarId>,
+    /// The state shared by every process; a process with private copies of
+    /// a dependency keeps its own (see `Ff::private_watchers`).
+    pub state: EventCounters,
+}
+
+/// The counters of one watcher: how often its expression changed, rose and
+/// fell, and the value it had before the store being recorded.
+#[derive(Clone)]
+pub(super) struct EventCounters {
+    pub previous: Option<(SourceVarId, String)>,
+    pub changes: String,
+    pub rises: String,
+    pub falls: String,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
 /// unknown mask.
+/// Bits of an event counter; the counters wrap, as only equality matters.
+pub const EVENT_COUNTER_WIDTH: usize = celox_design::PROCESS_EVENT_COUNTER_WIDTH;
+
+/// The counters of a package variable, as `variable@purpose` in the package
+/// and in every module denoting the variable (see
+/// [`super::ff::declare_event_counters`]).
+pub const PACKAGE_EVENT_COUNTERS: [&str; 3] = ["changes", "rises", "falls"];
+
 pub(super) struct MemoryWord {
     pub access: BitAccess,
     pub value: BigUint,
@@ -70,7 +170,7 @@ impl<'a> ProcModule<'a> {
                 .max()
                 .unwrap_or_default(),
         );
-        let subroutines = module
+        let subroutines: HashMap<String, sv::ir::Subroutine> = module
             .subroutines()
             .iter()
             .map(|subroutine| (subroutine.name.clone(), subroutine.clone()))
@@ -123,6 +223,43 @@ impl<'a> ProcModule<'a> {
                 unpacked_bounds.insert(id, bounds);
             }
         }
+        let comb_writes = module
+            .comb_processes()
+            .iter()
+            .filter(|process| condition_is_active(process.condition(), constants, parameter_types))
+            .map(|process| {
+                procedural_write_counts(
+                    process.body(),
+                    &subroutines,
+                    &LoopConstContext::new(
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        four_state,
+                    ),
+                    &|expr| expr_is_two_state(expr, variables, name_to_id, &subroutines),
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut total_writes: HashMap<String, usize> = HashMap::default();
+        for writes in &comb_writes {
+            for (name, count) in writes {
+                let total = total_writes.entry(name.clone()).or_default();
+                *total = (*total + count).min(2);
+            }
+        }
+        let hidden_comb_pulses = total_writes
+            .into_iter()
+            .filter_map(|(name, count)| (count > 1).then_some(name))
+            .collect();
+        let combinational = module
+            .assignments()
+            .iter()
+            .map(|assignment| assignment.lhs().to_string())
+            .chain(comb_writes.iter().flat_map(|writes| writes.keys().cloned()))
+            .collect();
         Self {
             variables,
             name_to_id,
@@ -140,6 +277,27 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
+            event_watchers: Vec::new(),
+            ff_processes: module.ff_processes().to_vec(),
+            event_signals: module
+                .ff_processes()
+                .iter()
+                .flat_map(|process| process.events())
+                .map(|event| event.signal().to_string())
+                .collect(),
+            combinational,
+            hidden_comb_pulses,
+            comb_bodies: module
+                .comb_processes()
+                .iter()
+                .filter(|process| {
+                    condition_is_active(process.condition(), constants, parameter_types)
+                })
+                .map(|process| process.body().to_vec())
+                .collect(),
+            watchers_by_var: HashMap::default(),
+            event_counter_ids: Vec::new(),
+            static_initial_values: Vec::new(),
         }
     }
 
@@ -292,8 +450,106 @@ impl<'a> ProcModule<'a> {
         self.name_to_id.get(name).copied()
     }
 
+    /// Fresh event counters, which start at zero. They follow the design's
+    /// state mode, as the expressions that read them do.
+    pub fn new_event_counters(&mut self) -> EventCounters {
+        let mut counter = |purpose: &str| {
+            let four_state = self.four_state;
+            let (id, name) = self.temp(purpose, EVENT_COUNTER_WIDTH, false, four_state);
+            self.event_counter_ids.push(id);
+            name
+        };
+        let changes = counter("event_changes");
+        let rises = counter("event_rises");
+        let falls = counter("event_falls");
+        EventCounters {
+            previous: None,
+            changes,
+            rises,
+            falls,
+        }
+    }
+
+    /// A hidden copy of variable `id` with its shape, for the activations
+    /// of one process. The copy has no name a body can refer to.
+    pub fn private_copy(&mut self, id: SourceVarId) -> SourceVarId {
+        let mut variable = self.variables[&id].clone();
+        variable.path = vec![format!(
+            "{}@p{}",
+            variable.path.join("."),
+            self.temp_counter
+        )];
+        self.temp_counter += 1;
+        variable.hidden = true;
+        let copy = next_var_id(&mut self.next_id);
+        self.variables.insert(copy, variable);
+        self.created.push(copy);
+        copy
+    }
+
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
         &self.variables[&id]
+    }
+
+    /// Give the `static` local `id` its initial value `init`, evaluated
+    /// once: the initializer of a static variable runs before time zero
+    /// (IEEE 1800-2023 6.21), so it must be constant. The inlined body of a
+    /// subroutine declares the local at every call site; the first one
+    /// records the value.
+    pub fn static_initial(
+        &mut self,
+        id: SourceVarId,
+        init: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        if self
+            .static_initial_values
+            .iter()
+            .any(|value| value.address == id)
+        {
+            return Ok(());
+        }
+        let name = self.var(id).path[0].clone();
+        if !self.var(id).array_dims.is_empty() {
+            return Err(unsupported(format!(
+                "static local array `{name}` with an initializer"
+            )));
+        }
+        let mut arena = SLTNodeArena::new();
+        let constant = (!self.calls(init))
+            .then(|| {
+                lower_expr_with_context(
+                    &expr_for_state_mode(init, self.four_state),
+                    self.variables,
+                    self.name_to_id,
+                    self.constants,
+                    self.parameter_types,
+                    &mut arena,
+                    Some(self.var(id).width),
+                    Some(self.expr_signed(init)),
+                )
+            })
+            .flatten()
+            .and_then(|(node, _)| slt_const4(&arena, &mut ConstCache::default(), node));
+        let Some((mut value, mut mask, _)) = constant else {
+            return Err(unsupported(format!(
+                "static local `{name}` with an initializer that is not constant"
+            )));
+        };
+        let width = self.var(id).width;
+        let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        if !self.var(id).is_4state {
+            value &= &written_mask ^ (&mask & &written_mask);
+            mask = BigUint::default();
+        }
+        self.static_initial_values.push(InitialStateValue {
+            address: id,
+            data: InitialStateData::Packed {
+                value: value & &written_mask,
+                mask: mask & &written_mask,
+                written_mask,
+            },
+        });
+        Ok(())
     }
 
     pub fn is_hidden(&self, id: SourceVarId) -> bool {
@@ -309,8 +565,13 @@ impl<'a> ProcModule<'a> {
         signed: bool,
         is_4state: bool,
     ) -> (SourceVarId, String) {
-        let name = format!("{purpose}@t{}", self.temp_counter);
-        self.temp_counter += 1;
+        let name = loop {
+            let name = format!("{purpose}@t{}", self.temp_counter);
+            self.temp_counter += 1;
+            if !self.name_to_id.contains_key(&name) {
+                break name;
+            }
+        };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(
             id,
@@ -1456,6 +1717,7 @@ pub(super) fn canonical_for_loop(
             sv::ir::Stmt::Local {
                 name,
                 init: Some(start),
+                ..
             },
         ] => (name.clone(), start.clone()),
         [
@@ -1534,44 +1796,47 @@ pub(super) fn canonical_for_loop(
     })
 }
 
-/// The identifiers an expression reads.
-pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
-    fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
-        match expr {
-            sv::ir::ConstExpr::Ident(name) => {
-                names.insert(name.clone());
-            }
-            sv::ir::ConstExpr::Literal(_) => {}
-            sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                const_idents(expr, names);
-                const_idents(msb, names);
-                const_idents(lsb, names);
-            }
-            sv::ir::ConstExpr::Select { expr, bit } => {
-                const_idents(expr, names);
-                const_idents(bit, names);
-            }
-            sv::ir::ConstExpr::Function { args, .. } => {
-                args.iter().for_each(|arg| const_idents(arg, names))
-            }
-            sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
-                const_idents(expr, names)
-            }
-            sv::ir::ConstExpr::Binary { left, right, .. } => {
-                const_idents(left, names);
-                const_idents(right, names);
-            }
-            sv::ir::ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                const_idents(condition, names);
-                const_idents(then_expr, names);
-                const_idents(else_expr, names);
-            }
+/// The identifiers a constant-expression operand, such as a run-time select
+/// index, reads.
+pub(super) fn const_idents(expr: &sv::ir::ConstExpr, names: &mut HashSet<String>) {
+    match expr {
+        sv::ir::ConstExpr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        sv::ir::ConstExpr::Literal(_) => {}
+        sv::ir::ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            const_idents(expr, names);
+            const_idents(msb, names);
+            const_idents(lsb, names);
+        }
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_idents(expr, names);
+            const_idents(bit, names);
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().for_each(|arg| const_idents(arg, names))
+        }
+        sv::ir::ConstExpr::Resize { expr, .. } | sv::ir::ConstExpr::Unary { expr, .. } => {
+            const_idents(expr, names)
+        }
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_idents(left, names);
+            const_idents(right, names);
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_idents(condition, names);
+            const_idents(then_expr, names);
+            const_idents(else_expr, names);
         }
     }
+}
+
+/// The identifiers `expr` reads.
+pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
     match expr {
         sv::ir::Expr::Ident(name) => {
             names.insert(name.clone());
@@ -1968,10 +2233,10 @@ fn lvalue_position_calls(
     }
 }
 
-pub(super) fn stmt_calls(
-    stmt: &sv::ir::Stmt,
+fn stmt_call_exprs<'a>(
+    stmt: &'a sv::ir::Stmt,
     calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
-) {
+) -> Vec<&'a sv::ir::Expr> {
     let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
     match stmt {
         sv::ir::Stmt::Call { name, args, .. } => {
@@ -2027,8 +2292,248 @@ pub(super) fn stmt_calls(
         }
         _ => {}
     }
-    for expr in exprs {
+    exprs
+}
+
+pub(super) fn stmt_calls(
+    stmt: &sv::ir::Stmt,
+    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+) {
+    for expr in stmt_call_exprs(stmt, calls) {
         collect_calls(expr, calls);
+    }
+}
+
+pub(super) enum CallEffects {
+    Call(String, Vec<Option<sv::ir::Expr>>),
+    Sequence(Vec<Self>),
+    Choice(Box<Self>, Box<Self>),
+}
+impl CallEffects {
+    pub(super) fn fold<T: Default>(
+        &self,
+        call: &mut impl FnMut(&str, &[Option<sv::ir::Expr>]) -> T,
+        add: &impl Fn(T, T) -> T,
+        max: &impl Fn(T, T) -> T,
+    ) -> T {
+        match self {
+            Self::Call(name, args) => call(name, args),
+            Self::Sequence(items) => items.iter().fold(T::default(), |value, item| {
+                add(value, item.fold(call, add, max))
+            }),
+            Self::Choice(left, right) => max(left.fold(call, add, max), right.fold(call, add, max)),
+        }
+    }
+}
+
+pub(super) fn stmt_call_effects(
+    stmt: &sv::ir::Stmt,
+    eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+    two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+) -> CallEffects {
+    fn constant(
+        expr: &sv::ir::ConstExpr,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    ) -> CallEffects {
+        if let Some(expr) = expr_from_const_expr(expr) {
+            return expression(&expr, eval, two_state);
+        }
+        let mut calls = Vec::new();
+        collect_const_calls(expr, &mut calls);
+        CallEffects::Sequence(
+            calls
+                .into_iter()
+                .map(|(name, args)| CallEffects::Call(name, args))
+                .collect(),
+        )
+    }
+    fn expression(
+        expr: &sv::ir::Expr,
+        eval: &dyn Fn(&sv::ir::Expr) -> Option<i128>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    ) -> CallEffects {
+        use sv::ir::Expr;
+        let mut items = Vec::new();
+        match expr {
+            Expr::Call { name, args, .. } => {
+                items.extend(
+                    args.iter()
+                        .flatten()
+                        .map(|arg| expression(arg, eval, two_state)),
+                );
+                items.push(CallEffects::Call(name.clone(), args.clone()));
+            }
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                items.push(expression(condition, eval, two_state));
+                match eval(condition) {
+                    Some(value) => items.push(expression(
+                        if value != 0 { then_expr } else { else_expr },
+                        eval,
+                        two_state,
+                    )),
+                    None if two_state(condition) => items.push(CallEffects::Choice(
+                        Box::new(expression(then_expr, eval, two_state)),
+                        Box::new(expression(else_expr, eval, two_state)),
+                    )),
+                    None => {
+                        items.push(expression(then_expr, eval, two_state));
+                        items.push(expression(else_expr, eval, two_state));
+                    }
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Resize { expr, .. } => {
+                items.push(expression(expr, eval, two_state))
+            }
+            Expr::Binary { left, right, .. } => {
+                items.push(expression(left, eval, two_state));
+                items.push(expression(right, eval, two_state));
+            }
+            Expr::Concat(parts) => {
+                items.extend(parts.iter().map(|part| expression(part, eval, two_state)))
+            }
+            Expr::RepeatConcat { count, parts } => {
+                items.push(constant(count, eval, two_state));
+                items.extend(parts.iter().map(|part| expression(part, eval, two_state)));
+            }
+            Expr::Select { expr, msb, lsb, .. } => {
+                items.push(expression(expr, eval, two_state));
+                items.push(constant(msb, eval, two_state));
+                items.push(constant(lsb, eval, two_state));
+            }
+            Expr::Inside {
+                expr,
+                items: inside,
+            } => {
+                items.push(expression(expr, eval, two_state));
+                items.extend(
+                    inside
+                        .iter()
+                        .flat_map(sv::ir::InsideItem::exprs)
+                        .map(|arg| expression(arg, eval, two_state)),
+                );
+            }
+            Expr::Ident(_) | Expr::Literal(_) => {}
+        }
+        CallEffects::Sequence(items)
+    }
+    let mut calls = Vec::new();
+    let exprs = stmt_call_exprs(stmt, &mut calls);
+    let mut items = exprs
+        .into_iter()
+        .map(|expr| expression(expr, eval, two_state))
+        .collect::<Vec<_>>();
+    items.extend(
+        calls
+            .into_iter()
+            .map(|(name, args)| CallEffects::Call(name, args)),
+    );
+    CallEffects::Sequence(items)
+}
+
+pub(super) fn expr_is_two_state(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    ids: &HashMap<String, SourceVarId>,
+    subroutines: &HashMap<String, sv::ir::Subroutine>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => ids.get(name).is_some_and(|id| !variables[id].is_4state),
+        sv::ir::Expr::Literal(value) => !value
+            .chars()
+            .any(|c| matches!(c, 'x' | 'X' | 'z' | 'Z' | '?')),
+        sv::ir::Expr::Call { name, .. } => subroutines
+            .get(name)
+            .and_then(|sub| sub.return_var.as_deref())
+            .and_then(|name| ids.get(name))
+            .is_some_and(|id| !variables[id].is_4state),
+        sv::ir::Expr::Binary {
+            op: sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase,
+            ..
+        } => true,
+        sv::ir::Expr::Unary { expr, .. } | sv::ir::Expr::Resize { expr, .. } => {
+            expr_is_two_state(expr, variables, ids, subroutines)
+        }
+        sv::ir::Expr::Binary { left, right, .. } => {
+            expr_is_two_state(left, variables, ids, subroutines)
+                && expr_is_two_state(right, variables, ids, subroutines)
+        }
+        _ => false,
+    }
+}
+
+/// The identifiers the expressions of `stmt` itself read: its nested
+/// statements are not visited. The variables an assignment writes are not
+/// reads, but the indices of its selects are.
+pub(super) fn stmt_reads(stmt: &sv::ir::Stmt, names: &mut HashSet<String>) {
+    fn lvalue_reads(lvalue: &sv::ir::LValue, names: &mut HashSet<String>) {
+        if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
+            const_idents(msb, names);
+            const_idents(lsb, names);
+        }
+    }
+    let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
+    match stmt {
+        sv::ir::Stmt::Call { args, .. } => exprs.extend(args.iter().flatten()),
+        sv::ir::Stmt::Assign { lhs, rhs, .. } => {
+            lvalue_reads(lhs, names);
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
+            parts.iter().for_each(|part| lvalue_reads(part, names));
+            exprs.push(rhs);
+        }
+        sv::ir::Stmt::Eval(rhs) | sv::ir::Stmt::Delay(rhs) | sv::ir::Stmt::Wait(rhs) => {
+            exprs.push(rhs)
+        }
+        sv::ir::Stmt::If { condition, .. } => exprs.push(condition),
+        sv::ir::Stmt::Case {
+            selector, items, ..
+        } => {
+            exprs.push(selector);
+            for item in items {
+                for label in &item.labels {
+                    match label {
+                        sv::ir::CaseLabel::Value(value) => exprs.push(value),
+                        sv::ir::CaseLabel::Range { low, high } => {
+                            exprs.push(low);
+                            exprs.push(high);
+                        }
+                    }
+                }
+            }
+        }
+        sv::ir::Stmt::Loop {
+            kind, condition, ..
+        } => {
+            if let sv::ir::LoopKind::Repeat(count) = kind {
+                exprs.push(count);
+            }
+            exprs.extend(condition);
+        }
+        sv::ir::Stmt::Return(Some(value)) => exprs.push(value),
+        sv::ir::Stmt::Local {
+            init: Some(init), ..
+        } => exprs.push(init),
+        sv::ir::Stmt::SystemTask { args, .. } => {
+            for arg in args {
+                if let sv::ir::SystemTaskArg::Expr(expr) = arg {
+                    exprs.push(expr);
+                }
+            }
+        }
+        sv::ir::Stmt::WaitEvent(items) => exprs.extend(items.iter().map(|item| &item.expr)),
+        sv::ir::Stmt::Return(None)
+        | sv::ir::Stmt::Local { init: None, .. }
+        | sv::ir::Stmt::Break
+        | sv::ir::Stmt::Continue => {}
+    }
+    for expr in exprs {
+        expr_idents(expr, names);
     }
 }
 
@@ -2043,6 +2548,642 @@ pub(super) fn default_calls(
             && let Some(default) = &param.default
         {
             collect_calls(default, calls);
+        }
+    }
+}
+
+/// Watchers planned before FF lowering and reused by timed processes.
+pub(super) type EventWatchPlan = (
+    Vec<EventWatcher>,
+    HashMap<SourceVarId, Vec<usize>>,
+    Vec<SourceVarId>,
+);
+
+pub(super) fn known_loop_value(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    ids: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool)>,
+) -> Option<i128> {
+    let mut arena = SLTNodeArena::new();
+    let (node, _) = lower_expr_with_context(
+        expr, variables, ids, constants, types, &mut arena, None, None,
+    )?;
+    let (value, width) = slt_const(&arena, &mut ConstCache::default(), node)?;
+    let mut value = num_bigint::BigInt::from(value);
+    if node_is_signed(&arena, node) && value.bit(width.saturating_sub(1) as u64) {
+        value -= num_bigint::BigInt::from(1u8) << width;
+    }
+    value.to_i128()
+}
+
+/// Constant evaluation with the declaration types used by executable lowering.
+pub(super) struct LoopConstContext<'a> {
+    variables: &'a HashMap<SourceVarId, SvVariable>,
+    ids: &'a HashMap<String, SourceVarId>,
+    constants: &'a HashMap<String, i128>,
+    types: &'a HashMap<String, (usize, bool)>,
+    four_state: bool,
+}
+
+// Flow out of the current sequence. A continue reaches this loop's step;
+// a break/return does not. Nested loops consume their own continue targets.
+#[derive(Clone, Copy)]
+pub(super) struct ProceduralFlow {
+    pub fallthrough: bool,
+    pub continues: bool,
+}
+impl ProceduralFlow {
+    fn choice(self, other: Self) -> Self {
+        Self {
+            fallthrough: self.fallthrough || other.fallthrough,
+            continues: self.continues || other.continues,
+        }
+    }
+}
+
+impl<'a> LoopConstContext<'a> {
+    pub fn new(
+        variables: &'a HashMap<SourceVarId, SvVariable>,
+        ids: &'a HashMap<String, SourceVarId>,
+        constants: &'a HashMap<String, i128>,
+        types: &'a HashMap<String, (usize, bool)>,
+        four_state: bool,
+    ) -> Self {
+        Self {
+            variables,
+            ids,
+            constants,
+            types,
+            four_state,
+        }
+    }
+
+    fn value(&self, expr: &sv::ir::Expr) -> Option<i128> {
+        known_loop_value(expr, self.variables, self.ids, self.constants, self.types)
+    }
+
+    /// Repeat uses zero for any unknown bit, before two-state conversion.
+    pub(super) fn repeat_count(&self, expr: &sv::ir::Expr) -> Option<i128> {
+        if expr_calls(expr, &|_| true) {
+            return None;
+        }
+        let mut arena = SLTNodeArena::new();
+        let (node, _) = lower_expr_with_context(
+            expr,
+            self.variables,
+            self.ids,
+            self.constants,
+            self.types,
+            &mut arena,
+            None,
+            None,
+        )?;
+        let (_, mask, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+        if !mask.is_zero() {
+            return Some(0);
+        }
+        // Known comparisons can differ after the executable two-state rewrite.
+        let node = self.lower(expr, None, &mut arena)?;
+        let (value, mask, width) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+        if !mask.is_zero()
+            || (node_is_signed(&arena, node) && value.bit(width.saturating_sub(1) as u64))
+        {
+            Some(0)
+        } else {
+            value.to_i128()
+        }
+    }
+
+    pub(super) fn truth(&self, expr: &sv::ir::Expr) -> Option<bool> {
+        let mut arena = SLTNodeArena::new();
+        let node = self.lower(expr, None, &mut arena)?;
+        let truth = slt_truth(&mut arena, node).ok()?;
+        slt_bool(&arena, &mut ConstCache::default(), truth)
+    }
+
+    fn lower(
+        &self,
+        expr: &sv::ir::Expr,
+        width: Option<usize>,
+        arena: &mut SLTNodeArena<SourceVarId>,
+    ) -> Option<celox_slt::NodeId> {
+        if expr_calls(expr, &|_| true) {
+            return None;
+        }
+        let signed = width
+            .map(|_| sv_expr_is_signed_with_parameters(expr, self.variables, self.ids, self.types));
+        lower_expr_with_context(
+            &expr_for_state_mode(expr, self.four_state),
+            self.variables,
+            self.ids,
+            self.constants,
+            self.types,
+            arena,
+            width,
+            signed,
+        )
+        .map(|(node, _)| node)
+    }
+
+    pub(super) fn selected_case_body<'b>(
+        &self,
+        kind: sv::ir::CaseKind,
+        selector: &sv::ir::Expr,
+        items: &'b [sv::ir::CaseItem],
+        default: Option<&'b [sv::ir::Stmt]>,
+    ) -> Option<&'b [sv::ir::Stmt]> {
+        // The selector executes even when the case has no items.
+        if expr_calls(selector, &|_| true) {
+            return None;
+        }
+        for item in items {
+            let condition = case_item_condition(kind, selector, &item.labels).ok()?;
+            if self.truth(&condition)? {
+                return Some(&item.body);
+            }
+        }
+        Some(default.unwrap_or_default())
+    }
+
+    pub(super) fn selected_branch<'b>(&self, stmt: &'b sv::ir::Stmt) -> Option<&'b [sv::ir::Stmt]> {
+        match stmt {
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => Some(if self.truth(condition)? {
+                then_body
+            } else {
+                else_body
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => self.selected_case_body(*kind, selector, items, default.as_deref()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn body_flow(&self, body: &[sv::ir::Stmt]) -> ProceduralFlow {
+        let mut flow = ProceduralFlow {
+            fallthrough: true,
+            continues: false,
+        };
+        for stmt in body {
+            if !flow.fallthrough {
+                break;
+            }
+            let next = self.stmt_flow(stmt);
+            flow.fallthrough = next.fallthrough;
+            flow.continues |= next.continues;
+        }
+        flow
+    }
+
+    pub(super) fn stmt_flow(&self, stmt: &sv::ir::Stmt) -> ProceduralFlow {
+        if let Some(branch) = self.selected_branch(stmt) {
+            return self.body_flow(branch);
+        }
+        match stmt {
+            sv::ir::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => self.body_flow(then_body).choice(self.body_flow(else_body)),
+            sv::ir::Stmt::Case { items, default, .. } => items.iter().fold(
+                self.body_flow(default.as_deref().unwrap_or_default()),
+                |flow, item| flow.choice(self.body_flow(&item.body)),
+            ),
+            sv::ir::Stmt::Continue => ProceduralFlow {
+                fallthrough: false,
+                continues: true,
+            },
+            sv::ir::Stmt::Wait(condition) if self.truth(condition) == Some(false) => {
+                ProceduralFlow {
+                    fallthrough: false,
+                    continues: false,
+                }
+            }
+            _ => ProceduralFlow {
+                fallthrough: stmt_may_fall_through(stmt),
+                continues: false,
+            },
+        }
+    }
+
+    fn for_cap(
+        &self,
+        init: &[sv::ir::Stmt],
+        condition: Option<&sv::ir::Expr>,
+        step: &[sv::ir::Stmt],
+        body: &[sv::ir::Stmt],
+    ) -> Option<usize> {
+        let loop_ = canonical_for_loop(init, condition, step)?;
+        let variable = self.variables.get(self.ids.get(&loop_.var)?)?;
+        let width = variable.width;
+        if width == 0 {
+            return None;
+        }
+        let mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let assigned = |expr: &sv::ir::Expr| {
+            let mut arena = SLTNodeArena::new();
+            let node = self.lower(expr, Some(width), &mut arena)?;
+            let (value, unknown, _) = slt_const4(&arena, &mut ConstCache::default(), node)?;
+            let unknown = unknown & &mask;
+            if variable.is_4state && !unknown.is_zero() {
+                return None;
+            }
+            Some((value & &mask) & (&mask ^ unknown))
+        };
+        let holds = |value: &BigUint| {
+            let expr = sv::ir::Expr::Binary {
+                left: Box::new(sv::ir::Expr::Literal(typed_literal(
+                    value,
+                    width,
+                    variable.signed,
+                ))),
+                op: loop_.compare,
+                right: Box::new(loop_.end.clone()),
+            };
+            let mut arena = SLTNodeArena::new();
+            let node = self.lower(&expr, None, &mut arena)?;
+            let truth = slt_truth(&mut arena, node).ok()?;
+            slt_bool(&arena, &mut ConstCache::default(), truth)
+        };
+        let start = assigned(&loop_.start)?;
+        if !holds(&start)? {
+            return Some(0);
+        }
+        // Header-only simulation cannot prove a single trip if the body
+        // changes the induction variable, directly or through a call.
+        let mut written = HashSet::default();
+        written_names(body, &mut written);
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt_calls(stmt, &mut calls);
+        }
+        if written.contains(&loop_.var) || !calls.is_empty() {
+            return Some(2);
+        }
+        let [
+            sv::ir::Stmt::Assign {
+                rhs: sv::ir::Expr::Binary { op, right, .. },
+                ..
+            },
+        ] = step
+        else {
+            return None;
+        };
+        let step = sv::ir::Expr::Binary {
+            left: Box::new(sv::ir::Expr::Literal(typed_literal(
+                &start,
+                width,
+                variable.signed,
+            ))),
+            op: *op,
+            right: right.clone(),
+        };
+        let next = assigned(&step)?;
+        Some(if holds(&next)? { 2 } else { 1 })
+    }
+}
+
+/// Maximum relevant iterations, capped at two for hidden-pulse analysis.
+pub(super) fn loop_trip_cap(
+    kind: &sv::ir::LoopKind<sv::ir::Expr>,
+    init: &[sv::ir::Stmt],
+    condition: Option<&sv::ir::Expr>,
+    step: &[sv::ir::Stmt],
+    body: &[sv::ir::Stmt],
+    eval: &LoopConstContext<'_>,
+) -> usize {
+    use sv::ir::LoopKind;
+    match kind {
+        LoopKind::Repeat(count) => eval.repeat_count(count).unwrap_or(2).clamp(0, 2) as usize,
+        LoopKind::While if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
+        LoopKind::DoWhile if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 1,
+        // A constant false entry test needs no canonical induction/step.
+        LoopKind::For if condition.and_then(|expr| eval.truth(expr)) == Some(false) => 0,
+        LoopKind::For => eval.for_cap(init, condition, step, body).unwrap_or(2),
+        _ => 2,
+    }
+}
+
+/// Condition/count evaluations, capped at two for hidden-pulse analysis.
+pub(super) fn loop_condition_eval_cap(
+    kind: &sv::ir::LoopKind<sv::ir::Expr>,
+    trips: usize,
+) -> usize {
+    match kind {
+        // Repeat evaluates its count once, even when the body runs zero times.
+        sv::ir::LoopKind::Repeat(_) => 1,
+        sv::ir::LoopKind::DoWhile => trips,
+        // Pre-test loops also evaluate the final false condition.
+        _ => (trips + 1).min(2),
+    }
+}
+
+/// Variables whose combinational process can write them repeatedly in one run.
+pub(super) fn procedural_write_counts(
+    stmts: &[sv::ir::Stmt],
+    subroutines: &HashMap<String, sv::ir::Subroutine>,
+    eval: &LoopConstContext<'_>,
+    two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+    include_nonblocking: bool,
+) -> HashMap<String, usize> {
+    fn counts(
+        stmts: &[sv::ir::Stmt],
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        visiting: &mut HashSet<String>,
+        eval: &LoopConstContext<'_>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+        include_nonblocking: bool,
+    ) -> HashMap<String, usize> {
+        let mut result: HashMap<String, usize> = HashMap::default();
+        for stmt in stmts {
+            let mut next: HashMap<String, usize> = HashMap::default();
+            let mut call_evaluations = 1;
+            match stmt {
+                sv::ir::Stmt::Assign {
+                    lhs, nonblocking, ..
+                } if include_nonblocking || !nonblocking => {
+                    next.insert(lhs.name().to_string(), 1);
+                }
+                sv::ir::Stmt::AssignConcat {
+                    parts, nonblocking, ..
+                } if include_nonblocking || !nonblocking => {
+                    for part in parts {
+                        *next.entry(part.name().to_string()).or_default() += 1;
+                    }
+                }
+                sv::ir::Stmt::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    let branches: Vec<&[sv::ir::Stmt]> = match eval.truth(condition) {
+                        Some(true) => vec![then_body],
+                        Some(false) => vec![else_body],
+                        None => vec![then_body, else_body],
+                    };
+                    for body in branches {
+                        for (name, count) in counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        ) {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry).max(count);
+                        }
+                    }
+                }
+                sv::ir::Stmt::Case { items, default, .. } => {
+                    let branches: Vec<&[sv::ir::Stmt]> =
+                        if let Some(selected) = eval.selected_branch(stmt) {
+                            vec![selected]
+                        } else {
+                            items
+                                .iter()
+                                .map(|item| item.body.as_slice())
+                                .chain(default.iter().map(Vec::as_slice))
+                                .collect()
+                        };
+                    for body in branches {
+                        for (name, count) in counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        ) {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry).max(count);
+                        }
+                    }
+                }
+                sv::ir::Stmt::Loop {
+                    kind,
+                    init,
+                    condition,
+                    body,
+                    step,
+                } => {
+                    next = counts(
+                        init,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    );
+                    let flow = eval.body_flow(body);
+                    // A break/return prevents another iteration and its step.
+                    // A continue reaches the step and must retain multiplicity.
+                    let reaches_step = flow.fallthrough || flow.continues;
+                    let trips = loop_trip_cap(kind, init, condition.as_ref(), step, body, eval)
+                        .min(if reaches_step { 2 } else { 1 });
+                    call_evaluations = if reaches_step {
+                        loop_condition_eval_cap(kind, trips)
+                    } else {
+                        // Repeat and pre-test loops evaluate once; a do-while
+                        // condition after an unconditional exit is unreachable.
+                        usize::from(!matches!(kind, sv::ir::LoopKind::DoWhile))
+                    };
+                    if trips != 0 {
+                        let mut cycle = counts(
+                            body,
+                            subroutines,
+                            visiting,
+                            eval,
+                            two_state,
+                            include_nonblocking,
+                        );
+                        if reaches_step {
+                            for (name, count) in counts(
+                                step,
+                                subroutines,
+                                visiting,
+                                eval,
+                                two_state,
+                                include_nonblocking,
+                            ) {
+                                let entry = cycle.entry(name).or_default();
+                                *entry = (*entry + count).min(2);
+                            }
+                        }
+                        for (name, count) in cycle {
+                            let entry = next.entry(name).or_default();
+                            *entry = (*entry + count * trips).min(2);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let effects = stmt_call_effects(stmt, &|expr| eval.value(expr), two_state);
+            let combine = |mut left: HashMap<String, usize>,
+                           right: HashMap<String, usize>,
+                           exclusive: bool| {
+                for (name, count) in right {
+                    let value = left.entry(name).or_default();
+                    *value = if exclusive {
+                        (*value).max(count)
+                    } else {
+                        (*value + count).min(2)
+                    };
+                }
+                left
+            };
+            let writes = effects.fold(
+                &mut |name, args| {
+                    call_counts(
+                        name,
+                        args,
+                        subroutines,
+                        visiting,
+                        eval,
+                        two_state,
+                        include_nonblocking,
+                    )
+                },
+                &|a, b| combine(a, b, false),
+                &|a, b| combine(a, b, true),
+            );
+            for (name, count) in writes {
+                let value = next.entry(name).or_default();
+                *value = (*value + count * call_evaluations).min(2);
+            }
+            for (name, count) in next {
+                let entry = result.entry(name).or_default();
+                *entry = (*entry + count).min(2);
+            }
+            if !eval.stmt_flow(stmt).fallthrough {
+                break;
+            }
+        }
+        result
+    }
+    fn call_counts(
+        name: &str,
+        args: &[Option<sv::ir::Expr>],
+        subroutines: &HashMap<String, sv::ir::Subroutine>,
+        visiting: &mut HashSet<String>,
+        eval: &LoopConstContext<'_>,
+        two_state: &dyn Fn(&sv::ir::Expr) -> bool,
+        include_nonblocking: bool,
+    ) -> HashMap<String, usize> {
+        if !visiting.insert(name.to_string()) {
+            return HashMap::default();
+        }
+        let mut result = HashMap::default();
+        if let Some(subroutine) = subroutines.get(name) {
+            result = counts(
+                &subroutine.body,
+                subroutines,
+                visiting,
+                eval,
+                two_state,
+                include_nonblocking,
+            );
+            for param in &subroutine.params {
+                result.remove(&param.name);
+            }
+            for (param, arg) in subroutine.params.iter().zip(args) {
+                if param.direction.is_written() {
+                    for target in arg
+                        .as_ref()
+                        .and_then(lvalue_from_expr)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let entry = result.entry(target.name().to_string()).or_default();
+                        *entry = (*entry + 1).min(2);
+                    }
+                }
+            }
+            let mut defaults = Vec::new();
+            default_calls(subroutine, args, &mut defaults);
+            for (name, args) in defaults {
+                for (name, count) in call_counts(
+                    &name,
+                    &args,
+                    subroutines,
+                    visiting,
+                    eval,
+                    two_state,
+                    include_nonblocking,
+                ) {
+                    let entry = result.entry(name).or_default();
+                    *entry = (*entry + count).min(2);
+                }
+            }
+        }
+        visiting.remove(name);
+        result
+    }
+    counts(
+        stmts,
+        subroutines,
+        &mut HashSet::default(),
+        eval,
+        two_state,
+        include_nonblocking,
+    )
+}
+
+/// Whether a sequence can reach the statement after it. Loop exits are local
+/// to the loop; direct return/break/continue end the current body sequence.
+pub(super) fn stmt_may_fall_through(stmt: &sv::ir::Stmt) -> bool {
+    let body_falls = |body: &[sv::ir::Stmt]| body.iter().all(stmt_may_fall_through);
+    match stmt {
+        sv::ir::Stmt::Return(_) | sv::ir::Stmt::Break | sv::ir::Stmt::Continue => false,
+        sv::ir::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_falls(then_body) || body_falls(else_body),
+        sv::ir::Stmt::Case { items, default, .. } => {
+            default.as_ref().is_none_or(|body| body_falls(body))
+                || items.iter().any(|item| body_falls(&item.body))
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod pulse_summary_review_tests {
+    use super::*;
+    #[test]
+    fn round60_constant_if_folds_before_write_summary() {
+        use sv::ir::{Expr, LValue, Stmt};
+        let variables = HashMap::default();
+        let ids = HashMap::default();
+        let constants = HashMap::default();
+        let types = HashMap::default();
+        let subroutines = HashMap::default();
+        let write = || Stmt::Assign {
+            lhs: LValue::Ident("q".into()),
+            rhs: Expr::Literal("1'b0".into()),
+            nonblocking: false,
+        };
+        for four_state in [false, true] {
+            let eval = LoopConstContext::new(&variables, &ids, &constants, &types, four_state);
+            for (condition, expected) in [("1'b1", 1), ("2'b10", 1), ("1'b0", 2)] {
+                let body = [Stmt::If {
+                    condition: Expr::Literal(condition.into()),
+                    then_body: vec![write()],
+                    else_body: vec![write(), write()],
+                }];
+                let counts = procedural_write_counts(&body, &subroutines, &eval, &|_| true, false);
+                assert_eq!(counts["q"], expected);
+            }
         }
     }
 }

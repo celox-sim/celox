@@ -517,3 +517,58 @@
   (assert_eq known 0xa)
   (assert_eq partial (fourstate 0xd 0x5))
   (assert_eq unset (fourstate 0xf 0xf)))
+
+; IEEE 1800-2023 12.7.2: any X/Z bit makes the whole repeat count zero.
+(case repeat_signed_counts_with_unknown_bits_skip_the_body
+  (four_state)
+  (source "repeat_unknown_count.sv" #"
+    module Top(input bit clk, input logic signed [67:0] n,
+               output bit [7:0] q, calls, literal_q, known_q);
+      function automatic logic signed [67:0] count(); calls++; return n; endfunction
+      always_ff @(posedge clk) begin
+        q = 0; calls = 0; literal_q = 0; known_q = 0;
+        repeat (n) q++;
+        repeat (count()) q++;
+        repeat (4'bx001) literal_q++;
+        repeat (4'bz001) literal_q++;
+        repeat (-1) literal_q++;
+        repeat (2) known_q++;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (value mask expected) (list (0 0 0) (1 0 2) (2 0 4)
+      (1 2 0) (3 2 0) (1 (<< 1 67) 0))
+    (modify (set n (fourstate value mask)))
+    (tick clk)
+    (assert_eq q expected)
+    (assert_eq calls 1)
+    (assert_eq literal_q 0)
+    (assert_eq known_q 2)))
+
+; IEEE 1800-2023 9.4.2.1: each event in an OR list can trigger the body.
+(case reset_first_edge_lists_preserve_sequential_behavior
+  (source "reset_first_sequential.sv" #"
+    module Top(input logic clk, rst_n, input logic [7:0] d,
+      output logic [7:0] reset_first, clock_first, by_case, by_mux, explicit_ff);
+      always @(negedge rst_n or posedge clk)
+        if (!rst_n) reset_first <= 0; else reset_first <= d;
+      always @(posedge clk or negedge rst_n)
+        if (!rst_n) clock_first <= 0; else clock_first <= d;
+      always @(negedge rst_n or posedge clk)
+        case (rst_n) 0: by_case <= 0; default: by_case <= d; endcase
+      always @(negedge rst_n or posedge clk) by_mux <= rst_n ? d : 0;
+      always_ff @(negedge rst_n or posedge clk)
+        if (!rst_n) explicit_ff <= 0; else explicit_ff <= d;
+    endmodule
+  "#)
+  (top Top)
+  (for data (list 0x5a 0xa5 0xff)
+    (modify (set rst_n 1) (set d data))
+    (tick clk)
+    (expand signal (reset_first clock_first by_case by_mux explicit_ff)
+      (assert_eq {signal} data))
+    (modify (set rst_n 0))
+    (tick rst_n)
+    (expand signal (reset_first clock_first by_case by_mux explicit_ff)
+      (assert_eq {signal} 0))))

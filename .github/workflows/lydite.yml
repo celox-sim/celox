@@ -101,7 +101,9 @@ jobs:
   celox-replay:
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/')
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # The measured cold debug/release builds take about 28 minutes alone.
+    # Keep enough time for verifier test builds and the complete replay gates.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -109,6 +111,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lydite-replay
+          cache-on-failure: true
       - name: Reproduce source violations and AXI4-Lite protocol regressions with Celox
         run: ./conformance/axi4lite/run_ci.sh "$RUNNER_TEMP/celox-replay"
       - name: Upload complete replay evidence

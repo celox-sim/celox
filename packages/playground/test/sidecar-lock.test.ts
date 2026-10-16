@@ -249,3 +249,59 @@ test("synchronous generation does not prevent lease renewal", async () => {
 		expect(statSync(lease).mtimeMs).toBeGreaterThan(before);
 	});
 });
+
+
+test("a Windows delete-pending ticket keeps the next owner waiting", async () => {
+    const path = root();
+    const owner = child(path, `await withSidecarLock(path, async () => {
+        writeFileSync(join(path, 'ready'), '');
+        while (!await import('node:fs').then(fs => fs.existsSync(join(path, 'release'))))
+            await new Promise(resolve => setTimeout(resolve, 10));
+    });`);
+    const deadline = Date.now() + 3000;
+    while (!existsSync(join(path, "ready"))) {
+        if (Date.now() > deadline) throw new Error(owner.output());
+        await delay(10);
+    }
+    const contender = child(path, `
+        const fs = (await import('node:fs')).default;
+        const { syncBuiltinESMExports } = await import('node:module');
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        const read = fs.readFileSync;
+        let injected = false;
+        fs.readFileSync = (file, ...args) => {
+            if (!injected && String(file).endsWith('ticket')) {
+                injected = true;
+                writeFileSync(join(path, 'injected'), '');
+                throw Object.assign(new Error('delete pending'), { code: 'EPERM' });
+            }
+            return read(file, ...args);
+        };
+        syncBuiltinESMExports();
+        await withSidecarLock(path, () => {
+            if (!fs.existsSync(join(path, 'release'))) throw new Error('entered before release');
+            writeFileSync(join(path, 'entered'), '');
+        });`);
+    try {
+        while (!existsSync(join(path, "injected"))) {
+            if (Date.now() > deadline) throw new Error(contender.output());
+            await delay(10);
+        }
+        const directory = join(path, ".celox/.generation-locks");
+        let tickets: number[] = [];
+        while (tickets.length < 2) {
+            tickets = readdirSync(directory).flatMap(name => {
+                const ticket = join(directory, name, "ticket");
+                return existsSync(ticket) ? [Number(readFileSync(ticket, "utf8"))] : [];
+            });
+            if (Date.now() > deadline) throw new Error(contender.output());
+            await delay(10);
+        }
+        expect(tickets.sort()).toEqual([1, 2]);
+        expect(existsSync(join(path, "entered"))).toBe(false);
+    } finally {
+        writeFileSync(join(path, "release"), "");
+    }
+    await Promise.all([owner.exited, contender.exited]);
+    expect(existsSync(join(path, "entered"))).toBe(true);
+});

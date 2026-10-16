@@ -21,6 +21,9 @@ type Value = (NodeId, Sources);
 
 #[derive(Clone)]
 enum Frame {
+    Process {
+        finish_flag: SourceVarId,
+    },
     Loop {
         break_flag: SourceVarId,
         continue_flag: SourceVarId,
@@ -1670,10 +1673,17 @@ impl<'p, 'a> Comb<'p, 'a> {
         store: &Store,
         frames: &[Frame],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
-        let mut flags = Vec::new();
+        let mut flags = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Process { finish_flag } => Some(*finish_flag),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         let mut seen_loop = false;
         for frame in frames.iter().rev() {
             match frame {
+                Frame::Process { .. } => {}
                 Frame::Loop {
                     break_flag,
                     continue_flag,
@@ -1727,7 +1737,12 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Store, sv::AnalyzerError> {
         for (index, stmt) in stmts.iter().enumerate() {
             store = self.exec(store, frames, stmt)?;
-            if index + 1 < stmts.len() && stmt_may_jump(stmt, false) {
+            if index + 1 < stmts.len()
+                && (stmt_may_jump(stmt, false)
+                    || frames
+                        .iter()
+                        .any(|frame| matches!(frame, Frame::Process { .. })))
+            {
                 if let Some(active) = self.active(&store, frames)? {
                     return match slt_bool(self.arena, &mut self.consts, active.0) {
                         Some(false) => Ok(store),
@@ -1774,12 +1789,22 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.assign_concat(&mut store, frames, parts, rhs)?;
                 Ok(store)
             }
-            sv::ir::Stmt::Local { name, init } => {
+            sv::ir::Stmt::Local {
+                name,
+                init,
+                r#static,
+            } => {
                 let id = self
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
                 let width = self.m.var(id).width;
+                if *r#static {
+                    if let Some(init) = init {
+                        self.m.static_initial(id, init)?;
+                    }
+                    return Ok(store);
+                }
                 match init {
                     Some(init) => {
                         self.assign(
@@ -1846,7 +1871,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         } else {
                             *continue_flag
                         }),
-                        Frame::Function { .. } => None,
+                        Frame::Function { .. } | Frame::Process { .. } => None,
                     })
                     .ok_or_else(|| unsupported("break or continue outside a loop"))?;
                 self.set_flag(&mut store, flag, true)?;
@@ -1861,7 +1886,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                             return_flag,
                             return_var,
                         } => Some((*return_flag, return_var.clone())),
-                        Frame::Loop { .. } => None,
+                        Frame::Loop { .. } | Frame::Process { .. } => None,
                     })
                     .ok_or_else(|| unsupported("return outside a subroutine"))?;
                 if let (Some(value), Some(return_var)) = (value, return_var) {
@@ -1900,6 +1925,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             {
                 self.readmem(&mut store, frames, name, args)?;
                 Ok(store)
+            }
+            sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
+                Err(unsupported("procedural timing control outside a process"))
             }
             sv::ir::Stmt::SystemTask { name, .. } if self.initial => Err(unsupported(format!(
                 "system task `{name}` inside an initial block"
@@ -2544,7 +2572,7 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Option<Value>, sv::AnalyzerError> {
         let Some(return_flag) = frames.iter().rev().find_map(|frame| match frame {
             Frame::Function { return_flag, .. } => Some(*return_flag),
-            Frame::Loop { .. } => None,
+            Frame::Loop { .. } | Frame::Process { .. } => None,
         }) else {
             return Ok(None);
         };
@@ -3245,6 +3273,17 @@ impl<'p, 'a> Comb<'p, 'a> {
             written_inputs: Vec::new(),
             captured_in_loop,
         });
+        if matches!(kind, SystemTaskKind::Finish) {
+            for frame in frames {
+                match frame {
+                    Frame::Process { finish_flag } => self.set_flag(store, *finish_flag, true)?,
+                    Frame::Loop { break_flag, .. } => self.set_flag(store, *break_flag, true)?,
+                    Frame::Function { return_flag, .. } => {
+                        self.set_flag(store, *return_flag, true)?
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3340,7 +3379,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         &mut self,
         body: &[sv::ir::Stmt],
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
-        let store = self.exec_block(Store::default(), &[], body)?;
+        let (finish_flag, _) = self.m.temp("comb_finish", 1, false, false);
+        let mut seed = Store::default();
+        self.set_flag(&mut seed, finish_flag, false)?;
+        let store = self.exec_block(seed, &[Frame::Process { finish_flag }], body)?;
         // Every bit a process may write must be defined on every path;
         // otherwise it would hold its previous value (a latch).
         let mut visited = HashSet::default();
