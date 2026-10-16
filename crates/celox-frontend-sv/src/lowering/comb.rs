@@ -846,39 +846,39 @@ impl<'p, 'a> Comb<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
-            ConstExpr::Function { name, .. } if name == "$urandom" => {
-                return Err(unsupported("$urandom called in combinational logic"));
+            ConstExpr::Function {
+                callee: callee @ sv::ir::Callee::System(_),
+                ..
+            } if self.m.is_callee(callee) => {
+                return Err(unsupported(format!(
+                    "{callee} called in combinational logic"
+                )));
             }
-            ConstExpr::Function { name, args, .. }
-                if self.m.subroutines.contains_key(name)
-                    || self.m.dpi_imports.contains_key(name) =>
-            {
+            ConstExpr::Function { callee, args, .. } if self.m.is_callee(callee) => {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
                     let arg = self.hoist_const(store, frames, arg, calls)?;
-                    lowered.push(
-                        expr_from_const_expr(&arg).ok_or_else(|| {
-                            unsupported(format!("argument of `{name}` in a select"))
-                        })?,
-                    );
+                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                        unsupported(format!("argument of `{callee}` in a select"))
+                    })?);
                 }
                 let call = sv::ir::Expr::Call {
                     arg_order: Vec::new(),
-                    name: name.clone(),
+                    callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(store, frames, &call)? else {
-                    return Err(unsupported(format!("call of `{name}` in a select")));
+                    return Err(unsupported(format!("call of `{callee}` in a select")));
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
                 result
             }
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.hoist_const(store, frames, arg, calls))
@@ -1095,8 +1095,8 @@ impl<'p, 'a> Comb<'p, 'a> {
                 expr: Box::new(self.freeze_const(store, frames, expr, copies)?),
                 bit: Box::new(self.freeze_const(store, frames, bit, copies)?),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.freeze_const(store, frames, arg, copies))
@@ -1150,16 +1150,24 @@ impl<'p, 'a> Comb<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
-            Expr::Call { name, .. } if name == "$urandom" => {
-                return Err(unsupported("$urandom called in combinational logic"));
+            Expr::Call {
+                callee: callee @ sv::ir::Callee::System(_),
+                ..
+            } if self.m.is_callee(callee) => {
+                return Err(unsupported(format!(
+                    "{callee} called in combinational logic"
+                )));
             }
-            Expr::Call { name, .. } if self.m.dpi_imports.contains_key(name) => {
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } if self.m.dpi_imports.contains_key(name) => {
                 return Err(unsupported(format!(
                     "DPI-C function `{name}` called in combinational logic"
                 )));
             }
             Expr::Call {
-                name,
+                callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
             } if self.m.subroutines.contains_key(name) => {
@@ -1186,12 +1194,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                 Expr::Ident(temp_name)
             }
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: name.clone(),
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| {
@@ -1901,17 +1909,18 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.eval(&mut store, frames, expr, None)?;
                 Ok(store)
             }
-            sv::ir::Stmt::SystemTask { name, args }
-                if name == "$readmemh" || name == "$readmemb" =>
-            {
-                self.readmem(&mut store, frames, name, args)?;
+            sv::ir::Stmt::SystemTask {
+                task: sv::ir::SystemTask::Readmem(format),
+                args,
+            } => {
+                self.readmem(&mut store, frames, *format, args)?;
                 Ok(store)
             }
-            sv::ir::Stmt::SystemTask { name, .. } if self.initial => Err(unsupported(format!(
-                "system task `{name}` inside an initial block"
+            sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
+                "system task `{task}` inside an initial block"
             ))),
-            sv::ir::Stmt::SystemTask { name, args } => {
-                self.system_task(&mut store, frames, name, args)?;
+            sv::ir::Stmt::SystemTask { task, args } => {
+                self.system_task(&mut store, frames, *task, args)?;
                 Ok(store)
             }
         }
@@ -3010,9 +3019,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         &mut self,
         store: &mut Store,
         frames: &[Frame],
-        name: &str,
+        format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
     ) -> Result<(), sv::AnalyzerError> {
+        let name = sv::ir::SystemTask::Readmem(format);
         let mut addresses = [None, None];
         for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
             let sv::ir::SystemTaskArg::Expr(expr) = arg else {
@@ -3037,7 +3047,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         if self.path_condition()?.is_some() {
             return Err(unsupported(format!("`{name}` under a run-time condition")));
         }
-        let (id, words) = self.m.readmem(name, args, addresses[0], addresses[1])?;
+        let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
         for word in words {
             let width = word.access.msb - word.access.lsb + 1;
             let node = self.alloc(SLTNode::Constant(word.value, word.mask, width, false))?;
@@ -3090,16 +3100,16 @@ impl<'p, 'a> Comb<'p, 'a> {
         &mut self,
         store: &mut Store,
         frames: &[Frame],
-        name: &str,
+        task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
     ) -> Result<(), sv::AnalyzerError> {
         let kind =
-            system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
+            system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         let observer_store = store.fork();
         let mut observed = Sources::default();
         let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
-                return Err(unsupported(format!("condition of `{name}`")));
+                return Err(unsupported(format!("condition of `{task}`")));
             };
             let (node, sources) = self.eval(store, frames, condition, None)?;
             observed.extend(sources);
@@ -3134,7 +3144,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     slt_constant(self.arena, value, width, false)?
                 }
                 sv::ir::SystemTaskArg::Empty => {
-                    return Err(unsupported(format!("empty argument of `{name}`")));
+                    return Err(unsupported(format!("empty argument of `{task}`")));
                 }
             };
             arg_widths.push(self.width(node));
@@ -3679,8 +3689,8 @@ fn substitute_literals(
                 expr: Box::new(constant(expr, literals)),
                 bit: Box::new(constant(bit, literals)),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 site: *site,
                 args: args.iter().map(|arg| constant(arg, literals)).collect(),
             },
@@ -3798,12 +3808,12 @@ fn substitute_literals(
             else_expr: Box::new(go(else_expr)),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => Expr::Call {
             arg_order: arg_order.clone(),
-            name: name.clone(),
+            callee: callee.clone(),
             args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {

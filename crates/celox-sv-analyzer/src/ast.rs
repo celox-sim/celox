@@ -19,6 +19,7 @@ use std::{
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
+pub use crate::system_functions::{ArrayQuery, Callee, SystemFunction, SystemTask};
 use crate::{AnalyzerError, system_functions, typecheck};
 
 mod array_compatibility;
@@ -106,7 +107,8 @@ use dimensions::{
     variable_size_marker, variable_unpacked_dimensions_marker,
 };
 use expressions::{
-    expr_from_expression, expr_from_expression_for_lvalue, expr_from_expression_with_types,
+    called_system_function, called_system_task, expr_from_expression,
+    expr_from_expression_for_lvalue, expr_from_expression_with_types,
     expr_from_function_subroutine_call, expr_from_primary, expr_from_subroutine_call,
     expr_from_tf_call, expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
 };
@@ -1788,7 +1790,7 @@ pub enum ConstExpr {
         signed: bool,
     },
     Function {
-        name: String,
+        callee: Callee,
         args: Vec<ConstExpr>,
         /// Tells a user subroutine call apart from a call written alike: a
         /// select repeats its index in its bounds and range checks, and the
@@ -1826,10 +1828,11 @@ pub(crate) fn with_call_sites<T>(f: impl FnOnce() -> T) -> T {
 
 impl ConstExpr {
     /// Effectful calls get distinct sites; analyzer-created copies retain them.
-    fn call(name: String, args: Vec<ConstExpr>) -> Self {
-        let site = (name == "$urandom" || !system_functions::is_system_name(&name))
+    fn call(callee: Callee, args: Vec<ConstExpr>) -> Self {
+        let site = callee
+            .is_effectful()
             .then(|| NEXT_CALL_SITE.with(|next| next.replace(next.get() + 1)));
-        ConstExpr::Function { name, args, site }
+        ConstExpr::Function { callee, args, site }
     }
 }
 
@@ -2234,7 +2237,7 @@ pub enum Expr {
         else_expr: Box<Expr>,
     },
     Call {
-        name: String,
+        callee: Callee,
         /// Missing actuals retain their formal slots for declaration-scope defaults.
         args: Vec<Option<Expr>>,
         /// Formal positions in source evaluation/copy-out order; empty means positional.

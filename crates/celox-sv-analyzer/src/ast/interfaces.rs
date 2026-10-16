@@ -410,8 +410,10 @@ fn resolve_interface_timescale_queries(
     scales: &super::timescales::Timescales,
 ) -> Result<Option<Vec<String>>, AnalyzerError> {
     let is_query = |call, tree| {
-        system_tf_call_parts(call, tree)
-            .is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
+        matches!(
+            called_system_function(call, tree),
+            Some(SystemFunction::Timeunit | SystemFunction::Timeprecision)
+        )
     };
     let mut changed = false;
     let codes = files
@@ -600,9 +602,7 @@ impl<'a> File<'a> {
             let RefNode::SystemTfCall(call) = node else {
                 continue;
             };
-            if !system_tf_call_parts(call, &file.syntax_tree)
-                .is_some_and(|(name, _)| name == "$printtimescale")
-            {
+            if called_system_task(call, &file.syntax_tree) != Some(SystemTask::Printtimescale) {
                 continue;
             }
             let span = file.span(RefNode::SystemTfCall(call))?;
@@ -2258,13 +2258,12 @@ impl<'a> Design<'a> {
                     let RefNode::SystemTfCall(call) = node else {
                         return false;
                     };
-                    system_tf_call_parts(call, &file.syntax_tree).is_some_and(|(name, _)| {
-                        matches!(name, "$timeunit" | "$timeprecision" | "$printtimescale")
-                    }) && super::timescales::argument(call).is_some_and(|argument| {
-                        file.syntax_tree
-                            .get_str_trim(argument)
-                            .is_some_and(|text| text.contains('.'))
-                    })
+                    super::timescales::is_timescale_call(call, &file.syntax_tree)
+                        && super::timescales::argument(call).is_some_and(|argument| {
+                            file.syntax_tree
+                                .get_str_trim(argument)
+                                .is_some_and(|text| text.contains('.'))
+                        })
                 });
         if handles.is_empty()
             && child_instantiations.is_empty()
@@ -2305,7 +2304,7 @@ impl<'a> Design<'a> {
             let Some((function, args)) = system_tf_call_parts(call, &file.syntax_tree) else {
                 return Ok(None);
             };
-            if !matches!(function, "$timeunit" | "$timeprecision" | "$printtimescale") {
+            if !super::timescales::is_timescale_call(call, &file.syntax_tree) {
                 return Ok(None);
             }
             let Some(argument) = super::timescales::argument(call) else {
@@ -2353,8 +2352,8 @@ impl<'a> Design<'a> {
         for node in RefNode::ModuleDeclarationAnsi(declaration) {
             let edit = match node {
                 RefNode::SystemTfCall(call)
-                    if system_tf_call_parts(call, &file.syntax_tree)
-                        .is_none_or(|(name, _)| name != "$printtimescale") =>
+                    if called_system_task(call, &file.syntax_tree)
+                        != Some(SystemTask::Printtimescale) =>
                 {
                     query_edit(call, system_functions::CallSite::Expression)?
                 }
@@ -2380,8 +2379,8 @@ impl<'a> Design<'a> {
                         check_query_origin(file, file.syntax_tree.get_str_trim(statement), span)?;
                         Some(Edit {
                             span,
-                            text: if system_tf_call_parts(call, &file.syntax_tree)
-                                .is_some_and(|(name, _)| name == "$printtimescale")
+                            text: if called_system_task(call, &file.syntax_tree)
+                                == Some(SystemTask::Printtimescale)
                             {
                                 format!("{};", edit.text)
                             } else {
@@ -3547,7 +3546,7 @@ fn readmem_destination<'b>(
         sv_parser::SystemTfCall::ArgDataType(_) => return Ok(None),
     };
     let name = file.text(file.span(RefNode::SystemTfIdentifier(identifier))?);
-    if name != "$readmemh" && name != "$readmemb" {
+    if !matches!(SystemTask::from_name(name), Some(SystemTask::Readmem(_))) {
         return Ok(None);
     }
     Ok(arguments.get(1).and_then(|argument| argument.as_ref()))

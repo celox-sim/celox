@@ -546,12 +546,14 @@ fn constant_pattern_literal(
                 freeze(then_expr, constants);
                 freeze(else_expr, constants);
             }
-            ConstExpr::Function { name, args, .. } => {
+            ConstExpr::Function { callee, args, .. } => {
                 for arg in args.iter_mut() {
                     freeze(arg, constants);
                 }
                 let lowered = args.iter().cloned().map(Into::into).collect::<Vec<_>>();
-                if let Some(literal) = const_functions::eval_call_literal(name, &lowered, constants)
+                if let Callee::Subroutine(name) = callee
+                    && let Some(literal) =
+                        const_functions::eval_call_literal(name, &lowered, constants)
                 {
                     *expr = ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal));
                 }
