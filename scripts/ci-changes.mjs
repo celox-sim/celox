@@ -200,14 +200,20 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
       continue;
     }
 
-    if (path === ".mergify.yml" || startsWithAny(path, ["scripts/"])) {
+    // Repository script tests also validate workflow files and the Updatecli
+    // policy, so these run in the required lint job instead of path-filtered
+    // workflows that cannot gate merges.
+    if (
+      path === ".mergify.yml" ||
+      startsWithAny(path, ["scripts/", ".updatecli/", ".github/workflows/"])
+    ) {
       affected.scripts = true;
       continue;
     }
 
     if (
       NEUTRAL_FILES.has(path) ||
-      startsWithAny(path, [".github/ISSUE_TEMPLATE/", ".github/workflows/"]) ||
+      startsWithAny(path, [".github/ISSUE_TEMPLATE/"]) ||
       path === ".github/pull_request_template.md"
     ) {
       continue;

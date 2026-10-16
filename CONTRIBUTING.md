@@ -70,12 +70,11 @@ minimum safety net, not the definition of validation completeness.
 
 ### Code scanning
 
-`.github/workflows/codeql.yml` scans Actions on pull requests that change
-workflow or local action files. Other ordinary PRs and Mergify queue drafts
-do not run this workflow's analysis. Every Sunday at 04:17 UTC, and on manual
+`.github/workflows/codeql.yml` does not gate merges, so pull requests and
+Mergify queue drafts do not run it. Every Sunday at 04:17 UTC, and on manual
 dispatch, it scans Actions, C/C++, JavaScript/TypeScript, Python, and Rust, with
 at most two analyses running concurrently. Compiled languages use CodeQL's
-`none` build mode. There is no push-triggered full scan or merge requirement.
+`none` build mode. There is no push-triggered scan.
 
 The workflow is inactive until the repository variable
 `CODEQL_ADVANCED_ENABLED` is set to `true`. To replace the existing automatic
@@ -88,9 +87,8 @@ scans after this workflow merges:
    using runners on PRs and pushes.
 3. Set the repository Actions variable `CODEQL_ADVANCED_ENABLED` to `true`,
    then manually dispatch `codeql.yml` on `master`.
-4. Confirm that all five analyses upload results and that an Actions-changing
-   PR runs only the Actions analysis. Rust/application-only PRs should not
-   start CodeQL or Code Quality scans.
+4. Confirm that all five analyses upload results and that PRs no longer start
+   CodeQL or Code Quality scans.
 
 For rollback, unset `CODEQL_ADVANCED_ENABLED` and re-enable default setup.
 This variable allows the replacement to be reviewed without running both
@@ -191,6 +189,10 @@ Job selection:
   including unit tests mixed with implementation, remain conservative.
 - Cargo manifests and lockfiles retain broad coverage. Mixed changes combine
   their requirements; unknown paths and failed change detection run all jobs.
+- Workflow, `scripts/` and `.updatecli/` changes run the repository script
+  tests in `Lint & Format`, including the Heliodor fixture and Updatecli
+  selector tests. A test that runs on pull requests must be a required check
+  or feed one; otherwise it belongs to a scheduled workflow.
 - Rust-only changes still pass through the existing `Rust Test & NAPI Build`
   required check. Only explicitly unneeded producers may be skipped; failures
   and cancellations fail the check.
@@ -223,7 +225,7 @@ uses the finer behavior-based matrix above.
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
-| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
+| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Affected pull requests and merge groups; weekly Monday at 03:41 UTC (12:41 JST); on demand | `lydite.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Weekly and manual runs enable all lanes. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |

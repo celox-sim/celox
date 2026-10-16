@@ -412,10 +412,15 @@ test("CI classifier changes exercise every path", () => {
 });
 
 test("repository script changes only run script tests", () => {
-  assert.deepEqual(classifyFiles(["scripts/check-pr-title.mjs"]), {
-    ...none,
-    scripts: true,
-  });
+  for (const path of [
+    "scripts/check-pr-title.mjs",
+    "scripts/tests/run-heliodor-bench-gate.sh",
+    ".updatecli/scripts/latest_compatible_python.py",
+    ".github/workflows/heliodor-bench.yml",
+    ".github/workflows/codeql.yml",
+  ]) {
+    assert.deepEqual(classifyFiles([path]), { ...none, scripts: true }, path);
+  }
 });
 
 test("unknown paths fail open", () => {
