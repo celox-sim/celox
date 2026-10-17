@@ -215,6 +215,8 @@ export interface NativeSimulationHandle {
 	nextEventTime(): number | null;
 	/** Whether a process requested the end of the simulation. */
 	isFinished?(): boolean;
+	/** Whether the last step or run returned early at `$stop`. */
+	isStopped?(): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;

@@ -464,9 +464,9 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         X::Backend: SimBackend<Event = E>,
     {
         match self.tick_domains(executor, scratch, settle) {
-            // An RTL `$finish` ends only a timed simulation, which does not
-            // tick; a tick leaves it to the host.
-            Ok(()) | Err(Halt::Finish) => Ok(()),
+            // An RTL `$finish` or `$stop` ends or suspends only a timed
+            // simulation, which does not tick; a tick leaves it to the host.
+            Ok(()) | Err(Halt::Finish | Halt::Stop) => Ok(()),
             Err(Halt::Error(error)) => Err(error),
         }
     }

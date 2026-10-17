@@ -165,6 +165,9 @@ mod host {
         },
         /// The design executed `$finish`. The host decides whether to stop.
         Finish,
+        /// The design executed `$stop` outside a process kernel. The host
+        /// decides whether to suspend.
+        Stop,
         Missed {
             count: u64,
         },
@@ -359,14 +362,18 @@ mod host {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
                 // Veryl prints arguments without a format string in hexadecimal.
-                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                RuntimeEventKind::Display
+                | RuntimeEventKind::Write
+                | RuntimeEventKind::Finish
+                | RuntimeEventKind::Stop
                     if site.sizing == DisplaySizing::Veryl =>
                 {
                     'x'
                 }
-                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish => {
-                    'd'
-                }
+                RuntimeEventKind::Display
+                | RuntimeEventKind::Write
+                | RuntimeEventKind::Finish
+                | RuntimeEventKind::Stop => 'd',
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return b"assertion failed".to_vec();
@@ -465,6 +472,7 @@ mod host {
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
                     RuntimeEventKind::Finish => RuntimeEvent::Finish,
+                    RuntimeEventKind::Stop => RuntimeEvent::Stop,
                 })
             }
         }
