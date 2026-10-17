@@ -1850,6 +1850,7 @@ impl<'a> ModuleParser<'a> {
     }
 
     fn parse_inner(mut self) -> Result<SimModule, ParserError> {
+        crate::value_type_check::check_module(self.module)?;
         let mut ff_groups: HashMap<TriggerSet<VarId>, Vec<&veryl_analyzer::ir::FfDeclaration>> =
             HashMap::default();
 
