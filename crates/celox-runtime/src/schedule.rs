@@ -4,7 +4,7 @@ use celox_design::{DomainKind, schedule::ScheduleModel};
 use fxhash::{FxHashMap, FxHashSet};
 
 use crate::{
-    AbsoluteAddr, EventInfo, HostWatch, SignalRef,
+    AbsoluteAddr, EventDomain, EventInfo, HostWatch, SignalRef,
     backend::{EventHandle, SimBackend},
     timing::{CountedDomainRefs, CountedRefs, NbaSiteRefs, ProcessRefs, TermRefs},
 };
@@ -74,17 +74,13 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             let canonical = events.canonical(addr);
             let is_cascaded = events.cascaded_events.contains(&canonical);
 
-            let eval_ff_event = backend.resolve_event_opt(&canonical);
-            let eval_only_event = backend.resolve_eval_only_event(&canonical);
-            let apply_event = backend.resolve_apply_event(&canonical);
-
-            if let Some(canonical_ev) = eval_ff_event {
+            if let Some(domain) = EventDomain::resolve(backend, &canonical) {
                 *info = EventInfo {
-                    canonical_id: canonical_ev.id(),
+                    canonical_id: domain.eval_apply.id(),
                     is_cascaded,
-                    eval_ff_event,
-                    eval_only_event,
-                    apply_event,
+                    eval_ff_event: Some(domain.eval_apply),
+                    eval_only_event: domain.eval_only,
+                    apply_event: domain.apply,
                 };
             }
         }
