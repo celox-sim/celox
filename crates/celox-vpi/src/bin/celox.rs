@@ -82,8 +82,9 @@ enum VpiCommand {
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Veryl project source file or standalone SystemVerilog (.sv) file.
-    source: PathBuf,
+    /// One Veryl project entry file, or one or more SystemVerilog (.sv) files.
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
 
     /// Top-level module name.
     #[arg(long)]
@@ -149,7 +150,12 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
         })?;
     }
 
-    celox_vpi::driver::compile_native_image(&arguments.source, &arguments.top)?
+    let sources = arguments
+        .sources
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    celox_vpi::driver::compile_native_sources(&sources, &arguments.top)?
         .write_attached_runtime(runtime, &arguments.output)
         .map_err(|error| format!("failed to write {}: {error}", arguments.output.display()))?;
     println!("Created {}", arguments.output.display());
