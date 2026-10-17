@@ -8,6 +8,21 @@ use super::{SimulationState, event_level};
 use crate::{backend::SimBackend, timing::kind_index};
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Take the levels of the event signals as the baseline that edge
+    /// detection compares against.
+    pub(super) fn resample_clock_values(&mut self, backend: &B) {
+        for (signal, id) in &self.model.topo_signals {
+            if *id == usize::MAX {
+                continue;
+            }
+            if event_level(backend, *signal) != 0 {
+                self.last_clock_values.insert(*id);
+            } else {
+                self.last_clock_values.remove(*id);
+            }
+        }
+    }
+
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();

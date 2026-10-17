@@ -15,7 +15,6 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 
 use bit_set::BitSet;
 use celox_design::CounterKind;
-use fxhash::FxHashMap;
 
 pub(crate) use batch::event_level;
 pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
@@ -23,7 +22,7 @@ pub use nba::NbaUpdate;
 pub use persist::{ScheduleParts, SimulationSnapshot};
 pub use wait::{Baseline, Waiter, Waiters};
 
-use self::{round::Round, time::PeriodicEventKey};
+use self::round::Round;
 use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
@@ -77,7 +76,6 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
-    periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     /// The design's scheduling facts, which never change.
     model: ResolvedSchedule<B>,
@@ -129,7 +127,6 @@ impl<B: SimBackend> SimulationState<B> {
         };
         Self {
             scheduler: Scheduler::new(),
-            periodic_events: FxHashMap::default(),
             last_clock_values,
             process_wakeups: (0..model.processes.len())
                 .map(|process| Reverse((0, process)))

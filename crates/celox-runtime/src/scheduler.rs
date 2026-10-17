@@ -15,6 +15,9 @@ pub struct SimEvent<B: SimBackend> {
     pub event_ref: B::Event,
     pub signal: SignalRef,
     pub next_val: u8,
+    /// A periodic clock re-schedules the event when it fires. Not part of
+    /// the event's identity: equality and order ignore it.
+    pub periodic: bool,
 }
 
 // Manual impl: a derive would require `B: Clone`, which no backend is.
@@ -25,6 +28,7 @@ impl<B: SimBackend> Clone for SimEvent<B> {
             event_ref: self.event_ref,
             signal: self.signal,
             next_val: self.next_val,
+            periodic: self.periodic,
         }
     }
 }

@@ -6,11 +6,10 @@ use bit_set::BitSet;
 
 use super::host::SimulationExecutor;
 use super::nba::{restore_working_image, working_image};
-use super::time::PeriodicEventKey;
 use super::{EventInfo, SimulationState, event_level};
 use crate::{
     SimulatorErrorCode,
-    backend::{EventHandle, SimBackend},
+    backend::SimBackend,
     scheduler::SimEvent,
     timing::{Halt, read},
 };
@@ -350,34 +349,6 @@ impl<B: SimBackend> SimulationState<B> {
         }
         self.scheduler.time = current_time;
 
-        // Keep periodic provenance private so the public SimEvent shape stays
-        // stable. Consume matching sidecar counts before fallible work so an
-        // execution error cannot leave a stale periodic marker behind.
-        let mut periodic_events_to_process: Vec<SimEvent<B>> = Vec::new();
-        for event in &events_to_process {
-            let key = PeriodicEventKey::from_event(event);
-            let mut remove_key = false;
-            if let Some(count) = self.periodic_events.get_mut(&key) {
-                periodic_events_to_process.push(SimEvent {
-                    time: event.time,
-                    event_ref: event.event_ref,
-                    signal: event.signal,
-                    next_val: event.next_val,
-                });
-                *count -= 1;
-                remove_key = *count == 0;
-            }
-            if remove_key {
-                self.periodic_events.remove(&key);
-            }
-        }
-        debug_assert!(
-            self.periodic_events
-                .keys()
-                .all(|event| event.time > current_time),
-            "periodic event sidecar fell behind the scheduler"
-        );
-
         // Host writes the waits must see one at a time.
         for (signal, value) in executor.take_host_writes() {
             self.observe_host_write(signal, &value);
@@ -594,42 +565,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id) in &self.model.topo_signals {
-            if *id == usize::MAX {
-                continue;
-            }
-            if event_level(executor.backend(), *signal) != 0 {
-                self.last_clock_values.insert(*id);
-            } else {
-                self.last_clock_values.remove(*id);
-            }
-        }
+        self.resample_clock_values(executor.backend());
 
         // Processes the published values wake run in the next round.
         self.observe_driven(executor.backend());
 
-        for event in periodic_events_to_process {
-            let event_id = event.event_ref.id();
-            if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
-                // Keep the extra odd-period tick in the high phase, matching
-                // the process/testbench clock model.
-                // A clock needs at least one time unit in each phase.
-                let period = clock.period.max(2);
-                let half = (period / 2) + ((period & 1) & u64::from(event.next_val != 0));
-                let time = current_time.checked_add(half).ok_or_else(|| {
-                    Halt::Error(SimulatorErrorCode::Runtime {
-                        message: format!("event {event_id} overflows simulation time"),
-                        signals: Vec::new(),
-                    })
-                })?;
-                self.push_periodic_event(SimEvent {
-                    time,
-                    event_ref: event.event_ref,
-                    signal: event.signal,
-                    next_val: 1 - event.next_val,
-                });
-            }
-        }
+        self.rearm_clocks(current_time, &events_to_process)?;
 
         self.scratch = Some(round);
         Ok(())
