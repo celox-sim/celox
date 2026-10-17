@@ -953,6 +953,7 @@ impl HandleBackend {
                 scratch,
                 &moves,
                 dirty,
+                celox::set_level,
             )
             .map_or_else(
                 |halt| match halt {

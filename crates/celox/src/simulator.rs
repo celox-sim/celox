@@ -1454,11 +1454,17 @@ mod host {
             event: B::Event,
             edge: celox_runtime::Edge,
         ) -> Result<(), RuntimeErrorCode> {
+            // A timed simulation the design finished no longer changes.
+            if self.frozen {
+                return Ok(());
+            }
             let info = self.event_edges[event.id()];
             if !matches!(self.derived_ticks.get(event.id()), Some(Some(_))) {
                 // No derived domains: move the signal, then run the event's
                 // domain exactly as `tick` does.
-                let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge) else {
+                let write = watched_write(&mut self.host_watch);
+                let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge, write)
+                else {
                     return Ok(());
                 };
                 if info.comb_read {
@@ -1475,9 +1481,12 @@ mod host {
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);
             let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let mut watch = std::mem::take(&mut self.host_watch);
             let dirty = self.dirty;
+            let write = watched_write(&mut watch);
             let result =
-                celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty);
+                celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty, write);
+            self.host_watch = watch;
             self.derived_scratch = Some(scratch);
             self.note_edge(result)
         }
@@ -1546,11 +1555,18 @@ mod host {
             &mut self,
             moves: &[(B::Event, celox_runtime::Edge)],
         ) -> Result<(), RuntimeErrorCode> {
+            if self.frozen {
+                return Ok(());
+            }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let edges = std::sync::Arc::clone(&self.event_edges);
             let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let mut watch = std::mem::take(&mut self.host_watch);
             let dirty = self.dirty;
-            let result = celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty);
+            let write = watched_write(&mut watch);
+            let result =
+                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write);
+            self.host_watch = watch;
             self.derived_scratch = Some(scratch);
             self.note_edge(result)
         }
@@ -2350,9 +2366,82 @@ mod host {
         }
     }
 
+    /// The host's write of an event signal's level, observed by a timed
+    /// simulation's waits and counters as [`IOContext`] writes are.
+    fn watched_write<B: SimBackend>(
+        watch: &mut celox_runtime::HostWatch,
+    ) -> impl FnMut(&mut B, SignalRef, u8) + '_ {
+        move |backend, signal, level| {
+            if watch.is_empty() {
+                backend.set(signal, level);
+            } else {
+                watch.write(backend, signal, |backend| backend.set(signal, level));
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        const GATED_COUNTER: &str = "module Top (clk: input clock, en: input logic, count: output logic<8>, plain: output logic<8>) {
+            let gated: '_ clock = clk & en;
+            always_ff (gated) { count += 1; }
+            always_ff (clk) { plain += 1; }
+        }";
+
+        #[test]
+        fn edges_leave_a_finished_simulation_unchanged() {
+            let mut sim = Simulator::builder(GATED_COUNTER, "Top").build().unwrap();
+            let (clk, en) = (sim.event("clk"), sim.signal("en"));
+            sim.modify(|io| io.set(en, 1u8)).unwrap();
+            sim.posedge(clk).unwrap();
+            let (count, plain) = (sim.signal("count"), sim.signal("plain"));
+            assert_eq!(sim.get(count), BigUint::from(1u8));
+            sim.negedge(clk).unwrap();
+            sim.frozen = true;
+            sim.posedge(clk).unwrap();
+            sim.edges(&[(clk, celox_runtime::Edge::Rising)]).unwrap();
+            sim.cycle(clk).unwrap();
+            let clk_signal = sim.signal("clk");
+            assert_eq!(sim.get(clk_signal), BigUint::from(0u8));
+            assert_eq!(sim.get(count), BigUint::from(1u8));
+            assert_eq!(sim.get(plain), BigUint::from(1u8));
+        }
+
+        #[test]
+        fn edges_write_the_clock_through_the_host_watch() {
+            for design in [
+                GATED_COUNTER,
+                "module Top (clk: input clock, plain: output logic<8>) {
+                always_ff (clk) { plain += 1; }
+            }",
+            ] {
+                let mut sim = Simulator::builder(design, "Top").build().unwrap();
+                let clk = sim.event("clk");
+                let clk_signal = sim.signal("clk");
+                let waited = [clk_signal.offset].into_iter().collect();
+                sim.host_watch = celox_runtime::HostWatch::new([], waited);
+                sim.posedge(clk).unwrap();
+                sim.edges(&[(clk, celox_runtime::Edge::Falling)]).unwrap();
+                // Already low: no write to observe.
+                sim.negedge(clk).unwrap();
+                let levels: Vec<_> = sim
+                    .host_watch
+                    .log()
+                    .iter()
+                    .map(|(signal, (value, _))| (signal.offset, value.clone()))
+                    .collect();
+                assert_eq!(
+                    levels,
+                    [
+                        (clk_signal.offset, BigUint::from(1u8)),
+                        (clk_signal.offset, BigUint::from(0u8)),
+                    ],
+                    "{design}"
+                );
+            }
+        }
 
         #[test]
         fn edges_that_run_nothing_leave_comb_stale_only_when_comb_reads_the_clock() {

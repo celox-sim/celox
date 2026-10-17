@@ -137,25 +137,46 @@ fn level<B: SimBackend>(backend: &B, signal: SignalRef) -> Option<bool> {
     Some(event_level(backend, signal) != 0)
 }
 
-/// Move `info`'s signal to the level of `edge`. Returns the level it had
-/// (`None` while unknown), or `None` when it already was at that level.
+/// Writes an event signal's new level: the host's own write of the signal,
+/// which a host observing its writes (a timed simulation's waits and
+/// counters) routes through its watch.
+pub trait SignalWrite<B> {
+    fn write(&mut self, backend: &mut B, signal: SignalRef, level: u8);
+}
+
+impl<B, F: FnMut(&mut B, SignalRef, u8)> SignalWrite<B> for F {
+    fn write(&mut self, backend: &mut B, signal: SignalRef, level: u8) {
+        self(backend, signal, level);
+    }
+}
+
+/// A plain write of the level, for hosts that observe nothing.
+pub fn set_level<B: SimBackend>(backend: &mut B, signal: SignalRef, level: u8) {
+    backend.set(signal, level);
+}
+
+/// Move `info`'s signal to the level of `edge` through `write`. Returns the
+/// level it had (`None` while unknown), or `None` when it already was at
+/// that level.
 pub fn move_signal<B: SimBackend>(
     backend: &mut B,
     info: &EventEdge,
     edge: Edge,
+    mut write: impl SignalWrite<B>,
 ) -> Option<Option<bool>> {
     let old = level(backend, info.signal);
     let new = edge.level();
     if old == Some(new != 0) {
         return None;
     }
-    backend.set(info.signal, new);
+    write.write(backend, info.signal, new);
     Some(old)
 }
 
 /// Move `event`'s signal through `edge` and run the domains sensitive to it.
 /// `info` and `plan` are the event's entries of its host's tables; `dirty`
-/// says whether combinational logic has pending changes.
+/// says whether combinational logic has pending changes; `write` moves the
+/// signal.
 #[allow(clippy::too_many_arguments)]
 pub fn run_edge<X, E>(
     executor: &mut X,
@@ -165,13 +186,14 @@ pub fn run_edge<X, E>(
     event: E,
     edge: Edge,
     dirty: bool,
+    write: impl SignalWrite<X::Backend>,
 ) -> Result<EdgeOutcome, Halt>
 where
     X: TickExecutor,
     X::Backend: SimBackend<Event = E>,
     E: EventHandle,
 {
-    let Some(old) = move_signal(executor.backend_mut(), &info, edge) else {
+    let Some(old) = move_signal(executor.backend_mut(), &info, edge, write) else {
         return Ok(EdgeOutcome::Unchanged);
     };
     let new = edge.level();
@@ -215,7 +237,7 @@ where
 
 /// Move several event signals at the same instant and run the domains
 /// sensitive to their edges: every domain evaluates against the state
-/// before the edge, then all of them commit.
+/// before the edge, then all of them commit. `write` moves the signals.
 pub fn run_edges<X, E>(
     executor: &mut X,
     plans: &DerivedTickPlans<E>,
@@ -223,6 +245,7 @@ pub fn run_edges<X, E>(
     scratch: &mut DerivedTickScratch,
     moves: &[(E, Edge)],
     dirty: bool,
+    mut write: impl SignalWrite<X::Backend>,
 ) -> Result<EdgeOutcome, Halt>
 where
     X: TickExecutor,
@@ -239,6 +262,7 @@ where
             *event,
             *edge,
             dirty,
+            write,
         );
     }
     let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(moves.len());
@@ -255,7 +279,7 @@ where
             continue;
         }
         any_moved = true;
-        executor.backend_mut().set(info.signal, new);
+        write.write(executor.backend_mut(), info.signal, new);
         transitions.push((info.signal, (old.map_or(new ^ 1, u8::from), new)));
         comb_read |= info.comb_read;
         if info.fires(old, edge) {
