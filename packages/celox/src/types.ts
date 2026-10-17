@@ -117,6 +117,16 @@ export interface NativeFrontendSimulatorHandle
 	extends FrontendSimulatorHandleMetadata {
 	tick(eventId: number): void;
 	tickN(eventId: number, count: number): void;
+	/**
+	 * Move event signals through coincident edges and run every domain
+	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
+	 * `dirty` says whether combinational logic has pending changes (default
+	 * `true`: it settles first). Returns whether combinational logic is
+	 * settled afterwards. Absent on addons without explicit edges.
+	 */
+	edges?(eventIds: number[], rising: boolean[], dirty?: boolean): boolean;
+	/** Whether the event's active edge is rising. */
+	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
@@ -141,6 +151,16 @@ export interface WasmFrontendSimulatorHandle
 	initialMemoryBytes(): Uint8Array | number[];
 	combWasmBytes(): Uint8Array | number[];
 	eventWasmBytes(name: string): Uint8Array | number[];
+	/**
+	 * Per event name, the derived domains its ticks and edges run, as JSON.
+	 * Absent on addons that predate explicit edges.
+	 */
+	edgePlansJson?(): string;
+	/** The `"evalOnly"` or `"apply"` phase module of an event's kernels. */
+	eventPhaseWasmBytes?(
+		name: string,
+		phase: "evalOnly" | "apply",
+	): Uint8Array | number[];
 	/**
 	 * Offset where the checkpointable design state starts (it ends at
 	 * `stableSize`). Absent on addons without checkpoint support.
@@ -170,6 +190,16 @@ export type FrontendSimulatorHandle =
 export interface NativeSimulatorHandle {
 	tick(eventId: number): void;
 	tickN(eventId: number, count: number): void;
+	/**
+	 * Move event signals through coincident edges and run every domain
+	 * sensitive to them: `rising[i]` gives the direction of `eventIds[i]`.
+	 * `dirty` says whether combinational logic has pending changes (default
+	 * `true`: it settles first). Returns whether combinational logic is
+	 * settled afterwards. Absent on addons without explicit edges.
+	 */
+	edges?(eventIds: number[], rising: boolean[], dirty?: boolean): boolean;
+	/** Whether the event's active edge is rising. */
+	activeEdgeIsRising?(eventId: number): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	dispose(): void;
@@ -395,6 +425,9 @@ export interface EventHandle {
 	readonly name: string;
 	readonly id: number;
 }
+
+/** A transition of a clock or reset signal. */
+export type ClockEdge = "posedge" | "negedge";
 
 // ---------------------------------------------------------------------------
 // 4-state helpers
