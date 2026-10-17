@@ -1354,6 +1354,14 @@ fn reports_where_a_known_system_function_is_not_supported() {
             "system task `$stop`",
             "module Top(output logic y); initial $stop; assign y = 0; endmodule",
         ),
+        (
+            "system task `$stacktrace`",
+            "module Top(output logic y); initial $stacktrace; assign y = 0; endmodule",
+        ),
+        (
+            "system function `$countdrivers` in an expression",
+            "module Top(input logic a, output logic y); assign y = $countdrivers(a); endmodule",
+        ),
     ];
     for (expected, source) in cases {
         let error = build_error(source);
