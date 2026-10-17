@@ -1803,6 +1803,11 @@ mod host {
         pub fn named_events(&self) -> Vec<NamedEvent<B>> {
             let mut result = Vec::new();
             for (id, addr) in self.backend.id_to_addr_slice().iter().enumerate() {
+                // A hidden event, such as the copy of a clock sensed at its
+                // other edge, has no name to list.
+                if !self.event_is_named(addr) {
+                    continue;
+                }
                 let name = self.program.get_path(addr);
                 if let Some(ev) = self.backend.resolve_event_opt(addr) {
                     result.push(NamedEvent {
@@ -1813,6 +1818,19 @@ mod host {
                 }
             }
             result
+        }
+
+        /// Whether the event at `addr` is a variable a path names.
+        fn event_is_named(&self, addr: &crate::ir::AbsoluteAddr) -> bool {
+            self.program
+                .design
+                .instance(addr.instance_id)
+                .is_some_and(|instance| {
+                    self.program
+                        .design
+                        .variable(addr)
+                        .is_some_and(|variable| instance.resolves_path_to(&variable.path, *addr))
+                })
         }
 
         /// Triggers a clock/event by its numeric ID.
