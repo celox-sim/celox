@@ -1522,7 +1522,7 @@ mod host {
                 Vec::with_capacity(events.len());
             for event in events {
                 let addr = self.backend.id_to_addr_slice()[event.id()];
-                let canonical = self.program.design.events.canonical(addr);
+                let canonical = self.schedule.events.canonical(addr);
                 if unique.iter().all(|(existing, _)| *existing != canonical) {
                     unique.push((canonical, *event));
                 }
@@ -1535,10 +1535,7 @@ mod host {
             let mut domains = Vec::with_capacity(unique.len());
             let mut unsplit = Vec::new();
             for (canonical, event) in unique {
-                match (
-                    self.backend.resolve_eval_only_event(&canonical),
-                    self.backend.resolve_apply_event(&canonical),
-                ) {
+                match celox_runtime::EventDomain::split_kernels(&self.backend, &canonical) {
                     (Some(eval_only), Some(apply)) => domains.push((event, eval_only, apply)),
                     _ => unsplit.push(event),
                 }
