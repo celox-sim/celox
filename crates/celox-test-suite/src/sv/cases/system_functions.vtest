@@ -2622,3 +2622,124 @@ endmodule
     (tick clk)
     (assert_eq ff_ok 1)
     (assert_eq comb_ok 1)))
+
+; IEEE 1800-2023 20.14.1 and Annex N: `$random(seed)` returns
+; `rtl_dist_uniform(seed, LONG_MIN, LONG_MAX)` and updates the seed variable.
+; A zero seed starts from 259341593. The other seeds reach the integral
+; negative results Annex N decrements, the overflowing conversion at the top of
+; the range, and the first nonnegative integral result.
+(case random_follows_annex_n_and_updates_its_seed
+  (source "random_seed.sv" #"
+    module Top(input logic clk, input int start, output int comb_value, comb_seed);
+      int seed, value;
+      always_ff @(posedge clk) begin
+        seed = start;
+        for (int k = 0; k < 3; k++) begin
+          value = $random(seed);
+          $display("%0d %0d", value, seed);
+        end
+      end
+      always_comb begin
+        comb_seed = start;
+        comb_value = $random(comb_seed);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set start 0))
+  (assert_eq comb_value 303379748)
+  (assert_eq comb_seed (trunc 32 -1844104698))
+  (tick clk)
+  (expect_output #"303379748 -1844104698
+-1064739199 1082744015
+-2071669239 75814084
+"#)
+  (modify (set start (trunc 32 -1752523756)))
+  (assert_eq comb_value (trunc 32 -2147483137))
+  (tick clk)
+  (expect_output #"-2147483137 5
+-2147138048 345346
+230383387 -1917100901
+"#)
+  (modify (set start (trunc 32 -593667845)))
+  (tick clk)
+  (expect_output #"-2139094528 8388608
+1719665613 -427819007
+-1803481559 344001998
+"#)
+  (modify (set start (trunc 32 -1271221770)))
+  (tick clk)
+  (expect_output #"-2147483648 -1
+2147415551 -69068
+1671993799 -475490395
+"#)
+  (modify (set start (trunc 32 -635610885)))
+  (tick clk)
+  (expect_output #"768 -2147483648
+768 -2147483647
+69376 -2147414578
+"#))
+
+; IEEE 1800-2023 20.14.1: without a seed argument, `$random` continues one
+; stream. A process that is the design's only caller draws the sequence of a
+; zero seed.
+(case random_without_a_seed_continues_its_stream
+  (source "random_stream.sv" #"
+    module Top(input logic clk);
+      int a, b;
+      always_ff @(posedge clk) begin
+        a = $random;
+        b = $random();
+        $display("%0d %0d", a, b);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (tick clk)
+  (expect_output "303379748 -1064739199\n")
+  (tick clk)
+  (expect_output "-2071669239 -1309649309\n"))
+
+; IEEE 1800-2023 18.13.2: `$urandom_range` returns a value between its bounds,
+; inclusive, swaps reversed bounds, and defaults the minimum to 0.
+(case urandom_range_stays_within_its_bounds
+  (source "urandom_range.sv" #"
+    module Top(input logic clk, input int unsigned low, high, output logic ok, covered,
+               output int unsigned width);
+      int unsigned value, reversed, single, full;
+      logic [3:0] seen;
+      always_ff @(posedge clk) begin
+        ok = 1;
+        seen = 0;
+        for (int k = 0; k < 64; k++) begin
+          value = $urandom_range(high, low);
+          reversed = $urandom_range(low, high);
+          single = $urandom_range(low, low);
+          full = $urandom_range(32'hffffffff);
+          ok &= value >= low && value <= high;
+          ok &= reversed >= low && reversed <= high;
+          ok &= single == low;
+          if (value - low < 4) seen[value - low] = 1;
+        end
+        ok &= $urandom_range(3) <= 3;
+        covered = &seen;
+        width = $bits($urandom_range(1));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set low 0) (set high 3))
+  (tick clk)
+  (assert_eq ok 1)
+  (assert_eq covered 1)
+  (assert_eq width 32)
+  (modify (set low 5) (set high 8))
+  (tick clk)
+  (assert_eq ok 1)
+  (assert_eq covered 1)
+  (assert_eq width 32)
+  (modify (set low 0xfffffffc) (set high 0xffffffff))
+  (tick clk)
+  (assert_eq ok 1)
+  (assert_eq covered 1)
+  (assert_eq width 32))

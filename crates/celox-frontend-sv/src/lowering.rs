@@ -972,8 +972,14 @@ impl DriverScan<'_> {
             });
         }
         while let Some((callee, args)) = calls.pop() {
-            let sv::ir::Callee::Subroutine(name) = callee else {
-                continue;
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    for lvalue in procedural::written_system_arguments(function, &args) {
+                        record(drivers, &lvalue);
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self
                 .subroutines
@@ -4668,9 +4674,11 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
                 arena.alloc(SLTNode::Binary(count, op, one)).ok()?
             }
         }
-        // `$urandom` needs process state, and the analyzer folds the other
-        // functions to constants.
-        SystemFunction::Urandom
+        // The random number functions need process state, and the analyzer
+        // folds the other functions to constants.
+        SystemFunction::Random
+        | SystemFunction::Urandom
+        | SystemFunction::UrandomRange
         | SystemFunction::Timeunit
         | SystemFunction::Timeprecision
         | SystemFunction::Isunbounded

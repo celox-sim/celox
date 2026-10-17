@@ -143,8 +143,8 @@ impl<'a> ProcModule<'a> {
         }
     }
 
-    /// Whether a process calls the random function, including through user
-    /// subroutines and omitted argument defaults.
+    /// Whether a process calls a random number function, including through
+    /// user subroutines and omitted argument defaults.
     pub fn uses_random(&self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {
@@ -154,7 +154,7 @@ impl<'a> ProcModule<'a> {
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
-                    if function == sv::ir::SystemFunction::Urandom {
+                    if function.is_effectful() {
                         return true;
                     }
                     continue;
@@ -2036,6 +2036,20 @@ pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>)
 }
 
 /// The lvalue an output argument writes back to.
+/// The variables a call of `function` writes through its arguments, such as
+/// the seed of `$random(seed)`.
+pub(super) fn written_system_arguments(
+    function: sv::ir::SystemFunction,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    args.iter()
+        .enumerate()
+        .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
 pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue>> {
     match expr {
         sv::ir::Expr::Ident(name) => Some(vec![sv::ir::LValue::Ident(name.clone())]),

@@ -46,10 +46,13 @@ pub(super) struct Ff<'p, 'a> {
     /// Read-modify-write views of a variable's working value: alias -> var.
     aliases: HashMap<SourceVarId, SourceVarId>,
     next_alias: u32,
-    /// One persistent RNG shared by every call from this process, including
-    /// calls in inlined subroutines. Bit 32 distinguishes an unseeded state.
+    /// One persistent RNG of `$urandom` and `$urandom_range` shared by every
+    /// call from this process, including calls in inlined subroutines. Bit
+    /// 32 distinguishes an unseeded state.
     random: Option<(SourceVarId, String)>,
     random_seed: u32,
+    /// The seed of this process's `$random` calls without a seed argument.
+    dist_seed: Option<(SourceVarId, String)>,
     /// The kernel of a process being lowered. Its builder is `b` while the
     /// body is lowered, and the process reads and writes stable state
     /// directly.
@@ -95,6 +98,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             next_alias: u32::MAX,
             random: None,
             random_seed,
+            dist_seed: None,
             kernel: None,
             direct: false,
         }
@@ -214,11 +218,18 @@ impl<'p, 'a> Ff<'p, 'a> {
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
-                    if function == sv::ir::SystemFunction::Urandom && self.random.is_none() {
-                        let (id, name) = self.m.temp("urandom_state", 33, false, false);
-                        self.working.insert(id);
-                        self.targets.push((id, BitAccess::new(0, 32)));
-                        self.random = Some((id, name));
+                    use sv::ir::SystemFunction;
+                    match function {
+                        SystemFunction::Urandom | SystemFunction::UrandomRange => {
+                            self.urandom_state();
+                        }
+                        SystemFunction::Random if args.is_empty() => {
+                            self.dist_seed();
+                        }
+                        _ => {}
+                    }
+                    for lvalue in written_system_arguments(function, &args) {
+                        self.record_target(&lvalue, true);
                     }
                     continue;
                 }
@@ -790,7 +801,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
                 args,
                 ..
-            } => self.urandom(args)?,
+            } => {
+                let seed = match args.first().and_then(Option::as_ref) {
+                    Some(seed) => Some(self.hoist(seed)?),
+                    None => None,
+                };
+                self.urandom(seed)?
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::UrandomRange),
+                args,
+                ..
+            } => self.urandom_range(args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Random),
+                args,
+                ..
+            } => self.random(args.first().and_then(Option::as_ref))?,
             Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 args,
@@ -1044,21 +1071,62 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // ---------------------------------------------------------------- stores
 
+    /// The state of this process's `$urandom` stream.
+    fn urandom_state(&mut self) -> (SourceVarId, String) {
+        if self.random.is_none() {
+            let (id, name) = self.m.temp("urandom_state", 33, false, false);
+            self.working.insert(id);
+            self.targets.push((id, BitAccess::new(0, 32)));
+            self.random = Some((id, name));
+        }
+        self.random.clone().expect("a process RNG")
+    }
+
+    /// The seed of this process's `$random` calls without a seed argument.
+    /// It starts at 0, as the seed variable of `$random(seed)` typically
+    /// does, so a design whose one process calls `$random` gets the same
+    /// numbers as other simulators that use one seed for the whole design.
+    fn dist_seed(&mut self) -> (SourceVarId, String) {
+        if self.dist_seed.is_none() {
+            let (id, name) = self.m.temp("random_seed", 32, false, false);
+            self.working.insert(id);
+            self.targets.push((id, BitAccess::new(0, 31)));
+            self.dist_seed = Some((id, name));
+        }
+        self.dist_seed.clone().expect("a process seed")
+    }
+
+    /// Evaluate `expr` into a new hidden variable.
+    fn hidden(
+        &mut self,
+        purpose: &str,
+        expr: &sv::ir::Expr,
+        signed: bool,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let value = self.eval(expr, Some((32, signed)))?;
+        let (id, name) = self.m.temp(purpose, 32, signed, false);
+        self.store(id, SIROffset::Static(0), 32, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `expr` converted to a 32-bit `int` or `int unsigned` formal.
+    fn int_formal(&self, expr: sv::ir::Expr) -> sv::ir::Expr {
+        let signed = self.expr_signed(&expr);
+        sv::ir::Expr::Resize {
+            expr: Box::new(expr),
+            width: 32,
+            signed,
+        }
+    }
+
     /// IEEE 1800-2023 18.13.1/18.14: a deterministic, process-local stream.
     /// This full-period 32-bit LCG is implementation-defined; tests compare
     /// repeatability rather than assuming another simulator's sequence.
-    fn urandom(
-        &mut self,
-        args: &[Option<sv::ir::Expr>],
-    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+    fn urandom(&mut self, seed: Option<sv::ir::Expr>) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::{BinaryOp, Expr};
-        if self.random.is_none() {
-            let random = self.m.temp("urandom_state", 33, false, false);
-            self.random = Some(random);
-        }
-        let (id, name) = self.random.clone().expect("a process RNG");
-        let initial = match args.first().and_then(Option::as_ref) {
-            Some(seed) => self.hoist(seed)?,
+        let (id, name) = self.urandom_state();
+        let initial = match seed {
+            Some(seed) => seed,
             None => Expr::Mux {
                 condition: Box::new(Expr::Binary {
                     left: Box::new(Expr::Ident(name.clone())),
@@ -1071,17 +1139,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         // The int seed formal preserves a narrow signed operand's sign bits
         // before its 32-bit representation becomes unsigned RNG state.
-        let seed_signed = self.expr_signed(&initial);
         let next = Expr::Resize {
             width: 32,
             signed: false,
             expr: Box::new(Expr::Binary {
                 left: Box::new(Expr::Binary {
-                    left: Box::new(Expr::Resize {
-                        expr: Box::new(initial),
-                        width: 32,
-                        signed: seed_signed,
-                    }),
+                    left: Box::new(self.int_formal(initial)),
                     op: BinaryOp::Mul,
                     right: Box::new(Expr::Literal("32'd1664525".into())),
                 }),
@@ -1089,16 +1152,162 @@ impl<'p, 'a> Ff<'p, 'a> {
                 right: Box::new(Expr::Literal("32'd1013904223".into())),
             }),
         };
-        let result = self.eval(&next, Some((32, false)))?;
-        let (temp, temp_name) = self.m.temp("urandom_result", 32, false, false);
-        self.store(temp, SIROffset::Static(0), 32, result);
-        let state = Expr::Concat(vec![
-            Expr::Literal("1'b1".into()),
-            Expr::Ident(temp_name.clone()),
-        ]);
+        let result = self.hidden("urandom_result", &next, false)?;
+        let state = Expr::Concat(vec![Expr::Literal("1'b1".into()), result.clone()]);
         let state = self.eval(&state, Some((33, false)))?;
         self.store(id, SIROffset::Static(0), 33, state);
-        Ok(Expr::Ident(temp_name))
+        Ok(result)
+    }
+
+    /// IEEE 1800-2023 18.13.2: a number of the `$urandom` stream between the
+    /// two bounds, in either order, inclusive.
+    fn urandom_range(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let bound = |this: &mut Self, arg: Option<&Expr>| match arg {
+            Some(arg) => {
+                let arg = this.hoist(arg)?;
+                let arg = this.int_formal(arg);
+                this.hidden("urandom_range_bound", &arg, false)
+            }
+            None => Ok(Expr::Literal("32'd0".into())),
+        };
+        let max = bound(self, args.first().and_then(Option::as_ref))?;
+        let min = bound(self, args.get(1).and_then(Option::as_ref))?;
+        let value = self.urandom(None)?;
+        let widen = |expr: Expr, width| Expr::Resize {
+            expr: Box::new(expr),
+            width,
+            signed: false,
+        };
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let reversed = binary(max.clone(), BinaryOp::Lt, min.clone());
+        let pick = |when_reversed: &Expr, otherwise: &Expr| Expr::Mux {
+            condition: Box::new(reversed.clone()),
+            then_expr: Box::new(when_reversed.clone()),
+            else_expr: Box::new(otherwise.clone()),
+        };
+        let (high, low) = (pick(&min, &max), pick(&max, &min));
+        // The span is 2**32 for the full range, so it takes 33 bits. Scaling
+        // takes the offset from the high bits of the number: the low bits of
+        // the LCG have short periods.
+        let span = binary(
+            binary(widen(high, 33), BinaryOp::Sub, widen(low.clone(), 33)),
+            BinaryOp::Add,
+            Expr::Literal("33'd1".into()),
+        );
+        let offset = binary(
+            binary(widen(value, 65), BinaryOp::Mul, widen(span, 65)),
+            BinaryOp::Shr,
+            Expr::Literal("65'd32".into()),
+        );
+        let result = Expr::Resize {
+            expr: Box::new(binary(widen(low, 65), BinaryOp::Add, offset)),
+            width: 32,
+            signed: false,
+        };
+        self.hidden("urandom_range_result", &result, false)
+    }
+
+    /// IEEE 1800-2023 20.14.1 and Annex N: `$random` is
+    /// `rtl_dist_uniform(seed, LONG_MIN, LONG_MAX)` with a 32-bit `long`.
+    ///
+    /// Annex N computes the number in floating point from bits 31:9 of the
+    /// next seed, `m`; the result is exactly `512 * (m + 1) + m / 16384 -
+    /// 2**31`, one less where that is negative and `m` is a multiple of
+    /// 16384 (Annex N takes `r - 1` of a negative integral `r`), and
+    /// `LONG_MIN` where `m` is all ones and the conversion overflows, as the
+    /// reference code returns on x86 and Icarus Verilog does.
+    fn random(&mut self, seed: Option<&sv::ir::Expr>) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let (current, store_back) = match seed {
+            Some(seed) => {
+                let lvalues = lvalue_from_expr(seed)
+                    .ok_or_else(|| unsupported("seed variable of `$random`"))?;
+                (self.hoist(seed)?, Some(lvalues))
+            }
+            None => (Expr::Ident(self.dist_seed().1), None),
+        };
+        let literal = |value: u32| Expr::Literal(format!("32'd{value}"));
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let current = self.int_formal(current);
+        let current = self.hidden("random_seed", &current, false)?;
+        let seeded = Expr::Mux {
+            condition: Box::new(binary(current.clone(), BinaryOp::Eq, literal(0))),
+            then_expr: Box::new(literal(259_341_593)),
+            else_expr: Box::new(current),
+        };
+        let next = binary(
+            binary(seeded, BinaryOp::Mul, literal(69_069)),
+            BinaryOp::Add,
+            literal(1),
+        );
+        let next = self.hidden("random_seed", &next, false)?;
+        // `{m, 9'b0} + 512 + m / 16384`, which wraps only for the all-ones `m`.
+        let scaled = binary(
+            binary(
+                binary(next.clone(), BinaryOp::BitAnd, literal(0xffff_fe00)),
+                BinaryOp::Add,
+                literal(512),
+            ),
+            BinaryOp::Add,
+            binary(next.clone(), BinaryOp::Shr, literal(23)),
+        );
+        let scaled = self.hidden("random_scaled", &scaled, false)?;
+        let integral_negative = binary(
+            binary(scaled.clone(), BinaryOp::Lt, literal(0x8000_0000)),
+            BinaryOp::LogicAnd,
+            binary(
+                binary(next.clone(), BinaryOp::BitAnd, literal(0x007f_fe00)),
+                BinaryOp::Eq,
+                literal(0),
+            ),
+        );
+        let value = Expr::Mux {
+            condition: Box::new(binary(
+                binary(next.clone(), BinaryOp::Shr, literal(9)),
+                BinaryOp::Eq,
+                literal(0x007f_ffff),
+            )),
+            then_expr: Box::new(literal(0x8000_0000)),
+            else_expr: Box::new(binary(
+                binary(scaled, BinaryOp::BitXor, literal(0x8000_0000)),
+                BinaryOp::Sub,
+                Expr::Mux {
+                    condition: Box::new(integral_negative),
+                    then_expr: Box::new(literal(1)),
+                    else_expr: Box::new(literal(0)),
+                },
+            )),
+        };
+        let value = Expr::Resize {
+            expr: Box::new(value),
+            width: 32,
+            signed: true,
+        };
+        let result = self.hidden("random_result", &value, true)?;
+        match store_back {
+            Some(lvalues) => match lvalues.as_slice() {
+                [lvalue] => self.assign(lvalue, &next)?,
+                parts => self.assign_concat(parts, &next)?,
+            },
+            None => {
+                let (id, _) = self.dist_seed();
+                let next = self.eval(&next, Some((32, false)))?;
+                self.store(id, SIROffset::Static(0), 32, next);
+            }
+        }
+        Ok(result)
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
