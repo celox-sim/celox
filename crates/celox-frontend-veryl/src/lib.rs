@@ -19,6 +19,7 @@ mod readmem;
 mod schedule;
 mod source;
 mod testbench;
+mod value_type_check;
 
 pub(crate) mod symbolic {
     pub use celox_frontend_core::symbolic::*;

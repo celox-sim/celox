@@ -206,8 +206,10 @@ fn dynamic_string_let_is_rejected() {
     )
     .run_test_detailed()
     .unwrap_err();
+    // A let is RTL, so the read of `text` is rejected before the testbench
+    // sees the initializer.
     assert!(
-        error.to_string().contains("string let initializer"),
+        error.to_string().contains("runtime string value"),
         "{error:?}"
     );
 }
