@@ -6,6 +6,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { changedFilesBetween } from "./ci-rust-scope.mjs";
 import {
   affectsHeliodorArm64,
   classifyFiles,
@@ -161,7 +162,7 @@ const MASTER_GROUP = {
 
 const classifier = fileURLToPath(new URL("./ci-changes.mjs", import.meta.url));
 
-// The classifier diffs base..head in the repository at cwd.
+// The classifier diffs base...head in the repository at cwd.
 function runClassifier(
   base,
   head,
@@ -505,4 +506,31 @@ test("queue configuration runs script checks without rebuilding the product", ()
     docs: false,
   });
   assert.deepEqual(classifyFiles([".mergify.yml", "unknown/new-source"]), all);
+});
+
+test("PR branches behind their base ignore unmerged base changes", (t) => {
+  const repository = mkdtempSync(join(tmpdir(), "celox-ci-changes-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  const commit = (path) => {
+    writeFileSync(join(repository, path), `${path}\n`);
+    git("add", path);
+    git("commit", "--quiet", "-m", path);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  git("config", "user.name", "test");
+  git("config", "user.email", "test@example.com");
+  git("config", "commit.gpgsign", "false");
+  const fork = commit("README.md");
+  git("checkout", "--quiet", "-b", "pr");
+  const head = commit("CONTRIBUTING.md");
+  git("checkout", "--quiet", fork);
+  const base = commit("unknown-base-change.xyz");
+  assert.deepEqual(changedFilesBetween(base, head, repository), ["CONTRIBUTING.md"]);
+  assert.deepEqual(
+    runClassifier(base, head, { GITHUB_EVENT_NAME: "pull_request" }, repository),
+    { ...none, docs: true, heliodor_arm64: false, release: false },
+  );
 });
