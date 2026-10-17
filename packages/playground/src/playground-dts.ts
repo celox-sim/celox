@@ -1,3 +1,37 @@
+/** A declaration file for Monaco's TypeScript service. */
+export interface ExtraLib {
+	readonly content: string;
+	readonly filePath: string;
+}
+
+const CELOX_ROOT = "file:///node_modules/@celox-sim/celox";
+
+/** Rewrite the relative imports of a `@celox-sim/celox` declaration file. */
+function fixCeloxDtsImports(content: string): string {
+	return content.replace(
+		/from\s+["']\.\/([\w-]+)\.js["']/g,
+		'from "@celox-sim/celox/$1"',
+	);
+}
+
+/**
+ * Monaco libraries for every declaration file of `@celox-sim/celox`'s
+ * `dist`, keyed by path (as `import.meta.glob` returns them): each one under
+ * `dist/` and under its bare subpath, and `index.d.ts` as the package root,
+ * so that testbenches see the whole public API, explicit edges included.
+ */
+export function celoxDtsLibs(files: Record<string, string>): ExtraLib[] {
+	const libs: ExtraLib[] = [];
+	for (const [path, content] of Object.entries(files)) {
+		const name = /([\w-]+)\.d\.ts$/.exec(path)?.[1];
+		if (!name) continue;
+		const fixed = fixCeloxDtsImports(content);
+		libs.push({ content: fixed, filePath: `${CELOX_ROOT}/dist/${name}.d.ts` });
+		libs.push({ content: fixed, filePath: `${CELOX_ROOT}/${name}.d.ts` });
+	}
+	return libs;
+}
+
 export type VirtualPortDirection = "input" | "output" | "inout";
 export type VirtualPortKind = "logic" | "bit" | "clock" | "reset";
 
