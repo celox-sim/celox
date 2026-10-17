@@ -35,7 +35,8 @@ pub enum Edge {
 }
 
 impl Edge {
-    fn level(self) -> u8 {
+    /// The level the signal has after the edge.
+    pub fn level(self) -> u8 {
         match self {
             Edge::Rising => 1,
             Edge::Falling => 0,
@@ -60,6 +61,13 @@ impl EventEdge {
             Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => Edge::Falling,
             _ => Edge::Rising,
         }
+    }
+
+    /// Whether `edge` can run the event's own domain at all, whatever the
+    /// level before it: always, except for the inactive edge of an event of
+    /// known polarity.
+    pub fn can_fire(&self, edge: Edge) -> bool {
+        self.fires(None, edge)
     }
 
     /// Whether `edge` from `old` (`None` when unknown) runs the event's own

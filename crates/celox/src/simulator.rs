@@ -1460,6 +1460,18 @@ mod host {
             }
             let info = self.event_edges[event.id()];
             if !matches!(self.derived_ticks.get(event.id()), Some(Some(_))) {
+                if !info.can_fire(edge) && self.host_watch.is_empty() {
+                    // An inactive edge runs nothing, whatever the level was:
+                    // store the level without reading it first. A load of
+                    // the signal right after the previous edge's kernel can
+                    // wait behind the kernel's stores (4 KiB aliasing),
+                    // which made a cycle cost almost two ticks.
+                    self.backend.set(info.signal, edge.level());
+                    if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+                        self.dirty = true;
+                    }
+                    return Ok(());
+                }
                 // No derived domains: move the signal, then run the event's
                 // domain exactly as `tick` does.
                 let write = watched_write(&mut self.host_watch);
@@ -1543,8 +1555,44 @@ mod host {
         /// One clock cycle: [`Self::active_edge`], then
         /// [`Self::inactive_edge`].
         pub fn cycle(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-            self.active_edge(event)?;
-            self.inactive_edge(event)
+            if self.frozen {
+                return Ok(());
+            }
+            let info = self.event_edges[event.id()];
+            let active = info.active_edge();
+            let inactive = match active {
+                celox_runtime::Edge::Rising => celox_runtime::Edge::Falling,
+                celox_runtime::Edge::Falling => celox_runtime::Edge::Rising,
+            };
+            let plain = !matches!(self.derived_ticks.get(event.id()), Some(Some(_)));
+            if !(plain && self.host_watch.is_empty() && !info.can_fire(inactive)) {
+                self.active_edge(event)?;
+                return self.inactive_edge(event);
+            }
+            // Everything is read before the domain runs: right after its
+            // kernel, loads of host tables can wait behind the kernel's
+            // stores (4 KiB aliasing), which made a cycle cost almost two
+            // ticks. The inactive edge runs nothing and only stores.
+            let observers = !self.program.runtime_schema.comb_observers.is_empty();
+            let moved = celox_runtime::move_signal(
+                &mut self.backend,
+                &info,
+                active,
+                celox_runtime::set_level,
+            );
+            if let Some(old) = moved {
+                if info.comb_read {
+                    self.dirty = true;
+                }
+                if info.fires(old, active) {
+                    self.tick(event)?;
+                }
+            }
+            self.backend.set(info.signal, inactive.level());
+            if info.comb_read || observers {
+                self.dirty = true;
+            }
+            Ok(())
         }
 
         /// Move several event signals at one instant, as coincident edges:
