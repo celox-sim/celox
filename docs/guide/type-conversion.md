@@ -10,6 +10,8 @@ This page describes how Veryl types are mapped to TypeScript types when `celox-t
 | `reset` | `bigint` | yes | |
 | `logic<N>` | `bigint` | yes | |
 | `bit<N>` | `bigint` | no | 2-state only |
+| `f32` / `f64` | `bigint` | no | The IEEE 754 bit pattern. Values can be copied through ports, variables and flip-flops; arithmetic, comparisons, conversions and formatting of non-constant values are not supported yet ([#1401](https://github.com/celox-sim/celox/issues/1401)) |
+| `string` | — | no | Non-constant strings are supported only in testbench code. RTL can use string literals, constants and parameters ([#1400](https://github.com/celox-sim/celox/issues/1400)) |
 
 All signal port values use `bigint` regardless of width. This ensures a consistent type across all signals and avoids type changes when signal widths are modified.
 
