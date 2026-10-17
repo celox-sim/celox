@@ -60,7 +60,7 @@ covers local links and fragments in all tracked Markdown, including the sealed
 historical records retained unchanged.
 
 The mandatory hosted gates are defined in
-[the workflow](../../.github/workflows/lydite.yml). They include the original Veryl
+[the workflow](../../.github/workflows/lydite-checks.yml). They include the original Veryl
 corpus, symbolic RTL refinement, native lemma diagnostics, selected RV32I, fixed
 automatic-proof controls and original-formula mutants. For their exact commands,
 dependency preparation and evidence locations, use the [audit index](../audit/README.md).

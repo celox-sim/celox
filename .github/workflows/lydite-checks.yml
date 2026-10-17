@@ -1,4 +1,4 @@
-name: lydite
+name: Lydite
 
 # Proof, editor, and pinned-Celox conformance gates imported from
 # https://github.com/tignear/hwverify. The workspace crates are also built,
