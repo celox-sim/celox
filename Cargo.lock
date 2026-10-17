@@ -2577,6 +2577,7 @@ dependencies = [
 name = "lydite-ir"
 version = "0.11.0"
 dependencies = [
+ "num-bigint",
  "serde_json",
 ]
 
@@ -2585,6 +2586,8 @@ name = "lydite-solver"
 version = "0.11.0"
 dependencies = [
  "lydite-ir",
+ "num-bigint",
+ "num-traits",
  "serde_json",
 ]
 

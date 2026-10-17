@@ -291,12 +291,16 @@ fn replay(
             else {
                 return Err("invalid store witness".into());
             };
+            let (index, value) = (
+                index.to_u64().ok_or("invalid store witness")?,
+                value.to_u64().ok_or("invalid store witness")?,
+            );
             b.tick(base.entries.len() as u64 + 1)?;
             let mut updated = base.clone();
-            if *value == 0 {
-                updated.entries.remove(index);
+            if value == 0 {
+                updated.entries.remove(&index);
             } else {
-                updated.entries.insert(*index, *value);
+                updated.entries.insert(index, value);
             }
             ValueModel::Array(updated)
         } else {
@@ -315,10 +319,8 @@ fn replay(
         else {
             return Err("invalid read witness".into());
         };
-        ValueModel::Scalar(Scalar::Bv {
-            width: a.value_width,
-            value: a.read(*value),
-        })
+        let index = value.to_u64().ok_or("invalid read witness")?;
+        ValueModel::Scalar(Scalar::bv(a.value_width, a.read(index)))
     } else if array_equality(t) {
         let (ValueModel::Array(a), ValueModel::Array(c)) = (&args[0], &args[1]) else {
             return Err("invalid equality witness".into());
@@ -552,7 +554,7 @@ pub(super) fn solve(formula: &Term, context: &Env, limits: Limits, hint: SearchH
                     &mut b,
                     0,
                 )?
-                .word();
+                .word64()?;
                 let value = evaluate(
                     &r.reads[&(array.clone(), index.clone())],
                     &out.assignments,
@@ -560,7 +562,7 @@ pub(super) fn solve(formula: &Term, context: &Env, limits: Limits, hint: SearchH
                     &mut b,
                     0,
                 )?
-                .word();
+                .word64()?;
                 if observed
                     .insert(address, value)
                     .is_some_and(|old| old != value)
@@ -816,7 +818,7 @@ mod tests {
             Verdict::Sat,
         );
         assert!(r.array_context_values["changed"].entries.is_empty());
-        assert_eq!(r.context_values["cell"], Scalar::Bv { width: 1, value: 0 });
+        assert_eq!(r.context_values["cell"], Scalar::bv(1, 0));
         // Include independent array replay in the same whole-query work limit.
         let ctx = Env::from([("changed".into(), write(mem("a"), bv(1, 0), bv(1, 1)))]);
         for hint in [SearchHint::Sat, SearchHint::Unsat] {
@@ -967,10 +969,7 @@ mod tests {
         assert_eq!(r.context_values["eq"], Scalar::Bool(true));
         assert_eq!(
             r.context_values["read"],
-            Scalar::Bv {
-                width: 1,
-                value: r.array_context_values["array"].read(1)
-            }
+            Scalar::bv(1, r.array_context_values["array"].read(1))
         );
         assert_eq!(r.assignments.len(), 1);
     }

@@ -1,6 +1,6 @@
 //! Bounded exact distribution of constant-index word lookups over ITE addresses.
 use super::*;
-use lydite_ir::{and, boolv, bv, eq, ite};
+use lydite_ir::{and, boolv, bv_big, eq, ite};
 
 const MAX_ROWS: usize = 64;
 const MAX_CREATED_NODES: usize = 4096;
@@ -156,7 +156,7 @@ impl Rewrite {
                 return Ok(None);
             }
             address = Some(a.clone());
-            if keys.insert(key) {
+            if keys.insert(key.clone()) {
                 rows.push((key, current.0.args[1].clone()));
             } else {
                 changed = true
@@ -175,11 +175,14 @@ impl Rewrite {
             && rows.iter().all(|r| r.1 == rows[0].1)
             && self.room(3, b)
         {
-            let missing = (0..1u64 << width).find(|k| !keys.contains(k)).unwrap();
+            let missing = (0..1u64 << width)
+                .map(BigUint::from)
+                .find(|k| !keys.contains(k))
+                .unwrap();
             self.charge(3, b)?;
             self.word_rewrites += 1;
             return Ok(Some(ite(
-                eq(address, bv(width, missing)),
+                eq(address, bv_big(width, &missing)),
                 current.clone(),
                 rows[0].1.clone(),
             )));
@@ -194,7 +197,7 @@ impl Rewrite {
         self.word_rewrites += 1;
         let mut result = current.clone();
         for (key, value) in rows.into_iter().rev() {
-            result = ite(eq(address.clone(), bv(width, key)), value, result)
+            result = ite(eq(address.clone(), bv_big(width, &key)), value, result)
         }
         Ok(Some(result))
     }
@@ -211,7 +214,7 @@ impl Rewrite {
         {
             return Ok(None);
         }
-        fn keyed(t: &Term) -> Res<Option<(Term, u64)>> {
+        fn keyed(t: &Term) -> Res<Option<(Term, BigUint)>> {
             if !matches!(operation(t)?, Op::Eq) {
                 return Ok(None);
             }
@@ -246,13 +249,14 @@ impl Rewrite {
             let Some((a, k)) = keyed(&current.0.args[0])? else {
                 return Ok(None);
             };
-            if a != address || !keys.insert(k) {
+            if a != address || !keys.insert(k.clone()) {
                 return Ok(None);
             }
             rows.push((k, current.0.args[1].clone()));
             current = &current.0.args[2];
         }
         let missing = (0..count as u64)
+            .map(BigUint::from)
             .find(|k| !keys.contains(k))
             .expect("distinct full-domain prefix");
         rows.push((missing, current.clone()));
@@ -262,7 +266,7 @@ impl Rewrite {
         for (key, value) in &rows {
             b.tick(1)?;
             if !matches!(operation(value)?, Op::Ite) {
-                unchanged.push(*key);
+                unchanged.push(key.clone());
                 bases.push(value.clone());
                 continue;
             }
@@ -351,7 +355,11 @@ impl Rewrite {
             self.charge(additional, b)?;
             let mut base = bases[count - 1].clone();
             for (row, old) in rows[..count - 1].iter().zip(&bases[..count - 1]).rev() {
-                base = ite(eq(address.clone(), bv(width, row.0)), old.clone(), base);
+                base = ite(
+                    eq(address.clone(), bv_big(width, &row.0)),
+                    old.clone(),
+                    base,
+                );
             }
             let mut enable = enable
                 .into_iter()
@@ -360,7 +368,7 @@ impl Rewrite {
             for key in &unchanged {
                 enable = and(
                     enable,
-                    lydite_ir::not(eq(write_address.clone(), bv(width, *key))),
+                    lydite_ir::not(eq(write_address.clone(), bv_big(width, key))),
                 );
             }
             let result = ite(
@@ -510,8 +518,8 @@ mod tests {
                     for b in 0..4 {
                         let values = BTreeMap::from([
                             ("g".into(), Scalar::Bool(g)),
-                            ("a".into(), Scalar::Bv { width: 2, value: a }),
-                            ("b".into(), Scalar::Bv { width: 2, value: b }),
+                            ("a".into(), Scalar::bv(2, a)),
+                            ("b".into(), Scalar::bv(2, b)),
                         ]);
                         let chosen = if g { a } else { b };
                         let expected = if chosen == 0 {
@@ -525,10 +533,7 @@ mod tests {
                             assert_eq!(
                                 evaluate(term, &values, &mut HashMap::new(), &mut budget, 0)
                                     .unwrap(),
-                                Scalar::Bv {
-                                    width: 2,
-                                    value: expected
-                                }
+                                Scalar::bv(2, expected)
                             );
                         }
                     }
@@ -654,10 +659,7 @@ mod tests {
             let result = super::super::solve_with_hint(&formula, &context, Limits::default(), hint);
             assert_eq!(result.verdict, Verdict::Sat);
             assert!(result.original_formula_validated);
-            assert_eq!(
-                result.context_values["table"],
-                Scalar::Bv { width: 2, value: 2 }
-            );
+            assert_eq!(result.context_values["table"], Scalar::bv(2, 2));
             for name in ["g", "h", "a", "b", "v0", "v1"] {
                 assert!(result.assignments.contains_key(name));
             }
@@ -741,7 +743,7 @@ mod tests {
 #[cfg(test)]
 mod word_normalization_tests {
     use super::*;
-    use lydite_ir::{node, not, var};
+    use lydite_ir::{bv, node, not, var};
     fn b() -> Budget {
         Budget {
             limits: Limits::default(),
