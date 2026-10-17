@@ -48,7 +48,7 @@ export function lyditeScope(files, packages) {
         "rust-toolchain.toml",
         "flake.nix",
         "flake.lock",
-        ".github/workflows/lydite.yml",
+        ".github/workflows/lydite-checks.yml",
         ".github/workflows/ci.yml",
         ".config/nextest.toml",
       ].includes(path) ||
@@ -87,11 +87,11 @@ export function lyditeScope(files, packages) {
 
 // Celox dependency changes reach the bridge, but its replay and proof corpus
 // are too heavy for every Celox PR. PRs run the bridge only for Lydite-owned
-// changes; daily runs cover Celox changes and report failures in an issue.
+// sources; daily runs cover Celox and CI changes and report failures.
 const ownsBridge = (path) =>
-  ["lydite/", "crates/lydite", "scripts/ci-lydite-changes."].some((prefix) =>
+  ["lydite/", "crates/lydite"].some((prefix) =>
     path.replace(/^\.\//, "").startsWith(prefix),
-  ) || path.replace(/^\.\//, "") === ".github/workflows/lydite.yml";
+  );
 
 export function pullRequestScope(files, packages) {
   // Release PRs and their queue drafts only bump versions.

@@ -304,7 +304,7 @@ if (
   });
 }
 
-// Lydite tests are selected independently by lydite.yml, including its bridge.
+// Lydite tests are selected independently by lydite-checks.yml, including its bridge.
 export function celoxRustTestScope(files, packages) {
   return rustTestScope(
     files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
@@ -313,7 +313,7 @@ export function celoxRustTestScope(files, packages) {
 }
 
 // Queue drafts, merge groups, releases and daily runs keep the Celox
-// workspace. Lydite tests run independently in lydite.yml.
+// workspace. Lydite tests run independently in lydite-checks.yml.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {
