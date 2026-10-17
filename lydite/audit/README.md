@@ -13,7 +13,7 @@ the commands below the "Sealed archives" heading must be run.
 ## Fresh required gates
 
 Run from `lydite/` with fresh output directories outside the checkout.
-The [workflow](../../.github/workflows/lydite.yml) is the authoritative ordering.
+The [workflow](../../.github/workflows/lydite-checks.yml) is the authoritative ordering.
 The original-corpus preparation builds the pinned frontend needed by the later
 symbolic/RV gates; a failed dependency fetch is a setup failure, never a pass.
 

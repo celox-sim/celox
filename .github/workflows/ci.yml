@@ -214,7 +214,7 @@ jobs:
       # runs the binaries one after another.
       # A pull request builds and runs only the tests its changes can affect
       # (scripts/ci-rust-scope.mjs); merge groups and the daily run keep the
-      # Celox workspace. lydite.yml owns Lydite tests at its own cadence.
+      # Celox workspace. lydite-checks.yml owns Lydite tests at its own cadence.
       - name: Run workspace tests with CI features
         if: needs.changes.outputs.rust_full != 'false'
         run: >-
