@@ -5376,10 +5376,6 @@ fn test_ff_register_gated_clock_uses_the_pre_edge_enable(sim) {
 }
 
 fn test_ff_inverted_clock_samples_after_the_rising_edge(sim) {
-    // The suite pulses a clock for each `tick`: `~clk` rises on its return.
-    // Celox's harness drives `Simulator::tick`, which is the active edge of
-    // `clk` only, so `~clk` never rises there.
-    @ignore_on(native, cranelift, wasm, interp, sv);
     @case "flip_flop::test_ff_inverted_clock_samples_after_the_rising_edge";
 }
 

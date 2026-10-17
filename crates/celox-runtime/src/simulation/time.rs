@@ -6,32 +6,11 @@ use std::cmp::Reverse;
 use super::SimulationState;
 use super::host::SimulationExecutor;
 use crate::{
-    AbsoluteAddr, SignalRef, SimulatorErrorCode,
+    SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
     scheduler::{ClockDef, SimEvent},
     timing::Halt,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct PeriodicEventKey {
-    pub(super) time: u64,
-    pub(super) event_id: usize,
-    event_addr: AbsoluteAddr,
-    pub(super) signal: SignalRef,
-    pub(super) next_val: u8,
-}
-
-impl PeriodicEventKey {
-    pub(super) fn from_event<B: SimBackend>(event: &SimEvent<B>) -> Self {
-        Self {
-            time: event.time,
-            event_id: event.event_ref.id(),
-            event_addr: event.event_ref.addr(),
-            signal: event.signal,
-            next_val: event.next_val,
-        }
-    }
-}
 
 impl<B: SimBackend> SimulationState<B> {
     pub fn add_clock(
@@ -48,11 +27,12 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.clocks[event_id] = Some(ClockDef {
             period: period.max(2),
         });
-        self.push_periodic_event(SimEvent {
+        self.scheduler.push(SimEvent {
             time: initial_delay,
             event_ref: event,
             signal,
             next_val: 1,
+            periodic: true,
         });
     }
 
@@ -62,15 +42,44 @@ impl<B: SimBackend> SimulationState<B> {
             event_ref: event,
             signal,
             next_val: value,
+            periodic: false,
         });
     }
 
-    pub(super) fn push_periodic_event(&mut self, event: SimEvent<B>) {
-        *self
-            .periodic_events
-            .entry(PeriodicEventKey::from_event(&event))
-            .or_default() += 1;
-        self.scheduler.push(event);
+    /// Re-schedule the periodic clock edges among `events`, which fired at
+    /// `current_time`: each clock's opposite level, half a period later.
+    pub(super) fn rearm_clocks(
+        &mut self,
+        current_time: u64,
+        events: &[SimEvent<B>],
+    ) -> Result<(), Halt> {
+        for event in events {
+            if !event.periodic {
+                continue;
+            }
+            let event_id = event.event_ref.id();
+            if let Some(Some(clock)) = self.scheduler.clocks.get(event_id) {
+                // Keep the extra odd-period tick in the high phase, matching
+                // the process/testbench clock model.
+                // A clock needs at least one time unit in each phase.
+                let period = clock.period.max(2);
+                let half = (period / 2) + ((period & 1) & u64::from(event.next_val != 0));
+                let time = current_time.checked_add(half).ok_or_else(|| {
+                    Halt::Error(SimulatorErrorCode::Runtime {
+                        message: format!("event {event_id} overflows simulation time"),
+                        signals: Vec::new(),
+                    })
+                })?;
+                self.scheduler.push(SimEvent {
+                    time,
+                    event_ref: event.event_ref,
+                    signal: event.signal,
+                    next_val: 1 - event.next_val,
+                    periodic: true,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Settle host writes at the current time, then run the next time with

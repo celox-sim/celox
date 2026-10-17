@@ -77,6 +77,8 @@ queue_rules:
       - base ~= ^(master|develop)$
       - -draft
       - -label = release:hold
+      # Wait for a rebase instead of entering and leaving the queue.
+      - -conflict
       # A release is only eligible after the weekly workflow requests it.
       - or:
           - head != release-please--branches--master--components--celox
@@ -105,6 +107,8 @@ queue_rules:
       - base ~= ^(master|develop)$
       - -draft
       - -label = release:hold
+      # Wait for a rebase instead of entering and leaving the queue.
+      - -conflict
       # A release is only eligible after the weekly workflow requests it.
       - or:
           - head != release-please--branches--master--components--celox
@@ -139,6 +143,8 @@ queue_rules:
               - 'body ~= (?m)^Depends-On: '
       - -draft
       - -label = release:hold
+      # Wait for a rebase instead of entering and leaving the queue.
+      - -conflict
       # A release is only eligible after the weekly workflow requests it.
       - or:
           - head != release-please--branches--master--components--celox
@@ -160,5 +166,7 @@ pull_request_rules:
       - -label = release:hold
       - -label = dequeued
       - -draft
+      # A rebase that resolves a conflict queues the PR again by itself.
+      - -conflict
     actions:
       queue: {}

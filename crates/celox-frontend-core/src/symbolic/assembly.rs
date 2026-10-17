@@ -740,6 +740,7 @@ pub fn schedule_symbolic_rtl(
         derived_events,
         combinational_derived,
         independent_derived,
+        combinationally_read,
     } = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
@@ -1344,6 +1345,7 @@ pub fn schedule_symbolic_rtl(
             .map(|(event, targets)| (project(event), targets.into_iter().map(project).collect()))
             .collect(),
         independent_derived: independent_derived.into_iter().map(project).collect(),
+        combinationally_read: combinationally_read.into_iter().map(project).collect(),
         combinational_derived: combinational_derived
             .into_iter()
             .map(|(event, clocks)| {
@@ -1926,15 +1928,10 @@ fn unify_clock_domains(
                 .map(|variable| variable.metadata.width)
         };
         let mut record_polarity = |module: &SimModule, instance: InstanceId, var: SourceVarId| {
-            let polarity =
-                module
-                    .variables
-                    .get(&var)
-                    .and_then(|variable| match variable.metadata.kind {
-                        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
-                        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
-                        _ => None,
-                    });
+            let polarity = module
+                .variables
+                .get(&var)
+                .and_then(|variable| celox_design::edges::polarity(variable.metadata.kind));
             if let Some(polarity) = polarity {
                 polarities.insert(bindings.locate(instance, var), polarity);
             }
@@ -3560,6 +3557,8 @@ struct ClockAnalysis {
     /// Events whose combinationally derived domains may run before them in
     /// turn instead of together.
     independent_derived: BTreeSet<AbsoluteAddr>,
+    /// Events whose signal combinational logic reads.
+    combinationally_read: BTreeSet<AbsoluteAddr>,
 }
 
 fn analyze_clock_dependencies(
@@ -3955,6 +3954,12 @@ fn analyze_clock_dependencies(
         Some((reads, writes))
     };
     let mut independent_derived = BTreeSet::new();
+    let combinationally_read: BTreeSet<AbsoluteAddr> = comb_deps
+        .values()
+        .flatten()
+        .map(|source| clock_domains.get(source).copied().unwrap_or(*source))
+        .filter(|source| unique_clocks.contains(source))
+        .collect();
     let combinational_derived = comb_derived_clocks
         .into_iter()
         .map(|(event, clocks)| {
@@ -3994,6 +3999,7 @@ fn analyze_clock_dependencies(
         derived_events,
         combinational_derived,
         independent_derived,
+        combinationally_read,
     }
 }
 

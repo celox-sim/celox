@@ -3,9 +3,7 @@
 use std::{cmp::Reverse, collections::BinaryHeap};
 
 use bit_set::BitSet;
-use fxhash::FxHashMap;
 
-use super::time::PeriodicEventKey;
 use super::{ProcessWakeup, SimulationState};
 use crate::{
     backend::{EventHandle, SimBackend},
@@ -21,7 +19,6 @@ impl<B: SimBackend> SimulationState<B> {
             time: self.scheduler.time,
             clocks: self.scheduler.clocks.clone(),
             event_queue: self.scheduler.event_queue.clone(),
-            periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
@@ -55,7 +52,6 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.time = snapshot.time;
         self.scheduler.clocks.clone_from(&snapshot.clocks);
         self.scheduler.event_queue = event_queue;
-        self.periodic_events.clone_from(&snapshot.periodic_events);
         self.last_clock_values
             .clone_from(&snapshot.last_clock_values);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
@@ -104,21 +100,18 @@ impl<B: SimBackend> SimulationState<B> {
                 .filter_map(|(id, clock)| Some((events[id], clock.as_ref()?.period)))
                 .collect(),
             events: self.scheduler.event_queue.iter().cloned().collect(),
-            periodic: self
-                .periodic_events
-                .iter()
-                .map(|(key, &count)| {
-                    (
-                        SimEvent {
-                            time: key.time,
-                            event_ref: events[key.event_id],
-                            signal: key.signal,
-                            next_val: key.next_val,
-                        },
-                        count as u64,
-                    )
-                })
-                .collect(),
+            periodic: {
+                // Identical periodic events once, with their number, in the
+                // order of `events`.
+                let mut periodic: Vec<(SimEvent<B>, u64)> = Vec::new();
+                for event in self.scheduler.event_queue.iter().filter(|e| e.periodic) {
+                    match periodic.iter_mut().find(|(known, _)| known == event) {
+                        Some((_, count)) => *count += 1,
+                        None => periodic.push((event.clone(), 1)),
+                    }
+                }
+                periodic
+            },
             high_events: self.last_clock_values.iter().map(|id| events[id]).collect(),
             process_wakeups: {
                 let mut wakeups = self
@@ -147,12 +140,22 @@ impl<B: SimBackend> SimulationState<B> {
             }
             self.scheduler.clocks[id] = Some(ClockDef { period });
         }
-        self.scheduler.event_queue = parts.events.into_iter().collect();
-        self.periodic_events = parts
-            .periodic
-            .into_iter()
-            .map(|(event, count)| (PeriodicEventKey::from_event(&event), count as usize))
-            .collect();
+        // Mark `count` pending events identical to each periodic one, the
+        // first in the order of `events`.
+        let mut events = parts.events;
+        for event in &mut events {
+            event.periodic = false;
+        }
+        for (periodic, count) in parts.periodic {
+            for event in events
+                .iter_mut()
+                .filter(|event| !event.periodic && **event == periodic)
+                .take(count as usize)
+            {
+                event.periodic = true;
+            }
+        }
+        self.scheduler.event_queue = events.into_iter().collect();
         self.last_clock_values.make_empty();
         for event in parts.high_events {
             self.last_clock_values.insert(event.id());
@@ -173,7 +176,6 @@ pub struct SimulationSnapshot<B: SimBackend> {
     time: u64,
     clocks: Vec<Option<ClockDef>>,
     event_queue: std::collections::BinaryHeap<SimEvent<B>>,
-    periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
@@ -187,7 +189,6 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             time: self.time,
             clocks: self.clocks.clone(),
             event_queue: self.event_queue.clone(),
-            periodic_events: self.periodic_events.clone(),
             last_clock_values: self.last_clock_values.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),

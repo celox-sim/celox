@@ -15,5 +15,7 @@ export class NativeSimulatorHandle {
 	initialMemoryBytes(): Uint8Array;
 	combWasmBytes(): Uint8Array;
 	eventWasmBytes(name: string): Uint8Array;
+	edgePlansJson(): string;
+	eventPhaseWasmBytes(name: string, phase: "evalOnly" | "apply"): Uint8Array;
 	dispose(): void;
 }

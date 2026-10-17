@@ -45,7 +45,10 @@
                 "rust-analyzer"
               ]
             );
-            targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [ "wasm32-unknown-unknown" ]);
+            targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [
+              "wasm32-unknown-unknown"
+              "wasm32-wasip1-threads"
+            ]);
           };
           mbx = nix-packages.packages.${system}.mbx;
           mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };

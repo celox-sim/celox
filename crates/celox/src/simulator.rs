@@ -101,6 +101,8 @@ mod host {
         /// Dynamic testbench strings, keyed by the bound variable location.
         pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
         pub(crate) program: RuntimeProgram,
+        /// The program's scheduling facts.
+        pub(crate) schedule: celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
@@ -134,6 +136,8 @@ mod host {
         /// Whether a timed simulation runs the design and it has a `$finish`
         /// runtime event site.
         pub(crate) finish_sites: bool,
+        /// Per event ID, its signal and polarity for explicit edges.
+        event_edges: celox_runtime::EventEdges,
     }
 
     /// Why [`Simulator::try_dump`] failed.
@@ -696,14 +700,18 @@ mod host {
             program: RuntimeProgram,
             warnings: Vec<CompilationWarning>,
         ) -> Self {
-            let (derived_ticks, derived_scratch) = celox_runtime::build_derived_tick_plans(
-                &backend,
-                &program.design.events,
-                &program.design.event_kinds(),
+            let schedule = celox_design::schedule::ScheduleModel::derive(
+                &program.design,
+                &program.runtime_schema,
             );
+            let (derived_ticks, derived_scratch) =
+                celox_runtime::build_derived_tick_plans(&backend, &schedule);
+            let event_edges =
+                celox_runtime::build_event_edges(&backend, &schedule.events, &schedule.kinds);
             let mut sim = Self {
                 backend,
                 program,
+                schedule,
                 vcd_writer: None,
                 dirty: false,
                 warnings,
@@ -726,6 +734,7 @@ mod host {
                 host_watch: Default::default(),
                 finish_scan_seq: 0,
                 finish_sites: false,
+                event_edges,
             };
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
@@ -1430,6 +1439,192 @@ mod host {
             Ok(())
         }
 
+        /// Move `event`'s signal through `edge` and run every domain
+        /// sensitive to that transition, as a timed step does: the event's own
+        /// domain when `edge` is its active edge, clocks computed
+        /// combinationally from the signal that see their active edge (judged
+        /// from the state before the edge, evaluating with the event's own
+        /// domain), and, after the commit, gates the commit moves and domains
+        /// clocked from state, transitively. The signal stays at its new
+        /// level. An edge to the level the signal already has does nothing.
+        ///
+        /// An unknown (X) level counts as either level, as in SystemVerilog.
+        pub fn edge(
+            &mut self,
+            event: B::Event,
+            edge: celox_runtime::Edge,
+        ) -> Result<(), RuntimeErrorCode> {
+            // A timed simulation the design finished no longer changes.
+            if self.frozen {
+                return Ok(());
+            }
+            let info = self.event_edges[event.id()];
+            if !matches!(self.derived_ticks.get(event.id()), Some(Some(_))) {
+                if !info.can_fire(edge) && self.host_watch.is_empty() {
+                    // An inactive edge runs nothing, whatever the level was:
+                    // store the level without reading it first. A load of
+                    // the signal right after the previous edge's kernel can
+                    // wait behind the kernel's stores (4 KiB aliasing),
+                    // which made a cycle cost almost two ticks.
+                    self.backend.set(info.signal, edge.level());
+                    if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+                        self.dirty = true;
+                    }
+                    return Ok(());
+                }
+                // No derived domains: move the signal, then run the event's
+                // domain exactly as `tick` does.
+                let write = watched_write(&mut self.host_watch);
+                let Some(old) = celox_runtime::move_signal(&mut self.backend, &info, edge, write)
+                else {
+                    return Ok(());
+                };
+                if info.comb_read {
+                    self.dirty = true;
+                }
+                if info.fires(old, edge) {
+                    return self.tick(event);
+                }
+                if !self.program.runtime_schema.comb_observers.is_empty() {
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let plan = plans.get(event.id()).and_then(Option::as_ref);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let mut watch = std::mem::take(&mut self.host_watch);
+            let dirty = self.dirty;
+            let write = watched_write(&mut watch);
+            let result =
+                celox_runtime::run_edge(self, plan, info, &mut scratch, event, edge, dirty, write);
+            self.host_watch = watch;
+            self.derived_scratch = Some(scratch);
+            self.note_edge(result)
+        }
+
+        fn note_edge(
+            &mut self,
+            outcome: Result<celox_runtime::EdgeOutcome, celox_runtime::Halt>,
+        ) -> Result<(), RuntimeErrorCode> {
+            match outcome {
+                Ok(celox_runtime::EdgeOutcome::Unchanged) => {}
+                Ok(celox_runtime::EdgeOutcome::Moved) => self.dirty = true,
+                // Combinational logic does not read the signal; observers
+                // still see its new level at their next evaluation.
+                Ok(celox_runtime::EdgeOutcome::Stored) => {
+                    if !self.program.runtime_schema.comb_observers.is_empty() {
+                        self.dirty = true;
+                    }
+                }
+                Ok(celox_runtime::EdgeOutcome::Settled) => self.dirty = false,
+                // An RTL `$finish` ends only a timed simulation; an edge, as a
+                // tick, leaves it to the host. What ran may not have settled.
+                Err(celox_runtime::Halt::Finish) => self.dirty = true,
+                Err(celox_runtime::Halt::Error(error)) => return Err(error),
+            }
+            Ok(())
+        }
+
+        /// A rising edge of `event`'s signal; see [`Self::edge`].
+        pub fn posedge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.edge(event, celox_runtime::Edge::Rising)
+        }
+
+        /// A falling edge of `event`'s signal; see [`Self::edge`].
+        pub fn negedge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            self.edge(event, celox_runtime::Edge::Falling)
+        }
+
+        /// The event's active edge (rising for a positive-edge clock or an
+        /// active-high reset, falling otherwise); see [`Self::edge`].
+        pub fn active_edge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let edge = self.event_edges[event.id()].active_edge();
+            self.edge(event, edge)
+        }
+
+        /// The edge opposite to the event's active edge; see [`Self::edge`].
+        pub fn inactive_edge(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let edge = match self.event_edges[event.id()].active_edge() {
+                celox_runtime::Edge::Rising => celox_runtime::Edge::Falling,
+                celox_runtime::Edge::Falling => celox_runtime::Edge::Rising,
+            };
+            self.edge(event, edge)
+        }
+
+        /// One clock cycle: [`Self::active_edge`], then
+        /// [`Self::inactive_edge`].
+        pub fn cycle(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if self.frozen {
+                return Ok(());
+            }
+            let info = self.event_edges[event.id()];
+            let active = info.active_edge();
+            let inactive = match active {
+                celox_runtime::Edge::Rising => celox_runtime::Edge::Falling,
+                celox_runtime::Edge::Falling => celox_runtime::Edge::Rising,
+            };
+            let plain = !matches!(self.derived_ticks.get(event.id()), Some(Some(_)));
+            if !(plain && self.host_watch.is_empty() && !info.can_fire(inactive)) {
+                self.active_edge(event)?;
+                return self.inactive_edge(event);
+            }
+            // Everything is read before the domain runs: right after its
+            // kernel, loads of host tables can wait behind the kernel's
+            // stores (4 KiB aliasing), which made a cycle cost almost two
+            // ticks. The inactive edge runs nothing and only stores.
+            let observers = !self.program.runtime_schema.comb_observers.is_empty();
+            let moved = celox_runtime::move_signal(
+                &mut self.backend,
+                &info,
+                active,
+                celox_runtime::set_level,
+            );
+            if let Some(old) = moved {
+                if info.comb_read {
+                    self.dirty = true;
+                }
+                if info.fires(old, active) {
+                    self.tick(event)?;
+                }
+            }
+            self.backend.set(info.signal, inactive.level());
+            if info.comb_read || observers {
+                self.dirty = true;
+            }
+            Ok(())
+        }
+
+        /// Move several event signals at one instant, as coincident edges:
+        /// every domain sensitive to one of them evaluates against the state
+        /// before the edges, then all of them commit, then the rounds of
+        /// [`Self::edge`] follow.
+        pub fn edges(
+            &mut self,
+            moves: &[(B::Event, celox_runtime::Edge)],
+        ) -> Result<(), RuntimeErrorCode> {
+            if self.frozen {
+                return Ok(());
+            }
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let edges = std::sync::Arc::clone(&self.event_edges);
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let mut watch = std::mem::take(&mut self.host_watch);
+            let dirty = self.dirty;
+            let write = watched_write(&mut watch);
+            let result =
+                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write);
+            self.host_watch = watch;
+            self.derived_scratch = Some(scratch);
+            self.note_edge(result)
+        }
+
+        /// Per event ID, its signal and polarity, for hosts that drive the
+        /// backend without this facade.
+        pub fn event_edges(&self) -> celox_runtime::EventEdges {
+            std::sync::Arc::clone(&self.event_edges)
+        }
+
         /// Per event ID, the derived clock domains a tick of the event can
         /// trigger, for hosts that drive the backend without this facade.
         /// Empty when the design has no derived clocks.
@@ -1518,7 +1713,7 @@ mod host {
                 Vec::with_capacity(events.len());
             for event in events {
                 let addr = self.backend.id_to_addr_slice()[event.id()];
-                let canonical = self.program.design.events.canonical(addr);
+                let canonical = self.schedule.events.canonical(addr);
                 if unique.iter().all(|(existing, _)| *existing != canonical) {
                     unique.push((canonical, *event));
                 }
@@ -1531,10 +1726,7 @@ mod host {
             let mut domains = Vec::with_capacity(unique.len());
             let mut unsplit = Vec::new();
             for (canonical, event) in unique {
-                match (
-                    self.backend.resolve_eval_only_event(&canonical),
-                    self.backend.resolve_apply_event(&canonical),
-                ) {
+                match celox_runtime::EventDomain::split_kernels(&self.backend, &canonical) {
                     (Some(eval_only), Some(apply)) => domains.push((event, eval_only, apply)),
                     _ => unsplit.push(event),
                 }
@@ -2219,9 +2411,109 @@ mod host {
         }
     }
 
+    /// The host's write of an event signal's level, observed by a timed
+    /// simulation's waits and counters as [`IOContext`] writes are.
+    fn watched_write<B: SimBackend>(
+        watch: &mut celox_runtime::HostWatch,
+    ) -> impl FnMut(&mut B, SignalRef, u8) + '_ {
+        move |backend, signal, level| {
+            if watch.is_empty() {
+                backend.set(signal, level);
+            } else {
+                watch.write(backend, signal, |backend| backend.set(signal, level));
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        const GATED_COUNTER: &str = "module Top (clk: input clock, en: input logic, count: output logic<8>, plain: output logic<8>) {
+            let gated: '_ clock = clk & en;
+            always_ff (gated) { count += 1; }
+            always_ff (clk) { plain += 1; }
+        }";
+
+        #[test]
+        fn edges_leave_a_finished_simulation_unchanged() {
+            let mut sim = Simulator::builder(GATED_COUNTER, "Top").build().unwrap();
+            let (clk, en) = (sim.event("clk"), sim.signal("en"));
+            sim.modify(|io| io.set(en, 1u8)).unwrap();
+            sim.posedge(clk).unwrap();
+            let (count, plain) = (sim.signal("count"), sim.signal("plain"));
+            assert_eq!(sim.get(count), BigUint::from(1u8));
+            sim.negedge(clk).unwrap();
+            sim.frozen = true;
+            sim.posedge(clk).unwrap();
+            sim.edges(&[(clk, celox_runtime::Edge::Rising)]).unwrap();
+            sim.cycle(clk).unwrap();
+            let clk_signal = sim.signal("clk");
+            assert_eq!(sim.get(clk_signal), BigUint::from(0u8));
+            assert_eq!(sim.get(count), BigUint::from(1u8));
+            assert_eq!(sim.get(plain), BigUint::from(1u8));
+        }
+
+        #[test]
+        fn edges_write_the_clock_through_the_host_watch() {
+            for design in [
+                GATED_COUNTER,
+                "module Top (clk: input clock, plain: output logic<8>) {
+                always_ff (clk) { plain += 1; }
+            }",
+            ] {
+                let mut sim = Simulator::builder(design, "Top").build().unwrap();
+                let clk = sim.event("clk");
+                let clk_signal = sim.signal("clk");
+                let waited = [clk_signal.offset].into_iter().collect();
+                sim.host_watch = celox_runtime::HostWatch::new([], waited);
+                sim.posedge(clk).unwrap();
+                sim.edges(&[(clk, celox_runtime::Edge::Falling)]).unwrap();
+                // Already low: no write to observe.
+                sim.negedge(clk).unwrap();
+                let levels: Vec<_> = sim
+                    .host_watch
+                    .log()
+                    .iter()
+                    .map(|(signal, (value, _))| (signal.offset, value.clone()))
+                    .collect();
+                assert_eq!(
+                    levels,
+                    [
+                        (clk_signal.offset, BigUint::from(1u8)),
+                        (clk_signal.offset, BigUint::from(0u8)),
+                    ],
+                    "{design}"
+                );
+            }
+        }
+
+        #[test]
+        fn edges_that_run_nothing_leave_comb_stale_only_when_comb_reads_the_clock() {
+            for (seen, comb_read) in [("1'b1", false), ("clk", true)] {
+                let source = format!(
+                    "module Top (clk: input clock, count: output logic<8>, seen: output logic) {{
+                        always_ff (clk) {{ count += 1; }}
+                        assign seen = {seen};
+                    }}"
+                );
+                let mut sim = Simulator::builder(&source, "Top").build().unwrap();
+                let clk = sim.event("clk");
+                sim.posedge(clk).unwrap();
+                assert!(!sim.dirty);
+                // Moving `clk` without running a domain leaves combinational
+                // logic stale only when it reads `clk`.
+                sim.negedge(clk).unwrap();
+                assert_eq!(sim.dirty, comb_read, "{seen}");
+                sim.cycle(clk).unwrap();
+                assert_eq!(sim.dirty, comb_read, "{seen}");
+                let seen_signal = sim.signal("seen");
+                let expected = if comb_read { 0u8 } else { 1 };
+                assert_eq!(sim.get(seen_signal), BigUint::from(expected));
+                let count = sim.signal("count");
+                assert_eq!(sim.get(count), BigUint::from(2u8));
+            }
+        }
 
         #[test]
         fn comb_fatal_records_do_not_mask_unrelated_backend_errors() {

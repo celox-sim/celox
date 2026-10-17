@@ -32,6 +32,7 @@ celox = { path = "../celox" }
 celox = { path = "../celox" }
 
 [dependencies]
+celox-design.workspace = true
 clap.workspace = true
 fxhash.workspace = true
 libloading = "0.9"
