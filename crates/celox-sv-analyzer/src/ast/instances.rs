@@ -20,6 +20,7 @@ pub(super) fn instances_from_module_node(
         if !matches!(node, sv_parser::ModuleOrGenerateItem::Module(_)) {
             continue;
         }
+        let _constant_functions = item.enter();
         let start = instances.len();
         let dimensions = views.dimensions(item);
         instances_from_module_or_generate_item(
