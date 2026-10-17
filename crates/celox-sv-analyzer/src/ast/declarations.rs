@@ -407,8 +407,9 @@ pub(super) fn signals_from_module_node(
                 )?);
                 continue;
             }
-            // `word_t v;` with a typedef `word_t` parses as a net declaration
-            // of a net type; real package nets are rejected with the package.
+            // sv-parser represents `word_t v;` as a net declaration even
+            // when `word_t` is a typedef and `v` is a variable. Real package
+            // nets are rejected with the package.
             ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(
                 net,
             )) => {
