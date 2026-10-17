@@ -344,7 +344,7 @@ chapter-20/20.15--dist_normal.sv	fail
 chapter-20/20.15--dist_poisson.sv	fail
 chapter-20/20.15--dist_t.sv	fail
 chapter-20/20.15--dist_uniform.sv	fail
-chapter-20/20.15--random.sv	fail
+chapter-20/20.15--random.sv	pass
 chapter-20/20.2--exit.sv	fail
 chapter-20/20.2--finish.sv	pass
 chapter-20/20.2--stop.sv	fail

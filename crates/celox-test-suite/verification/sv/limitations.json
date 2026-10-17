@@ -1360,7 +1360,7 @@
     "category": "simulator_disagreement",
     "phase": "execute",
     "observed_version": "Verilator 5.052",
-    "reason": "Verilator 5.052 does not compute  with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded  draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define  as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+    "reason": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
     "upstream": [],
     "evidence": [
       "verification/repros/sv_random.json",
