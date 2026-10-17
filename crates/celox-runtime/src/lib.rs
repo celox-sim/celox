@@ -1,6 +1,7 @@
 //! Backend-independent executable simulation contracts and utilities.
 
 pub mod backend;
+mod derived_tick;
 mod error;
 mod event_buffer;
 pub mod parallel;
@@ -9,8 +10,13 @@ pub mod scheduler;
 mod simulation;
 mod state_file;
 mod testbench;
+pub mod timing;
 mod vcd;
 
+pub use derived_tick::{
+    BackendExecutor, DerivedDomain, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch,
+    EventDomain, Gate, GatedDomain, TickExecutor, build_derived_tick_plans,
+};
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
 pub use reflection::{
@@ -18,13 +24,18 @@ pub use reflection::{
     SignalDirection,
 };
 pub use simulation::{
-    EventInfo, ProcessRefs, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
+    EventInfo, HostBoundary, ScheduleParts, SimulationExecutor, SimulationSnapshot,
+    SimulationState, UnitExecutor,
 };
 pub use state_file::{
-    ScheduleRecord, ScheduledEvent, StateDifference, StateFile, StateFileError, StateObject,
-    StateRole, format_state_value,
+    BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,
+    StateFile, StateFileError, StateObject, StateRole, WaiterRecord, format_state_value,
 };
 pub use testbench::bind_testbench_program;
+pub use timing::{
+    CountedDomainRefs, CountedRefs, Halt, HostWatch, NbaSiteRefs, NbaUpdate, ProcessRefs,
+    ProcessState, TermRefs, Waiter, Waiters,
+};
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdStatistics, VcdWriter};
 
 pub type AbsoluteAddr = celox_design::StateAddr;

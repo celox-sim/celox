@@ -885,6 +885,9 @@ pub(crate) fn host_value_from_argument(
     width: usize,
     is_string: bool,
 ) -> HostValue {
+    if let TestbenchValue::String(bytes) = &value {
+        return HostValue::Str(String::from_utf8_lossy(bytes).into_owned());
+    }
     let value = value.to_biguint();
     if is_string {
         let byte_len = width.div_ceil(8);

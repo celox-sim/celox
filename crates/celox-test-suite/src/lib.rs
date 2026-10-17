@@ -25,6 +25,7 @@ pub use backend::{
 pub use frontend::{Frontend, PreparedDesign};
 pub use num_bigint::BigUint;
 pub use scalar::Scalar;
+pub use script::validate_timed_design;
 
 /// Errors from a compiler or simulator adapter. Assertions fail by panicking,
 /// just like ordinary Rust tests; adapter errors are included in that failure.
@@ -233,6 +234,7 @@ impl script::ScriptCase {
             top: self.top.clone(),
             four_state: self.four_state,
             parameters: self.parameters.clone(),
+            timed: self.is_timed(),
         }
     }
 }

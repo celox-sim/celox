@@ -1,18 +1,21 @@
-# 共有ポートの合成仕様と正例・反例（0.8 / JSON version 3）
+# Shared-port composition specifications with positive and negative examples (0.8 / JSON version 3)
 
-0.9ではこのversion 3にも入力量化・executionモード・ensure・短いtrace呼出しを追加した。
-新しい意味と制限は [expectations and traces](expectations.md) を参照。
-この文書のpositive/negative例は従来の存在条件を保持する。
+0.9 added input quantification, execution modes, `ensure` and short trace calls to
+version 3 as well. See [expectations and traces](expectations.md) for their new
+semantics and limits. The positive/negative examples on this page keep the
+original existence conditions.
 
-`.lyd` の `specification "名前"` ヘッダは、関係として書いた仕様部品、その合成、
-許したい／拒否したい有限の振る舞いを一つの文書にまとめる。
-ヘッダにセミコロンを付けず、以降の宣言を囲む外側の波括弧も不要。
-[budgeted_counter.lyd](../examples/budgeted_counter.lyd) は「カウンタの算術」と
-「使える予算」を別部品にし、入出力を共有して組み合わせる例。
-既存の `design` / version-2 JSON はそのまま使用できる。
-このページは共有グローバルポート・同名同期操作のversion 3を説明する。
-局所ポート、明示配線、インスタンスごとの状態分離、独立した操作集合は
-新しいversion 4の [scoped specifications](scoped-specifications.md) を参照。
+A `.lyd` file with a `specification "name"` header gathers relationally written
+specification components, their composition, and the finite behaviors to allow
+or reject into one document. The header takes no semicolon, and no outer braces
+surround the declarations that follow it.
+[budgeted_counter.lyd](../examples/budgeted_counter.lyd) separates "counter
+arithmetic" and "available budget" into components that share inputs and outputs.
+Existing `design` / version-2 JSON can be used unchanged.
+This page describes version 3, with shared global ports and synchronized
+same-name operations. For local ports, explicit wiring, per-instance state
+separation and independent operation sets, see the new version 4
+[scoped specifications](scoped-specifications.md).
 
 ```
 cargo run -- examples/budgeted_counter.lyd --check
@@ -20,14 +23,17 @@ cargo run -- examples/budgeted_counter.lyd --out /tmp/budgeted --z3 /path/to/z3
 cargo run -- examples/contradictory_composition.lyd --out /tmp/contradiction --z3 /path/to/z3
 ```
 
-最後の例は意図的に失敗する。部品単体で許される振る舞いが、合成後も許されるとは限らない。
-`weakened_budget.lyd` も意図的な失敗例で、弱くしすぎた仕様が負例を許すことを検出する。
+The last example fails deliberately: a behavior that a component allows on its
+own is not necessarily allowed after composition. `weakened_budget.lyd` is also a
+deliberate failure; it detects an overly weakened specification that allows a
+negative example.
 
-## 部品の意味
+## Component semantics
 
-仕様全体で `input`、`observation`、名前付き `operation` を宣言する。
-各 `component` は独立した `state` 宣言、初期条件 `init`、各状態での `invariant`、
-操作ごとの関係 `steps` を持つ。
+The specification as a whole declares `input`, `observation` and named
+`operation` items. Each `component` has its own `state` declarations, an initial
+condition `init`, an `invariant` for every state, and per-operation relations
+`steps`.
 
 ```
 specification "Counter"
@@ -45,41 +51,49 @@ component Counter {
 }
 ```
 
-`o.count` と `i.amount` は、文書の observation / input 宣言を参照する。
-幅・算術・演算子の意味は [language guide](language.md) と同じ。
+`o.count` and `i.amount` refer to the document's observation / input
+declarations. Widths, arithmetic and operator semantics are the same as in the
+[language guide](language.md).
 
-- `s.x`: その部品の現在の非公開状態
-- `n.x`: その部品の次の非公開状態
-- `o.x`: 現在の共有観測
-- `no.x`: 次の共有観測
-- `i.x`: 今回の操作が消費する共有入力
+- `s.x`: the component's current private state
+- `n.x`: the component's next private state
+- `o.x`: the current shared observation
+- `no.x`: the next shared observation
+- `i.x`: the shared input consumed by this operation
 
-init / invariant は s と o だけを参照する。steps は全ての名前付き操作を明示的に定義する。
-`true` はその操作を無制約にする。状態を保持したいときは `n.x == s.x` のように明示する。
-複数部品が同じ private field 名を使っても、別の状態として扱う。
+init / invariant refer only to s and o. steps defines every named operation
+explicitly; `true` leaves that operation unconstrained. To hold state, write it
+explicitly, as in `n.x == s.x`. Components that use the same private field name
+still have separate state.
 
-## 合成
+## Composition
 
 ```
 composition Arithmetic { members compose(Counter); }
 composition Budgeted { members compose(Arithmetic, Budget); }
 ```
 
-名前付き composition をさらに合成できる。選んだ部品の関係を、同じ観測・同じ入力を
-使って論理積にする。ある例が単体で通るときの witness と、別の部品が通るときの witness
-を別々に採用して成功にはしない。共有値について一つの整合した実行が必要になる。
+Named compositions can themselves be composed. The relations of the selected
+components are conjoined over the same observations and inputs. Success is never
+obtained by taking one witness under which an example passes for one component
+and another witness under which it passes for a different component. One
+consistent execution over the shared values is required.
 
-各 trace の操作名に対し、全メンバーが同時にその操作の関係を満たす。暗黙の非同期実行、
-interleaving、任意の順序変更は行わない。別々の private state を持ち、観測と入力だけを共有する。
-ポート名の変更・配線別名・パラメータ付きインスタンス化はこの版にはない。
+For each trace operation name, all members satisfy that operation's relation
+simultaneously. There is no implicit asynchronous execution, interleaving or
+arbitrary reordering. Members have separate private state and share only
+observations and inputs. Port renaming, wiring aliases and parameterized
+instantiation are not part of this version.
 
-未知のメンバー、循環、空の合成、同一 component の重複到達はエラー。
-例えば P が A を含むとき `compose(P, A)` は拒否する。独立したコピーが必要なら別名の
-component を定義する。合成の循環検査は、将来の証明仮定の循環検査とは別の機能である。
+Unknown members, cycles, empty compositions and reaching the same component more
+than once are errors. For example, if P contains A, `compose(P, A)` is rejected.
+Define a component under another name when an independent copy is needed. The
+composition cycle check is a separate feature from a future cycle check over
+proof assumptions.
 
-## 正例と反例
+## Positive and negative examples
 
-各 component / composition の中に、名前付き `example` を直接並べる。
+List named `example` items directly inside each component / composition.
 
 ```
 example add_two {
@@ -98,39 +112,49 @@ example wrong_result {
 }
 ```
 
-`operation add {}` は文書ルートでの操作の宣言。trace中は従来通り
-`add { ... }` と書き、操作を一回行うことを表す。
+`operation add {}` declares the operation at the document root. Inside a trace,
+`add { ... }` is written as before and denotes performing the operation once.
 
-- positive: 指定した観測と入力に一致する、仕様上の実行が**一つ以上存在する**ことを要求する
-- negative: 非公開状態や省略した値をどう補っても、その実行が**存在しない**ことを要求する
+- positive: requires that **at least one** specification execution exists that
+  matches the given observations and inputs
+- negative: requires that **no** such execution exists, however private state and
+  omitted values are filled in
 
-initial は frame 0 の観測。init と invariant を frame 0 で課す。
-trace の step k は inputs k を使い、frame k と k+1 を関係づける。
-`observe` は操作後の frame k+1 を制約し、全ての frame に invariant を課す。
-reset 操作は暗黙には挿入しない。初期述語が例の出発点を決める。
+initial is the frame 0 observation; init and invariant are imposed at frame 0.
+Trace step k uses inputs k and relates frames k and k+1. `observe` constrains the
+post-operation frame k+1, and invariant is imposed on every frame. No reset
+operation is inserted implicitly; the initial predicate determines the example's
+starting point.
 
-入力・観測は部分指定できる。省略は0ではなく存在量化される。
-trace の inputs / observe ブロックを省くと空の部分指定になる。
-非公開状態の値を例から直接指定することはできない。
-同じ操作を何回書いても順番通りの別ステップとして保持する。空の trace も許す。
-一例の上限は4096ステップだが、これは時間・メモリの厳密な上限ではない。
+Inputs and observations may be partially specified. Omitted values are
+existentially quantified, not zero. Omitting a trace step's inputs / observe
+block gives an empty partial specification. Private state values cannot be
+specified directly in an example. Writing the same operation several times keeps
+each occurrence as a separate step in order. An empty trace is also allowed.
+An example is limited to 4096 steps, but this is not a strict time or memory
+limit.
 
-各例について単一の SAT 問題を作る。SAT の場合は具体的な全状態・観測・入力を取得し、
-再度 SAT を確認する。UNSAT は全ての隠れた補完を排除したことを意味する。
-UNKNOWN・solver異常・witness再取得の失敗を、例の成功として扱わない。
+Each example produces a single SAT problem. On SAT, the concrete complete states,
+observations and inputs are retrieved and SAT is confirmed again. UNSAT means
+every hidden completion has been excluded. UNKNOWN, solver errors and failed
+witness re-retrieval are never treated as example success.
 
-正例だけでは仕様が弱すぎることを見落とし、反例だけでは全部を拒否する矛盾した仕様を
-見落とす。両方を付け、特に合成後にも要求する振る舞いを置く。
-例が通ったことは、任意長の実行、仕様の完全性、deadlock freedom、liveness の証明ではない。
-指定した有限 prefix が存在しても、それを任意に延長できるとは限らない。
-report の coverage には部品・合成ごとの正例／反例数と不足する極性の警告を記録する。
-負例しかない対象では、それらが通っても許される振る舞いの存在を示したことにはならない。
+Positive examples alone miss an overly weak specification, and negative examples
+alone miss a contradictory specification that rejects everything. Supply both,
+and in particular include behaviors that must still be allowed after composition.
+Passing examples do not prove arbitrary-length executions, specification
+completeness, deadlock freedom or liveness. The existence of a given finite
+prefix does not mean it can be extended arbitrarily.
+The report's coverage records positive/negative example counts per component and
+composition, with warnings for a missing polarity. For a target with only
+negative examples, passing them does not show that any allowed behavior exists.
 
-## 実装への限定された binding
+## Restricted binding to an implementation
 
-任意の composition に、同じ文書の `implementation` を結び付けられる。
-実装は state/reset/next と、操作を選ぶ Boolean 式を持つ。
-全 private state と共有観測に、実装の現在状態だけを使った写像を与える。
+Any composition can be bound to an `implementation` in the same document. The
+implementation has state/reset/next and Boolean expressions that select
+operations. Every private state field and shared observation is given a mapping
+that uses only the implementation's current state.
 
 ```
 implementation {
@@ -154,107 +178,125 @@ implementation {
 }
 ```
 
-共有入力に `input rst: bool;` と `input go: bool;` を宣言する。
-`bind Counter { ... }` は既存componentの状態への写像であり、新しい状態宣言ではない。
-binding内の `observation count = ...;` は共有観測への写像で、
-ルートの `observation count: bv<4>;` はその型の宣言。
-reset は最優先で、抽象初期状態に戻る。
-全 binding field と操作 selector の過不足を検査し、入力依存の abstraction は拒否する。
-証明する内容は次の通り。
+Declare `input rst: bool;` and `input go: bool;` as shared inputs.
+`bind Counter { ... }` is a mapping to an existing component's state, not a new
+state declaration. `observation count = ...;` inside binding is a mapping to a
+shared observation, while the root `observation count: bv<4>;` declares its type.
+Reset has top priority and returns to the abstract initial state.
+Missing or extra binding fields and operation selectors are checked, and
+input-dependent abstractions are rejected. The proved obligations are:
 
-1. reset が合成仕様の init / invariant を確立する
-2. reset 以外で、選択される操作が高々一つである
-3. 選択された操作について、写像後の一歩が全 component の関係と次状態 invariant を満たす
-4. 操作が選択されない一歩では、写像した private state と観測が全て保持される
+1. reset establishes the composed specification's init / invariant
+2. outside reset, at most one operation is selected
+3. for the selected operation, the mapped step satisfies every component's
+   relation and the next-state invariant
+4. on a step that selects no operation, all mapped private state and
+   observations are held
 
-これは与えた状態写像による safety / stuttering refinement。
-到達可能性を絞り込まず、写像後の invariant を満たす全実装状態で検査する。
-関係的仕様の全ての振る舞いを実装できることや、abstraction の全射性は要求しない。
-全 selector が常にfalseで、状態を保持する実装は safety を満たし得る。
-進行・公平性・停止性は別途必要であり、specの正例が通ることも実装の進行保証にはならない。
+This is safety / stuttering refinement under the supplied state mapping.
+Reachability is not narrowed; the check covers every implementation state that
+satisfies the mapped invariant. It does not require that every behavior of the
+relational specification be implementable, or that the abstraction be surjective.
+An implementation whose selectors are always false and that holds its state can
+satisfy safety. Progress, fairness and termination need separate treatment, and
+passing positive spec examples does not guarantee implementation progress either.
 
-## 結果と証跡
+## Results and evidence
 
-主な結果は `spec_examples_passed`、`spec_examples_failed`、`unknown`、`no_examples`。
-binding がある場合は `spec_examples_and_binding_verified`、`implementation_binding_failed`、
-`binding_verified_no_examples` も使う。validation-only は従来通り `validated`。
-report では例の成否と `implementation_binding` の証明結果を分離して確認できる。
+The main results are `spec_examples_passed`, `spec_examples_failed`, `unknown`
+and `no_examples`. With a binding, `spec_examples_and_binding_verified`,
+`implementation_binding_failed` and `binding_verified_no_examples` are also used.
+Validation-only remains `validated` as before. The report keeps example outcomes
+and the `implementation_binding` proof result separately inspectable.
 
-元の `.smt2`、solver の `.out`、完全な witness の context mapping を保存する。
-Rust の検査・変換・カーネルと Z3 を信頼する。今回の変更で処理系全体の健全性を
-形式的に証明したわけではない。
-証明の仮置き・穴・条件付き定理・証明依存DAGはまだ実装していない。
+The original `.smt2`, the solver `.out` and the complete witness context mapping
+are saved. The Rust checks, translation and kernel, and Z3, are trusted. The
+whole toolchain is not formally proved sound.
+Provisional proofs, holes, conditional theorems and a proof dependency DAG are
+not implemented yet.
 
-## 0.8の表記と互換性
+## 0.8 notation and compatibility
 
-旧 `specification "名前" { ... }`、`operations { add {} }`、
-`components { Counter { ... } }`、`compositions { Budgeted { ... } }`、
-部品・合成内の `examples { overspend { ... } }` は互換表記として受理する。
-型宣言の旧 `inputs { ... }` / `observations { ... }` / `state { ... }` と、
-bindingの旧 `states { Counter { ... } }` / `observations { count = ...; }` も使える。
-個別宣言と旧コンテナは同じJSON mapへloweringし、形式をまたぐ重複名も拒否する。
+The old `specification "name" { ... }`, `operations { add {} }`,
+`components { Counter { ... } }`, `compositions { Budgeted { ... } }`, and
+`examples { overspend { ... } }` inside components and compositions are accepted
+as compatibility notation. The old type-declaration forms `inputs { ... }` /
+`observations { ... }` / `state { ... }`, and the old binding forms
+`states { Counter { ... } }` / `observations { count = ...; }`, also work.
+Individual declarations and old containers lower to the same JSON map, and
+duplicate names across forms are rejected.
 
 `input` / `observation` / `operation` / `component` / `composition` / `example` /
-`state` / `bind` 等は文脈で解釈する。新しいグローバル予約語は増やさない。
-`steps { add = ...; }`、実装の `operations { add = ...; }`、
-traceの `inputs { amount = ...; }` / `observe { count = ...; }`、
-`reset` / `next` / `wires` 等の代入ブロックは変更しない。
+`state` / `bind` and similar words are interpreted by context. No new global
+reserved words are added. `steps { add = ...; }`, the implementation's
+`operations { add = ...; }`, the trace's `inputs { amount = ...; }` /
+`observe { count = ...; }`, and assignment blocks such as `reset` / `next` /
+`wires` are unchanged.
 
-DSLでは宣言がない集合の空コンテナを書かなくてよい。
-ルートの入力・観測・操作・部品・合成、component/implementationの状態、
-部品・合成の例、bindingの状態写像・観測写像を省略すると、
-対応するJSON mapに `{}` を補う。JSON入力では必須キーと空objectを明示する。
-これは空集合の表記だけの変更で、意味検査を省略するものではない。
-例えば操作・部品は引き続き一つ以上必要で、合成の `members` は空にできない。
-`init` / `invariant` / `steps`、例の `expect` / `initial` / `trace` 等の
-必須フィールド・ブロックも従来通り必要。
+In the DSL, empty containers for sets with no declarations need not be written.
+Omitting root inputs, observations, operations, components or compositions,
+component/implementation state, component/composition examples, or binding state
+and observation mappings fills the corresponding JSON map with `{}`. JSON input
+must state required keys and empty objects explicitly. This changes only the
+notation for empty sets; it does not skip semantic checks. For example, at least
+one operation and one component are still required, and a composition's
+`members` cannot be empty. Required fields and blocks such as `init` /
+`invariant` / `steps` and an example's `expect` / `initial` / `trace` are still
+required as before.
 
 ```sh
 python scripts/json_to_lyd.py examples/budgeted_counter.json /tmp/budgeted_counter.lyd
 cargo run --locked -- /tmp/budgeted_counter.lyd --emit-json /tmp/budgeted_counter.json
 ```
 
-printerはversion 2 / 3 / 4 JSONを対応する表記へ変換し、式木・trace順序を保持する。
-このページの文書はversion 3のままで、version 4へは自動変換しない。
-移行後もRust側の完全な検査を通す。JSON schema versionと処理系の版番号は別。
+The printer converts version 2 / 3 / 4 JSON to the corresponding notation,
+preserving expression trees and trace order. Documents on this page remain
+version 3 and are not converted to version 4 automatically. Migrated documents
+must still pass the complete Rust checks. The JSON schema version is separate
+from the toolchain version number.
 
-## version-3 JSON の構造
+## Version-3 JSON structure
 
-完全な入力例は [budgeted_counter.json](../examples/budgeted_counter.json)。
-型と式の配列表現は version 2 と共通で、例えば `0u4` は `["bv",4,0]`、
-`s.x == o.count` は `["eq","s.x","o.count"]`。
+A complete input example is [budgeted_counter.json](../examples/budgeted_counter.json).
+The array representation of types and expressions is shared with version 2; for
+example, `0u4` is `["bv",4,0]` and `s.x == o.count` is `["eq","s.x","o.count"]`.
 
-トップレベルの必須フィールド:
+Required top-level fields:
 
 - `version`: 3
 - `kind`: `"specification"`
-- `inputs`, `observations`: 名前→型の object
-- `operations`: 操作名→空 object の object（例: `{"add":{}}`）
-- `components`: 名前→component の object
-- `compositions`: 名前→composition の object（空でもよい）
+- `inputs`, `observations`: object of name → type
+- `operations`: object of operation name → empty object (e.g. `{"add":{}}`)
+- `components`: object of name → component
+- `compositions`: object of name → composition (may be empty)
 
-任意フィールドは `name` と `implementation`。
-component の必須フィールドは `state`、`init`、`invariant`、`steps`、`examples`。
-steps は全操作名→Boolean式、examples は例名→example の object。
-composition は `members`（component/composition名の配列）と `examples` を持つ。
+Optional fields are `name` and `implementation`.
+Required component fields are `state`, `init`, `invariant`, `steps` and `examples`.
+steps maps every operation name → Boolean expression, and examples is an object
+of example name → example. A composition has `members` (an array of
+component/composition names) and `examples`.
 
-example は `expect`、`initial`（観測名→式）、`trace`（ステップの順序付き配列）を持つ。
-旧 `expect` は `"positive"` / `"negative"`、0.9の明示モードは `"exists"` / `"not_exists"` / `"forall"`。
-明示モードでは任意の順序付き `quantifiers` 配列を指定でき、JSON内ではその変数を `q.name` で参照する。
-通常の `.lyd` ソースでは宣言名をそのまま `name` と書く。旧 `q.name` も互換表記として受理する。
-旧モードには `quantifiers` を付けない。各ステップは必ず
-`operation`（操作名）、`inputs`、`observe` を持ち、任意のBoolean `ensure` を追加できる。
-inputs / observe は名前→式のobject。束縛変数がない場合は従来通り閉じた式。
-ensureは操作後の `o.` 観測値と束縛変数だけを参照する。
-JSON側では、部分指定がなくても明示的に `{}` とする。DSLではtrace stepの
-inputs / observeを省いた場合にフロントエンドが `{}` を補う。
-exampleの `initial` と `trace` は空でもブロックを明示する。
+An example has `expect`, `initial` (observation name → expression) and `trace`
+(an ordered array of steps). The old `expect` values are `"positive"` /
+`"negative"`; the explicit modes of 0.9 are `"exists"` / `"not_exists"` /
+`"forall"`. Explicit modes may specify an optional ordered `quantifiers` array,
+whose variables are referenced as `q.name` in JSON. In ordinary `.lyd` source the
+declared name is written as plain `name`; the old `q.name` is also accepted as
+compatibility notation. Old modes take no `quantifiers`. Every step has
+`operation` (the operation name), `inputs` and `observe`, and may add an
+optional Boolean `ensure`. inputs / observe are objects of name → expression.
+Without bound variables they are closed expressions as before. ensure refers
+only to post-operation `o.` observations and bound variables.
+In JSON, write `{}` explicitly even when there is no partial specification. In
+the DSL, the frontend fills in `{}` when a trace step omits inputs / observe.
+An example's `initial` and `trace` blocks are explicit even when empty.
 
-implementation の必須フィールドは `composition`、`reset_input`、`state`、`reset`、
-`next`、`operations`、`binding`。`wires` は任意。
-operations は操作名→Boolean selector式、binding は `states` と `observations` を持つ。
-states は component名→（private field名→状態のみの式）、observations は
-観測名→状態のみの式。全ての対応先と型を検査する。
+Required implementation fields are `composition`, `reset_input`, `state`, `reset`,
+`next`, `operations` and `binding`. `wires` is optional.
+operations maps operation name → Boolean selector expression, and binding has
+`states` and `observations`. states maps component name → (private field name →
+state-only expression), and observations maps observation name → state-only
+expression. Every target and type is checked.
 
 ## Conditional bounded response
 
@@ -456,7 +498,7 @@ mutant and correct source under identical stimuli. An unreachable-only fault
 retains its induction countermodel but has no bounded reset failure and passes
 concrete reset traces. Failure controls also reject internal-state writes,
 malformed/stale witnesses, bad sampling/reset indices, and simulation divergence.
-The mandatory `celox-replay` CI job uploads fresh evidence; `--record` is an
+The `bridge` CI job uploads fresh replay evidence; `--record` is an
 explicit developer action for changing reviewed regressions and is never used
 by CI.
 

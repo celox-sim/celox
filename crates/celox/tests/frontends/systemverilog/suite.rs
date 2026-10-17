@@ -1,9 +1,171 @@
 //! Runs SystemVerilog suite cases on the Celox backends.
 
-use celox::{BigUint, SimBackend, Simulator};
+use celox::{BigUint, RuntimeEvent, SimBackend, Simulation, Simulator};
 use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath};
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
+
+/// A timed case: the design's own processes and clocks run in a
+/// [`Simulation`]. A host write is settled at the current time by the next
+/// run operation. A timed simulation offers no four-state read; the cases
+/// that need it are excluded in `timing.rs`.
+struct TimedBackend<B: SimBackend> {
+    sim: Simulation<B>,
+    four_state: bool,
+    /// Runtime events not yet taken as output.
+    events: Vec<RuntimeEvent>,
+    finished: bool,
+}
+
+impl<B: SimBackend> TimedBackend<B> {
+    fn new(sim: Simulation<B>, four_state: bool) -> Self {
+        Self {
+            sim,
+            four_state,
+            events: Vec::new(),
+            finished: false,
+        }
+    }
+
+    fn signal(&self, path: &SignalPath) -> celox::SignalRef {
+        let instances: Vec<_> = path
+            .instances
+            .iter()
+            .map(|i| (i.name.as_str(), i.index.unwrap_or(0)))
+            .collect();
+        self.sim.child_signal(&instances, &path.name)
+    }
+
+    /// Collect the design's runtime events; a failed assertion fails the
+    /// case, and a `$finish` outside the run operations is an error.
+    fn capture_events(&mut self) -> Result<()> {
+        let events = self.sim.drain_runtime_events();
+        let error = events.iter().find_map(|event| match event {
+            RuntimeEvent::AssertFatal { message } => Some(format!(
+                "fatal assertion: {}",
+                String::from_utf8_lossy(message)
+            )),
+            RuntimeEvent::AssertContinue { message } => Some(format!(
+                "failed assertion: {}",
+                String::from_utf8_lossy(message)
+            )),
+            RuntimeEvent::Missed { count } => Some(format!("{count} runtime events were missed")),
+            _ => None,
+        });
+        self.finished |= self.sim.is_finished()
+            || events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Finish));
+        self.events.extend(events);
+        match error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Capture events after an operation that does not advance time.
+    fn checked(&mut self, operation: &str) -> Result<()> {
+        let finished = self.finished;
+        self.capture_events()?;
+        if !finished && self.finished {
+            return Err(format!("the design finished during {operation}").into());
+        }
+        Ok(())
+    }
+}
+
+fn collect_output(events: Vec<RuntimeEvent>) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    for event in events {
+        match event {
+            RuntimeEvent::Display { message } => {
+                output.extend_from_slice(&message);
+                output.push(b'\n');
+            }
+            RuntimeEvent::Write { message } => output.extend_from_slice(&message),
+            RuntimeEvent::Missed { count } => {
+                return Err(format!("{count} runtime events were missed").into());
+            }
+            // Simulators print severity messages in their own words.
+            _ => {}
+        }
+    }
+    Ok(output)
+}
+
+impl<B: SimBackend> Backend for TimedBackend<B> {
+    fn write(&mut self, path: &SignalPath, payload: BigUint, mask: BigUint) -> Result<()> {
+        let signal = self.signal(path);
+        self.sim.modify(|io| {
+            if mask == BigUint::default() {
+                io.set_wide(signal, payload);
+            } else {
+                io.set_four_state(signal, payload, mask);
+            }
+        })?;
+        self.checked("a write")
+    }
+
+    fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
+        if self.four_state {
+            return Err("a timed simulation has no four-state read".into());
+        }
+        self.checked("a read")?;
+        let signal = self.signal(path);
+        Ok((self.sim.get(signal), BigUint::default()))
+    }
+
+    fn eval_comb(&mut self) -> Result<()> {
+        self.sim.eval_comb()?;
+        self.checked("eval")
+    }
+
+    fn tick(&mut self, _event: &str) -> Result<()> {
+        Err("tick is not available in a timed case; the design drives its clocks".into())
+    }
+
+    fn take_output(&mut self) -> Result<Vec<u8>> {
+        self.checked("output collection")?;
+        collect_output(std::mem::take(&mut self.events))
+    }
+
+    fn run_until(&mut self, time: u64) -> Result<()> {
+        let now = self.sim.time();
+        if time < now {
+            return Err(format!("run_until {time}: the simulation is already at {now}").into());
+        }
+        self.sim.run_until(time)?;
+        self.capture_events()?;
+        if self.finished {
+            return Err(format!(
+                "run_until {time}: the design finished the simulation at {}",
+                self.sim.time()
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn run_to_finish(&mut self) -> Result<()> {
+        if self.finished {
+            return Err("run_to_finish: the design had already finished".into());
+        }
+        while !self.finished {
+            let step = self.sim.step()?;
+            self.capture_events()?;
+            if step.is_none() {
+                break;
+            }
+        }
+        if !self.finished {
+            return Err(
+                "run_to_finish: the simulation ran out of events before a process finished it"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
 
 impl<B: SimBackend> CeloxBackend<B> {
     fn signal(&self, path: &SignalPath) -> celox::SignalRef {
@@ -40,31 +202,31 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     }
 
     fn take_output(&mut self) -> Result<Vec<u8>> {
-        let mut output = Vec::new();
-        for event in self.0.drain_runtime_events() {
-            match event {
-                celox::RuntimeEvent::Display { message } => {
-                    output.extend_from_slice(&message);
-                    output.push(b'\n');
-                }
-                celox::RuntimeEvent::Write { message } => output.extend_from_slice(&message),
-                celox::RuntimeEvent::Missed { count } => {
-                    return Err(format!("{count} runtime events were missed").into());
-                }
-                // Simulators print severity messages in their own words.
-                _ => {}
-            }
-        }
-        Ok(output)
+        collect_output(self.0.drain_runtime_events())
     }
 }
 
 fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
+    celox_test_suite::validate_timed_design(design)?;
     let sources = design
         .sources
         .iter()
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
+    if design.timed {
+        // `Simulation` builds only the default backend.
+        if backend != "native" {
+            return Err(format!("no timed simulation for the {backend} backend").into());
+        }
+        let builder = design.parameters.iter().fold(
+            Simulation::from_sv_sources(sources, &design.top).four_state(design.four_state),
+            |builder, (name, value)| builder.param(name, *value),
+        );
+        return Ok(Box::new(TimedBackend::new(
+            builder.build()?,
+            design.four_state,
+        )));
+    }
     let builder = design.parameters.iter().fold(
         Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),
         |builder, (name, value)| builder.param(name, *value),

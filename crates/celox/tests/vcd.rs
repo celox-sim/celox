@@ -558,6 +558,12 @@ mod activity {
             if step == 2 {
                 let rst = sim.signal("rst");
                 sim.modify(|io| io.set(rst, 1u8)).unwrap();
+                // The next step settles the write at the current time, and
+                // the waveform records it there.
+                let (ptr, size) = sim.memory_as_ptr();
+                reference
+                    .dump(sim.time(), unsafe { std::slice::from_raw_parts(ptr, size) })
+                    .unwrap();
             }
             let time = sim.step().unwrap().unwrap();
             sim.dump(time);

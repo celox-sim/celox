@@ -6,6 +6,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { changedFilesBetween } from "./ci-rust-scope.mjs";
 import {
   affectsHeliodorArm64,
   classifyFiles,
@@ -33,7 +34,7 @@ const all = {
 
 test("documentation changes only build documentation", () => {
   assert.deepEqual(
-    classifyFiles(["docs/index.md", "adr/README.md", "CONTRIBUTING.md"]),
+    classifyFiles(["docs/index.md", "README.md", "CONTRIBUTING.md"]),
     {
       ...none,
       docs: true,
@@ -161,7 +162,7 @@ const MASTER_GROUP = {
 
 const classifier = fileURLToPath(new URL("./ci-changes.mjs", import.meta.url));
 
-// The classifier diffs base..head in the repository at cwd.
+// The classifier diffs base...head in the repository at cwd.
 function runClassifier(
   base,
   head,
@@ -412,10 +413,15 @@ test("CI classifier changes exercise every path", () => {
 });
 
 test("repository script changes only run script tests", () => {
-  assert.deepEqual(classifyFiles(["scripts/check-pr-title.mjs"]), {
-    ...none,
-    scripts: true,
-  });
+  for (const path of [
+    "scripts/check-pr-title.mjs",
+    "scripts/tests/run-heliodor-bench-gate.sh",
+    ".updatecli/scripts/latest_compatible_python.py",
+    ".github/workflows/heliodor-bench.yml",
+    ".github/workflows/codeql.yml",
+  ]) {
+    assert.deepEqual(classifyFiles([path]), { ...none, scripts: true }, path);
+  }
 });
 
 test("unknown paths fail open", () => {
@@ -486,4 +492,45 @@ test("queue drafts on master run release gates even with an unknown diff", () =>
 test("version-only Release Please PRs defer product tests to queue validation", () => {
   assert.deepEqual(classifyFiles(releasePullRequestFiles, { releasePlease: true }), none);
   assert.equal(classifyFiles([...releasePullRequestFiles, "crates/celox/src/lib.rs"], { releasePlease: true }).rust, true);
+});
+
+test("queue configuration runs script checks without rebuilding the product", () => {
+  assert.deepEqual(classifyFiles([".mergify.yml"]), { ...none, scripts: true });
+  assert.deepEqual(classifyFiles([".mergify.yml", "CONTRIBUTING.md"]), {
+    ...none,
+    scripts: true,
+    docs: true,
+  });
+  assert.deepEqual(classifyFiles([".mergify.yml", "Cargo.lock"]), {
+    ...all,
+    docs: false,
+  });
+  assert.deepEqual(classifyFiles([".mergify.yml", "unknown/new-source"]), all);
+});
+
+test("PR branches behind their base ignore unmerged base changes", (t) => {
+  const repository = mkdtempSync(join(tmpdir(), "celox-ci-changes-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  const commit = (path) => {
+    writeFileSync(join(repository, path), `${path}\n`);
+    git("add", path);
+    git("commit", "--quiet", "-m", path);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "--quiet");
+  git("config", "user.name", "test");
+  git("config", "user.email", "test@example.com");
+  git("config", "commit.gpgsign", "false");
+  const fork = commit("README.md");
+  git("checkout", "--quiet", "-b", "pr");
+  const head = commit("CONTRIBUTING.md");
+  git("checkout", "--quiet", fork);
+  const base = commit("unknown-base-change.xyz");
+  assert.deepEqual(changedFilesBetween(base, head, repository), ["CONTRIBUTING.md"]);
+  assert.deepEqual(
+    runClassifier(base, head, { GITHUB_EVENT_NAME: "pull_request" }, repository),
+    { ...none, docs: true, heliodor_arm64: false, release: false },
+  );
 });

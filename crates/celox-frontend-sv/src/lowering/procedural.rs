@@ -143,17 +143,203 @@ impl<'a> ProcModule<'a> {
         }
     }
 
+    /// Whether a process calls a random number function, including through
+    /// user subroutines and omitted argument defaults.
+    pub fn uses_random(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    if function.is_effectful() {
+                        return true;
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Syntactic implicit sensitivity, including branches that constant folding
+    /// will remove. `always @*` sees arguments; `always_comb` also sees bodies.
+    pub fn implicit_reads(
+        &self,
+        body: &[sv::ir::Stmt],
+        include_functions: bool,
+    ) -> HashSet<VarAtomBase<SourceVarId>> {
+        fn expression(
+            m: &ProcModule<'_>,
+            expr: &sv::ir::Expr,
+            include_functions: bool,
+            visited: &mut HashSet<String>,
+            reads: &mut HashSet<VarAtomBase<SourceVarId>>,
+        ) {
+            let mut exprs = Vec::new();
+            use sv::ir::Expr;
+            match expr {
+                Expr::Call { callee, args, .. } => {
+                    exprs.extend(args.iter().flatten().cloned());
+                    if let sv::ir::Callee::Subroutine(name) = callee
+                        && let Some(subroutine) = m.subroutine(name)
+                    {
+                        for (i, param) in subroutine.params.iter().enumerate() {
+                            if args.get(i).and_then(Option::as_ref).is_none() {
+                                exprs.extend(param.default.clone());
+                            }
+                        }
+                        if include_functions && visited.insert(name.clone()) {
+                            statements(m, &subroutine.body, true, visited, reads);
+                            statements(m, &subroutine.sensitivity_body, true, visited, reads);
+                        }
+                    }
+                }
+                Expr::Select {
+                    expr: base,
+                    msb,
+                    lsb,
+                    ..
+                } => {
+                    let selected = sv::typecheck::eval_const_expr_with_types(
+                        msb,
+                        m.constants,
+                        m.parameter_types,
+                    )
+                    .zip(sv::typecheck::eval_const_expr_with_types(
+                        lsb,
+                        m.constants,
+                        m.parameter_types,
+                    ))
+                    .and_then(|(msb, lsb)| {
+                        packed_expr_select_offsets(base, msb, lsb, m.variables, m.name_to_id)
+                    });
+                    if let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
+                        && let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id))
+                    {
+                        reads.insert(VarAtomBase::new(id, lsb.min(msb), lsb.max(msb)));
+                    } else {
+                        // A dynamic select's longest static prefix is its base.
+                        exprs.push((**base).clone());
+                    }
+                    exprs.extend(expr_from_const_expr(msb));
+                    exprs.extend(expr_from_const_expr(lsb));
+                }
+                Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => {
+                    exprs.push((**expr).clone())
+                }
+                Expr::Binary { left, right, .. } => {
+                    exprs.push((**left).clone());
+                    exprs.push((**right).clone());
+                }
+                Expr::Mux {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    exprs.extend([
+                        (**condition).clone(),
+                        (**then_expr).clone(),
+                        (**else_expr).clone(),
+                    ]);
+                }
+                Expr::Concat(parts) => exprs.extend(parts.iter().cloned()),
+                Expr::RepeatConcat { count, parts } => {
+                    exprs.extend(expr_from_const_expr(count));
+                    exprs.extend(parts.iter().cloned());
+                }
+                Expr::Inside { expr, items } => {
+                    exprs.push((**expr).clone());
+                    for item in items {
+                        exprs.extend(item.exprs().into_iter().cloned());
+                    }
+                }
+                Expr::Ident(name) => {
+                    if let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id)) {
+                        reads.insert(VarAtomBase::new(id, 0, m.var(id).width - 1));
+                    }
+                }
+                Expr::Literal(_) => {}
+            }
+            for expr in exprs {
+                expression(m, &expr, include_functions, visited, reads);
+            }
+        }
+        fn statements(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            include_functions: bool,
+            visited: &mut HashSet<String>,
+            reads: &mut HashSet<VarAtomBase<SourceVarId>>,
+        ) {
+            let mut exprs = Vec::new();
+            let mut positions = Vec::new();
+            for stmt in body {
+                let _ = stmt.clone().map(
+                    &mut |expr| {
+                        exprs.push(expr);
+                    },
+                    &mut |lhs| {
+                        if let sv::ir::LValue::Select { msb, lsb, .. } = lhs {
+                            positions.extend(expr_from_const_expr(&msb));
+                            positions.extend(expr_from_const_expr(&lsb));
+                        }
+                    },
+                );
+                // A call statement carries its callee outside the expression visitor.
+                stmt.walk(&mut |stmt| {
+                    if let sv::ir::Stmt::Call {
+                        name,
+                        args,
+                        arg_order,
+                    } = stmt
+                    {
+                        exprs.push(sv::ir::Expr::Call {
+                            callee: sv::ir::Callee::Subroutine(name.clone()),
+                            args: args.clone(),
+                            arg_order: arg_order.clone(),
+                        });
+                    }
+                });
+            }
+            for expr in exprs.into_iter().chain(positions) {
+                expression(m, &expr, include_functions, visited, reads);
+            }
+        }
+        let mut reads = HashSet::default();
+        statements(
+            self,
+            body,
+            include_functions,
+            &mut HashSet::default(),
+            &mut reads,
+        );
+        reads
+    }
+
     /// The words `$readmemh`/`$readmemb` (IEEE 1800-2023 21.4) write, with
     /// the values of its optional start and finish addresses: the file is
     /// read when the design is compiled.
     pub fn readmem(
         &self,
-        name: &str,
+        format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         start: Option<i128>,
         finish: Option<i128>,
     ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
-        let radix = if name == "$readmemb" { 2 } else { 16 };
+        let name = sv::ir::SystemTask::Readmem(format).name();
+        let radix = format.base();
         let Some(sv::ir::SystemTaskArg::Str(filename)) = args.first() else {
             return Err(unsupported(format!(
                 "`{name}` with a file name that is not a string literal"
@@ -337,21 +523,63 @@ impl<'a> ProcModule<'a> {
         (id, name)
     }
 
+    /// A hidden one-bit copy of the event signal `signal`, sensed as `kind`.
+    /// It has no name a SystemVerilog identifier can denote, and is not
+    /// addressable by path.
+    pub fn event_copy(&mut self, signal: SourceVarId, kind: DomainKind) -> SourceVarId {
+        let source = &self.variables[&signal];
+        let suffix = match kind {
+            DomainKind::ClockPosedge => "posedge",
+            DomainKind::ClockNegedge => "negedge",
+            DomainKind::ResetAsyncHigh => "reset_high",
+            DomainKind::ResetAsyncLow => "reset_low",
+            DomainKind::Other => "event",
+        };
+        let mut path = source.path.clone();
+        if let Some(last) = path.last_mut() {
+            last.push('@');
+            last.push_str(suffix);
+        }
+        let variable = SvVariable {
+            path,
+            width: 1,
+            signed: false,
+            is_4state: source.is_4state,
+            packed_ranges: vec![(0, 0)],
+            array_dims: Vec::new(),
+            domain_kind: kind,
+            kind: VariableKind::Variable,
+            type_kind: source.type_kind,
+            source: None,
+            hidden: true,
+        };
+        let id = next_var_id(&mut self.next_id);
+        self.variables.insert(id, variable);
+        id
+    }
+
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
     }
 
-    /// Whether an expression calls a user subroutine or a DPI-C import.
+    /// Whether a call of `callee` has effects: a user subroutine or a DPI
+    /// import, or an effectful system function such as `$urandom`.
+    pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
+        match callee {
+            sv::ir::Callee::System(function) => function.is_effectful(),
+            sv::ir::Callee::Subroutine(name) => {
+                self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
+            }
+        }
+    }
+
+    /// Whether an expression contains a call whose evaluation has effects.
     pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
-        lvalue_calls(lvalue, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        lvalue_calls(lvalue, &|callee| self.is_callee(callee))
     }
 
     pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
-        const_calls(expr, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        const_calls(expr, &|callee| self.is_callee(callee))
     }
 
     /// The largest subexpressions of `expr` that call a subroutine and also
@@ -362,19 +590,12 @@ impl<'a> ProcModule<'a> {
         other: &sv::ir::ConstExpr,
     ) -> Vec<&'e sv::ir::ConstExpr> {
         let mut shared = Vec::new();
-        shared_calls(
-            expr,
-            other,
-            &|name| self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name),
-            &mut shared,
-        );
+        shared_calls(expr, other, &|callee| self.is_callee(callee), &mut shared);
         shared
     }
 
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
-        expr_calls(expr, &|name| {
-            self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
-        })
+        expr_calls(expr, &|callee| self.is_callee(callee))
     }
 
     /// The local index of the extern function `import` links to. Imports
@@ -452,13 +673,19 @@ impl<'a> ProcModule<'a> {
         use sv::ir::Expr;
         let go = |expr: &Expr| self.typed_calls(expr);
         match expr {
-            Expr::Call { name, .. } if self.dpi_imports.contains_key(name) => {
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } if self.dpi_imports.contains_key(name) => {
                 let (width, signed) = self.dpi_imports[name]
                     .return_type()
                     .map_or((1, false), |r#type| (r#type.width(), r#type.is_signed()));
                 Expr::Literal(typed_literal(&BigUint::zero(), width, signed))
             }
-            Expr::Call { name, .. } if self.subroutines.contains_key(name) => {
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } if self.subroutines.contains_key(name) => {
                 let (width, signed) = self
                     .subroutines
                     .get(name)
@@ -512,12 +739,12 @@ impl<'a> ProcModule<'a> {
                 else_expr: Box::new(go(else_expr)),
             },
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: name.clone(),
+                callee: callee.clone(),
                 args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
             },
             Expr::Inside { expr, items } => Expr::Inside {
@@ -540,13 +767,12 @@ impl<'a> ProcModule<'a> {
     }
 }
 
-/// How a system task statement reports.
 /// The variable `$readmemh`/`$readmemb` writes, if it is a task of these.
-pub(super) fn readmem_destination<'e>(
-    name: &str,
-    args: &'e [sv::ir::SystemTaskArg<sv::ir::Expr>],
-) -> Option<&'e str> {
-    if name != "$readmemh" && name != "$readmemb" {
+pub(super) fn readmem_destination(
+    task: sv::ir::SystemTask,
+    args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+) -> Option<&str> {
+    if !matches!(task, sv::ir::SystemTask::Readmem(_)) {
         return None;
     }
     match args.get(1)? {
@@ -559,6 +785,7 @@ pub(super) fn readmem_destination<'e>(
     }
 }
 
+/// How a system task statement reports.
 pub(super) enum SystemTaskKind {
     /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
     /// variants (`d` otherwise).
@@ -583,28 +810,23 @@ impl SystemTaskKind {
     }
 }
 
-pub(super) fn system_task_kind(name: &str) -> Option<SystemTaskKind> {
-    Some(match name {
-        "$display" | "$displayb" | "$displayh" | "$displayo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Display, print_radix(name))
+/// How a task reports, for the tasks that report: `$readmemh`/`$readmemb`
+/// load memory instead, and the analyzer rewrites `$printtimescale` into a
+/// `$display`.
+pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKind> {
+    use sv::ir::SystemTask;
+    Some(match task {
+        SystemTask::Display(radix) => {
+            SystemTaskKind::Print(RuntimeEventKind::Display, radix.letter())
         }
-        "$write" | "$writeb" | "$writeh" | "$writeo" => {
-            SystemTaskKind::Print(RuntimeEventKind::Write, print_radix(name))
-        }
-        "$finish" => SystemTaskKind::Finish,
-        "$error" | "$warning" | "$info" => SystemTaskKind::Message,
-        "$fatal" => SystemTaskKind::Fatal,
-        "$assert" => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
-        "$assert_continue" => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
-        _ => return None,
+        SystemTask::Write(radix) => SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter()),
+        SystemTask::Finish => SystemTaskKind::Finish,
+        SystemTask::Severity(_) => SystemTaskKind::Message,
+        SystemTask::Fatal => SystemTaskKind::Fatal,
+        SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
+        SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
+        SystemTask::Readmem(_) | SystemTask::Printtimescale => return None,
     })
-}
-
-fn print_radix(name: &str) -> char {
-    match name.as_bytes().last() {
-        Some(radix @ (b'b' | b'o' | b'h')) => char::from(*radix),
-        _ => 'd',
-    }
 }
 
 /// How many arguments the conversions of `template` consume, as the runtime
@@ -1620,7 +1842,10 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
 
 /// Whether a constant-expression operand, such as a run-time select index,
 /// calls a subroutine.
-pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> bool) -> bool {
+pub(super) fn const_calls(
+    expr: &sv::ir::ConstExpr,
+    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+) -> bool {
     use sv::ir::ConstExpr;
     match expr {
         ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
@@ -1632,8 +1857,8 @@ pub(super) fn const_calls(expr: &sv::ir::ConstExpr, is_callee: &dyn Fn(&str) -> 
         ConstExpr::Select { expr, bit } => {
             const_calls(expr, is_callee) || const_calls(bit, is_callee)
         }
-        ConstExpr::Function { name, args, .. } => {
-            is_callee(name) || args.iter().any(|arg| const_calls(arg, is_callee))
+        ConstExpr::Function { callee, args, .. } => {
+            is_callee(callee) || args.iter().any(|arg| const_calls(arg, is_callee))
         }
         ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
             const_calls(expr, is_callee)
@@ -1689,7 +1914,7 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
 fn shared_calls<'e>(
     expr: &'e sv::ir::ConstExpr,
     other: &sv::ir::ConstExpr,
-    is_callee: &dyn Fn(&str) -> bool,
+    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
     shared: &mut Vec<&'e sv::ir::ConstExpr>,
 ) {
     use sv::ir::ConstExpr;
@@ -1734,7 +1959,10 @@ fn shared_calls<'e>(
 }
 
 /// Whether the select positions of an assignment target call a subroutine.
-pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> bool) -> bool {
+pub(super) fn lvalue_calls(
+    lvalue: &sv::ir::LValue,
+    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+) -> bool {
     match lvalue {
         sv::ir::LValue::Ident(_) => false,
         sv::ir::LValue::Select { msb, lsb, .. } => {
@@ -1744,7 +1972,7 @@ pub(super) fn lvalue_calls(lvalue: &sv::ir::LValue, is_callee: &dyn Fn(&str) -> 
 }
 
 /// Whether an expression calls a user subroutine.
-pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) -> bool {
+pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&sv::ir::Callee) -> bool) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
         sv::ir::Expr::Select { expr, msb, lsb, .. } => {
@@ -1770,8 +1998,8 @@ pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&str) -> bool) 
                 || expr_calls(then_expr, is_callee)
                 || expr_calls(else_expr, is_callee)
         }
-        sv::ir::Expr::Call { name, args, .. } => {
-            is_callee(name) || args.iter().flatten().any(|arg| expr_calls(arg, is_callee))
+        sv::ir::Expr::Call { callee, args, .. } => {
+            is_callee(callee) || args.iter().flatten().any(|arg| expr_calls(arg, is_callee))
         }
         sv::ir::Expr::Inside { expr, items } => {
             expr_calls(expr, is_callee)
@@ -1808,6 +2036,20 @@ pub(super) fn written_names(stmts: &[sv::ir::Stmt], names: &mut HashSet<String>)
 }
 
 /// The lvalue an output argument writes back to.
+/// The variables a call of `function` writes through its arguments, such as
+/// the seed of `$random(seed)`.
+pub(super) fn written_system_arguments(
+    function: sv::ir::SystemFunction,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    args.iter()
+        .enumerate()
+        .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
 pub(super) fn lvalue_from_expr(expr: &sv::ir::Expr) -> Option<Vec<sv::ir::LValue>> {
     match expr {
         sv::ir::Expr::Ident(name) => Some(vec![sv::ir::LValue::Ident(name.clone())]),
@@ -1860,15 +2102,14 @@ pub(super) fn stmt_may_jump(stmt: &sv::ir::Stmt, in_loop: bool) -> bool {
     }
 }
 
-/// The user subroutine calls an expression makes, outermost first, with their
-/// arguments.
+/// The calls an expression makes, outermost first, with their arguments.
 pub(super) fn collect_calls(
     expr: &sv::ir::Expr,
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+    calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
 ) {
     match expr {
-        sv::ir::Expr::Call { name, args, .. } => {
-            calls.push((name.clone(), args.clone()));
+        sv::ir::Expr::Call { callee, args, .. } => {
+            calls.push((callee.clone(), args.clone()));
             for arg in args.iter().flatten() {
                 collect_calls(arg, calls);
             }
@@ -1915,13 +2156,13 @@ pub(super) fn collect_calls(
 /// position.
 fn collect_const_calls(
     expr: &sv::ir::ConstExpr,
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+    calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
 ) {
     use sv::ir::ConstExpr;
     match expr {
-        ConstExpr::Function { name, args, .. } => {
+        ConstExpr::Function { callee, args, .. } => {
             calls.push((
-                name.clone(),
+                callee.clone(),
                 args.iter().map(expr_from_const_expr).collect(),
             ));
             args.iter().for_each(|arg| collect_const_calls(arg, calls));
@@ -1960,7 +2201,7 @@ fn collect_const_calls(
 /// The calls in the select positions of an assignment target.
 fn lvalue_position_calls(
     lvalue: &sv::ir::LValue,
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+    calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
 ) {
     if let sv::ir::LValue::Select { msb, lsb, .. } = lvalue {
         collect_const_calls(msb, calls);
@@ -1970,12 +2211,12 @@ fn lvalue_position_calls(
 
 pub(super) fn stmt_calls(
     stmt: &sv::ir::Stmt,
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+    calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
 ) {
     let mut exprs: Vec<&sv::ir::Expr> = Vec::new();
     match stmt {
         sv::ir::Stmt::Call { name, args, .. } => {
-            calls.push((name.clone(), args.clone()));
+            calls.push((sv::ir::Callee::Subroutine(name.clone()), args.clone()));
             exprs.extend(args.iter().flatten());
         }
         sv::ir::Stmt::Assign { lhs, rhs, .. } => {
@@ -2036,7 +2277,7 @@ pub(super) fn stmt_calls(
 pub(super) fn default_calls(
     subroutine: &sv::ir::Subroutine,
     args: &[Option<sv::ir::Expr>],
-    calls: &mut Vec<(String, Vec<Option<sv::ir::Expr>>)>,
+    calls: &mut Vec<(sv::ir::Callee, Vec<Option<sv::ir::Expr>>)>,
 ) {
     for (position, param) in subroutine.params.iter().enumerate() {
         if matches!(args.get(position), None | Some(None))

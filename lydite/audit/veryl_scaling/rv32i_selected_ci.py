@@ -27,7 +27,7 @@ def capture_provenance(out, checker):
     root = selected.ROOT
     scope = ['../Cargo.toml', '../Cargo.lock', '../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify',
              'audit/veryl_scaling', 'audit/lemma_candidates',
-             'conformance/veryl-symbolic', '../.github/workflows/lydite.yml',
+             'conformance/veryl-symbolic', '../.github/workflows/lydite-checks.yml',
              'examples/build_pipeline.py', 'examples/build_branch_pipeline.py',
              'audit/interpreter.py']
     files = set()

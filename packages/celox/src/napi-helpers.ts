@@ -45,6 +45,8 @@ export interface RawNapiSimulationHandle {
 	addClock(eventId: number, period: number, initialDelay: number): void;
 	schedule(eventId: number, time: number, value: number): void;
 	runUntil(endTime: number): void;
+	runUntilBounded?(endTime: number, maxSteps: number): boolean;
+	noteHostWrites?(): void;
 	step(): number | null;
 	time(): number;
 	nextEventTime(): number | null;
@@ -859,6 +861,15 @@ export function wrapDirectSimulationHandle(
 		},
 		runUntil(endTime: number): void {
 			raw.runUntil(endTime);
+		},
+		runUntilBounded(endTime: number, maxSteps: number): boolean {
+			if (!raw.runUntilBounded) {
+				throw new Error("This simulation does not support bounded runs");
+			}
+			return raw.runUntilBounded(endTime, maxSteps);
+		},
+		noteHostWrites(): void {
+			raw.noteHostWrites?.();
 		},
 		step(): number | null {
 			return raw.step();

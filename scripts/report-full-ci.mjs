@@ -149,6 +149,7 @@ if (
       branch: process.env.BRANCH,
       sha: process.env.SHA,
       runUrl: process.env.RUN_URL,
+      name: process.env.REPORT_NAME || undefined,
     });
   } catch (error) {
     console.error(error.message);

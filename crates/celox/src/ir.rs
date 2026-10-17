@@ -765,6 +765,8 @@ fn collect_comb_writes(program: &mut OptimizedSir) {
             }
         }
     }
+    let persistent = &program.runtime.runtime_schema.persistent_comb_state;
+    comb_writes.retain(|address| !persistent.contains(address));
     program.runtime.runtime_schema.comb_writes = comb_writes;
 }
 

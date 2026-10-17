@@ -55,6 +55,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    pub(super) sensitivity_body: Vec<Stmt>,
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
@@ -113,6 +114,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let automatic = state.automatic;
         Self {
             automatic,
+            sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
             scopes: vec![Scope {
@@ -752,42 +754,41 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
                     .ok_or_else(|| unsupported("system task or function name"))?;
-                let tf = system_functions::check_call(
+                let task = match system_functions::check_call(
                     name,
                     args.as_deref(),
                     system_functions::CallSite::Statement(self.body),
-                )?;
-                if name == "$printtimescale" {
-                    return Ok(vec![Stmt::SystemTask {
-                        name: "$display".into(),
-                        args: vec![SystemTaskArg::Str(timescales::print_message(
-                            system_call,
-                            self.tree,
-                            system_functions::CallSite::Statement(self.body),
-                        )?)],
-                    }]);
-                }
-                if tf.expression {
-                    // A system function called as a statement is converted
-                    // and checked like the same call in an expression, then
-                    // its value is discarded. `$bits` and `$size` become
-                    // constants and do not evaluate their operands
-                    // (IEEE 1800-2023 20.6.2).
-                    let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
-                    self.rename_expr(&mut value);
-                    return Ok(vec![Stmt::Eval(value)]);
-                }
-                let call = system_call;
-                let (name, args) = match &**call {
-                    sv_parser::SystemTfCall::ArgOptionl(call) => (
-                        self.tree.get_str(&call.nodes.0.nodes.0),
-                        call.nodes
-                            .1
-                            .as_ref()
-                            .map(|paren| self.system_task_arguments(&paren.nodes.1))
-                            .transpose()?
-                            .unwrap_or_default(),
-                    ),
+                )? {
+                    system_functions::SystemCall::Function(_) => {
+                        // A system function called as a statement is
+                        // converted and checked like the same call in an
+                        // expression, then its value is discarded. `$bits`
+                        // and `$size` become constants and do not evaluate
+                        // their operands (IEEE 1800-2023 20.6.2).
+                        let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
+                        self.rename_expr(&mut value);
+                        return Ok(vec![Stmt::Eval(value)]);
+                    }
+                    system_functions::SystemCall::Task(SystemTask::Printtimescale) => {
+                        return Ok(vec![Stmt::SystemTask {
+                            task: SystemTask::Display(system_functions::Radix::Decimal),
+                            args: vec![SystemTaskArg::Str(timescales::print_message(
+                                system_call,
+                                self.tree,
+                                system_functions::CallSite::Statement(self.body),
+                            )?)],
+                        }]);
+                    }
+                    system_functions::SystemCall::Task(task) => task,
+                };
+                let args = match &**system_call {
+                    sv_parser::SystemTfCall::ArgOptionl(call) => call
+                        .nodes
+                        .1
+                        .as_ref()
+                        .map(|paren| self.system_task_arguments(&paren.nodes.1))
+                        .transpose()?
+                        .unwrap_or_default(),
                     sv_parser::SystemTfCall::ArgExpression(call) => {
                         let mut args = Vec::new();
                         for arg in call.nodes.1.nodes.1.0.contents() {
@@ -796,16 +797,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         if args.len() == 1 && args[0] == SystemTaskArg::Empty {
                             args.clear();
                         }
-                        (self.tree.get_str(&call.nodes.0.nodes.0), args)
+                        args
                     }
                     sv_parser::SystemTfCall::ArgDataType(_) => {
                         return Err(unsupported("system task with a data type argument"));
                     }
                 };
-                let name = name.ok_or_else(|| unsupported("system task"))?.to_string();
                 // Keep Veryl's assertion calls as calls: their message arguments
                 // execute even on success, unlike an SV assertion's fail action.
-                Ok(vec![Stmt::SystemTask { name, args }])
+                Ok(vec![Stmt::SystemTask { task, args }])
             }
             _ => Err(unsupported("method or randomize call")),
         }
@@ -942,8 +942,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
             };
             if let Some(value) = constant {
+                // Implicit sensitivity is syntactic even for unreachable
+                // branches. Preserve reads separately from executable writes.
+                self.sensitivity_body.push(Stmt::Eval(condition.clone()));
                 if value != 0 {
+                    self.sensitivity_body.extend(else_body);
                     else_body = then_body;
+                } else {
+                    self.sensitivity_body.extend(then_body);
                 }
                 continue;
             }
@@ -1312,7 +1318,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         let fail = fail.unwrap_or_else(|| {
             vec![Stmt::SystemTask {
-                name: "$error".to_string(),
+                task: SystemTask::Severity(system_functions::Severity::Error),
                 args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
             }]
         });
@@ -1884,8 +1890,13 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     params: lowered_params,
                     return_var,
                     body,
+                    sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
                 };
-                for stmt in &mut subroutine.body {
+                for stmt in subroutine
+                    .body
+                    .iter_mut()
+                    .chain(&mut subroutine.sensitivity_body)
+                {
                     qualify_stmt(item, stmt);
                     substitute_stmt_constants(stmt, &declaration_env, literals);
                 }
@@ -1985,7 +1996,7 @@ pub(super) fn initial_processes_from_module_node(
     let mut processes = Vec::new();
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
-    for item in &active {
+    for (creation_order, item) in active.iter().enumerate() {
         if item.is_parameter_declaration() {
             continue;
         }
@@ -2031,9 +2042,11 @@ pub(super) fn initial_processes_from_module_node(
             }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
+                    creation_order,
                     condition: None,
                     body,
                     initializer: true,
+                    synthetic: false,
                 });
             }
             continue;
@@ -2059,9 +2072,11 @@ pub(super) fn initial_processes_from_module_node(
             substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
+            creation_order,
             condition: None,
             body,
             initializer: false,
+            synthetic: false,
         });
     }
     initializers.extend(processes);

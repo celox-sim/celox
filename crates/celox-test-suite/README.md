@@ -90,6 +90,17 @@ behavioral model and verifies that incorrect results are rejected.
   changes. `read` observes settled values, including after a direct write.
   `tick` executes the named event once and settles its consequences. Event names
   can refer to clocks or asynchronous resets; use the declaration's polarity.
+- A design with `Design::timed` is driven by `run_until` and `run_to_finish`
+  instead of `tick`: the simulator runs the design's own processes, delays
+  and clocks. `run_until` advances to the given time in the design's time
+  units and fails when the design has finished by then; `run_to_finish` rejects
+  an already-finished design, runs until a process calls `$finish`, and fails
+  when the events run out first. A
+  `write` in a timed case takes effect at the current time, and `eval_comb`
+  also resumes the processes it woke, as a simulator's settle step does. A
+  time later than `RUN_UNTIL_LIMIT` (`i64::MAX / 1000`) is out of range in
+  every adapter. The optional methods' defaults return an
+  unsupported-operation error.
 - Start each design with fresh storage: zero for two-state signals and X for
   four-state signals. Initial combinational outputs must be readable before an
   input is written. Generic clock/reset types use Veryl's defaults (positive
@@ -236,6 +247,45 @@ statements with signal names substituted, so that every signal reference stays
 static). Script values are integers of unbounded width, so an expectation never
 depends on the simulator's width or X rules; arithmetic on unknown bits is an
 error.
+
+A case whose design has processes with delays or event controls, or a clock
+it generates itself, advances time with `run_until` and `run_to_finish` and
+checks the design's output with `expect_output`. Design delays count time
+units with the injected 1 ns / 1 ps scale. Explicit `timescale`, `timeunit`
+and `timeprecision` declarations, and `resetall`, are rejected consistently by
+the Celox and external adapters, with each simulator's predefined macros
+applied. A timed design has no `final` procedures: they would run in an
+arbitrary order relative to the checks after `run_to_finish`. `tick` cannot be
+mixed with timed operations.
+
+A timed script begins with `run_until` or `run_to_finish`; the parser rejects
+any other first statement. Time zero starts the design's `initial` and
+`always` processes, `always_ff` listeners and variable initializers in an order
+the standard leaves open relative to the testbench, so a timed case never
+depends on host inputs written before them: every input keeps its fresh value
+(zero, or X with four-state) until time zero has been drained. Drive stimulus
+after the first `run_until`, or generate it in the design. For the same
+reason the design does not call `$finish` at time zero, and the target of the
+first `run_until` does not read the design.
+
+Within a time slot the standard orders regions, not processes (IEEE 1800-2023
+4.5): a process woken by `@(posedge clk)` runs in the active region of that
+edge, before the edge's nonblocking assignments publish, so it reads flip-flop
+outputs from before the edge. Its blocking writes, however, race with the
+flip-flops that the same edge triggers. A shared case must not depend on that
+race: a process that drives a flip-flop input at the edge uses a nonblocking
+assignment or a delay, and a check of the race's outcome belongs to no
+shared case.
+
+After that, reads, output collection and `eval` settle processes due at the
+current timestamp without advancing time. External scripted adapters use an
+Icarus read/write synchronization callback or a Verilator clocking event
+sampled in the observed region; they compile the design sources unchanged.
+`run_until` drains its target timestamp before subsequent writes. Only checks
+may follow `run_to_finish`; they run in a `final` block that sees the script's
+top-level bindings. They run only when the script reached the operation and
+the design called `$finish`; a design that idles or is still running at
+`RUN_UNTIL_LIMIT` fails the case.
 
 For an invalid design, write `(expect reject)` and no statements.
 `TestCase::expectation` lets consumers select these separately. For additional

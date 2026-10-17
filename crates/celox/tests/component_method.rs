@@ -1522,8 +1522,10 @@ fn component_on_hierarchical_derived_clock_fires() {
             initial {
                 rst.assert();
                 clk.next(10);
-                $assert(cnt == 5, "divided clock ticked five times");
-                $assert(q == 4, "component mirrors pre-edge divided state");
+                // `clk & toggle` rises once per edge: at the edge when
+                // `toggle` is high, after the commit when the edge raises it.
+                $assert(cnt == 10, "divided clock ticked on every edge: %d", cnt);
+                $assert(q == 9, "component mirrors pre-edge divided state: %d", q);
                 $finish();
             }
         }
@@ -1539,7 +1541,7 @@ fn component_on_hierarchical_derived_clock_fires() {
 }
 
 #[test]
-fn timed_simulation_ff_derived_clock_fires_five_times() {
+fn timed_simulation_ff_derived_clock_fires_on_every_edge() {
     let code = r#"
         module DivDut (
             clk: input clock,
@@ -1576,7 +1578,10 @@ fn timed_simulation_ff_derived_clock_fires_five_times() {
         sim.schedule("clk", 30 + cycle * 20, 0).unwrap();
         sim.step().unwrap();
     }
-    assert_eq!(sim.get(cnt), 5u8.into());
+    // `clk & toggle` rises at the edges that find `toggle` high, and, while
+    // `clk` is high, when an edge raises `toggle` (IEEE 1800-2023 4.4.2):
+    // once per edge.
+    assert_eq!(sim.get(cnt), 10u8.into());
 }
 
 #[test]
@@ -2229,11 +2234,13 @@ fn upstream_string_argument_and_host_file_service_roundtrip() {
         module t {
             var component: $comp::celox_counter;
             var value: logic<8>;
+            var path: string;
             initial {
                 component.set(42);
                 component.save("state.bin");
                 component.set(0);
-                component.load("state.bin");
+                path = "state.bin";
+                component.load(path);
                 value = component.get();
                 $assert(value == 42, "file service roundtrip");
                 $finish();
@@ -2828,6 +2835,8 @@ fn split_derived_event_stages_component_inputs_with_canonical_event() {
                 q,
             );
             initial {
+                // The first edge finds the gate closed, then raises `toggle`
+                // while `clk` is high: `div_clk` rises after the commit.
                 clk.next();
                 $assert(q == 1, "derived component observed committed input: %d", q);
                 $finish();

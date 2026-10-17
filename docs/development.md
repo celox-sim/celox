@@ -3,7 +3,8 @@
 The Linux development environment is defined in `flake.nix` and `flake.lock`.
 It supports x86-64 and AArch64. The host and both devcontainer variants use the
 same tools: Rust, Node.js 24, pnpm, Python with cocotb, Verilator, C/C++ build
-tools, mold, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`. Corepack selects
+tools, mold, cargo-insta, mbx, and the Mergify CLI (`mergify`) for stacked pull
+requests. Rust reads `rust-toolchain.toml`. Corepack selects
 pnpm from the nearest `package.json` with a `packageManager` field, so pnpm
 updates do not depend on the version available in nixpkgs. The first use of a
 version requires network access to download it into the user's Corepack cache;
@@ -205,15 +206,29 @@ Commit `flake.lock` together with environment changes. When updating Rust,
 update the rust-overlay revision in `flake.nix` and regenerate `flake.lock`
 with `nix flake update rust-overlay` if its locked revision predates the release.
 Renovate groups the explicitly pinned rust-overlay revision with Rust version
-updates in one PR. Other Nix inputs remain manually managed. The CI lint job
+updates in one PR. The mbx input is updated by the workflow described below;
+other Nix inputs remain manually managed. The CI lint job
 also evaluates the locked flake for both Linux architectures and builds its
 Rust toolchain check without allowing lockfile updates, so a Rust update that
 is not supported by the pinned overlay fails CI before merge.
 When updating pnpm, update `packageManager` in `package.json` and the pnpm
 lockfile as needed; no Nix version or hash update is required. Verify with
 `nix develop --command pnpm --version` (also from a workspace package directory).
+The Mergify CLI is defined in `nix/mergify-cli.nix` from upstream's prebuilt
+release binaries, the only unfree package the flake allows. To update it, set
+its version and replace both Linux hashes with the SRI form of the release's
+`SHA256SUMS` entries (`nix hash convert --hash-algo sha256 --to sri <hex>`).
 mbx comes from [tignear/nix-packages](https://github.com/tignear/nix-packages).
 Run `nix flake update nix-packages` to update its pinned package definition.
+The `Update mbx` workflow checks that input daily at 05:37 UTC and can also
+be dispatched manually. It validates the updated flake and mbx executable,
+then opens or updates `automation/update-mbx` against the default branch.
+Only `flake.lock` is included in the PR; other flake inputs stay pinned.
+The workflow uses the existing release GitHub App credentials so its PR
+triggers normal CI. The daily and manual runs also build and run the
+committed mbx package on both x86_64 and ARM64 Linux. Updates are proposed as PRs for review;
+the workflow does not merge them automatically. Upstream package-definition
+updates can produce a PR even when the mbx version is unchanged.
 
 The shell pins development tools, not the complete host OS or all build inputs.
 Use the committed Cargo/pnpm lockfiles and locked dependency installation for

@@ -83,6 +83,8 @@ jobs:
             # Updating one changed Veryl root resolves the complete shared git
             # dependency graph without also refreshing unrelated unlocked crates.
             cargo update -p veryl-analyzer
+            # Declare the versions the new revision locked to.
+            node scripts/use-veryl-head.mjs "$veryl_revision"
           fi
           echo "VERYL_REVISION=$veryl_revision" >> "$GITHUB_ENV"
 

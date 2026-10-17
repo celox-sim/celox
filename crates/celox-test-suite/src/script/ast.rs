@@ -178,6 +178,11 @@ pub struct Stmt {
     pub pos: Pos,
 }
 
+/// The latest time `run_until` may name, in the design's time unit: the
+/// generated external testbenches scale it to picoseconds in a 64-bit
+/// signed time, and every adapter rejects a later time alike.
+pub const RUN_UNTIL_LIMIT: u64 = i64::MAX as u64 / 1000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StmtKind {
     /// `(set SIGNAL EXPR)`: stage a write; `eval`, a read or a tick settles it.
@@ -208,6 +213,40 @@ pub enum StmtKind {
     /// `(expect_output TEXT)`: the design printed exactly TEXT with
     /// `$display`/`$write` since the start or the previous `expect_output`.
     ExpectOutput(Vec<u8>),
+    /// `(run_until TIME)`: advance simulation time to TIME, running the
+    /// design's processes, delays and clocks.
+    RunUntil(Expr),
+    /// `(run_to_finish)`: run until a process of the design ends the
+    /// simulation with `$finish`. Only checks may follow it.
+    RunToFinish,
+}
+
+impl Stmt {
+    /// Visit this statement and the statements nested in it.
+    pub fn walk<'a>(&'a self, visit: &mut impl FnMut(&'a Stmt)) {
+        visit(self);
+        match &self.kind {
+            StmtKind::Modify(body) | StmtKind::Block(body) | StmtKind::For(_, _, body) => {
+                body.iter().for_each(|stmt| stmt.walk(visit));
+            }
+            StmtKind::If(_, then, otherwise) => {
+                then.walk(visit);
+                if let Some(otherwise) = otherwise {
+                    otherwise.walk(visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether this is a check that reads but never drives the design:
+    /// what may follow `(run_to_finish)`.
+    pub fn is_check(&self) -> bool {
+        matches!(
+            self.kind,
+            StmtKind::AssertEq(..) | StmtKind::Assert(..) | StmtKind::ExpectOutput(_)
+        )
+    }
 }
 
 /// Part of a source file: text, or a file of the Veryl standard library
@@ -234,6 +273,68 @@ pub struct ScriptCase {
     pub parameters: Vec<(String, u64)>,
     pub body: Vec<Stmt>,
     pub pos: Pos,
+}
+
+impl ScriptCase {
+    /// Whether the case advances simulation time, so the design's own
+    /// processes, delays and clocks run.
+    pub fn is_timed(&self) -> bool {
+        let mut timed = false;
+        for stmt in &self.body {
+            stmt.walk(&mut |stmt| {
+                timed |= matches!(stmt.kind, StmtKind::RunUntil(_) | StmtKind::RunToFinish);
+            });
+        }
+        timed
+    }
+
+    /// The statements before and after a top-level `(run_to_finish)`.
+    pub fn split_at_finish(&self) -> (&[Stmt], Option<&[Stmt]>) {
+        match self
+            .body
+            .iter()
+            .position(|stmt| stmt.kind == StmtKind::RunToFinish)
+        {
+            Some(at) => (&self.body[..at], Some(&self.body[at + 1..])),
+            None => (&self.body, None),
+        }
+    }
+}
+
+/// `(run_to_finish)` is a top-level statement, at most once, and only
+/// checks follow it: after the design has finished, nothing can drive it.
+fn reads_design(expr: &Expr) -> bool {
+    match expr {
+        Expr::Get(_) => true,
+        Expr::Op(_, operands) => operands.iter().any(reads_design),
+        Expr::Literal(_) | Expr::Var(_) => false,
+    }
+}
+
+fn validate_finish(body: &[Stmt]) -> Result<(), ScriptError> {
+    let mut finished = false;
+    for stmt in body {
+        if finished && !stmt.is_check() {
+            return error(
+                stmt.pos,
+                "only assert_eq, assert and expect_output may follow run_to_finish",
+            );
+        }
+        if stmt.kind == StmtKind::RunToFinish {
+            finished = true;
+            continue;
+        }
+        let mut nested = None;
+        stmt.walk(&mut |inner| {
+            if inner.kind == StmtKind::RunToFinish && nested.is_none() {
+                nested = Some(inner.pos);
+            }
+        });
+        if let Some(pos) = nested {
+            return error(pos, "run_to_finish must be a top-level statement");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -597,6 +698,14 @@ pub fn stmt(form: &Sexpr) -> Result<Stmt, ScriptError> {
                 string(&items[1], "output")?.into_bytes()
             })
         }
+        "run_until" => {
+            arity(items, pos, 1, Some(1))?;
+            StmtKind::RunUntil(expr(&items[1])?)
+        }
+        "run_to_finish" => {
+            arity(items, pos, 0, Some(0))?;
+            StmtKind::RunToFinish
+        }
         _ => return error(pos, format!("unknown statement `{head}`")),
     };
     Ok(Stmt { kind, pos })
@@ -781,6 +890,41 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
         if case.expectation == Expectation::CompilationError && !case.body.is_empty() {
             return error(pos, "a rejected case has no statements");
         }
+        if case.is_timed() {
+            let mut tick = false;
+            for stmt in &case.body {
+                stmt.walk(&mut |stmt| tick |= matches!(stmt.kind, StmtKind::Tick(..)));
+            }
+            if tick {
+                return error(
+                    pos,
+                    "tick cannot be combined with run_until or run_to_finish",
+                );
+            }
+            // Time zero starts the design's initial and always processes in
+            // an unspecified order relative to the testbench, so the script
+            // touches the design only once that time has been drained.
+            if let Some(first) = case.body.first()
+                && !matches!(first.kind, StmtKind::RunUntil(_) | StmtKind::RunToFinish)
+            {
+                return error(
+                    first.pos,
+                    "a timed case begins with run_until or run_to_finish",
+                );
+            }
+            // Adapters evaluate that first target at different points of
+            // time zero, so it must not depend on the design.
+            if let Some(first) = case.body.first()
+                && let StmtKind::RunUntil(time) = &first.kind
+                && reads_design(time)
+            {
+                return error(
+                    first.pos,
+                    "the first run_until target cannot read the design",
+                );
+            }
+        }
+        validate_finish(&case.body)?;
         parsed.push(case);
     }
     Ok((group_name, parsed))
@@ -872,5 +1016,62 @@ mod tests {
         assert_eq!(cases[0].tags, [TestTag::EvaluationOrder]);
         assert!(matches!(cases[0].body[0].kind, StmtKind::For(..)));
         assert_eq!(cases[1].expectation, Expectation::CompilationError);
+    }
+}
+
+#[cfg(test)]
+mod timing_mode_tests {
+    use super::*;
+    #[test]
+    fn mixed_tick_and_time_controls_are_rejected_even_in_nested_blocks() {
+        for body in [
+            "(tick clk) (run_until 1)",
+            "(if 0 (tick clk)) (run_to_finish)",
+        ] {
+            let text = format!(
+                "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) {body})"
+            );
+            let error = group(&text).unwrap_err();
+            assert!(error.message.contains("tick cannot be combined"), "{error}");
+        }
+    }
+
+    #[test]
+    fn timed_cases_drive_and_read_the_design_only_after_time_zero_drains() {
+        for body in [
+            "(set a 1) (run_until 0)",
+            "(eval) (run_until 0)",
+            "(assert_eq y 0) (run_to_finish)",
+            "(let v 1) (run_until v)",
+            "(do (run_until 0) (set a 1)) (run_until 1)",
+        ] {
+            let text = format!(
+                "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) {body})"
+            );
+            let error = group(&text).unwrap_err();
+            assert!(error.message.contains("begins with run_until"), "{error}");
+        }
+        let text = "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) (run_until 0) (set a 1) (run_to_finish))";
+        assert!(group(text).is_ok());
+    }
+
+    #[test]
+    fn the_first_run_until_target_does_not_read_the_design() {
+        for (body, ok) in [
+            ("(run_until (get y))", false),
+            ("(run_until (+ 1 (get y)))", false),
+            ("(run_until (+ 1 2)) (run_until (get y))", true),
+        ] {
+            let text = format!(
+                "(group mode (category sequential)) (case test (source \"test.sv\" \"module Top; endmodule\") (top Top) {body})"
+            );
+            match group(&text) {
+                Ok(_) => assert!(ok, "{body}"),
+                Err(error) => {
+                    assert!(!ok, "{body}: {error}");
+                    assert!(error.message.contains("cannot read the design"), "{error}");
+                }
+            }
+        }
     }
 }

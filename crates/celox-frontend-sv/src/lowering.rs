@@ -105,6 +105,8 @@ pub(crate) struct LoweredSvModule {
     pub instances: Vec<LoweredSvInstance>,
     /// Variables that denote a package variable, with its package and name.
     package_variables: Vec<(SourceVarId, String, String)>,
+    /// The hidden `(copy, signal)` event copies of [`FfEventVars`].
+    event_copies: Vec<(SourceVarId, SourceVarId)>,
 }
 
 #[derive(Clone)]
@@ -969,7 +971,16 @@ impl DriverScan<'_> {
                 procedural::stmt_calls(stmt, &mut calls);
             });
         }
-        while let Some((name, args)) = calls.pop() {
+        while let Some((callee, args)) = calls.pop() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    for lvalue in procedural::written_system_arguments(function, &args) {
+                        record(drivers, &lvalue);
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+            };
             let Some(subroutine) = self
                 .subroutines
                 .iter()
@@ -1242,6 +1253,8 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             parameter_types: HashMap::default(),
             instances: Vec::new(),
             package_variables: Vec::new(),
+            // The foreign module's own combinational blocks carry its copies.
+            event_copies: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -1941,6 +1954,7 @@ fn lower_module_with_overrides(
             eval_apply_ff_blocks,
             reset_clock_map,
             parallel_ff_parts,
+            event_vars,
         ),
         mut runtime_event_sites,
         mut runtime_errors,
@@ -1962,7 +1976,7 @@ fn lower_module_with_overrides(
             std::mem::take(&mut pm.extern_functions),
         )
     };
-    mark_ff_event_domains(module, &mut variables, &name_to_id);
+    mark_ff_event_domains(&event_vars, &mut variables);
     let (initial_values, processes) = lower_initial_processes(
         module,
         &mut variables,
@@ -2067,6 +2081,9 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             package_bindings: HashMap::default(),
+            counter_slots: Vec::new(),
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         },
         variables,
         port_order,
@@ -2075,44 +2092,22 @@ fn lower_module_with_overrides(
         parameter_types,
         instances,
         package_variables,
+        event_copies: event_vars.copies,
     })
 }
 
 fn mark_ff_event_domains(
-    module: &sv::ir::Module,
+    event_vars: &FfEventVars,
     variables: &mut HashMap<SourceVarId, SvVariable>,
-    name_to_id: &HashMap<String, SourceVarId>,
 ) {
-    for process in module.ff_processes() {
-        let Some(clock) = clock_event_from_ff_process(process) else {
-            continue;
-        };
-        if let Some(id) = name_to_id.get(clock.signal()).copied()
-            && let Some(variable) = variables.get_mut(&id)
-        {
-            variable.domain_kind = match clock.edge() {
-                sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
-                sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+    for (id, kind) in event_vars.kinds() {
+        if let Some(variable) = variables.get_mut(&id) {
+            variable.domain_kind = kind;
+            variable.type_kind = match kind {
+                DomainKind::ResetAsyncHigh => PortTypeKind::ResetAsyncHigh,
+                DomainKind::ResetAsyncLow => PortTypeKind::ResetAsyncLow,
+                _ => PortTypeKind::Clock,
             };
-            variable.type_kind = PortTypeKind::Clock;
-        }
-        for event in process
-            .events()
-            .iter()
-            .filter(|event| event.signal() != clock.signal())
-        {
-            if let Some(id) = name_to_id.get(event.signal()).copied()
-                && let Some(variable) = variables.get_mut(&id)
-            {
-                variable.domain_kind = match event.edge() {
-                    sv::ir::FfEdge::Pos => DomainKind::ResetAsyncHigh,
-                    sv::ir::FfEdge::Neg => DomainKind::ResetAsyncLow,
-                };
-                variable.type_kind = match event.edge() {
-                    sv::ir::FfEdge::Pos => PortTypeKind::ResetAsyncHigh,
-                    sv::ir::FfEdge::Neg => PortTypeKind::ResetAsyncLow,
-                };
-            }
         }
     }
 }
@@ -2422,6 +2417,8 @@ pub(crate) fn attach_instance_glue(
         &lowered.constants,
         &lowered.parameter_types,
         four_state,
+        &mut module.runtime_errors,
+        &mut module.extern_functions,
     )
     .map_err(|error| match error {
         sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -2436,8 +2433,28 @@ pub(crate) fn attach_instance_glue(
             None,
         ),
     })?;
+    let (mut comb_blocks, mut arena) = (comb_blocks, arena);
+    push_event_copies(&lowered.event_copies, &mut comb_blocks, &mut arena)?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
+    // Signals a kernel or an imperative combinational unit may store twice
+    // between two runtime checks get counters; assembly uses them only for
+    // the ones a flip-flop domain or wait watches.
+    let mut candidates = Vec::new();
+    for process in &module.processes {
+        candidates.extend(celox_frontend_core::watch::multi_store_candidates(
+            &process.kernel,
+            |address| (address.region == STABLE_REGION).then_some(address.var_id),
+        ));
+    }
+    for path in &module.comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            candidates.extend(celox_frontend_core::watch::multi_store_candidates(
+                unit,
+                |address| Some(*address),
+            ));
+        }
+    }
     module.arena = arena;
     // Combinational event sites follow the flip-flop ones, including the
     // events run-time loops emit.
@@ -2462,6 +2479,17 @@ pub(crate) fn attach_instance_glue(
                     None,
                 )
             })?;
+    }
+    for path in &mut module.comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            for block in unit.blocks.values_mut() {
+                for inst in &mut block.instructions {
+                    if let SIRInstruction::RuntimeEvent { site_id, .. } = inst {
+                        *site_id += site_base;
+                    }
+                }
+            }
+        }
     }
     for mut observer in comb_observers {
         observer.site_id += site_base;
@@ -2495,6 +2523,8 @@ pub(crate) fn attach_instance_glue(
                 arena: glue.2,
             });
     }
+    module.counter_slots =
+        celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     Ok(())
 }
 
@@ -2639,18 +2669,54 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 .collect(),
         },
         sv::ir::Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => sv::ir::Expr::Call {
             arg_order: arg_order.clone(),
-            name: name.clone(),
+            callee: callee.clone(),
             args: args
                 .iter()
                 .map(|arg| arg.as_ref().map(|arg| expr_for_state_mode(arg, four_state)))
                 .collect(),
         },
     }
+}
+
+/// Process kind and index identify a thread without merging the lowering paths.
+/// Each instance owns an initialization RNG seeded with the same default
+/// (IEEE 1800-2023 18.14.1); relocation keeps sibling RNG states independent.
+fn process_random_seeds(module: &sv::ir::Module) -> HashMap<(u8, usize), u32> {
+    let mut processes: Vec<_> = module
+        .ff_processes()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.creation_order(), 0u8, i))
+        .chain(
+            module
+                .initial_processes()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.is_synthetic())
+                .map(|(i, p)| (p.creation_order(), 1, i)),
+        )
+        .chain(
+            module
+                .comb_processes()
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.creation_order(), 2, i)),
+        )
+        .collect();
+    processes.sort_by_key(|&(order, kind, i)| (order, kind, i));
+    let mut state = 0x4d59_5df4u32;
+    processes
+        .into_iter()
+        .map(|(_, kind, index)| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((kind, index), state)
+        })
+        .collect()
 }
 
 /// The `initial` blocks and declaration initializers (IEEE 1800-2023 9.2.1,
@@ -2690,7 +2756,8 @@ fn lower_initial_processes(
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
-    for process in module.initial_processes() {
+    let random_seeds = process_random_seeds(module);
+    for (index, process) in module.initial_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -2701,6 +2768,10 @@ fn lower_initial_processes(
                 continue;
             }
         }
+        let random_seed = random_seeds
+            .get(&(1, index))
+            .copied()
+            .unwrap_or(0x4d59_5df4);
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {
@@ -2709,7 +2780,7 @@ fn lower_initial_processes(
                     seed = store;
                 }
             }
-            Err(_) => runtime.push(process),
+            Err(_) => runtime.push((process, random_seed)),
         }
     }
     let created = std::mem::take(&mut pm.created);
@@ -2776,9 +2847,10 @@ fn lower_initial_processes(
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|(process, slots)| {
+        .map(|((process, random_seed), slots)| {
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm).lower_initial_kernel(process.body(), slots)?,
+                kernel: ff::Ff::new(&mut pm, random_seed)
+                    .lower_initial_kernel(process.body(), slots)?,
                 slots,
             })
         })
@@ -2796,6 +2868,8 @@ fn lower_comb_processes(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
+    runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+    extern_functions: &mut Vec<ExternFunction>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -2818,7 +2892,10 @@ fn lower_comb_processes(
         parameter_types,
         four_state,
     );
-    for process in module.comb_processes() {
+    pm.runtime_errors = std::mem::take(runtime_errors);
+    pm.extern_functions = std::mem::take(extern_functions);
+    let random_seeds = process_random_seeds(module);
+    for (index, process) in module.comb_processes().iter().enumerate() {
         if let Some(condition) = process.condition() {
             let condition =
                 sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
@@ -2831,10 +2908,65 @@ fn lower_comb_processes(
                 continue;
             }
         }
+        if pm.uses_random(process.body()) {
+            pm.runtime_event_sites = std::mem::take(&mut sites);
+            comb_blocks.extend(
+                ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
+                    process.body(),
+                    process.sensitivity_body(),
+                    process.kind(),
+                    &mut arena,
+                )?,
+            );
+            sites = std::mem::take(&mut pm.runtime_event_sites);
+            continue;
+        }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
         comb_blocks.extend(comb.lower_process(process.body())?);
+        if comb.observers.iter().any(|observer| {
+            observer
+                .sensitivity
+                .iter()
+                .any(|atom| !comb.m.var(atom.id).array_dims.is_empty())
+        }) {
+            // Symbolic array reads may conservatively depend on every element.
+            // Process activation follows the syntactic static selection instead.
+            let include_functions = process.kind() != sv::ir::CombProcessKind::AlwaysStar;
+            let mut reads = comb.m.implicit_reads(process.body(), include_functions);
+            reads.extend(
+                comb.m
+                    .implicit_reads(process.sensitivity_body(), include_functions),
+            );
+            for observer in &mut comb.observers {
+                observer.sensitivity = observer
+                    .sensitivity
+                    .iter()
+                    .flat_map(|atom| {
+                        if comb.m.var(atom.id).array_dims.is_empty() {
+                            return vec![*atom];
+                        }
+                        let selected: Vec<_> = reads
+                            .iter()
+                            .filter(|read| read.id == atom.id && read.access.overlaps(&atom.access))
+                            .map(|read| {
+                                VarAtomBase::new(
+                                    atom.id,
+                                    read.access.lsb.max(atom.access.lsb),
+                                    read.access.msb.min(atom.access.msb),
+                                )
+                            })
+                            .collect();
+                        if selected.is_empty() {
+                            vec![*atom]
+                        } else {
+                            selected
+                        }
+                    })
+                    .collect();
+            }
+        }
         // The sites of one process activate together.
         let base = sites.len() as u32;
         for mut observer in std::mem::take(&mut comb.observers) {
@@ -2843,8 +2975,50 @@ fn lower_comb_processes(
         }
         sites.append(&mut comb.sites);
     }
+    *runtime_errors = std::mem::take(&mut pm.runtime_errors);
+    *extern_functions = std::mem::take(&mut pm.extern_functions);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites))
+}
+
+/// The continuous assignments `copy = signal` of the hidden event copies of
+/// [`FfEventVars`]: a whole-variable copy, which clock-domain unification
+/// keeps in the signal's domain unless the copy is sensed at the other edge.
+fn push_event_copies(
+    copies: &[(SourceVarId, SourceVarId)],
+    comb_blocks: &mut Vec<LogicPath<SourceVarId>>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Result<(), ParserError> {
+    for &(copy, signal) in copies {
+        let access = BitAccess::new(0, 0);
+        let expr = arena
+            .alloc(SLTNode::Input {
+                variable: signal,
+                signed: false,
+                index: Vec::new(),
+                access,
+            })
+            .map_err(|error| {
+                ParserError::illegal_context(
+                    "systemverilog always_ff event copy",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+        comb_blocks.push(LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(copy, 0, 0)),
+            sources: std::iter::once(VarAtomBase::new(signal, 0, 0)).collect(),
+            previous_sources: HashSet::default(),
+            address_sources: HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
+            pre_lower_nodes: Vec::new(),
+            expr,
+        });
+    }
+    Ok(())
 }
 
 /// The bit boundaries at which combinational processes write or statically
@@ -3998,10 +4172,10 @@ fn lower_glue_parent_expr(
             context_signed,
         ),
         sv::ir::Expr::Call {
-            name,
+            callee: sv::ir::Callee::System(function),
             args,
-            arg_order,
-        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
+            ..
+        } if function.result_type().is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
             let mut source_ids = Vec::new();
@@ -4026,7 +4200,7 @@ fn lower_glue_parent_expr(
             Some((
                 lower_bit_vector_function_slt(
                     arena,
-                    name,
+                    *function,
                     &operands,
                     context_width,
                     context_signed,
@@ -4377,7 +4551,7 @@ fn permute_reversed_lvalue_rhs_slt(
 // IEEE 1800-2023 20.9: bit vector functions return known counts/predicates.
 fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
-    name: &str,
+    function: sv::ir::SystemFunction,
     operands: &[NodeId],
     context_width: Option<usize>,
     context_signed: Option<bool>,
@@ -4386,114 +4560,135 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     let known = arena
         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, inner))
         .ok()?;
-    let (width, signed) = sv::typecheck::bit_vector_function_return_type(name, operands.len())?;
-    let result = if name == "$countbits" {
-        let controls = operands[1..]
-            .iter()
-            .map(|&expr| {
-                arena
-                    .alloc(SLTNode::Slice {
-                        expr,
-                        access: BitAccess::new(0, 0),
-                    })
-                    .ok()
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let operand_width = celox_slt::get_width(inner, arena);
-        let mut matches = Vec::with_capacity(operand_width);
-        for bit in (0..operand_width).rev() {
-            let selected = arena
-                .alloc(SLTNode::Slice {
-                    expr: inner,
-                    access: BitAccess::new(bit, bit),
+    use sv::ir::SystemFunction;
+    let (width, signed) = function.result_type()?;
+    let result = match function {
+        SystemFunction::Countbits => {
+            let controls = operands[1..]
+                .iter()
+                .map(|&expr| {
+                    arena
+                        .alloc(SLTNode::Slice {
+                            expr,
+                            access: BitAccess::new(0, 0),
+                        })
+                        .ok()
                 })
-                .ok()?;
-            let mut matched = None;
-            for &control in &controls {
-                // Case equality distinguishes all four states and returns a
-                // known bit. OR makes repeated controls count only once.
-                let equal = arena
-                    .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                .collect::<Option<Vec<_>>>()?;
+            let operand_width = celox_slt::get_width(inner, arena);
+            let mut matches = Vec::with_capacity(operand_width);
+            for bit in (0..operand_width).rev() {
+                let selected = arena
+                    .alloc(SLTNode::Slice {
+                        expr: inner,
+                        access: BitAccess::new(bit, bit),
+                    })
                     .ok()?;
-                matched = Some(match matched {
-                    None => equal,
-                    Some(previous) => arena
-                        .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
-                        .ok()?,
-                });
+                let mut matched = None;
+                for &control in &controls {
+                    // Case equality distinguishes all four states and returns a
+                    // known bit. OR makes repeated controls count only once.
+                    let equal = arena
+                        .alloc(SLTNode::Binary(selected, BinaryOp::EqCase, control))
+                        .ok()?;
+                    matched = Some(match matched {
+                        None => equal,
+                        Some(previous) => arena
+                            .alloc(SLTNode::Binary(previous, BinaryOp::Or, equal))
+                            .ok()?,
+                    });
+                }
+                matches.push((matched?, 1));
             }
-            matches.push((matched?, 1));
-        }
-        let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
-        let count = arena
-            .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
-            .ok()?;
-        coerce_node_width(arena, count, Some(32), false).ok()?
-    } else if name == "$clog2" {
-        // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
-        // (IEEE 1800-2023 20.8.1).
-        let operand_width = celox_slt::get_width(known, arena);
-        let constant = |arena: &mut SLTNodeArena<A>, value: usize, width: usize| {
-            arena
-                .alloc(SLTNode::Constant(
-                    BigUint::from(value),
-                    BigUint::default(),
-                    width,
-                    false,
-                ))
-                .ok()
-        };
-        let one = constant(arena, 1, operand_width)?;
-        let decremented = arena
-            .alloc(SLTNode::Binary(known, BinaryOp::Sub, one))
-            .ok()?;
-        let zeros = arena
-            .alloc(SLTNode::Unary(UnaryOp::CountLeadingZeros, decremented))
-            .ok()?;
-        let zeros = coerce_node_width(arena, zeros, Some(32), false).ok()?;
-        let total = constant(arena, operand_width, 32)?;
-        let bits = arena
-            .alloc(SLTNode::Binary(total, BinaryOp::Sub, zeros))
-            .ok()?;
-        let small = arena
-            .alloc(SLTNode::Binary(known, BinaryOp::LeU, one))
-            .ok()?;
-        let zero = constant(arena, 0, 32)?;
-        arena
-            .alloc(SLTNode::Mux {
-                cond: small,
-                then_expr: zero,
-                else_expr: bits,
-            })
-            .ok()?
-    } else if name == "$isunknown" {
-        // Case inequality detects either X or Z, including unknown bits whose
-        // value plane is zero and would disappear during two-state conversion.
-        arena
-            .alloc(SLTNode::Binary(inner, BinaryOp::NeCase, known))
-            .ok()?
-    } else {
-        let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
-        // PopCount has a minimal unsigned width; $countones returns signed int.
-        let count = coerce_node_width(arena, count, Some(32), false).ok()?;
-        if name == "$countones" {
-            count
-        } else {
-            let one = arena
-                .alloc(SLTNode::Constant(
-                    BigUint::from(1u8),
-                    BigUint::default(),
-                    32,
-                    false,
-                ))
+            let matching_bits = arena.alloc(SLTNode::Concat(matches)).ok()?;
+            let count = arena
+                .alloc(SLTNode::Unary(UnaryOp::PopCount, matching_bits))
                 .ok()?;
-            let op = if name == "$onehot" {
-                BinaryOp::Eq
-            } else {
-                BinaryOp::LeU
-            };
-            arena.alloc(SLTNode::Binary(count, op, one)).ok()?
+            coerce_node_width(arena, count, Some(32), false).ok()?
         }
+        SystemFunction::Clog2 => {
+            // ceil(log2(x)): the bit length of x - 1, and 0 for x <= 1
+            // (IEEE 1800-2023 20.8.1).
+            let operand_width = celox_slt::get_width(known, arena);
+            let constant = |arena: &mut SLTNodeArena<A>, value: usize, width: usize| {
+                arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(value),
+                        BigUint::default(),
+                        width,
+                        false,
+                    ))
+                    .ok()
+            };
+            let one = constant(arena, 1, operand_width)?;
+            let decremented = arena
+                .alloc(SLTNode::Binary(known, BinaryOp::Sub, one))
+                .ok()?;
+            let zeros = arena
+                .alloc(SLTNode::Unary(UnaryOp::CountLeadingZeros, decremented))
+                .ok()?;
+            let zeros = coerce_node_width(arena, zeros, Some(32), false).ok()?;
+            let total = constant(arena, operand_width, 32)?;
+            let bits = arena
+                .alloc(SLTNode::Binary(total, BinaryOp::Sub, zeros))
+                .ok()?;
+            let small = arena
+                .alloc(SLTNode::Binary(known, BinaryOp::LeU, one))
+                .ok()?;
+            let zero = constant(arena, 0, 32)?;
+            arena
+                .alloc(SLTNode::Mux {
+                    cond: small,
+                    then_expr: zero,
+                    else_expr: bits,
+                })
+                .ok()?
+        }
+        SystemFunction::Isunknown => {
+            // Case inequality detects either X or Z, including unknown bits whose
+            // value plane is zero and would disappear during two-state conversion.
+            arena
+                .alloc(SLTNode::Binary(inner, BinaryOp::NeCase, known))
+                .ok()?
+        }
+        SystemFunction::Countones | SystemFunction::Onehot | SystemFunction::Onehot0 => {
+            let count = arena.alloc(SLTNode::Unary(UnaryOp::PopCount, known)).ok()?;
+            // PopCount has a minimal unsigned width; $countones returns signed int.
+            let count = coerce_node_width(arena, count, Some(32), false).ok()?;
+            if function == SystemFunction::Countones {
+                count
+            } else {
+                let one = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(1u8),
+                        BigUint::default(),
+                        32,
+                        false,
+                    ))
+                    .ok()?;
+                let op = if function == SystemFunction::Onehot {
+                    BinaryOp::Eq
+                } else {
+                    BinaryOp::LeU
+                };
+                arena.alloc(SLTNode::Binary(count, op, one)).ok()?
+            }
+        }
+        // The random number functions need process state, and the analyzer
+        // folds the other functions to constants.
+        SystemFunction::Random
+        | SystemFunction::Urandom
+        | SystemFunction::UrandomRange
+        | SystemFunction::Timeunit
+        | SystemFunction::Timeprecision
+        | SystemFunction::Isunbounded
+        | SystemFunction::Signed
+        | SystemFunction::Unsigned
+        | SystemFunction::Bits
+        | SystemFunction::Size
+        | SystemFunction::Dimensions
+        | SystemFunction::UnpackedDimensions
+        | SystemFunction::ArrayQuery(_) => return None,
     };
     coerce_node_width(
         arena,
@@ -5173,10 +5368,10 @@ fn lower_expr_with_context(
             context_signed,
         ),
         sv::ir::Expr::Call {
-            name,
+            callee: sv::ir::Callee::System(function),
             args,
-            arg_order,
-        } if sv::typecheck::bit_vector_function_return_type(name, args.len()).is_some() => {
+            ..
+        } if function.result_type().is_some() => {
             let mut operands = Vec::with_capacity(args.len());
             let mut sources = HashSet::default();
 
@@ -5200,7 +5395,7 @@ fn lower_expr_with_context(
             Some((
                 lower_bit_vector_function_slt(
                     arena,
-                    name,
+                    *function,
                     &operands,
                     context_width,
                     context_signed,
@@ -6059,7 +6254,88 @@ type SvFfBlocks = (
         TriggerSet<SourceVarId>,
         Vec<celox_frontend_core::symbolic::artifact::FfPart<RegionedVarAddr>>,
     >,
+    FfEventVars,
 );
+
+/// The variables `always_ff` event controls are sensed on.
+///
+/// A variable carries one domain kind, the edge and role of its event, so a
+/// signal is sensed on itself at one edge and role, and at any other on a
+/// hidden copy of the signal: `negedge clk` beside `posedge clk`, or
+/// `posedge rst` as a clock beside `negedge rst` as an asynchronous reset.
+/// Each copy is a whole-variable continuous assignment of the signal, so it
+/// changes in the same time step as the signal and is a clock derived from
+/// it; only domains sensed on a copy pay for it.
+///
+/// The signal itself keeps the first of rising clock, falling clock, active
+/// high reset, active low reset that it is sensed as, independent of the
+/// order of the processes: a clock port stays in the domain of the rising
+/// clock that drives it, and `Simulator::tick` of the signal is its rising
+/// edge whenever a process uses that.
+#[derive(Clone, Default)]
+pub(crate) struct FfEventVars {
+    /// Per signal, the domain kinds it is sensed at and their variables.
+    sensed: HashMap<SourceVarId, Vec<(DomainKind, SourceVarId)>>,
+    /// The `(copy, signal)` pairs of the hidden copies, in creation order.
+    copies: Vec<(SourceVarId, SourceVarId)>,
+}
+
+impl FfEventVars {
+    /// Sense each signal of `events` on itself at its first kind in
+    /// priority order.
+    fn new(events: impl Iterator<Item = (SourceVarId, DomainKind)>) -> Self {
+        let priority = |kind: DomainKind| match kind {
+            DomainKind::ClockPosedge => 0,
+            DomainKind::ClockNegedge => 1,
+            DomainKind::ResetAsyncHigh => 2,
+            DomainKind::ResetAsyncLow => 3,
+            DomainKind::Other => 4,
+        };
+        let mut primary = HashMap::<SourceVarId, DomainKind>::default();
+        for (signal, kind) in events {
+            primary
+                .entry(signal)
+                .and_modify(|primary| {
+                    if priority(kind) < priority(*primary) {
+                        *primary = kind;
+                    }
+                })
+                .or_insert(kind);
+        }
+        Self {
+            sensed: primary
+                .into_iter()
+                .map(|(signal, kind)| (signal, vec![(kind, signal)]))
+                .collect(),
+            copies: Vec::new(),
+        }
+    }
+
+    /// The variable on which `signal` is sensed as `kind`.
+    fn sensed(
+        &mut self,
+        pm: &mut procedural::ProcModule<'_>,
+        signal: SourceVarId,
+        kind: DomainKind,
+    ) -> SourceVarId {
+        let sensed = self.sensed.entry(signal).or_default();
+        if let Some(&(_, var)) = sensed.iter().find(|(sensed_kind, _)| *sensed_kind == kind) {
+            return var;
+        }
+        let copy = pm.event_copy(signal, kind);
+        self.copies.push((copy, signal));
+        sensed.push((kind, copy));
+        copy
+    }
+
+    /// Every sensed variable with its domain kind.
+    fn kinds(&self) -> impl Iterator<Item = (SourceVarId, DomainKind)> + '_ {
+        self.sensed
+            .values()
+            .flatten()
+            .map(|&(kind, var)| (var, kind))
+    }
+}
 
 fn lower_ff_processes(
     module: &sv::ir::Module,
@@ -6071,70 +6347,58 @@ fn lower_ff_processes(
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
-    let mut clock_edges = HashMap::default();
-    let mut reset_edges = HashMap::default();
 
+    // Every event of every process, as (signal, domain kind): the clock, then
+    // the resets.
+    let mut process_events = Vec::new();
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        let clock_id = pm
-            .id(clock.signal())
-            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        if pm
-            .variables
-            .get(&clock_id)
-            .is_some_and(|variable| variable.width != 1)
-        {
-            return Err(sv::AnalyzerError::Unsupported(
-                "multi-bit always_ff event signal".to_string(),
-            ));
-        }
-        if reset_edges.contains_key(&clock_id) {
-            return Err(sv::AnalyzerError::Unsupported(
-                "mixed clock/reset-edge polarities for one signal".to_string(),
-            ));
-        }
-        if clock_edges
-            .insert(clock_id, clock.edge())
-            .is_some_and(|edge| edge != clock.edge())
-        {
-            return Err(sv::AnalyzerError::Unsupported(
-                "mixed clock-edge polarities for one signal".to_string(),
-            ));
-        }
-        for reset in process
-            .events()
-            .iter()
-            .filter(|event| event.signal() != clock.signal())
-        {
-            let reset_id = pm.id(reset.signal()).ok_or_else(|| {
+        let event_id = |event: &sv::ir::FfEvent| {
+            let id = pm.id(event.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
             if pm
                 .variables
-                .get(&reset_id)
+                .get(&id)
                 .is_some_and(|variable| variable.width != 1)
             {
                 return Err(sv::AnalyzerError::Unsupported(
                     "multi-bit always_ff event signal".to_string(),
                 ));
             }
-            if clock_edges.contains_key(&reset_id) {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "mixed clock/reset-edge polarities for one signal".to_string(),
-                ));
-            }
-            if reset_edges
-                .insert(reset_id, reset.edge())
-                .is_some_and(|edge| edge != reset.edge())
-            {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "mixed reset-edge polarities for one signal".to_string(),
-                ));
-            }
+            Ok(id)
+        };
+        let clock_kind = match clock.edge() {
+            sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
+            sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+        };
+        let mut events = vec![(event_id(clock)?, clock_kind)];
+        for reset in process
+            .events()
+            .iter()
+            .filter(|event| event.signal() != clock.signal())
+        {
+            let reset_kind = match reset.edge() {
+                sv::ir::FfEdge::Pos => DomainKind::ResetAsyncHigh,
+                sv::ir::FfEdge::Neg => DomainKind::ResetAsyncLow,
+            };
+            events.push((event_id(reset)?, reset_kind));
         }
-        let trigger_set = trigger_set_from_ff_process(process, pm.name_to_id)
-            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        process_events.push(events);
+    }
+    let mut event_vars = FfEventVars::new(process_events.iter().flatten().copied());
+
+    let random_seeds = process_random_seeds(module);
+    for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {
+        let mut events = events
+            .into_iter()
+            .map(|(signal, kind)| event_vars.sensed(pm, signal, kind));
+        let mut trigger_set = TriggerSet {
+            clock: events.next().expect("a process has a clock event"),
+            resets: Vec::new(),
+        };
+        trigger_set.resets.extend(events);
         // A reset shared by several clock domains is associated with the
         // first; the association only names a clock for the reset signal.
         for reset in &trigger_set.resets {
@@ -6142,7 +6406,8 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
-        let (eval_only, apply, targets) = ff::Ff::new(pm).lower_process(process.body())?;
+        let (eval_only, apply, targets) =
+            ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =
@@ -6180,6 +6445,7 @@ fn lower_ff_processes(
         eval_apply_ff_blocks,
         reset_clock_map,
         parallel_ff_parts,
+        event_vars,
     ))
 }
 
@@ -6264,24 +6530,6 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
     }
 }
 
-fn trigger_set_from_ff_process(
-    process: &sv::ir::FfProcess,
-    name_to_id: &HashMap<String, SourceVarId>,
-) -> Option<TriggerSet<SourceVarId>> {
-    let clock = clock_event_from_ff_process(process)?;
-    let clock_id = *name_to_id.get(clock.signal())?;
-    let resets = process
-        .events()
-        .iter()
-        .filter(|event| event.signal() != clock.signal())
-        .filter_map(|event| name_to_id.get(event.signal()).copied())
-        .collect();
-    Some(TriggerSet {
-        clock: clock_id,
-        resets,
-    })
-}
-
 fn seal_builder(mut builder: SIRBuilder<RegionedVarAddr>) -> ExecutionUnit<RegionedVarAddr> {
     builder.seal_block(SIRTerminator::Return);
     let (blocks, register_map, _) = builder.drain();
@@ -6350,10 +6598,7 @@ fn sv_glue_expr_is_signed(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len())
-                .is_some_and(|(_, signed)| signed)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().is_some_and(|(_, signed)| signed),
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -6412,10 +6657,7 @@ fn sv_expr_is_signed_with_parameters(
         sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { signed, .. } => *signed,
         sv::ir::Expr::Inside { .. } => false,
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len())
-                .is_some_and(|(_, signed)| signed)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().is_some_and(|(_, signed)| signed),
         sv::ir::Expr::Concat(_) | sv::ir::Expr::RepeatConcat { .. } => false,
         sv::ir::Expr::Unary { op, expr } => {
             matches!(
@@ -6660,9 +6902,7 @@ fn sv_expr_natural_width(
                 )?),
         ),
         sv::ir::Expr::Inside { .. } => Some(1),
-        sv::ir::Expr::Call { name, args, .. } => {
-            sv::typecheck::bit_vector_function_return_type(name, args.len()).map(|(width, _)| width)
-        }
+        sv::ir::Expr::Call { callee, .. } => callee.result_type().map(|(width, _)| width),
     }
 }
 

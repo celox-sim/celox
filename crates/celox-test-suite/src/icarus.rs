@@ -41,7 +41,14 @@ impl Icarus {
             top,
             testbench,
             edges,
-        } = stage(frontend, design, directory, script)?;
+        } = stage(
+            frontend,
+            design,
+            directory,
+            script,
+            // `__ICARUS__` is predefined by Icarus.
+            &["CELOX_SUITE_ICARUS", "__ICARUS__"],
+        )?;
         write_if_changed(
             &directory.join("vpi_bits.hpp"),
             include_bytes!("vpi_bits.hpp"),

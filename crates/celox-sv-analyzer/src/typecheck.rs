@@ -4,7 +4,7 @@ use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
 
-use crate::ir::{BinaryOp, ConstExpr, PackedRange, UnaryOp};
+use crate::ir::{BinaryOp, Callee, ConstExpr, PackedRange, SystemFunction, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegralLiteral {
@@ -50,24 +50,6 @@ impl std::fmt::Display for UnpackedArrayType {
             write!(f, "[{count}]")?;
         }
         Ok(())
-    }
-}
-
-/// Width and signedness of the supported integral system functions.
-pub fn bit_vector_function_return_type(name: &str, arity: usize) -> Option<(usize, bool)> {
-    if matches!(name, "$timeunit" | "$timeprecision") {
-        return (arity <= 1).then_some((32, true));
-    }
-    if name == "$countbits" {
-        return (arity >= 2).then_some((32, true));
-    }
-    if arity != 1 {
-        return None;
-    }
-    match name {
-        "$countones" | "$clog2" => Some((32, true)),
-        "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some((1, false)),
-        _ => None,
     }
 }
 
@@ -209,7 +191,12 @@ pub(crate) fn eval_const_expr_in_env(
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
-        ConstExpr::Function { name, args, .. } => eval_const_function(name, args, constants),
+        ConstExpr::Function { callee, args, .. } => match callee {
+            Callee::Subroutine(name) => {
+                crate::ast::const_functions::eval_call(name, args, constants)
+            }
+            Callee::System(function) => eval_system_function(*function, args, constants),
+        },
         ConstExpr::Unary { op, expr: operand } => {
             if let Some(result) = integral_literal_from_const_expr(expr)
                 && let Some(value) = integral_literal_as_i128(&result, result.signed)
@@ -519,8 +506,8 @@ fn substitute_typed_constants_with_lookup(
                 *bit, constants, types,
             )),
         },
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name,
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
             site,
             args: args
                 .into_iter()
@@ -1002,23 +989,25 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
             let extension = signed_extension(&operand, operand.signed);
             Some(resize_integral_literal(operand, *width, *signed, extension))
         }
-        ConstExpr::Function { name, args, .. } => {
-            if matches!(name.as_str(), "$signed" | "$unsigned") {
+        // User functions are evaluated by the numeric fallback with the
+        // caller's environment.
+        ConstExpr::Function {
+            callee: Callee::System(function),
+            args,
+            ..
+        } => {
+            if let SystemFunction::Signed | SystemFunction::Unsigned = function {
                 let [arg] = args.as_slice() else { return None };
                 let mut literal = self_determined_integral_literal(arg)?;
-                literal.signed = name == "$signed";
+                literal.signed = *function == SystemFunction::Signed;
                 return Some(literal);
             }
-            // Check support before executing: user functions are evaluated
-            // by the numeric fallback with the caller's environment.
-            let (width, signing) = match name.as_str() {
-                "$clog2" | "$countones" | "$countbits" => (32, "s"),
-                "$onehot" | "$onehot0" | "$isunknown" => (1, ""),
-                _ => return None,
-            };
-            let value = eval_const_function(name, args, &HashMap::default())?;
+            let (width, signed) = function.result_type()?;
+            let value = eval_system_function(*function, args, &HashMap::default())?;
+            let signing = if signed { "s" } else { "" };
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
         }
+        ConstExpr::Function { .. } => None,
         ConstExpr::SelectRange {
             expr,
             msb,
@@ -1343,15 +1332,13 @@ fn signed_extension(literal: &IntegralLiteral, signed: bool) -> (bool, bool) {
     (literal.value.bit(sign_bit), literal.mask.bit(sign_bit))
 }
 
-fn eval_const_function(
-    name: &str,
+/// The value of a call of a system function with constant arguments.
+fn eval_system_function(
+    function: SystemFunction,
     args: &[ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    if !crate::system_functions::is_system_name(name) {
-        return crate::ast::const_functions::eval_call(name, args, constants);
-    }
-    if name == "$countbits" {
+    if function == SystemFunction::Countbits {
         let (arg, controls) = args.split_first()?;
         if controls.is_empty() {
             return None;
@@ -1385,29 +1372,26 @@ fn eval_const_function(
     let [arg] = args else {
         return None;
     };
-    match name {
-        "$signed" | "$unsigned" => {
+    let ones = || {
+        let value = const_expr_known_one_bits(arg, constants)?;
+        Some(value.iter_u64_digits().map(u64::count_ones).sum::<u32>())
+    };
+    match function {
+        SystemFunction::Signed | SystemFunction::Unsigned => {
             let literal = self_determined_integral_literal(arg)?;
-            integral_literal_as_i128(&literal, name == "$signed")
+            integral_literal_as_i128(&literal, function == SystemFunction::Signed)
         }
-        "$clog2" => clog2(eval_const_expr_in_env(arg, constants)?),
-        "$isunknown" => {
+        SystemFunction::Clog2 => clog2(eval_const_expr_in_env(arg, constants)?),
+        SystemFunction::Isunknown => {
             if let Some(literal) = self_determined_integral_literal(arg) {
                 Some((literal.mask != BigUint::default()) as i128)
             } else {
                 eval_const_expr_in_env(arg, constants).map(|_| 0)
             }
         }
-        "$countones" | "$onehot" | "$onehot0" => {
-            let value = const_expr_known_one_bits(arg, constants)?;
-            let ones = value.iter_u64_digits().map(u64::count_ones).sum::<u32>();
-            Some(match name {
-                "$countones" => ones as i32 as i128,
-                "$onehot" => (ones == 1) as i128,
-                "$onehot0" => (ones <= 1) as i128,
-                _ => unreachable!(),
-            })
-        }
+        SystemFunction::Countones => Some(ones()? as i32 as i128),
+        SystemFunction::Onehot => Some((ones()? == 1) as i128),
+        SystemFunction::Onehot0 => Some((ones()? <= 1) as i128),
         _ => None,
     }
 }

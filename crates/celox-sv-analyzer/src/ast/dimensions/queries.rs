@@ -10,7 +10,7 @@ pub(in crate::ast) fn array_query_call(
     aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
 ) -> Option<Expr> {
-    let (name, _) = system_tf_call_parts(call, tree)?;
+    let function = called_system_function(call, tree)?;
     let (bounds, unpacked, dimension) = match call {
         sv_parser::SystemTfCall::ArgDataType(call) => {
             let (data_type, dimension) = &call.nodes.1.nodes.1;
@@ -62,25 +62,25 @@ pub(in crate::ast) fn array_query_call(
         _ => return None,
     };
     let integer = |value| Expr::Literal(format_typed_parameter_literal(value, 32, true));
-    match name {
-        "$dimensions" => return Some(integer(bounds.len() as i128)),
-        "$unpacked_dimensions" => return Some(integer(unpacked as i128)),
-        _ => {}
-    }
+    let query = match function {
+        SystemFunction::Dimensions => return Some(integer(bounds.len() as i128)),
+        SystemFunction::UnpackedDimensions => return Some(integer(unpacked as i128)),
+        SystemFunction::ArrayQuery(query) => query,
+        _ => return None,
+    };
     let value = |&(left, right): &(i128, i128)| {
-        integer(match name {
-            "$left" => left,
-            "$right" => right,
-            "$low" => left.min(right),
-            "$high" => left.max(right),
-            "$increment" => {
+        integer(match query {
+            ArrayQuery::Left => left,
+            ArrayQuery::Right => right,
+            ArrayQuery::Low => left.min(right),
+            ArrayQuery::High => left.max(right),
+            ArrayQuery::Increment => {
                 if left >= right {
                     1
                 } else {
                     -1
                 }
             }
-            _ => unreachable!(),
         })
     };
     let dimension = dimension.unwrap_or_else(|| integer(1));

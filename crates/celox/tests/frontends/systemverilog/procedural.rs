@@ -70,4 +70,16 @@ sv_backends! {
     fn declaration_initializers_keep_unknown_bits(sim) {
         @case "procedural::declaration_initializers_keep_unknown_bits";
     }
+
+    fn always_ff_at_both_edges_of_one_clock(sim) {
+        @case "procedural::always_ff_at_both_edges_of_one_clock";
+    }
+
+    fn always_ff_at_both_edges_of_a_child_clock_port(sim) {
+        @case "procedural::always_ff_at_both_edges_of_a_child_clock_port";
+    }
+
+    fn always_ff_reset_at_both_edges_and_as_a_clock(sim) {
+        @case "procedural::always_ff_reset_at_both_edges_and_as_a_clock";
+    }
 }

@@ -287,6 +287,11 @@ impl PathCostWalk {
             LogicPathTarget::Var(target) => ((target.access.msb - target.access.lsb + 1)
                 .div_ceil(64) as u64)
                 .min(MAX_VALUE_WORDS),
+            LogicPathTarget::Process { unit, .. } => unit
+                .blocks
+                .values()
+                .map(|block| block.instructions.len() as u64 + 1)
+                .sum(),
             LogicPathTarget::CombCaptureEvent {
                 guard,
                 args,
@@ -711,6 +716,16 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
             }
         }
     }
+    // Output projections of one imperative process share mutable activation
+    // and RNG state, so they must execute on the same lane as one atomic item.
+    let mut process_work = HashMap::default();
+    for (path, logic) in prepared.input.iter().enumerate() {
+        if let LogicPathTarget::Process { process, .. } = &logic.target {
+            if let Some(previous) = process_work.insert(*process, work_of_path[path]) {
+                union(&mut atomic, previous, work_of_path[path]);
+            }
+        }
+    }
     join_expensive_sharing(work, &prepared.input, arena, &mut atomic);
     let mut edges = Vec::new();
     for (definition, users) in prepared.adj.iter().enumerate().take(path_count) {
@@ -790,7 +805,12 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 // Runtime events append to the single-producer event ring.
                 None => pinned = true,
             }
-            if !logic_path.comb_capture_enable_sites.is_empty() {
+            if !logic_path.comb_capture_enable_sites.is_empty()
+                || matches!(&logic_path.target, LogicPathTarget::Process { unit, .. }
+                    if unit.blocks.values().any(|block| block.instructions.iter().any(|inst|
+                        matches!(inst, SIRInstruction::RuntimeEvent { .. } | SIRInstruction::ExternCall { .. } | SIRInstruction::CombCaptureEnableIfChanged { .. } | SIRInstruction::CombCaptureEvent { .. })
+                        || matches!(inst, SIRInstruction::Store(_, _, _, _, _, sites) if !sites.is_empty()))))
+            {
                 pinned = true;
             }
             if let Some(root) = prepared.fold_group_schedule_index.direct_group_by_path[path] {

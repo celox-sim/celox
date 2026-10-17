@@ -76,7 +76,7 @@ synthesis and is tested at the design level.
 | Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
 | Continuous logic | `assign`, `wire w = expr;` |
 | Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
-| Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains |
+| Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
 | Functions | `function` and `task` (without timing) with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
@@ -85,6 +85,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| Random numbers | `$urandom`, `$urandom_range` and `$random` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -135,8 +136,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs, strings and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
-  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists, and both edges of one clock ([#443](https://github.com/celox-sim/celox/issues/443)) or one
-  reset ([#471](https://github.com/celox-sim/celox/issues/471)) across processes.
+  plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists.
 - Combinational processes: nonblocking assignments inside `always_comb`
   ([#453](https://github.com/celox-sim/celox/issues/453)).
 - Loops: a procedural loop unrolls at most 10,000 iterations; a combinational
@@ -146,8 +146,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Expressions: streaming concatenations ([#447](https://github.com/celox-sim/celox/issues/447)), reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)), and parameter overrides that are not plain integers, such as X/Z
   values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
-- System tasks and functions: Celox knows every name of IEEE 1800-2023
-  clauses 20 and 21. One it does not support where it is called, such as
+- System tasks and functions: Celox knows every name IEEE 1800-2023
+  defines, including the optional ones of its Annex D. One it does not support where it is called, such as
   `$time` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
@@ -370,3 +370,23 @@ resolved using their bound interface type before flattening, including generic
 interface ports and handles declared within a generate block. Scalar paths to
 interface instances inside child modules, such as `child.info`, are resolved
 before those instances are flattened away.
+
+`$urandom` uses a deterministic, full-period 32-bit linear congruential generator
+(IEEE 1800-2023 18.13.1 and 18.14). Reseeding repeats the sequence without
+modifying the seed argument. Calls through subroutines use their caller's
+stream. The generator state participates in checkpoints and state restoration.
+The default seed is implementation-defined; random values need not match those
+of other simulators. In combinational procedures, draws occur when the process
+activates: `always_comb` runs once at time zero and on implicit sensitivity
+changes, while `always @*` waits for a sensitivity change. Repeated evaluation
+with unchanged inputs does not advance the stream. Constant-value contexts
+report a diagnostic.
+
+`$urandom_range(maxval, minval)` draws from the `$urandom` stream and returns a
+value between the bounds, inclusive, swapping reversed bounds; `minval`
+defaults to 0 (18.13.2). `$random` follows the algorithm of IEEE 1800-2023
+Annex N, so it returns the same values as other simulators that implement it,
+such as Icarus Verilog. `$random(seed)` updates its seed variable. Without an
+argument, each process continues its own seed, which starts at 0, so a design
+whose one process calls `$random` matches simulators that keep one seed for
+the whole design.

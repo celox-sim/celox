@@ -56,6 +56,8 @@ impl VerylIdMap {
 #[derive(Clone, Default)]
 pub struct VerylTestbenchSource {
     pub id_map: VerylIdMap,
+    /// Constant scalar string lets are continuous assignments, outside initial blocks.
+    pub constant_strings: HashMap<celox_design::StateAddr, Expression>,
     pub initial_statements: Option<Vec<Statement>>,
     /// Length of each initial block in `initial_statements`; empty means one block.
     pub initial_block_lengths: Vec<usize>,

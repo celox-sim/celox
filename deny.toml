@@ -1,0 +1,57 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run with `cargo deny check`.
+
+[graph]
+# Optional backends (wasmtime, SystemVerilog frontend, ...) ship in released
+# crates, so check every feature combination's dependencies.
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # Unmaintained, no vulnerability. Pulled in by wasmtime/cranelift via
+    # heapless; no safe upgrade exists.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill: transitive via wasmtime, no upgrade" },
+    # Unmaintained, no vulnerability. Direct dependency of the workspace and of
+    # veryl-analyzer.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash: used directly and by veryl-analyzer" },
+    # Unmaintained, no vulnerability. Transitive via veryl-analyzer.
+    { id = "RUSTSEC-2024-0436", reason = "paste: transitive via veryl-analyzer" },
+]
+
+[licenses]
+# Workspace crates are MIT OR Apache-2.0; every dependency must be compatible
+# with redistributing them under either license.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[licenses.private]
+# Unpublished crates (lydite, examples, benches) are not redistributed.
+ignore = true
+
+[bans]
+# Duplicates come from upstream (wasmtime, veryl, sv-parser) and are not
+# actionable here.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# develop pins Veryl to an upstream revision; master stays on released crates
+# (scripts/check-veryl-lane.mjs).
+allow-git = ["https://github.com/veryl-lang/veryl.git"]

@@ -102,6 +102,15 @@ export function cutsRelease(files) {
   );
 }
 
+// A Release Please diff that only bumps versions and changelogs.
+export function isVersionOnlyRelease(files) {
+  const normalized = files.map((path) => path.replace(/^\.\//, ""));
+  return (
+    cutsRelease(normalized) &&
+    normalized.every((path) => RELEASE_PLEASE_FILES.has(path))
+  );
+}
+
 // On master, only the release pull request changes the release manifest, so a
 // PR or legacy merge group carrying it gets full validation before merging
 // instead of the change-based subset. Syncing master into develop carries the
@@ -143,7 +152,7 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
     }
 
     if (
-      startsWithAny(path, ["docs/", "adr/"]) ||
+      startsWithAny(path, ["docs/"]) ||
       path === "README.md" ||
       path === "CONTRIBUTING.md"
     ) {
@@ -200,14 +209,20 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
       continue;
     }
 
-    if (startsWithAny(path, ["scripts/"])) {
+    // Repository script tests also validate workflow files and the Updatecli
+    // policy, so these run in the required lint job instead of path-filtered
+    // workflows that cannot gate merges.
+    if (
+      path === ".mergify.yml" ||
+      startsWithAny(path, ["scripts/", ".updatecli/", ".github/workflows/"])
+    ) {
       affected.scripts = true;
       continue;
     }
 
     if (
       NEUTRAL_FILES.has(path) ||
-      startsWithAny(path, [".github/ISSUE_TEMPLATE/", ".github/workflows/"]) ||
+      startsWithAny(path, [".github/ISSUE_TEMPLATE/"]) ||
       path === ".github/pull_request_template.md"
     ) {
       continue;
@@ -230,7 +245,8 @@ function changedFiles(base, head) {
   try {
     const output = execFileSync(
       "git",
-      ["diff", "--name-only", "-z", base, head],
+      // Diff from the merge base: a PR's base.sha is the current base tip.
+      ["diff", "--name-only", "-z", `${base}...${head}`],
       { encoding: "utf8" },
     );
     return output.split("\0").filter(Boolean);
@@ -288,14 +304,22 @@ if (
   });
 }
 
-// Queue drafts, legacy merge groups, releases and daily runs keep
-// the whole workspace. The scope helper remains available outside queue CI.
+// Lydite tests are selected independently by lydite-checks.yml, including its bridge.
+export function celoxRustTestScope(files, packages) {
+  return rustTestScope(
+    files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
+    packages.filter((pkg) => !/^lydite(?:-|$)/.test(pkg.name)),
+  );
+}
+
+// Queue drafts, merge groups, releases and daily runs keep the Celox
+// workspace. Lydite tests run independently in lydite-checks.yml.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {
     try {
       const root = fileURLToPath(new URL("../", import.meta.url));
-      scope = rustTestScope(files, readWorkspace(root));
+      scope = celoxRustTestScope(files, readWorkspace(root));
     } catch (error) {
       console.warn(`Unable to scope the Rust tests: ${error.message}`);
     }

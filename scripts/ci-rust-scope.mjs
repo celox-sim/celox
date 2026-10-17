@@ -206,12 +206,17 @@ export function rustTestScope(files, packages) {
   };
 }
 
-/** Changed files between two commits, or null when they cannot be compared. */
-export function changedFilesBetween(base, head) {
+/**
+ * Files changed on head since it forked from base, or null when they cannot be
+ * compared. A PR's base.sha is the current base tip, so a two-point diff would
+ * also report base changes that the PR branch has not merged yet.
+ */
+export function changedFilesBetween(base, head, cwd = undefined) {
   const sha = /^[0-9a-f]{40,64}$/i;
   if (!sha.test(base) || !sha.test(head) || /^0+$/.test(base)) return null;
   try {
-    return execFileSync("git", ["diff", "--name-only", "-z", base, head], {
+    return execFileSync("git", ["diff", "--name-only", "-z", `${base}...${head}`], {
+      cwd,
       encoding: "utf8",
     })
       .split("\0")
