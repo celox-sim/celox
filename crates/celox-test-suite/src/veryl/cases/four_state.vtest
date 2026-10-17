@@ -2393,3 +2393,196 @@ assign narrow_256 = a_256 >> sh;
         (assert_eq shr_{width} (fourstate limit limit) "unknown count width={width}")
         (assert_eq shl_{width} (fourstate limit limit) "unknown count width={width}")
         (assert_eq narrow_{width} (fourstate 15 15))))))
+
+; IEEE 1800-2023 9.4.2, Table 9-2: a posedge leaves 0 or reaches 1, a negedge
+; leaves 1 or reaches 0, and a change between x and z is neither. The clock
+; below is a register, so each of its twelve changes (an Euler circuit over
+; 0, 1, x, z) is an edge of an internally driven clock.
+(case test_four_state_register_clock_edges_follow_table_9_2
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    d  : input logic,
+    pos: output logic<8>,
+    neg: output logic<8>,
+) {
+    var c: logic;
+    always_ff (clk) {
+        c = d;
+    }
+    let cp: '_ clock         = c;
+    let cn: '_ clock_negedge = c;
+    var p : logic<8>;
+    var n : logic<8>;
+    always_ff (cp, rst) {
+        if_reset {
+            p = 0;
+        } else {
+            p = p + 8'd1;
+        }
+    }
+    always_ff (cn, rst) {
+        if_reset {
+            n = 0;
+        } else {
+            n = n + 8'd1;
+        }
+    }
+    assign pos = p;
+    assign neg = n;
+}
+"#)
+  (top Top)
+  (set clk 0)
+  (set rst 0)
+  (tick rst)
+  (set rst 1)
+  (assert_eq pos 0)
+  (assert_eq neg 0)
+  ; x -> 0 is a negedge.
+  (set d 0)
+  (tick clk)
+  (assert_eq pos 0)
+  (assert_eq neg 1)
+  (for (value pos_count neg_count)
+    (list (1 1 1) (0 1 2) (1'bx 2 2) (0 2 3) (1'bz 3 3) (1 4 3)
+          (1'bx 4 4) (1 5 4) (1'bz 5 5) (1'bx 5 5) (1'bz 5 5) (0 5 6))
+    (set d value)
+    (tick clk)
+    (assert_eq pos pos_count)
+    (assert_eq neg neg_count)))
+
+; The same transitions on a clock computed combinationally from a register,
+; `e ? a & b : 'z`. The register changes as a whole, so the clock changes once
+; per tick without a glitch.
+(case test_four_state_comb_clock_edges_follow_table_9_2
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    d  : input logic<3>,
+    pos: output logic<8>,
+    neg: output logic<8>,
+) {
+    var r: logic<3>;
+    always_ff (clk) {
+        r = d;
+    }
+    let cp: '_ clock         = if r[2] ? r[1] & r[0] : 1'bz;
+    let cn: '_ clock_negedge = if r[2] ? r[1] & r[0] : 1'bz;
+    var p : logic<8>;
+    var n : logic<8>;
+    always_ff (cp, rst) {
+        if_reset {
+            p = 0;
+        } else {
+            p = p + 8'd1;
+        }
+    }
+    always_ff (cn, rst) {
+        if_reset {
+            n = 0;
+        } else {
+            n = n + 8'd1;
+        }
+    }
+    assign pos = p;
+    assign neg = n;
+}
+"#)
+  (top Top)
+  (set clk 0)
+  (set rst 0)
+  (tick rst)
+  (set rst 1)
+  ; x -> 0 is a negedge.
+  (set d 3'b101)
+  (tick clk)
+  (assert_eq pos 0)
+  (assert_eq neg 1)
+  ; Clock levels: 1, 0, x, 0, z, 1, x, 1, z, x, z, 0.
+  (for (value pos_count neg_count)
+    (list (3'b111 1 1) (3'b100 1 2) (3'b11z 2 2) (3'b110 2 3) (3'b011 3 3)
+          (3'b111 4 3) (3'b1x1 4 4) (3'b111 5 4) (3'b000 5 5) (3'bx11 5 5)
+          (3'b0z1 5 5) (3'b101 5 6))
+    (set d value)
+    (tick clk)
+    (assert_eq pos pos_count)
+    (assert_eq neg neg_count)))
+
+; Asynchronous resets driven by registers. A reset domain runs on every
+; Table 9-2 edge of its reset and takes the reset branch only at the known
+; active level, so an edge to x or z increments the counter and an edge to
+; the active level clears it. The path through the twelve changes puts an
+; increment before every clear, and any edge that should not fire would
+; increment the counter.
+(case test_four_state_internal_async_reset_edges_follow_table_9_2
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    clk   : input '_ clock,
+    k     : input '_ clock,
+    clr   : input logic,
+    dh    : input logic,
+    dl    : input logic,
+    hits_h: output logic<8>,
+    hits_l: output logic<8>,
+) {
+    var qh: logic;
+    var ql: logic;
+    always_ff (clk) {
+        qh = dh;
+        ql = dl;
+    }
+    let rh: '_ reset_async_high = qh;
+    let rl: '_ reset_async_low  = ql;
+    var h : logic<8>;
+    var l : logic<8>;
+    always_ff (k, rh) {
+        if_reset {
+            h = 0;
+        } else if clr {
+            h = 8'h80;
+        } else {
+            h = h + 8'h01;
+        }
+    }
+    always_ff (k, rl) {
+        if_reset {
+            l = 0;
+        } else if clr {
+            l = 8'h80;
+        } else {
+            l = l + 8'h01;
+        }
+    }
+    assign hits_h = h;
+    assign hits_l = l;
+}
+"#)
+  (top Top)
+  (set clk 0)
+  (set k 0)
+  ; x -> 0 is not a posedge, and x -> 1 is not a negedge.
+  (set dh 0)
+  (set dl 1)
+  (tick clk)
+  (set clr 1)
+  (tick k)
+  (set clr 0)
+  (assert_eq hits_h 0x80)
+  (assert_eq hits_l 0x80)
+  ; Reset levels 1, 0, x, 1, x, 0, z, 1, z, x, z, 0 for `rh`; `rl` has 0 and
+  ; 1 swapped.
+  (for (high low hits)
+    (list (1 0 0) (0 1 0) (1'bx 1'bx 1) (1 0 0) (1'bx 1'bx 0) (0 1 0)
+          (1'bz 1'bz 1) (1 0 0) (1'bz 1'bz 0) (1'bx 1'bx 0) (1'bz 1'bz 0)
+          (0 1 0))
+    (set dh high)
+    (set dl low)
+    (tick clk)
+    (assert_eq hits_h hits)
+    (assert_eq hits_l hits)))

@@ -33,7 +33,7 @@ use celox_design::{DomainKind, EventTopology, GateOp};
 use crate::{
     AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
-    simulation::{SimulationExecutor, event_level, stable_edge},
+    simulation::{LEVEL_UNKNOWN, SimulationExecutor, edge_level, stable_edge},
     timing::Halt,
 };
 
@@ -261,6 +261,9 @@ pub struct DerivedTickPlan<E> {
     /// Every gate has a program over two-state values, so gates are judged
     /// without settling the design.
     fast: bool,
+    /// The design keeps unknown bits: levels are read with their masks and
+    /// edges follow the four-state table.
+    four_state: bool,
     /// The gated domains read and write no state the ticked domain writes,
     /// nor one another's, so they may run before it, one at a time, with the
     /// result of evaluating them together.
@@ -278,10 +281,11 @@ pub struct DerivedTickScratch {
     ready: Vec<usize>,
 }
 
-/// The entry's level at the start of the current phase.
-const WAS: u8 = 1;
+/// The entry's level at the start of the current phase, as
+/// [`edge_level`] gives it.
+const WAS: u8 = 1 | LEVEL_UNKNOWN;
 /// The entry's domain already ran in the current phase.
-const FIRED: u8 = 2;
+const FIRED: u8 = 4;
 
 impl DerivedTickScratch {
     #[inline]
@@ -379,6 +383,7 @@ pub fn build_derived_tick_plans<B: SimBackend>(
             domains,
             levers,
             fast,
+            four_state: !two_state,
             independent,
         }));
     }
@@ -407,8 +412,10 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         let mut domains: Vec<DerivedDomain<E>> = Vec::new();
         let mut levers: Vec<(SignalRef, u8)> = Vec::new();
         let mut fast = true;
+        let mut four_state = false;
         for plan in plans {
             fast &= plan.fast;
+            four_state |= plan.four_state;
             for domain in &plan.gated {
                 let id = domain.derived.domain.eval_apply.id();
                 if ticked(&domain.derived.domain)
@@ -449,6 +456,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
             domains: domains.into(),
             levers: levers.into(),
             fast,
+            four_state,
             independent: false,
         }
     }
@@ -466,7 +474,12 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         X: SimulationExecutor,
         X::Backend: SimBackend<Event = E>,
     {
-        match self.tick_domains(executor, scratch, settle) {
+        let ticked = if self.four_state {
+            self.tick_in::<true, X>(executor, scratch, settle)
+        } else {
+            self.tick_in::<false, X>(executor, scratch, settle)
+        };
+        match ticked {
             // An RTL `$finish` ends only a timed simulation, which does not
             // tick; a tick leaves it to the host.
             Ok(()) | Err(Halt::Finish) => Ok(()),
@@ -474,7 +487,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         }
     }
 
-    fn tick_domains<X>(
+    /// [`Self::tick`] with levels read in the design's state mode.
+    fn tick_in<const FOUR_STATE: bool, X>(
         &self,
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
@@ -487,21 +501,21 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         scratch.prepare(self.domains.len() + self.gated.len(), self.levers.len());
         // The baseline is the state settled after the previous operation,
         // as the timed scheduler keeps it between steps.
-        self.sample_domains(executor.backend(), scratch);
+        self.sample_domains::<FOUR_STATE, _>(executor.backend(), scratch);
         if self.gated.is_empty() {
             fire(executor, settle, self.sources.iter())?;
             executor.eval_comb()?;
-            return self.rounds(executor, scratch, Phase::Active);
+            return self.rounds::<FOUR_STATE, X>(executor, scratch, Phase::Active);
         }
         if self.fast {
-            self.tick_gated_fast(executor, scratch, settle)
+            self.tick_gated_fast::<FOUR_STATE, X>(executor, scratch, settle)
         } else {
-            self.tick_gated_settled(executor, scratch, settle)
+            self.tick_gated_settled::<FOUR_STATE, X>(executor, scratch, settle)
         }
     }
 
     /// Gates judged by their programs: no settle beyond the ticked domains'.
-    fn tick_gated_fast<X>(
+    fn tick_gated_fast<const FOUR_STATE: bool, X>(
         &self,
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
@@ -516,9 +530,9 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         scratch.ready.clear();
         for (index, domain) in self.gated.iter().enumerate() {
             let backend = executor.backend();
-            let before = self.gate_level(backend, domain, Phase::Inactive);
-            let after = self.gate_level(backend, domain, Phase::Active);
-            let fired = stable_edge(domain.derived.kind, before, after);
+            let before = self.gate_level::<FOUR_STATE, _>(backend, domain, Phase::Inactive);
+            let after = self.gate_level::<FOUR_STATE, _>(backend, domain, Phase::Active);
+            let fired = stable_edge::<FOUR_STATE>(domain.derived.kind, before, after);
             if fired {
                 scratch.ready.push(index);
             }
@@ -528,12 +542,12 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor.eval_comb()?;
         // The commit may move a gate, as the nonblocking updates after the
         // edge do; that is a further edge of the gated clock.
-        self.rounds(executor, scratch, Phase::Active)
+        self.rounds::<FOUR_STATE, X>(executor, scratch, Phase::Active)
     }
 
     /// Gates without programs: settle the design with the levers at each
     /// level, as the timed scheduler does at the edge.
-    fn tick_gated_settled<X>(
+    fn tick_gated_settled<const FOUR_STATE: bool, X>(
         &self,
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
@@ -550,7 +564,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
             let (value, mask) = executor.backend().get_four_state(signal);
             scratch.flags[saved + 2 * index] = u8::try_from(&value).unwrap_or(0);
             scratch.flags[saved + 2 * index + 1] = u8::try_from(&mask).unwrap_or(0);
-            if event_level(executor.backend(), signal) != active ^ 1 {
+            // An x or z lever is moved to the inactive level too.
+            if edge_level::<FOUR_STATE, _>(executor.backend(), signal) != active ^ 1 {
                 executor.backend_mut().set(signal, active ^ 1);
                 moved = true;
             }
@@ -559,7 +574,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
             executor.eval_comb()?;
         }
         for (index, domain) in self.gated.iter().enumerate() {
-            let level = event_level(executor.backend(), domain.derived.signal) != 0;
+            let level = edge_level::<FOUR_STATE, _>(executor.backend(), domain.derived.signal);
             scratch.flags[base + index] = flags(level, false);
         }
         for &(signal, active) in &self.levers {
@@ -568,9 +583,9 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         executor.eval_comb()?;
         scratch.ready.clear();
         for (index, domain) in self.gated.iter().enumerate() {
-            let before = scratch.flags[base + index] & WAS != 0;
-            let after = event_level(executor.backend(), domain.derived.signal) != 0;
-            let fired = stable_edge(domain.derived.kind, before, after);
+            let before = scratch.flags[base + index] & WAS;
+            let after = edge_level::<FOUR_STATE, _>(executor.backend(), domain.derived.signal);
+            let fired = stable_edge::<FOUR_STATE>(domain.derived.kind, before, after);
             if fired {
                 scratch.ready.push(index);
             }
@@ -578,7 +593,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         }
         self.fire_with_gated(executor, false, &scratch.ready)?;
         executor.eval_comb()?;
-        self.rounds(executor, scratch, Phase::Active)?;
+        self.rounds::<FOUR_STATE, X>(executor, scratch, Phase::Active)?;
 
         // Leave the levers as they were, unknown bits included. Only the
         // active edge is ticked: the return of a lever fires nothing.
@@ -627,32 +642,37 @@ impl<E: EventHandle> DerivedTickPlan<E> {
     /// A gated clock's level with its lever at `phase`'s level, from its
     /// program in the fast path and from the settled design otherwise.
     #[inline]
-    fn gate_level<B: SimBackend>(
+    fn gate_level<const FOUR_STATE: bool, B: SimBackend>(
         &self,
         backend: &B,
         domain: &GatedDomain<E>,
         phase: Phase,
-    ) -> bool {
+    ) -> u8 {
         match &domain.gate {
             Some(gate) if self.fast => {
                 let level = self.levers[domain.lever].1 ^ u8::from(phase == Phase::Inactive);
-                gate.level(backend, level)
+                u8::from(gate.level(backend, level))
             }
-            _ => event_level(backend, domain.derived.signal) != 0,
+            _ => edge_level::<FOUR_STATE, _>(backend, domain.derived.signal),
         }
     }
 
     #[inline]
-    fn sample_domains<B: SimBackend>(&self, backend: &B, scratch: &mut DerivedTickScratch) {
+    fn sample_domains<const FOUR_STATE: bool, B: SimBackend>(
+        &self,
+        backend: &B,
+        scratch: &mut DerivedTickScratch,
+    ) {
         for (index, domain) in self.domains.iter().enumerate() {
-            scratch.flags[index] = flags(event_level(backend, domain.signal) != 0, false);
+            let level = edge_level::<FOUR_STATE, _>(backend, domain.signal);
+            scratch.flags[index] = flags(level, false);
         }
     }
 
     /// Cascade rounds over the state-derived and gated domains: each round
     /// runs together every domain whose clock moved to its active edge since
     /// the phase began, then settles, until no further edge appears.
-    fn rounds<X>(
+    fn rounds<const FOUR_STATE: bool, X>(
         &self,
         executor: &mut X,
         scratch: &mut DerivedTickScratch,
@@ -670,8 +690,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
                 if state & FIRED != 0 {
                     continue;
                 }
-                let is = event_level(executor.backend(), domain.signal) != 0;
-                if stable_edge(domain.kind, state & WAS != 0, is) {
+                let is = edge_level::<FOUR_STATE, _>(executor.backend(), domain.signal);
+                if stable_edge::<FOUR_STATE>(domain.kind, state & WAS, is) {
                     scratch.ready.push(index);
                 }
             }
@@ -680,8 +700,8 @@ impl<E: EventHandle> DerivedTickPlan<E> {
                 if state & FIRED != 0 {
                     continue;
                 }
-                let is = self.gate_level(executor.backend(), domain, phase);
-                if stable_edge(domain.derived.kind, state & WAS != 0, is) {
+                let is = self.gate_level::<FOUR_STATE, _>(executor.backend(), domain, phase);
+                if stable_edge::<FOUR_STATE>(domain.derived.kind, state & WAS, is) {
                     scratch.ready.push(base + index);
                 }
             }
@@ -716,12 +736,13 @@ enum Phase {
 }
 
 #[inline]
-fn flags(level: bool, fired: bool) -> u8 {
-    (u8::from(level) * WAS) | (u8::from(fired) * FIRED)
+fn flags(level: u8, fired: bool) -> u8 {
+    level | (u8::from(fired) * FIRED)
 }
 
 /// Evaluate and commit `domains` as one coincident edge: each of them
 /// samples the same state, then all of them commit.
+#[inline(always)]
 fn fire<'a, X, E>(
     executor: &mut X,
     settle: bool,
