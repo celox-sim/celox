@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.12.0 (2026-10-17)
+
+## What's Changed
+* chore(deps): update dependency lefthook to v2.2.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1282
+* chore(deps): update dependency @playwright/test to v1.64.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1284
+* fix(release): publish SV analyzer before the test suite by @tignear in https://github.com/celox-sim/celox/pull/1287
+* chore(deps): update rust toolchain to e9d12b9 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1288
+* ci: migrate merge automation to Mergify by @tignear in https://github.com/celox-sim/celox/pull/1290
+* chore(deps): update dependency lefthook to v2.2.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1292
+* chore(deps): update dependency vite to v8.3.4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1296
+* ci: restore focused PR checks and parallel merge validation by @tignear in https://github.com/celox-sim/celox/pull/1300
+* ci: pin the published Mergify CLI setup action by @tignear in https://github.com/celox-sim/celox/pull/1305
+* fix(deps): update rust crate syn to v3.0.9 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1299
+* chore(deps): update rust crate sha2 to v0.11.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1310
+* ci: batch queued PRs and defer lydite gates to the queue by @tignear in https://github.com/celox-sim/celox/pull/1308
+* ci: ignore obsolete merge queue title checks by @tignear in https://github.com/celox-sim/celox/pull/1319
+* ci: move full CodeQL analysis to weekly and manual runs by @tignear in https://github.com/celox-sim/celox/pull/1311
+* chore(deps): update rust toolchain to 87ffb7f by @renovate[bot] in https://github.com/celox-sim/celox/pull/1302
+* ci: separate merge queues by category and independent scope by @tignear in https://github.com/celox-sim/celox/pull/1318
+* ci: preserve shared Rust caches and avoid unnecessary product builds by @tignear in https://github.com/celox-sim/celox/pull/1324
+* chore(deps): update pnpm to v12.11.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1332
+* feat(sv): implement $urandom by @tignear in https://github.com/celox-sim/celox/pull/1294
+* chore(deps): update rust to v1.99.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1303
+* chore(deps): update rust toolchain to ec07af4 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1335
+* ci: run Veryl proof gates only weekly or manually by @tignear in https://github.com/celox-sim/celox/pull/1337
+* fix(backend): zero logical shifts by counts at or above the width by @tignear in https://github.com/celox-sim/celox/pull/1340
+* chore(claude): remove the overlayfs worktree hooks by @tignear in https://github.com/celox-sim/celox/pull/1341
+* chore(deps): update mbx to 1.24.0 and automate updates by @tignear in https://github.com/celox-sim/celox/pull/1346
+* fix(vite-plugin): retry transient ticket read failures by @tignear in https://github.com/celox-sim/celox/pull/1348
+* fix(native): mask rounded partial-chunk loads by @tignear in https://github.com/celox-sim/celox/pull/1351
+* chore(lydite): drop unreferenced audit evidence and translate docs to English by @tignear in https://github.com/celox-sim/celox/pull/1291
+* test(suite): add timed script operations and the timing oracle by @tignear in https://github.com/celox-sim/celox/pull/1354
+* chore(deps): update pnpm to v12.11.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1358
+* chore(deps): update pnpm to v12.11.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1363
+* fix(lydite): sync Veryl conformance lockfile with syn pin by @tignear in https://github.com/celox-sim/celox/pull/1366
+* fix(native): preserve loaded slices across state writes by @tignear in https://github.com/celox-sim/celox/pull/1367
+* fix(sim): fire derived clock domains at their real edges by @tignear in https://github.com/celox-sim/celox/pull/1364
+* test(testbench): cover Veryl string variable semantics by @tignear in https://github.com/celox-sim/celox/pull/1370
+* ci(lydite): select tests by dependencies and weekly cadence by @tignear in https://github.com/celox-sim/celox/pull/1362
+* fix(sim): keep clock copies sensed at the opposite edge apart by @tignear in https://github.com/celox-sim/celox/pull/1373
+* test(runtime): isolate parallel trace capture from concurrent tests by @tignear in https://github.com/celox-sim/celox/pull/1375
+* feat(testbench)!: support basic Veryl string values by @tignear in https://github.com/celox-sim/celox/pull/1371
+* ci: check dependencies with cargo-deny by @tignear in https://github.com/celox-sim/celox/pull/1380
+* refactor(sv): identify system tasks and functions by type by @tignear in https://github.com/celox-sim/celox/pull/1381
+* ci: move non-required PR checks to required lint or schedules by @tignear in https://github.com/celox-sim/celox/pull/1382
+* fix(deps): update rust crate wasm-encoder to 0.262 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1383
+* feat(sv): support both edges of one clock or reset by @tignear in https://github.com/celox-sim/celox/pull/1384
+* feat(runtime)!: wake processes on events in front of the batch step by @tignear in https://github.com/celox-sim/celox/pull/1361
+* ci: select PR checks from the merge base, not the base tip by @tignear in https://github.com/celox-sim/celox/pull/1393
+* feat(sv): know every system task and function IEEE 1800-2023 names by @tignear in https://github.com/celox-sim/celox/pull/1392
+* docs: remove ADRs moved to Claude Docs by @tignear in https://github.com/celox-sim/celox/pull/1397
+* ci(lydite): retire the stale workflow path and skip release PRs by @tignear in https://github.com/celox-sim/celox/pull/1403
+* ci: support Mergify stacked pull requests by @tignear in https://github.com/celox-sim/celox/pull/1406
+* fix(veryl): reject string and float values Celox cannot represent by @tignear in https://github.com/celox-sim/celox/pull/1405
+* feat(sv): support $random and $urandom_range by @tignear in https://github.com/celox-sim/celox/pull/1396
+* refactor(runtime)!: split the simulation scheduler into modules by @tignear in https://github.com/celox-sim/celox/pull/1408
+* chore(deps): update rust toolchain to a110337 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1416
+* chore(deps): update rust crate codspeed-criterion-compat to v5.0.3 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1421
+* chore(deps): update mbx to 1.24.1 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/1420
+* chore(deps): update cachix/install-nix-action digest to 448cde7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1424
+* refactor(runtime)!: derive the schedule model once per program by @tignear in https://github.com/celox-sim/celox/pull/1417
+* ci(lydite): scope Cargo.lock edits by the lockfile dependency graph by @tignear in https://github.com/celox-sim/celox/pull/1427
+* chore(deps): update pnpm to v12.12.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/1428
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.11.0...v0.12.0
+
 ## 0.11.0 (2026-10-14)
 
 ## What's Changed
