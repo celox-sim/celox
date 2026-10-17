@@ -1,0 +1,1 @@
+Rebase the dependent multi-source support onto the revised #1441, remove an extra trailing blank line in the existing SV fixture, and record the new validation results.
