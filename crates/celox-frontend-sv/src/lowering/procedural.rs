@@ -44,6 +44,8 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
+    /// Warnings found while lowering, for the caller to report.
+    pub warnings: Vec<crate::FrontendWarning>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -140,6 +142,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
+            warnings: Vec::new(),
         }
     }
 
@@ -333,7 +336,7 @@ impl<'a> ProcModule<'a> {
     /// the values of its optional start and finish addresses: the file is
     /// read when the design is compiled.
     pub fn readmem(
-        &self,
+        &mut self,
         format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         start: Option<i128>,
@@ -418,9 +421,13 @@ impl<'a> ProcModule<'a> {
             finish,
         )
         .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
-        if let Some(warning) = parsed.warning {
-            tracing::warn!(task = name, file = filename, "{warning}");
-        }
+        let warning = parsed
+            .warning
+            .map(|detail| crate::FrontendWarning::MemoryFileWordCount {
+                task: name.to_string(),
+                file: unescape(filename),
+                detail,
+            });
         let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
@@ -447,6 +454,7 @@ impl<'a> ProcModule<'a> {
                 });
             }
         }
+        self.warnings.extend(warning);
         Ok((id, words))
     }
 

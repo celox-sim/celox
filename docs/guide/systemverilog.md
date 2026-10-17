@@ -331,8 +331,9 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   words are written on every activation; in `initial` they are part of the
   initial state. Explicit ranges load in either direction, and `@` file addresses
   are absolute array indices. An address directive outside the requested range
-  is an error. Without directives, a word-count mismatch emits a warning:
-  excess words are ignored, and missing words leave memory unchanged.
+  is an error. Without directives, a word-count mismatch is a compilation
+  warning (`Simulator::warnings()`): excess words are ignored, and missing words
+  leave memory unchanged.
 - **Constant parameters of aggregate type** (unpacked arrays, packed structs
   given by a pattern) are variables that hold their value from the start of
   the simulation; they cannot be used where an elaboration-time constant is

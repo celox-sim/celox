@@ -46,6 +46,35 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 5u8.into());
     }
 
+    fn reports_sv_warnings_of_a_veryl_top(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let veryl = "module Top(y: output logic<8>) { inst child: $sv::Child(y); }";
+            let sv = format!(r#"
+                module Child(output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{}", mem);
+                    assign y = mem[0];
+                endmodule
+            "#, file.display());
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(&sv, Path::new("child.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+        let warnings: Vec<_> = sim.warnings().iter().map(ToString::to_string).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(
+                &sim.warnings()[0],
+                celox::CompilationWarning::SystemVerilog(
+                    celox::SvFrontendWarning::MemoryFileWordCount { .. }
+                )
+            ),
+            "{warnings:?}"
+        );
+    }
+
     fn resolves_veryl_interface_parameter_types_after_prior_overrides(sim) {
         @setup {
             let veryl = "interface Bus #(param W: u32 = 8, param V: logic<W> = 4) { var req: logic<V>; var rsp: logic<V>; modport slave { req: input, rsp: output, } } module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req; }";

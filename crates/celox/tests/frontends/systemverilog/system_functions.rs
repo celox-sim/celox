@@ -945,6 +945,8 @@ sv_backends! {
         assert_eq!(sim.get(initial_words), 0xaabbcc00u32.into());
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(registered), 0x0a0b0c00u32.into());
+        // Address directives, or a word for each address, warn nothing.
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
     fn readmem_count_mismatch_preserves_unwritten_words(sim) {
@@ -976,6 +978,26 @@ sv_backends! {
         let short_y = sim.signal("short_y");
         assert_eq!(sim.get(y), 0xbbcc3344u32.into());
         assert_eq!(sim.get(short_y), 0x112233aau32.into());
+        // IEEE 1800-2023 21.4: a count mismatch without address directives
+        // issues a warning, once per call even though the process is
+        // lowered more than once.
+        let mut warned: Vec<_> = sim
+            .warnings()
+            .iter()
+            .map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(
+                    celox::SvFrontendWarning::MemoryFileWordCount { task, file, .. },
+                ) => (task.as_str(), file.clone()),
+                warning => panic!("unexpected warning: {warning}"),
+            })
+            .collect();
+        warned.sort();
+        let mut expected = vec![
+            ("$readmemh", long.display().to_string()),
+            ("$readmemh", short.display().to_string()),
+        ];
+        expected.sort();
+        assert_eq!(warned, expected);
     }
     fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
     fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
