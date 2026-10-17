@@ -749,7 +749,7 @@ struct Recording<'a, B: SimBackend> {
     calls: Vec<&'static str>,
 }
 
-impl<B: SimBackend> celox_runtime::SimulationExecutor for Recording<'_, B> {
+impl<B: SimBackend> celox_runtime::UnitExecutor for Recording<'_, B> {
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -762,29 +762,31 @@ impl<B: SimBackend> celox_runtime::SimulationExecutor for Recording<'_, B> {
 
     fn eval_comb(&mut self) -> Result<(), celox_runtime::Halt> {
         self.calls.push("comb");
-        celox_runtime::SimulationExecutor::eval_comb(self.sim)
+        celox_runtime::UnitExecutor::eval_comb(self.sim)
     }
 
     fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push("eval_apply");
-        celox_runtime::SimulationExecutor::eval_apply_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::eval_apply_ff_at(self.sim, event)
     }
 
     fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push("eval_only");
-        celox_runtime::SimulationExecutor::eval_only_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::eval_only_ff_at(self.sim, event)
     }
 
     fn apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push("apply");
-        celox_runtime::SimulationExecutor::apply_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::apply_ff_at(self.sim, event)
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), celox_runtime::Halt> {
         self.calls.push("process");
-        celox_runtime::SimulationExecutor::run_process(self.sim, index)
+        celox_runtime::UnitExecutor::run_process(self.sim, index)
     }
 }
+
+impl<B: SimBackend> celox_runtime::HostBoundary for Recording<'_, B> {}
 
 /// Two registers on `clk`, a combinational output, and with `testbench`
 /// a process that counts rising edges of `clk` and one that sleeps.
@@ -1800,7 +1802,7 @@ struct Tracing<'a, B: SimBackend> {
     calls: Vec<String>,
 }
 
-impl<B: SimBackend> celox_runtime::SimulationExecutor for Tracing<'_, B> {
+impl<B: SimBackend> celox_runtime::UnitExecutor for Tracing<'_, B> {
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -1813,38 +1815,40 @@ impl<B: SimBackend> celox_runtime::SimulationExecutor for Tracing<'_, B> {
 
     fn eval_comb(&mut self) -> Result<(), celox_runtime::Halt> {
         self.calls.push("comb".into());
-        celox_runtime::SimulationExecutor::eval_comb(self.sim)
+        celox_runtime::UnitExecutor::eval_comb(self.sim)
     }
 
     fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push(format!("eval_apply(e{})", event.id()));
-        celox_runtime::SimulationExecutor::eval_apply_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::eval_apply_ff_at(self.sim, event)
     }
 
     fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push(format!("eval_only(e{})", event.id()));
-        celox_runtime::SimulationExecutor::eval_only_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::eval_only_ff_at(self.sim, event)
     }
 
     fn apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
         self.calls.push(format!("apply(e{})", event.id()));
-        celox_runtime::SimulationExecutor::apply_ff_at(self.sim, event)
+        celox_runtime::UnitExecutor::apply_ff_at(self.sim, event)
     }
 
     fn run_process(&mut self, index: usize) -> Result<(), celox_runtime::Halt> {
         self.calls.push(format!("process({index})"));
-        celox_runtime::SimulationExecutor::run_process(self.sim, index)
+        celox_runtime::UnitExecutor::run_process(self.sim, index)
     }
+}
 
+impl<B: SimBackend> celox_runtime::HostBoundary for Tracing<'_, B> {
     fn take_host_writes(&mut self) -> Vec<(crate::SignalRef, celox_runtime::timing::Value)> {
-        let writes = celox_runtime::SimulationExecutor::take_host_writes(self.sim);
+        let writes = celox_runtime::HostBoundary::take_host_writes(self.sim);
         self.calls.push(format!("host_writes({})", writes.len()));
         writes
     }
 
     fn freeze(&mut self) {
         self.calls.push("freeze".into());
-        celox_runtime::SimulationExecutor::freeze(self.sim);
+        celox_runtime::HostBoundary::freeze(self.sim);
     }
 
     fn stage_external_event(
@@ -1854,7 +1858,7 @@ impl<B: SimBackend> celox_runtime::SimulationExecutor for Tracing<'_, B> {
     ) -> Result<(), crate::RuntimeErrorCode> {
         self.calls
             .push(format!("stage(e{}@{timestamp})", event.id()));
-        celox_runtime::SimulationExecutor::stage_external_event(self.sim, event, timestamp)
+        celox_runtime::HostBoundary::stage_external_event(self.sim, event, timestamp)
     }
 
     fn fire_external_event(
@@ -1864,12 +1868,12 @@ impl<B: SimBackend> celox_runtime::SimulationExecutor for Tracing<'_, B> {
     ) -> Result<(), crate::RuntimeErrorCode> {
         self.calls
             .push(format!("fire(e{}@{timestamp})", event.id()));
-        celox_runtime::SimulationExecutor::fire_external_event(self.sim, event, timestamp)
+        celox_runtime::HostBoundary::fire_external_event(self.sim, event, timestamp)
     }
 
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.calls.push(format!("finish_step({timestamp})"));
-        celox_runtime::SimulationExecutor::finish_timed_step(self.sim, timestamp);
+        celox_runtime::HostBoundary::finish_timed_step(self.sim, timestamp);
     }
 }
 

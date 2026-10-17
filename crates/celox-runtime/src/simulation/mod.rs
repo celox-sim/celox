@@ -18,7 +18,7 @@ use celox_design::{CounterKind, DomainKind};
 use fxhash::FxHashMap;
 
 pub(crate) use batch::{event_level, stable_edge};
-pub use host::{HostWatch, SimulationExecutor};
+pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
 pub use persist::{ScheduleParts, SimulationSnapshot};
 pub use wait::{Baseline, Waiter, Waiters};

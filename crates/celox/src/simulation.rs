@@ -7,8 +7,8 @@ use crate::{
     },
 };
 use celox_runtime::{
-    CountedDomainRefs, CountedRefs, EventInfo, Halt, HostWatch, NbaSiteRefs, ProcessRefs,
-    SimulationExecutor, SimulationSnapshot, SimulationState, TermRefs,
+    CountedDomainRefs, CountedRefs, EventInfo, Halt, HostBoundary, HostWatch, NbaSiteRefs,
+    ProcessRefs, SimulationSnapshot, SimulationState, TermRefs, TickExecutor, UnitExecutor,
 };
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -70,7 +70,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
     }
 }
 
-impl<B: SimBackend> SimulationExecutor for Simulator<B> {
+impl<B: SimBackend> UnitExecutor for Simulator<B> {
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -100,12 +100,6 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     }
 
     #[inline]
-    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
-        self.eval_comb_apply_ff_at_checked(event)?;
-        self.runtime_finish()
-    }
-
-    #[inline]
     fn apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
         self.apply_ff_at_checked(event)?;
         self.runtime_finish()
@@ -117,7 +111,17 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
             .map_err(|e| self.decorate_runtime_error(e))?;
         self.runtime_finish()
     }
+}
 
+impl<B: SimBackend> TickExecutor for Simulator<B> {
+    #[inline]
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_comb_apply_ff_at_checked(event)?;
+        self.runtime_finish()
+    }
+}
+
+impl<B: SimBackend> HostBoundary for Simulator<B> {
     fn take_host_writes(&mut self) -> Vec<(SignalRef, celox_runtime::timing::Value)> {
         self.host_watch.take_log()
     }

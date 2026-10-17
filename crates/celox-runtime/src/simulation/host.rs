@@ -8,11 +8,9 @@ use crate::{
     timing::{CountedRefs, Halt, Value, read},
 };
 
-/// Backend execution hooks needed by the timed simulation engine.
-///
-/// The facade implements this contract to retain policy such as runtime-event
-/// decoration and waveform capture outside the backend-independent scheduler.
-pub trait SimulationExecutor {
+/// The units a timed step executes: combinational settling, flip-flop
+/// domains and process kernels.
+pub trait UnitExecutor {
     type Backend: SimBackend;
 
     fn backend(&self) -> &Self::Backend;
@@ -21,19 +19,15 @@ pub trait SimulationExecutor {
     fn eval_apply_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event)
     -> Result<(), Halt>;
     fn eval_only_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event) -> Result<(), Halt>;
-    /// Settle combinational logic, then evaluate and commit one domain.
-    fn eval_comb_apply_ff_at(
-        &mut self,
-        event: <Self::Backend as SimBackend>::Event,
-    ) -> Result<(), Halt> {
-        self.eval_comb()?;
-        self.eval_apply_ff_at(event)
-    }
     fn apply_ff_at(&mut self, event: <Self::Backend as SimBackend>::Event) -> Result<(), Halt>;
     fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         Ok(self.backend_mut().run_process(index)?)
     }
+}
 
+/// What a timed step tells the host around the units it executes. Every
+/// hook defaults to doing nothing.
+pub trait HostBoundary: UnitExecutor {
     /// Values the host wrote to signals that a wait watches since the last
     /// call, in write order (see [`crate::HostWatch`]).
     fn take_host_writes(&mut self) -> Vec<(SignalRef, Value)> {
@@ -67,6 +61,15 @@ pub trait SimulationExecutor {
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 }
+
+/// Backend execution hooks needed by the timed simulation engine: its
+/// units and its host boundary.
+///
+/// The facade implements this contract to retain policy such as runtime-event
+/// decoration and waveform capture outside the backend-independent scheduler.
+pub trait SimulationExecutor: UnitExecutor + HostBoundary {}
+
+impl<T: UnitExecutor + HostBoundary + ?Sized> SimulationExecutor for T {}
 
 /// Host writes the runtime must observe one at a time: writes of counted
 /// signals bump their counters, and writes of signals a wait watches are
