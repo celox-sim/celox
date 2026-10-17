@@ -50,8 +50,12 @@ pub enum SystemFunction {
     Onehot0,
     /// `$isunknown` (20.9).
     Isunknown,
+    /// `$random` (20.14.1), with the algorithm of Annex N.
+    Random,
     /// `$urandom` (18.13.1).
     Urandom,
+    /// `$urandom_range` (18.13.2).
+    UrandomRange,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -88,7 +92,9 @@ impl SystemFunction {
             Self::Onehot => "$onehot",
             Self::Onehot0 => "$onehot0",
             Self::Isunknown => "$isunknown",
+            Self::Random => "$random",
             Self::Urandom => "$urandom",
+            Self::UrandomRange => "$urandom_range",
         }
     }
 
@@ -116,7 +122,13 @@ impl SystemFunction {
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice.
     pub fn is_effectful(self) -> bool {
-        self == Self::Urandom
+        matches!(self, Self::Random | Self::Urandom | Self::UrandomRange)
+    }
+
+    /// Whether the call writes argument `position` back, as `$random(seed)`
+    /// updates its seed variable.
+    pub fn writes_argument(self, position: usize) -> bool {
+        self == Self::Random && position == 0
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -131,7 +143,8 @@ impl SystemFunction {
             | Self::Countbits
             | Self::Countones => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
-            Self::Urandom => Some((32, false)),
+            Self::Random => Some((32, true)),
+            Self::Urandom | Self::UrandomRange => Some((32, false)),
             Self::Signed
             | Self::Unsigned
             | Self::Bits
@@ -302,7 +315,7 @@ impl Callee {
 
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice: user subroutines may have side
-    /// effects, as does `$urandom`.
+    /// effects, as do the random number functions.
     pub fn is_effectful(&self) -> bool {
         self.system().is_none_or(SystemFunction::is_effectful)
     }
@@ -550,7 +563,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$set_coverage_db_name", Task),
     unsupported("$load_coverage_db", Task),
     // 20.14 Probabilistic distribution functions
-    unsupported("$random", Function),
+    function(SystemFunction::Random, 0, Some(1)),
     unsupported("$dist_uniform", Function),
     unsupported("$dist_normal", Function),
     unsupported("$dist_exponential", Function),
@@ -720,7 +733,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$inferred_disable", Function),
     // 18.13 Random number system functions and methods
     function(SystemFunction::Urandom, 0, Some(1)),
-    unsupported("$urandom_range", Function),
+    function(SystemFunction::UrandomRange, 1, Some(2)),
     // 32.9 Loading timing data from an SDF file
     unsupported("$sdf_annotate", Task),
     // Annex D Optional system tasks and system functions, which the standard

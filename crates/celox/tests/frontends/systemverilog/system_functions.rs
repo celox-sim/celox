@@ -437,6 +437,15 @@ sv_backends! {
     fn urandom_keeps_process_and_instance_streams_independent(sim) {
         @case "system_functions::urandom_keeps_process_and_instance_streams_independent";
     }
+    fn random_follows_annex_n_and_updates_its_seed(sim) {
+        @case "system_functions::random_follows_annex_n_and_updates_its_seed";
+    }
+    fn random_without_a_seed_continues_its_stream(sim) {
+        @case "system_functions::random_without_a_seed_continues_its_stream";
+    }
+    fn urandom_range_stays_within_its_bounds(sim) {
+        @case "system_functions::urandom_range_stays_within_its_bounds";
+    }
 
     fn display_expressions_propagate_operand_widths(sim) { @case "system_functions::display_expressions_propagate_operand_widths"; }
 

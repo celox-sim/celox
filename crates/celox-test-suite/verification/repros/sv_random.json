@@ -1,0 +1,53 @@
+{
+  "standard": "IEEE 1800-2023 20.14.1 and Annex N",
+  "source": "module Top;\n  int seed, a, b, c;\n  initial begin\n    seed = 0; a = $random(seed); b = $random(seed); c = $random(seed);\n    $display(\"seeded=%0d,%0d,%0d seed=%0d\", a, b, c, seed);\n    a = $random; b = $random;\n    $display(\"unseeded=%0d,%0d\", a, b);\n    $finish;\n  end\nendmodule\n",
+  "expected": [
+    "seeded=303379748,-1064739199,-2071669239 seed=75814084",
+    "unseeded=303379748,-1064739199"
+  ],
+  "verilator_compile": {
+    "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+    "exit_code": 0
+  },
+  "verilator_run": {
+    "command": "<repro>/obj/VTop",
+    "exit_code": 0,
+    "output": "seeded=1631467331,-1457234074,-1292847975 seed=201238671\nunseeded=-491736939,795631877\n- <repro>/probe.sv:8: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 0s; walltime 0.000 s; speed 0.000 s/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+  },
+  "icarus_compile": {
+    "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+    "exit_code": 0
+  },
+  "icarus_run": {
+    "command": "vvp <repro>/probe.vvp",
+    "exit_code": 0,
+    "output": "seeded=303379748,-1064739199,-2071669239 seed=75814084\nunseeded=303379748,-1064739199\n<repro>/probe.sv:8: $finish called at 0 (1s)\n"
+  },
+  "note": "The expected values are those of the Annex N C source compiled with a 32-bit long. Focused shared failures were reviewed against the locally supplied IEEE 1800-2023; passing or unrelated baseline rows are not refreshed.",
+  "shared_failures": {
+    "verilator": [
+      {
+        "category": "Functions",
+        "detail": "system_functions::random_follows_annex_n_and_updates_its_seed at 2650:3: assert_eq comb_value: expected 0x12153524, got 0x4f36f2dc",
+        "expectation": "Simulation",
+        "name": "system_functions::random_follows_annex_n_and_updates_its_seed",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      },
+      {
+        "category": "Functions",
+        "detail": "system_functions::random_without_a_seed_continues_its_stream at 2699:3: expect_output: expected [51, 48, 51, 51, 55, 57, 55, 52, 56, 32, 45, 49, 48, 54, 52, 55, 51, 57, 49, 57, 57, 10], got [49, 54, 48, 52, 52, 54, 57, 56, 52, 48, 32, 54, 49, 50, 51, 54, 57, 52, 57, 55, 10]",
+        "expectation": "Simulation",
+        "name": "system_functions::random_without_a_seed_continues_its_stream",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      }
+    ]
+  }
+}

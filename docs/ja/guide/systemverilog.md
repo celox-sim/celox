@@ -71,7 +71,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| 乱数 | `$urandom` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。任意の整数式によるシードと、プロセスごとに独立した32bit符号なしの乱数列 |
+| 乱数 | `$urandom`、`$urandom_range`、`$random` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -233,3 +233,11 @@ interface型から解決します。generic interfaceポートとgenerate内の�
 `always_comb` は時刻0と暗黙の感度リストの入力変化時に実行され、
 `always @*` は入力変化を待ちます。入力が変わらない再評価では乱数列は進みません。
 定数値を要求する文脈では診断を返します。
+
+`$urandom_range(maxval, minval)` は `$urandom` の列から両端を含む範囲の値を返し、
+逆順の範囲は入れ替えます。`minval` の既定値は0です（18.13.2）。
+`$random` は IEEE 1800-2023 附属書 N のアルゴリズムに従うため、
+Icarus Verilog などそれを実装するシミュレータと同じ値を返します。
+`$random(seed)` はシード変数を更新します。引数がなければプロセスごとのシードを
+使い、その初期値は0です。そのため `$random` を呼ぶプロセスが1つだけの設計では、
+設計全体で1つのシードを持つシミュレータと一致します。

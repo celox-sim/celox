@@ -85,7 +85,7 @@ synthesis and is tested at the design level.
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
-| Random numbers | `$urandom` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed, a 32-bit unsigned result and a separate stream per process |
+| Random numbers | `$urandom`, `$urandom_range` and `$random` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -381,3 +381,12 @@ activates: `always_comb` runs once at time zero and on implicit sensitivity
 changes, while `always @*` waits for a sensitivity change. Repeated evaluation
 with unchanged inputs does not advance the stream. Constant-value contexts
 report a diagnostic.
+
+`$urandom_range(maxval, minval)` draws from the `$urandom` stream and returns a
+value between the bounds, inclusive, swapping reversed bounds; `minval`
+defaults to 0 (18.13.2). `$random` follows the algorithm of IEEE 1800-2023
+Annex N, so it returns the same values as other simulators that implement it,
+such as Icarus Verilog. `$random(seed)` updates its seed variable. Without an
+argument, each process continues its own seed, which starts at 0, so a design
+whose one process calls `$random` matches simulators that keep one seed for
+the whole design.

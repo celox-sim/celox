@@ -597,44 +597,36 @@ fn expr_from_system_function_call(
     )?;
     let operand_error = || unsupported(format!("operand of `{name}`"));
     match function {
-        SystemFunction::Urandom => {
-            let args = match call {
+        SystemFunction::Urandom | SystemFunction::Random | SystemFunction::UrandomRange => {
+            let arguments = match call {
+                _ if args.as_deref() == Some(&[]) => Vec::new(),
                 sv_parser::SystemTfCall::ArgOptionl(call) if call.nodes.1.is_none() => Vec::new(),
-                _ => match single_expression_argument(call) {
-                    Some(argument) => {
-                        if dimensions::unpacked_expression_dimensions(
-                            argument,
-                            syntax_tree,
-                            &packed_dimensions.const_env,
-                            &packed_dimensions.type_aliases,
-                            Some(packed_dimensions),
-                        )
-                        .is_some_and(|rank| rank != 0)
-                        {
-                            return Err(operand_error());
-                        }
-                        let argument = expr_from_expression_with_types(
-                            argument,
-                            syntax_tree,
-                            packed_dimensions,
-                        )
-                        .map_err(|error| {
-                            AnalyzerError::InvalidSystemTfCall {
-                                name: name.into(),
-                                detail: format!("seed must be an integral expression: {error}"),
-                            }
-                        })?;
-                        expr_static_width(&argument, packed_dimensions)
-                            .ok_or_else(operand_error)?;
-                        vec![Some(argument)]
-                    }
-                    None if args.as_deref() == Some(&[]) => Vec::new(),
-                    None => return Err(operand_error()),
-                },
+                sv_parser::SystemTfCall::ArgExpression(call)
+                    if call.nodes.1.nodes.1.1.is_none() =>
+                {
+                    call.nodes.1.nodes.1.0.contents()
+                }
+                _ => return Err(operand_error()),
             };
+            let mut converted = Vec::new();
+            for (position, argument) in arguments.into_iter().enumerate() {
+                let argument = argument.as_ref().ok_or_else(operand_error)?;
+                let argument = integral_argument(name, argument, syntax_tree, packed_dimensions)?;
+                // 20.14.1: the seed of `$random` is an integral variable,
+                // which the call updates.
+                if function.writes_argument(position)
+                    && !query_actual_is_writable(&argument, packed_dimensions)
+                {
+                    return Err(AnalyzerError::InvalidSystemTfCall {
+                        name: name.into(),
+                        detail: "seed must be an integral variable".into(),
+                    });
+                }
+                converted.push(Some(argument));
+            }
             Ok(Expr::Call {
                 callee: Callee::System(function),
-                args,
+                args: converted,
                 arg_order: Vec::new(),
             })
         }
@@ -750,6 +742,35 @@ fn expr_from_system_function_call(
             })
         }
     }
+}
+
+/// An integral argument of a random number function, such as the seed of
+/// `$urandom`.
+fn integral_argument(
+    name: &str,
+    argument: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let operand_error = || unsupported(format!("operand of `{name}`"));
+    if dimensions::unpacked_expression_dimensions(
+        argument,
+        syntax_tree,
+        &packed_dimensions.const_env,
+        &packed_dimensions.type_aliases,
+        Some(packed_dimensions),
+    )
+    .is_some_and(|rank| rank != 0)
+    {
+        return Err(operand_error());
+    }
+    let argument = expr_from_expression_with_types(argument, syntax_tree, packed_dimensions)
+        .map_err(|error| AnalyzerError::InvalidSystemTfCall {
+            name: name.into(),
+            detail: format!("argument must be an integral expression: {error}"),
+        })?;
+    expr_static_width(&argument, packed_dimensions).ok_or_else(operand_error)?;
+    Ok(argument)
 }
 
 /// The one expression argument of a system function call such as `$clog2(x)`.
