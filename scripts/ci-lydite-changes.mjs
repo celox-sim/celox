@@ -1,5 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isVersionOnlyRelease } from "./ci-changes.mjs";
 import { changedFilesBetween, readWorkspace } from "./ci-rust-scope.mjs";
 
 export const isLydite = (name) =>
@@ -93,6 +94,9 @@ const ownsBridge = (path) =>
   ) || path.replace(/^\.\//, "") === ".github/workflows/lydite.yml";
 
 export function pullRequestScope(files, packages) {
+  // Release PRs and their queue drafts only bump versions.
+  if (files !== null && isVersionOnlyRelease(files))
+    return { core: false, bridge: false };
   const scope = lyditeScope(files, packages);
   if (files === null) return scope;
   return { ...scope, bridge: scope.bridge && files.some(ownsBridge) };

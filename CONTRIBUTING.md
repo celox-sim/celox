@@ -210,6 +210,7 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   in the issue "Lydite validation is failing on <branch>", closed by the next
   passing run. NAPI/JS changes, upstream private tests and Markdown do not
   reach Lydite.
+- Version-only Release Please diffs, including their queue drafts, skip Lydite.
 - Shared dependency/toolchain configuration runs the core lane; an unreadable
   diff or dependency graph runs both lanes. The graph includes optional, build
   and dev edges.

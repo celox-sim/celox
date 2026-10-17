@@ -84,6 +84,29 @@ test("PRs run the bridge only for Lydite-owned changes", () => {
   assert.deepEqual(pullRequestScope(null, packages), both);
 });
 
+test("version-only release PRs skip Lydite", () => {
+  const release = [
+    ".release-please-manifest.json",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "VERSION",
+    "crates/celox-napi/package.json",
+    "packages/celox/package.json",
+    "packages/vite-plugin/package.json",
+  ];
+  assert.deepEqual(pullRequestScope(release, packages), neither);
+  // Without the release manifest, Cargo changes are ordinary dependency edits.
+  assert.deepEqual(pullRequestScope(release.slice(1), packages), {
+    core: true,
+    bridge: false,
+  });
+  assert.equal(
+    pullRequestScope([...release, "crates/lydite/src/main.rs"], packages).bridge,
+    true,
+  );
+});
+
 test("dependency selection follows new transitive edges automatically", () => {
   const graph = [
     { name: "lydite", dir: "crates/lydite", dependencies: [] },
