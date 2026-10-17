@@ -10,9 +10,9 @@
 //! counters instead.
 
 use celox_design::CounterKind;
-use fxhash::{FxHashMap, FxHashSet};
 use num_bigint::BigUint;
 
+pub use crate::simulation::{Baseline, HostWatch, NbaUpdate, Waiter, Waiters};
 use crate::{SignalRef, SimulatorErrorCode, backend::SimBackend};
 
 /// Why a simulation stopped executing before completing the work it was
@@ -101,77 +101,6 @@ impl CountedRefs {
     }
 }
 
-/// Host writes the runtime must observe one at a time: writes of counted
-/// signals bump their counters, and writes of signals a wait watches are
-/// logged for the waits to examine. Empty unless a timed simulation with
-/// such signals is attached, so ordinary writes pay one emptiness check.
-#[derive(Clone, Debug, Default)]
-pub struct HostWatch {
-    counted: FxHashMap<usize, CountedRefs>,
-    waited: FxHashSet<usize>,
-    log: Vec<(SignalRef, Value)>,
-}
-
-impl HostWatch {
-    pub fn new(counted: impl IntoIterator<Item = CountedRefs>, waited: FxHashSet<usize>) -> Self {
-        Self {
-            counted: counted
-                .into_iter()
-                .map(|refs| (refs.signal.offset, refs))
-                .collect(),
-            waited,
-            log: Vec::new(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.counted.is_empty() && self.waited.is_empty()
-    }
-
-    /// Run `write`, which writes `signal` in `backend`, and observe it.
-    pub fn write<B: SimBackend>(
-        &mut self,
-        backend: &mut B,
-        signal: SignalRef,
-        write: impl FnOnce(&mut B),
-    ) {
-        let counted = self.counted.get(&signal.offset).copied();
-        let waited = self.waited.contains(&signal.offset);
-        if counted.is_none() && !waited {
-            write(backend);
-            return;
-        }
-        let old = read(backend, signal);
-        write(backend);
-        let new = read(backend, signal);
-        if let Some(counted) = counted {
-            counted.bump(backend, &old, &new);
-        }
-        if waited && old != new {
-            self.log.push((signal, new));
-        }
-    }
-
-    /// The logged values of waited signals, in write order.
-    pub fn log(&self) -> &[(SignalRef, Value)] {
-        &self.log
-    }
-
-    /// Replace the log, as when returning to a saved state.
-    pub fn set_log(&mut self, log: Vec<(SignalRef, Value)>) {
-        self.log = log;
-    }
-
-    /// Take the logged values of waited signals, in write order.
-    pub fn take_log(&mut self) -> Vec<(SignalRef, Value)> {
-        std::mem::take(&mut self.log)
-    }
-
-    pub fn has_log(&self) -> bool {
-        !self.log.is_empty()
-    }
-}
-
 /// One term of a wait site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermRefs {
@@ -224,22 +153,6 @@ pub struct CountedDomainRefs {
     pub refs: CountedRefs,
     /// Event ids and the counter that triggers each.
     pub domains: Vec<(usize, CounterKind)>,
-}
-
-/// What one term of a waiting process compares against.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Baseline {
-    /// The counter's value when the wait began, and the signal's value at
-    /// the last check. Only kernels and combinational process units count a
-    /// signal's writes, so a write the counter misses, such as one of a
-    /// continuous assignment to other bits, shows as a change of value.
-    Counter { seen: u32, value: Value },
-    /// The signal's value at the last check.
-    Value(Value),
-    /// The signal's state at the last check, as the bytes of its planes
-    /// (see [`planes`]) with the bits above its width cleared. Checks
-    /// compare it with the state in place.
-    Raw(Vec<u8>),
 }
 
 /// The state of a signal without unpacked dimensions: the bytes of its
@@ -369,134 +282,6 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
         )
     };
     edge(kind, lsb(old), lsb(new))
-}
-
-/// A process suspended at a wait.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Waiter {
-    pub site: usize,
-    pub baselines: Vec<Baseline>,
-}
-
-/// The processes suspended at a wait, by process index. A slot keeps its
-/// storage while its process runs, so suspending again reuses it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Waiters {
-    slots: Vec<Waiter>,
-    waiting: Vec<bool>,
-    /// Whether a slot's site has a term on a driven signal.
-    driven: Vec<bool>,
-    count: usize,
-    driven_count: usize,
-}
-
-impl Waiters {
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Whether no waiting process has a term on a driven signal.
-    pub fn none_driven(&self) -> bool {
-        self.driven_count == 0
-    }
-
-    fn slot(&mut self, process: usize) -> &mut Waiter {
-        if process >= self.slots.len() {
-            self.slots.resize_with(process + 1, Waiter::default);
-            self.waiting.resize(process + 1, false);
-            self.driven.resize(process + 1, false);
-        }
-        &mut self.slots[process]
-    }
-
-    /// Process `process` waits at a site with a term on a driven signal if
-    /// `driven`; `fill` sets its site and baselines in the slot's previous
-    /// storage.
-    pub fn register(&mut self, process: usize, driven: bool, fill: impl FnOnce(&mut Waiter)) {
-        fill(self.slot(process));
-        self.remove(process);
-        self.waiting[process] = true;
-        self.driven[process] = driven;
-        self.count += 1;
-        self.driven_count += usize::from(driven);
-    }
-
-    /// Process `process` waits as `waiter`.
-    pub fn insert(&mut self, process: usize, driven: bool, waiter: Waiter) {
-        self.register(process, driven, |slot| *slot = waiter);
-    }
-
-    /// Process `process` no longer waits.
-    pub fn remove(&mut self, process: usize) {
-        if self.waiting.get(process).copied().unwrap_or(false) {
-            self.waiting[process] = false;
-            self.count -= 1;
-            self.driven_count -= usize::from(self.driven[process]);
-        }
-    }
-
-    /// The waiting processes in index order.
-    pub fn iter(&self) -> impl Iterator<Item = (usize, &Waiter)> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter(|(process, _)| self.waiting[*process])
-    }
-
-    /// Keep the waiting processes for which `keep` holds, in index order.
-    /// Keep the waiting processes for which `keep` holds, in index order;
-    /// with `driven_only`, consider only those with a term on a driven
-    /// signal.
-    #[inline]
-    pub fn retain(&mut self, driven_only: bool, mut keep: impl FnMut(usize, &mut Waiter) -> bool) {
-        for process in 0..self.slots.len() {
-            if self.waiting[process]
-                && (!driven_only || self.driven[process])
-                && !keep(process, &mut self.slots[process])
-            {
-                self.remove(process);
-            }
-        }
-    }
-
-    /// The waiting processes in index order, for updating their baselines.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut Waiter)> {
-        let waiting = &self.waiting;
-        self.slots
-            .iter_mut()
-            .enumerate()
-            .filter(move |(process, _)| waiting[*process])
-    }
-}
-
-/// A nonblocking assignment waiting for the NBA region.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NbaUpdate {
-    pub target: SignalRef,
-    /// Bit position of the assigned range in the target.
-    pub lsb: usize,
-    pub width: usize,
-    pub value: Value,
-}
-
-impl NbaUpdate {
-    /// Write the update into the target's value.
-    pub fn merge_into(&self, target: &Value) -> Value {
-        let width = self.target.width;
-        let range = ((BigUint::from(1u8) << self.width) - 1u8) << self.lsb;
-        let all = (BigUint::from(1u8) << width) - 1u8;
-        let keep = &all ^ (&range & &all);
-        let place =
-            |old: &BigUint, new: &BigUint| ((old & &keep) | ((new << self.lsb) & &range)) & &all;
-        (
-            place(&target.0, &self.value.0),
-            place(&target.1, &self.value.1),
-        )
-    }
 }
 
 /// Mutable process scheduling state beyond the delay queue: who waits for

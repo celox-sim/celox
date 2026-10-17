@@ -1,0 +1,74 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::from_sv_sources(sources(), \"Top\").build().unwrap(), &ops,\nobserve)"
+---
+modify [("clk", 0)]
+run_until 0
+  time 0 finished false: up=0 down=0
+modify [("clk", 37)]
+run_until 2
+  step -> Some(0): comb stage(e0@0) eval_only(e0) apply(e0) fire(e0@0) comb finish_step(0)
+  time 2 finished false: up=1 down=0
+modify [("clk", 74)]
+run_until 4
+  step -> Some(2): comb stage(e1@2) eval_only(e1) apply(e1) fire(e1@2) comb finish_step(2)
+  time 4 finished false: up=1 down=1
+modify [("clk", 111)]
+run_until 6
+  step -> Some(4): comb stage(e0@4) eval_only(e0) apply(e0) fire(e0@4) comb finish_step(4)
+  time 6 finished false: up=2 down=1
+modify [("clk", 148)]
+run_until 8
+  step -> Some(6): comb stage(e1@6) eval_only(e1) apply(e1) fire(e1@6) comb finish_step(6)
+  time 8 finished false: up=2 down=2
+modify [("clk", 185)]
+run_until 10
+  step -> Some(8): comb stage(e0@8) eval_only(e0) apply(e0) fire(e0@8) comb finish_step(8)
+  time 10 finished false: up=3 down=2
+modify [("clk", 222)]
+run_until 12
+  step -> Some(10): comb stage(e1@10) eval_only(e1) apply(e1) fire(e1@10) comb finish_step(10)
+  time 12 finished false: up=3 down=3
+modify [("clk", 1), ("clk", 0)]
+run_until 14
+  time 14 finished false: up=3 down=3
+schedule clk @15 = 1
+schedule clk @16 = 0
+schedule clk @17 = 1
+schedule clk @17 = 0
+schedule clk @18 = 1
+schedule clk @19 = 0
+run_until 20
+  step -> Some(15): comb stage(e0@15) eval_only(e0) apply(e0) fire(e0@15) comb finish_step(15)
+  step -> Some(16): comb stage(e1@16) eval_only(e1) apply(e1) fire(e1@16) comb finish_step(16)
+  step -> Some(17): comb stage(e0@17) eval_only(e0) apply(e0) fire(e0@17) comb finish_step(17)
+  step -> Some(18): comb finish_step(18)
+  step -> Some(19): comb stage(e1@19) eval_only(e1) apply(e1) fire(e1@19) comb finish_step(19)
+  time 20 finished false: up=5 down=5
+clock clk period 4 delay 21
+run_until 40
+  step -> Some(21): comb stage(e0@21) eval_only(e0) apply(e0) fire(e0@21) comb finish_step(21)
+  step -> Some(23): comb stage(e1@23) eval_only(e1) apply(e1) fire(e1@23) comb finish_step(23)
+  step -> Some(25): comb stage(e0@25) eval_only(e0) apply(e0) fire(e0@25) comb finish_step(25)
+  step -> Some(27): comb stage(e1@27) eval_only(e1) apply(e1) fire(e1@27) comb finish_step(27)
+  step -> Some(29): comb stage(e0@29) eval_only(e0) apply(e0) fire(e0@29) comb finish_step(29)
+  step -> Some(31): comb stage(e1@31) eval_only(e1) apply(e1) fire(e1@31) comb finish_step(31)
+  step -> Some(33): comb stage(e0@33) eval_only(e0) apply(e0) fire(e0@33) comb finish_step(33)
+  step -> Some(35): comb stage(e1@35) eval_only(e1) apply(e1) fire(e1@35) comb finish_step(35)
+  step -> Some(37): comb stage(e0@37) eval_only(e0) apply(e0) fire(e0@37) comb finish_step(37)
+  step -> Some(39): comb stage(e1@39) eval_only(e1) apply(e1) fire(e1@39) comb finish_step(39)
+  time 40 finished false: up=10 down=10
+steps 12
+  step -> Some(41): comb stage(e0@41) eval_only(e0) apply(e0) fire(e0@41) comb finish_step(41)
+  step -> Some(43): comb stage(e1@43) eval_only(e1) apply(e1) fire(e1@43) comb finish_step(43)
+  step -> Some(45): comb stage(e0@45) eval_only(e0) apply(e0) fire(e0@45) comb finish_step(45)
+  step -> Some(47): comb stage(e1@47) eval_only(e1) apply(e1) fire(e1@47) comb finish_step(47)
+  step -> Some(49): comb stage(e0@49) eval_only(e0) apply(e0) fire(e0@49) comb finish_step(49)
+  step -> Some(51): comb stage(e1@51) eval_only(e1) apply(e1) fire(e1@51) comb finish_step(51)
+  step -> Some(53): comb stage(e0@53) eval_only(e0) apply(e0) fire(e0@53) comb finish_step(53)
+  step -> Some(55): comb stage(e1@55) eval_only(e1) apply(e1) fire(e1@55) comb finish_step(55)
+  step -> Some(57): comb stage(e0@57) eval_only(e0) apply(e0) fire(e0@57) comb finish_step(57)
+  step -> Some(59): comb stage(e1@59) eval_only(e1) apply(e1) fire(e1@59) comb finish_step(59)
+  step -> Some(61): comb stage(e0@61) eval_only(e0) apply(e0) fire(e0@61) comb finish_step(61)
+  step -> Some(63): comb stage(e1@63) eval_only(e1) apply(e1) fire(e1@63) comb finish_step(63)
+  time 63 finished false: up=16 down=16

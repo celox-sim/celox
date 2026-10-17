@@ -15,7 +15,7 @@ mod vcd;
 
 pub use derived_tick::{
     BackendExecutor, DerivedDomain, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch,
-    EventDomain, Gate, GatedDomain, build_derived_tick_plans,
+    EventDomain, Gate, GatedDomain, TickExecutor, build_derived_tick_plans,
 };
 pub use error::{SimulatorErrorCode, comb_fatal_code, comb_fatal_site};
 pub use event_buffer::RuntimeEventBuffer;
@@ -24,7 +24,8 @@ pub use reflection::{
     SignalDirection,
 };
 pub use simulation::{
-    EventInfo, ScheduleParts, SimulationExecutor, SimulationSnapshot, SimulationState,
+    EventInfo, HostBoundary, ScheduleParts, SimulationExecutor, SimulationSnapshot,
+    SimulationState, UnitExecutor,
 };
 pub use state_file::{
     BaselineRecord, NbaRecord, ProcessRecord, ScheduleRecord, ScheduledEvent, StateDifference,

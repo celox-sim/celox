@@ -33,7 +33,7 @@ use celox_design::{DomainKind, EventTopology, GateOp};
 use crate::{
     AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
-    simulation::{SimulationExecutor, event_level, stable_edge},
+    simulation::{HostBoundary, UnitExecutor, event_level, stable_edge},
     timing::Halt,
 };
 
@@ -463,7 +463,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         settle: bool,
     ) -> Result<(), SimulatorErrorCode>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         match self.tick_domains(executor, scratch, settle) {
@@ -481,7 +481,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         settle: bool,
     ) -> Result<(), Halt>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         scratch.prepare(self.domains.len() + self.gated.len(), self.levers.len());
@@ -508,7 +508,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         settle: bool,
     ) -> Result<(), Halt>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         // The active edge: gated clocks judged from the state before it.
@@ -540,7 +540,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         settle: bool,
     ) -> Result<(), Halt>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         let base = self.domains.len();
@@ -605,7 +605,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         ready: &[usize],
     ) -> Result<(), Halt>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         let gated = ready.iter().map(|&index| &self.gated[index].derived.domain);
@@ -659,7 +659,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         phase: Phase,
     ) -> Result<(), Halt>
     where
-        X: SimulationExecutor,
+        X: TickExecutor,
         X::Backend: SimBackend<Event = E>,
     {
         let base = self.domains.len();
@@ -728,7 +728,7 @@ fn fire<'a, X, E>(
     domains: impl Iterator<Item = &'a EventDomain<E>> + Clone,
 ) -> Result<(), Halt>
 where
-    X: SimulationExecutor,
+    X: TickExecutor,
     X::Backend: SimBackend<Event = E>,
     E: 'a + Copy,
 {
@@ -767,10 +767,23 @@ where
     }
 }
 
-/// [`SimulationExecutor`] over a bare backend, for hosts without a facade.
+/// The units a derived tick executes.
+pub trait TickExecutor: UnitExecutor {
+    /// Settle combinational logic, then evaluate and commit one domain.
+    fn eval_comb_apply_ff_at(
+        &mut self,
+        event: <Self::Backend as SimBackend>::Event,
+    ) -> Result<(), Halt> {
+        self.eval_comb()?;
+        self.eval_apply_ff_at(event)
+    }
+}
+
+/// [`crate::SimulationExecutor`] over a bare backend, for hosts without a
+/// facade.
 pub struct BackendExecutor<'a, B>(pub &'a mut B);
 
-impl<B: SimBackend> SimulationExecutor for BackendExecutor<'_, B> {
+impl<B: SimBackend> UnitExecutor for BackendExecutor<'_, B> {
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -789,10 +802,6 @@ impl<B: SimBackend> SimulationExecutor for BackendExecutor<'_, B> {
         Ok(self.0.eval_apply_ff_at(event)?)
     }
 
-    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
-        Ok(self.0.eval_comb_apply_ff_at(event)?)
-    }
-
     fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
         Ok(self.0.eval_only_ff_at(event)?)
     }
@@ -801,3 +810,11 @@ impl<B: SimBackend> SimulationExecutor for BackendExecutor<'_, B> {
         Ok(self.0.apply_ff_at(event)?)
     }
 }
+
+impl<B: SimBackend> TickExecutor for BackendExecutor<'_, B> {
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        Ok(self.0.eval_comb_apply_ff_at(event)?)
+    }
+}
+
+impl<B: SimBackend> HostBoundary for BackendExecutor<'_, B> {}

@@ -1,0 +1,39 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_interpreter().unwrap()), &ops, observe)"
+---
+modify [("a", 0), ("b", 0)]
+run_until 0
+  step -> Some(0): host_writes(0) process(0) comb finish_step(0)
+  time 0 finished false: y=0 z=0 ffs=0 waits=0
+modify [("a", 37), ("b", 38)]
+run_until 2
+  step -> Some(0): host_writes(0) comb process(0) comb stage(e0@0) eval_apply(e0) fire(e0@0) comb finish_step(0)
+  time 2 finished false: y=1 z=0 ffs=1 waits=1
+modify [("a", 74), ("b", 75)]
+run_until 4
+  step -> Some(2): host_writes(0) comb finish_step(2)
+  time 4 finished false: y=0 z=1 ffs=1 waits=1
+modify [("a", 111), ("b", 113)]
+run_until 6
+  step -> Some(4): host_writes(0) comb process(0) comb stage(e0@4) eval_apply(e0) fire(e0@4) comb finish_step(4)
+  time 6 finished false: y=1 z=1 ffs=2 waits=2
+modify [("a", 148), ("b", 148)]
+run_until 8
+  step -> Some(6): host_writes(0) comb finish_step(6)
+  time 8 finished false: y=0 z=0 ffs=2 waits=2
+modify [("a", 185), ("b", 186)]
+run_until 10
+  step -> Some(8): host_writes(0) comb process(0) comb stage(e0@8) eval_apply(e0) fire(e0@8) comb finish_step(8)
+  time 10 finished false: y=1 z=0 ffs=3 waits=3
+modify [("a", 222), ("b", 223)]
+run_until 12
+  step -> Some(10): host_writes(0) comb finish_step(10)
+  time 12 finished false: y=0 z=1 ffs=3 waits=3
+modify [("a", 1), ("a", 0)]
+run_until 14
+  step -> Some(12): host_writes(0) comb finish_step(12)
+  time 14 finished false: y=0 z=1 ffs=3 waits=3
+steps 12
+  step -> None: 
+  time 14 finished false: y=0 z=1 ffs=3 waits=3

@@ -1,0 +1,14 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(Simulator::from_sv_sources(sources(),\n\"Top\").emit_triggers().build_interpreter().unwrap()), &ops, observe)"
+---
+run_until 0
+  step -> Some(0): host_writes(0) process(0) comb finish_step(0)
+  time 0 finished false: y=7
+run_until 1
+  time 1 finished false: y=7
+run_until 5
+  time 5 finished false: y=7
+steps 12
+  step -> None: 
+  time 5 finished false: y=7
