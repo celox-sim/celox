@@ -285,6 +285,7 @@ fn analyze(
     Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
     Vec<FrontendDiagnostic>,
+    Vec<CompilationWarning>,
 ) {
     symbol_table::clear();
     attribute_table::clear();
@@ -307,6 +308,7 @@ fn analyze(
                         None,
                     )
                     .into()),
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 );
@@ -346,6 +348,7 @@ fn analyze(
                     Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 );
             }
         }
@@ -372,7 +375,7 @@ fn analyze(
             });
         let contracts = match contracts {
             Ok(contracts) => contracts,
-            Err(error) => return (Err(error.into()), errors, Vec::new()),
+            Err(error) => return (Err(error.into()), errors, Vec::new(), Vec::new()),
         };
         if !contracts.is_empty() {
             let parsed = match Parser::parse(&contracts, &Path::new("<sv-interface-contracts>")) {
@@ -381,6 +384,7 @@ fn analyze(
                     return (
                         Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
                         errors,
+                        Vec::new(),
                         Vec::new(),
                     );
                 }
@@ -414,7 +418,7 @@ fn analyze(
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
-        return (Err(error.into()), errors, Vec::new());
+        return (Err(error.into()), errors, Vec::new(), Vec::new());
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
@@ -472,6 +476,8 @@ fn analyze(
         build_config.reset_type = rt;
     }
     build_config.parallel_lanes = optimize_options.parallel_lanes();
+    #[cfg(feature = "systemverilog")]
+    let mut sv_warnings = Vec::new();
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
             &top,
@@ -548,6 +554,7 @@ fn analyze(
                         testbench_random_seed,
                         component_libraries,
                         component_file_base,
+                        &mut sv_warnings,
                     )
                 })()
             } else {
@@ -598,7 +605,14 @@ fn analyze(
             sir
         })
         .map_err(SimulatorError::from);
-    (sir, errors, frontend_diagnostics)
+    #[cfg(feature = "systemverilog")]
+    let elaboration_warnings = sv_warnings
+        .into_iter()
+        .map(CompilationWarning::SystemVerilog)
+        .collect();
+    #[cfg(not(feature = "systemverilog"))]
+    let elaboration_warnings = Vec::new();
+    (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
@@ -769,7 +783,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         );
     }
     let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         None,
         Some(&lowered.external),
@@ -803,6 +817,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
@@ -847,7 +862,7 @@ fn compile_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         None,
         None,
@@ -881,6 +896,7 @@ fn compile_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
@@ -974,7 +990,8 @@ fn compile_sv_to_sir_with_layout_mode(
         build_config.reset_type = reset_type;
     }
     let (component_libraries, component_file_base) = component_runtime_config(&metadata);
-    parser::parse_sv(
+    let mut sv_warnings = Vec::new();
+    let sir = parser::parse_sv(
         sources,
         top,
         param_overrides,
@@ -990,9 +1007,16 @@ fn compile_sv_to_sir_with_layout_mode(
         metadata.test.seed,
         component_libraries,
         component_file_base,
-    )
-    .map(|program| (program, Vec::new()))
-    .map_err(SimulatorError::from)
+        &mut sv_warnings,
+    );
+    let warnings = sv_warnings
+        .into_iter()
+        .map(CompilationWarning::SystemVerilog)
+        .collect();
+    match sir {
+        Ok(program) => Ok((program, warnings)),
+        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+    }
 }
 
 /// Compile a mixed Veryl/SystemVerilog hierarchy to optimized SIR.
@@ -1072,7 +1096,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         Some(sv_sources),
         None,
@@ -1106,6 +1130,7 @@ fn compile_mixed_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(

@@ -107,6 +107,9 @@ pub(crate) struct LoweredSvModule {
     package_variables: Vec<(SourceVarId, String, String)>,
     /// The hidden `(copy, signal)` event copies of [`FfEventVars`].
     event_copies: Vec<(SourceVarId, SourceVarId)>,
+    /// Warnings of the module's sequential and initial processes; those of
+    /// its combinational processes come from [`attach_instance_glue`].
+    warnings: Vec<crate::FrontendWarning>,
 }
 
 #[derive(Clone)]
@@ -1148,6 +1151,7 @@ pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign(
         sources,
@@ -1155,6 +1159,7 @@ pub fn prepare_external_hierarchy(
         &ExternalHierarchy::default(),
         &[],
         four_state,
+        warnings,
     )
 }
 
@@ -1166,6 +1171,7 @@ pub fn prepare_external_hierarchy_with_foreign(
     foreign: &ExternalHierarchy,
     declarations: &[(&str, &Path)],
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign_resolver(
         sources,
@@ -1176,14 +1182,67 @@ pub fn prepare_external_hierarchy_with_foreign(
         None,
         None,
         &[],
+        warnings,
     )
 }
 
 pub type ForeignModuleResolver<'a> =
     dyn FnMut(&str, &[(String, SvParameterValue)]) -> Result<ExternalModule, ParserError> + 'a;
 
+/// Appends the warnings of the lowered modules to `warnings`, also when
+/// lowering fails after them.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_external_hierarchy_with_foreign_resolver(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ExternalHierarchy, FrontendError> {
+    let mut found = Vec::new();
+    let hierarchy = prepare_external_hierarchy_collecting(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        &mut found,
+    );
+    append_unique_warnings(warnings, found);
+    hierarchy
+}
+
+/// Appends `found` to `warnings` in a stable order, once each: each
+/// specialization of a module and each lowering attempt of a process repeats
+/// the warnings of the same source.
+fn append_unique_warnings(
+    warnings: &mut Vec<crate::FrontendWarning>,
+    mut found: Vec<crate::FrontendWarning>,
+) {
+    found.sort();
+    found.dedup();
+    warnings.extend(found);
+}
+
+/// The warnings of a lowered module, its combinational processes aside.
+fn lowered_warnings<'a>(
+    modules: impl IntoIterator<Item = &'a LoweredSvModule>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) {
+    for module in modules {
+        warnings.extend(module.warnings.iter().cloned());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_external_hierarchy_collecting(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     foreign: &ExternalHierarchy,
@@ -1192,6 +1251,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     mut resolver: Option<&mut ForeignModuleResolver<'_>>,
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1255,6 +1315,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             package_variables: Vec::new(),
             // The foreign module's own combinational blocks carry its copies.
             event_copies: Vec::new(),
+            warnings: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -1431,6 +1492,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             Ok((module_id, specialize_module(base, key, four_state, false)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    lowered_warnings(lowered_modules.values(), warnings);
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {
@@ -1455,6 +1517,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         modules.insert(
             module_id,
@@ -1569,6 +1632,44 @@ pub fn schedule_sources(
     parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let mut found = Vec::new();
+    let scheduled = schedule_sources_collecting(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        &mut found,
+    );
+    append_unique_warnings(warnings, found);
+    scheduled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_sources_collecting(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources, &[top])?;
     let top = top.to_string();
@@ -1633,6 +1734,7 @@ pub fn schedule_sources(
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    lowered_warnings(lowered_modules.values(), warnings);
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
     let root = &lowered_modules[&root_id];
     if let Some(port) = root
@@ -1663,6 +1765,7 @@ pub fn schedule_sources(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         module_names.insert(module_id, key.name.clone());
         modules.insert(module_id, sim_module);
@@ -1959,6 +2062,7 @@ fn lower_module_with_overrides(
         mut runtime_event_sites,
         mut runtime_errors,
         mut extern_functions,
+        mut warnings,
     ) = {
         let mut pm = procedural::ProcModule::new(
             module,
@@ -1974,6 +2078,7 @@ fn lower_module_with_overrides(
             std::mem::take(&mut pm.runtime_event_sites),
             std::mem::take(&mut pm.runtime_errors),
             std::mem::take(&mut pm.extern_functions),
+            std::mem::take(&mut pm.warnings),
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
@@ -1987,6 +2092,7 @@ fn lower_module_with_overrides(
         &mut runtime_event_sites,
         &mut runtime_errors,
         &mut extern_functions,
+        &mut warnings,
     )?;
     initial_memory_values.extend(initial_values);
 
@@ -2093,6 +2199,7 @@ fn lower_module_with_overrides(
         instances,
         package_variables,
         event_copies: event_vars.copies,
+        warnings,
     })
 }
 
@@ -2351,6 +2458,7 @@ pub(crate) fn attach_instance_glue(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -2419,6 +2527,7 @@ pub(crate) fn attach_instance_glue(
         four_state,
         &mut module.runtime_errors,
         &mut module.extern_functions,
+        warnings,
     )
     .map_err(|error| match error {
         sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -2740,6 +2849,7 @@ fn lower_initial_processes(
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
     if module.initial_processes().is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -2783,6 +2893,9 @@ fn lower_initial_processes(
             Err(_) => runtime.push((process, random_seed)),
         }
     }
+    // A process that falls back to a kernel warns again below; the callers
+    // drop repeated warnings.
+    warnings.append(&mut pm.warnings);
     let created = std::mem::take(&mut pm.created);
     for id in created {
         if let Some(variable) = variables.remove(&id) {
@@ -2858,6 +2971,7 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
+    warnings.append(&mut pm.warnings);
     Ok((values, processes?))
 }
 
@@ -2870,6 +2984,7 @@ fn lower_comb_processes(
     four_state: bool,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -2977,6 +3092,7 @@ fn lower_comb_processes(
     }
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
+    warnings.append(&mut pm.warnings);
     let created = std::mem::take(&mut pm.created);
     Ok((comb_blocks, arena, created, observers, sites))
 }
