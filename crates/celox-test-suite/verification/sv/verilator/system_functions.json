@@ -830,6 +830,52 @@
         "observed_version": "Verilator 5.052",
         "reason": "Verilator 5.052 treats a zero $urandom seed as an entropy request, so reseeding with zero does not reproduce the sequence. IEEE 1800-2023 18.13.1 permits any integral seed and requires the same sequence for the same seed. A standalone run reports zero_seed_repeat=0 in Verilator and 1 in Icarus; nonzero seeding repeats in both."
       }
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_random.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_random_algorithm",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+        "upstream": []
+      },
+      "name": "system_functions::random_follows_annex_n_and_updates_its_seed",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_random.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_random_algorithm",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+        "upstream": []
+      },
+      "name": "system_functions::random_without_a_seed_continues_its_stream",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

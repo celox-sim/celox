@@ -1354,5 +1354,23 @@
         "system_functions::urandom_extends_signed_seed_values"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_random_algorithm",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_random.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::random_follows_annex_n_and_updates_its_seed",
+        "system_functions::random_without_a_seed_continues_its_stream"
+      ]
+    }
   }
 ]
