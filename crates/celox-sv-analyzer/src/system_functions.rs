@@ -1,5 +1,6 @@
-//! The system tasks and functions Celox knows (IEEE 1800-2023 clauses 20 and
-//! 21), and where the SystemVerilog frontend supports each one.
+//! The system tasks and functions Celox knows (those IEEE 1800-2023 defines,
+//! mostly in clauses 20 and 21, and the optional ones of its Annex D), and
+//! where the SystemVerilog frontend supports each one.
 //!
 //! The analyzer checks each call against this catalog where it converts the
 //! call, with the context it converts it in ([`CallSite`]), so a name the
@@ -49,7 +50,7 @@ pub enum SystemFunction {
     Onehot0,
     /// `$isunknown` (20.9).
     Isunknown,
-    /// `$urandom` (18.13.1, 20.15.2).
+    /// `$urandom` (18.13.1).
     Urandom,
 }
 
@@ -416,7 +417,8 @@ const fn function(function: SystemFunction, min_args: usize, max_args: Option<us
     }
 }
 
-/// The catalog, in the order of IEEE 1800-2023 clauses 20 and 21.
+/// The catalog: IEEE 1800-2023 clauses 20 and 21 in order, then the names
+/// other clauses define, then Annex D.
 pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.2 Simulation control system tasks
     task(SystemTask::Finish, ProceduralAndInitial, 0, Some(1)),
@@ -489,7 +491,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Onehot, 1, Some(1)),
     function(SystemFunction::Onehot0, 1, Some(1)),
     function(SystemFunction::Isunknown, 1, Some(1)),
-    // 20.10 Severity tasks (and 20.11 elaboration system tasks)
+    // 20.10 Severity system tasks (and 20.10.1 elaboration severity system
+    // tasks)
     task(SystemTask::Fatal, ProceduralAndInitial, 0, None),
     task(
         SystemTask::Severity(Severity::Error),
@@ -509,7 +512,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         0,
         None,
     ),
-    // 20.12 Assertion control system tasks
+    // 20.11 Assertion control system tasks
     unsupported("$asserton", Task),
     unsupported("$assertoff", Task),
     unsupported("$assertkill", Task),
@@ -520,7 +523,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$assertnonvacuouson", Task),
     unsupported("$assertvacuousoff", Task),
     unsupported("$assertcontrol", Task),
-    // 20.13 Sampled value system functions
+    // 20.12 Sampled value system functions
     unsupported("$sampled", Function),
     unsupported("$rose", Function),
     unsupported("$fell", Function),
@@ -537,7 +540,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$falling_gclk", Function),
     unsupported("$steady_gclk", Function),
     unsupported("$changing_gclk", Function),
-    // 20.14 Coverage control functions
+    // 20.13 Coverage system functions
     unsupported("$coverage_control", Function),
     unsupported("$coverage_get_max", Function),
     unsupported("$coverage_get", Function),
@@ -546,10 +549,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$get_coverage", Function),
     unsupported("$set_coverage_db_name", Task),
     unsupported("$load_coverage_db", Task),
-    // 20.15 Probabilistic distribution functions
+    // 20.14 Probabilistic distribution functions
     unsupported("$random", Function),
-    function(SystemFunction::Urandom, 0, Some(1)),
-    unsupported("$urandom_range", Function),
     unsupported("$dist_uniform", Function),
     unsupported("$dist_normal", Function),
     unsupported("$dist_exponential", Function),
@@ -557,13 +558,13 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$dist_chi_square", Function),
     unsupported("$dist_t", Function),
     unsupported("$dist_erlang", Function),
-    // 20.16 Stochastic analysis tasks and functions
+    // 20.15 Stochastic analysis tasks and functions
     unsupported("$q_initialize", Task),
     unsupported("$q_add", Task),
     unsupported("$q_remove", Task),
     unsupported("$q_full", Function),
     unsupported("$q_exam", Task),
-    // 20.17 Programmable logic array modeling system tasks
+    // 20.16 Programmable logic array modeling system tasks
     unsupported("$async$and$array", Task),
     unsupported("$async$nand$array", Task),
     unsupported("$async$or$array", Task),
@@ -580,8 +581,9 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$sync$nand$plane", Task),
     unsupported("$sync$or$plane", Task),
     unsupported("$sync$nor$plane", Task),
-    // 20.18 Miscellaneous tasks and functions
+    // 20.17 Miscellaneous tasks and functions
     unsupported("$system", TaskOrFunction),
+    unsupported("$stacktrace", TaskOrFunction),
     // 21.2 Display system tasks
     task(
         SystemTask::Display(Radix::Decimal),
@@ -711,6 +713,38 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$dumpportsall", Task),
     unsupported("$dumpportslimit", Task),
     unsupported("$dumpportsflush", Task),
+    // 14.14 Global clocking
+    unsupported("$global_clock", Function),
+    // 16.14.7 Inferred clocking and disable functions
+    unsupported("$inferred_clock", Function),
+    unsupported("$inferred_disable", Function),
+    // 18.13 Random number system functions and methods
+    function(SystemFunction::Urandom, 0, Some(1)),
+    unsupported("$urandom_range", Function),
+    // 32.9 Loading timing data from an SDF file
+    unsupported("$sdf_annotate", Task),
+    // Annex D Optional system tasks and system functions, which the standard
+    // describes for information only
+    unsupported("$countdrivers", Function),
+    unsupported("$getpattern", Function),
+    unsupported("$input", Task),
+    unsupported("$key", Task),
+    unsupported("$nokey", Task),
+    unsupported("$list", Task),
+    unsupported("$log", Task),
+    unsupported("$nolog", Task),
+    unsupported("$reset", Task),
+    unsupported("$reset_count", Function),
+    unsupported("$reset_value", Function),
+    unsupported("$save", Task),
+    unsupported("$restart", Task),
+    unsupported("$incsave", Task),
+    unsupported("$scale", Function),
+    unsupported("$scope", Task),
+    unsupported("$showscopes", Task),
+    unsupported("$showvars", Task),
+    unsupported("$sreadmemb", Task),
+    unsupported("$sreadmemh", Task),
     // Veryl's immediate assertions, emitted into SystemVerilog as calls of
     // these names: `$assert(condition, message...)` ends the simulation when
     // the condition fails and `$assert_continue` reports and continues.
