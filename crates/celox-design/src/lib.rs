@@ -8,6 +8,9 @@ use std::{
     fmt,
 };
 
+pub mod edges;
+pub mod schedule;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainKind {
     ClockPosedge,
@@ -328,10 +331,10 @@ impl CounterKind {
 
     /// The counter kind that wakes an event domain of `kind`.
     pub const fn for_domain(kind: DomainKind) -> Self {
-        match kind {
-            DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Self::Rises,
-            DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Self::Falls,
-            DomainKind::Other => Self::Changes,
+        match edges::polarity(kind) {
+            Some(true) => Self::Rises,
+            Some(false) => Self::Falls,
+            None => Self::Changes,
         }
     }
 }

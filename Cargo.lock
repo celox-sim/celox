@@ -825,6 +825,7 @@ name = "celox-vpi"
 version = "0.11.0"
 dependencies = [
  "celox",
+ "celox-design",
  "clap",
  "fxhash",
  "libloading",
