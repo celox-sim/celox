@@ -105,6 +105,16 @@ paths, then reload that window. The extension runs only in a trusted workspace.
 }
 ```
 
+The client also installs a TextMate grammar for `.lyd`: comments, strings,
+`255u8`-style literals, declaration and section words, built-in operations and
+the qualifier of every dotted reference (`s.x`, `i.amount`, `o.count`) are
+colored. `lyd` reads those words in context, so the grammar highlights them
+where an entry starts rather than everywhere they appear.
+Proof frame names (`pre`, `goal`, `lhs`, `rhs`) receive their special scope inside
+`target` blocks. Highlighting is a lexical approximation: if a callable name
+and its opening `(` are on different lines, the name keeps ordinary identifier
+coloring. Later lines still tokenize normally.
+
 Open [`counter.lyd`](../audit/lemma_candidates/counter.lyd). Name, type and width
 errors appear as you edit; these debounced checks do not run a solver. Definition,
 completion and hover use the current unsaved buffer. Click **Check target** above
