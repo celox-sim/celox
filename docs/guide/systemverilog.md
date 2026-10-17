@@ -147,8 +147,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Expressions: streaming concatenations ([#447](https://github.com/celox-sim/celox/issues/447)), reduction operators in parameter expressions
   ([#456](https://github.com/celox-sim/celox/issues/456)), and parameter overrides that are not plain integers, such as X/Z
   values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
-- System tasks and functions: Celox knows every name of IEEE 1800-2023
-  clauses 20 and 21. One it does not support where it is called, such as
+- System tasks and functions: Celox knows every name IEEE 1800-2023
+  defines, including the optional ones of its Annex D. One it does not support where it is called, such as
   `$time` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
