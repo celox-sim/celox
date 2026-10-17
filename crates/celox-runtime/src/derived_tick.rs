@@ -52,11 +52,25 @@ pub struct EventDomain<E> {
 impl<E: Copy> EventDomain<E> {
     /// Resolve the kernels of the canonical domain `address`.
     pub fn resolve<B: SimBackend<Event = E>>(backend: &B, address: &AbsoluteAddr) -> Option<Self> {
+        let eval_apply = backend.resolve_event_opt(address)?;
+        let (eval_only, apply) = Self::split_kernels(backend, address);
         Some(Self {
-            eval_apply: backend.resolve_event_opt(address)?,
-            eval_only: backend.resolve_eval_only_event(address),
-            apply: backend.resolve_apply_event(address),
+            eval_apply,
+            eval_only,
+            apply,
         })
+    }
+
+    /// The split kernels of the canonical domain `address`: evaluation
+    /// without commit, and commit.
+    pub fn split_kernels<B: SimBackend<Event = E>>(
+        backend: &B,
+        address: &AbsoluteAddr,
+    ) -> (Option<E>, Option<E>) {
+        (
+            backend.resolve_eval_only_event(address),
+            backend.resolve_apply_event(address),
+        )
     }
 }
 
@@ -363,10 +377,11 @@ pub fn build_derived_tick_plans<B: SimBackend>(
         };
         let fast = two_state && gated.iter().all(|gated| gated.gate.is_some());
         let independent = events.independent_derived.contains(&canonical);
+        let (eval_only, apply) = EventDomain::split_kernels(backend, &canonical);
         let source = EventDomain {
             eval_apply: *event,
-            eval_only: backend.resolve_eval_only_event(&canonical),
-            apply: backend.resolve_apply_event(&canonical),
+            eval_only,
+            apply,
         };
         scratch.prepare(domains.len() + gated.len(), levers.len());
         any = true;
