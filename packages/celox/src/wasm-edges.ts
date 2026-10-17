@@ -57,6 +57,9 @@ export interface EdgePlans {
 	readonly events: Readonly<Record<string, EdgePlanEvent>>;
 }
 
+/** One compiled kernel: runs a module's `run` export. */
+export type KernelRun = () => void;
+
 /** The kernels of one event domain. */
 export interface EdgeKernels {
 	/** Evaluate and commit the domain. */
@@ -65,6 +68,34 @@ export interface EdgeKernels {
 	evalOnly?(): void;
 	/** Commit what `evalOnly()` evaluated. */
 	apply?(): void;
+}
+
+/**
+ * Kernels looked up by event name on first use and cached: `evalApply(name)`
+ * runs the event's domain, `phase(name, kind)` one phase of its split
+ * kernels. An event without a domain of its own (a clock that only drives a
+ * gated clock) has no kernels.
+ */
+export function cachedEdgeKernels(
+	evalApply: (name: string) => KernelRun | undefined,
+	phase: (name: string, kind: "evalOnly" | "apply") => KernelRun | undefined,
+): (name: string) => EdgeKernels | undefined {
+	const cache = new Map<string, EdgeKernels | undefined>();
+	return (name) => {
+		if (cache.has(name)) return cache.get(name);
+		const run = evalApply(name);
+		let kernels: EdgeKernels | undefined;
+		if (run) {
+			const evalOnly = phase(name, "evalOnly");
+			const apply = phase(name, "apply");
+			kernels =
+				evalOnly && apply
+					? { evalApply: run, evalOnly, apply }
+					: { evalApply: run };
+		}
+		cache.set(name, kernels);
+		return kernels;
+	};
 }
 
 /** One entry of a cascade round: a domain and the level it last had. */
@@ -135,7 +166,7 @@ export class WasmEdgeRunner {
 		const plan = this.plan(eventId);
 		if (!plan || !this.hasDerived(eventId)) {
 			this.evalComb();
-			this.kernel(name).evalApply();
+			this.kernels(name)?.evalApply();
 			this.evalComb();
 			return;
 		}
@@ -322,12 +353,15 @@ export class WasmEdgeRunner {
 		if (settle) {
 			this.evalComb();
 		}
-		const [only] = events;
-		if (events.length === 1 && only !== undefined) {
-			this.kernel(only).evalApply();
+		// An event without a domain of its own runs nothing.
+		const kernels = events
+			.map((name) => this.kernels(name))
+			.filter((kernel): kernel is EdgeKernels => kernel !== undefined);
+		const [only] = kernels;
+		if (kernels.length === 1 && only !== undefined) {
+			only.evalApply();
 			return;
 		}
-		const kernels = events.map((name) => this.kernel(name));
 		for (const kernel of kernels) {
 			if (kernel.evalOnly) {
 				kernel.evalOnly();
@@ -393,13 +427,5 @@ export class WasmEdgeRunner {
 
 	private plan(eventId: number): EdgePlanEvent | undefined {
 		return this.plans.events[this.name(eventId)];
-	}
-
-	private kernel(name: string): EdgeKernels {
-		const kernels = this.kernels(name);
-		if (!kernels) {
-			throw new Error(`No WASM module for event '${name}'`);
-		}
-		return kernels;
 	}
 }

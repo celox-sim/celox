@@ -17,7 +17,7 @@ import type {
 	WasmFrontendSimulatorHandle,
 } from "./types.js";
 import {
-	type EdgeKernels,
+	cachedEdgeKernels,
 	type EdgePlans,
 	WasmEdgeRunner,
 } from "./wasm-edges.js";
@@ -129,6 +129,21 @@ function wasmCheckpointMethods(
 }
 
 /**
+ * The module of an event's own domain, or `undefined` for an event without
+ * one (a clock that only drives a gated clock).
+ */
+function eventBytes(
+	raw: RawWasmSimulatorHandle,
+	name: string,
+): Uint8Array | undefined {
+	try {
+		return new Uint8Array(raw.eventWasmBytes(name));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * The edge runner of a bridge, when the raw handle provides edge plans.
  * Phase modules of split kernels are compiled on first use.
  */
@@ -153,23 +168,11 @@ function wasmEdgeRunner(
 			return undefined;
 		}
 	};
-	const cache = new Map<string, EdgeKernels | undefined>();
-	const kernels = (name: string): EdgeKernels | undefined => {
-		if (cache.has(name)) return cache.get(name);
+	const kernels = cachedEdgeKernels((name) => {
 		const id = events[name];
 		const instance = id === undefined ? undefined : eventInstances.get(id);
-		let kernel: EdgeKernels | undefined;
-		if (instance) {
-			const evalOnly = phase(name, "evalOnly");
-			const apply = phase(name, "apply");
-			kernel =
-				evalOnly && apply
-					? { evalApply: run(instance), evalOnly, apply }
-					: { evalApply: run(instance) };
-		}
-		cache.set(name, kernel);
-		return kernel;
-	};
+		return instance ? run(instance) : undefined;
+	}, phase);
 	return new WasmEdgeRunner(memory, plans, events, kernels, evalComb);
 }
 
@@ -228,7 +231,8 @@ export function createWasmSimulatorBridge(
 	const eventInstances = new Map<number, WebAssembly.Instance>();
 
 	for (const [name, id] of Object.entries(events)) {
-		const bytes = new Uint8Array(raw.eventWasmBytes(name));
+		const bytes = eventBytes(raw, name);
+		if (!bytes) continue;
 		const mod = new WebAssembly.Module(bytes);
 		const inst = new WebAssembly.Instance(mod, { env: { memory } });
 		eventInstances.set(id, inst);
@@ -307,7 +311,8 @@ export async function createWasmSimulatorBridgeAsync(
 	const eventEntries = Object.entries(events);
 	await Promise.all(
 		eventEntries.map(async ([name, id]) => {
-			const bytes = new Uint8Array(raw.eventWasmBytes(name));
+			const bytes = eventBytes(raw, name);
+			if (!bytes) return;
 			const mod = await WebAssembly.compile(bytes);
 			const inst = await WebAssembly.instantiate(mod, { env: { memory } });
 			eventInstances.set(id, inst);
