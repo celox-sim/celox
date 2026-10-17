@@ -144,7 +144,7 @@ impl<B: SimBackend> SimulationState<B> {
         if !round.gating_sources.is_empty() {
             self.judge_derived_edges(executor.backend_mut(), round);
         }
-        if !self.counted.is_empty() {
+        if !self.model.counted.is_empty() {
             self.mark_counted_domains(executor.backend_mut(), round);
         }
         Ok(())
@@ -160,12 +160,16 @@ impl<B: SimBackend> SimulationState<B> {
     /// edge) gives a further edge, as the update events of the NBA region do.
     fn judge_derived_edges(&mut self, backend: &mut B, round: &mut Round) {
         for source in std::mem::take(&mut round.gating_sources) {
-            for &id in self.combinational_derived[source].iter() {
+            for &id in self.model.combinational_derived[source].iter() {
                 if self.stable_edge_triggered(backend, id) {
                     backend.mark_triggered_bit(id);
                     round.edge_approved.insert(id);
                 }
-                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+                let Some((signal, _)) = self
+                    .model
+                    .topo_signals
+                    .get(self.model.signal_index_by_id[id])
+                else {
                     continue;
                 };
                 if event_level(backend, *signal) != 0 {
@@ -194,7 +198,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut evaluated = BitSet::new();
         let mut unsplit = Vec::new();
         for id in marked.iter() {
-            let info = self.event_info[id];
+            let info = self.model.event_info[id];
             if info.canonical_id == usize::MAX || evaluated.contains(info.canonical_id) {
                 continue;
             }
@@ -218,7 +222,7 @@ impl<B: SimBackend> SimulationState<B> {
         // The edges are consumed: later rounds compare against the values
         // they were evaluated at.
         self.synchronize_event_values(executor.backend());
-        round.begin_scan(self.domain_kinds.len());
+        round.begin_scan(self.model.domain_kinds.len());
         round.scheduled_trigger_ids.make_empty();
         round.counted_triggered.make_empty();
         for id in unsplit {
@@ -282,7 +286,7 @@ impl<B: SimBackend> SimulationState<B> {
             for (id, image) in &deferred {
                 if let Some(image) = image {
                     restore_working_image(executor.backend_mut(), image);
-                    if let Some(event) = self.event_info[*id].apply_event {
+                    if let Some(event) = self.model.event_info[*id].apply_event {
                         executor.apply_ff_at(event)?;
                     }
                     self.record_transitions(executor.backend(), round);
@@ -294,7 +298,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut applied = Vec::new();
         for (id, image) in deferred {
             if image.is_none() {
-                if let Some(event) = self.event_info[id].apply_event {
+                if let Some(event) = self.model.event_info[id].apply_event {
                     executor.apply_ff_at(event)?;
                 }
                 applied.push(id);
@@ -341,7 +345,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
-        if !self.timed {
+        if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
         self.scheduler.time = current_time;
@@ -383,12 +387,12 @@ impl<B: SimBackend> SimulationState<B> {
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
-            if let Some(&counted) = self.counted_by_offset.get(&signal.offset) {
+            if let Some(&counted) = self.model.counted_by_offset.get(&signal.offset) {
                 let backend = executor.backend_mut();
                 let old = read(backend, signal);
                 backend.set(signal, value);
                 let new = read(backend, signal);
-                self.counted[counted].refs.bump(backend, &old, &new);
+                self.model.counted[counted].refs.bump(backend, &old, &new);
             } else {
                 executor.backend_mut().set(signal, value);
             }
@@ -410,7 +414,7 @@ impl<B: SimBackend> SimulationState<B> {
 
         let mut round = self.scratch.take().unwrap_or_default();
         round.reset(events_to_process.is_empty());
-        round.begin_scan(self.domain_kinds.len());
+        round.begin_scan(self.model.domain_kinds.len());
         self.process_state.ready.extend(ready_processes);
         executor.backend_mut().clear_triggered_bits();
         // An external drive may already have been combinationally evaluated
@@ -419,7 +423,8 @@ impl<B: SimBackend> SimulationState<B> {
         round
             .transitions
             .extend(events_to_process.iter().filter_map(|event| {
-                self.signal_to_id
+                self.model
+                    .signal_to_id
                     .get(&event.signal)
                     .map(|&id| (id, event.next_val != 0))
             }));
@@ -445,7 +450,7 @@ impl<B: SimBackend> SimulationState<B> {
                     !deferred_pending && triggered_domains.is_empty() && marked_bits.count() == 1;
                 if can_use_eval_apply {
                     let single_id = marked_bits.iter().next().expect("one marked trigger");
-                    let info = self.event_info[single_id];
+                    let info = self.model.event_info[single_id];
                     can_use_eval_apply = !info.is_cascaded;
                     if can_use_eval_apply {
                         if let Some(event) = info.eval_ff_event {
@@ -465,7 +470,7 @@ impl<B: SimBackend> SimulationState<B> {
                                     executor.backend_mut().mark_triggered_bit(id);
                                 }
                             }
-                            if !self.counted.is_empty() {
+                            if !self.model.counted.is_empty() {
                                 self.mark_counted_domains(executor.backend_mut(), &mut round);
                             }
                             // Each update is seen by the waits on it
@@ -481,7 +486,7 @@ impl<B: SimBackend> SimulationState<B> {
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
-                    let info = self.event_info[id];
+                    let info = self.model.event_info[id];
                     if triggered_domains.contains(info.canonical_id) {
                         continue;
                     }
@@ -532,7 +537,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // trigger again publish with this NBA region.
                 for id in self.apply_deferred(executor, &mut round)? {
                     if !newly_triggered.contains(&id)
-                        && let Some(event) = self.event_info[id].eval_ff_event
+                        && let Some(event) = self.model.event_info[id].eval_ff_event
                     {
                         executor.fire_external_event(event, current_time)?;
                     }
@@ -555,7 +560,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             for id in &newly_triggered {
-                if let Some(event) = self.event_info[*id].apply_event {
+                if let Some(event) = self.model.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
                 }
             }
@@ -564,7 +569,7 @@ impl<B: SimBackend> SimulationState<B> {
                 self.observe_driven(executor.backend());
             }
             for id in &newly_triggered {
-                if let Some(event) = self.event_info[*id].eval_ff_event {
+                if let Some(event) = self.model.event_info[*id].eval_ff_event {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
@@ -580,7 +585,7 @@ impl<B: SimBackend> SimulationState<B> {
                         executor.backend_mut().mark_triggered_bit(id);
                     }
                 }
-                if !self.counted.is_empty() {
+                if !self.model.counted.is_empty() {
                     self.mark_counted_domains(executor.backend_mut(), &mut round);
                 }
                 // A combinational value between two waves of domains is
@@ -589,7 +594,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id) in &self.topo_signals {
+        for (signal, id) in &self.model.topo_signals {
             if *id == usize::MAX {
                 continue;
             }

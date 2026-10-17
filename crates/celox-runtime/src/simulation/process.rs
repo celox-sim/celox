@@ -25,8 +25,14 @@ impl<B: SimBackend> SimulationState<B> {
     {
         {
             executor.run_process(process)?;
-            let status: u8 = executor.backend().get_as(self.processes[process].status);
-            let delay = || -> u64 { executor.backend().get_as(self.processes[process].delay) };
+            let status: u8 = executor
+                .backend()
+                .get_as(self.model.processes[process].status);
+            let delay = || -> u64 {
+                executor
+                    .backend()
+                    .get_as(self.model.processes[process].delay)
+            };
             match ProcessStatus::from_code(status) {
                 Some(ProcessStatus::Delay) => {
                     let delay = delay();

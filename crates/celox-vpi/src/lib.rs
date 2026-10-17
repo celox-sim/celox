@@ -191,16 +191,16 @@ fn logic_level(value: &BigUint, mask: &BigUint) -> LogicLevel {
 }
 
 fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
-    match kind {
-        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => {
+    match celox_design::edges::polarity(kind) {
+        Some(true) => {
             matches!(old, LogicLevel::Zero) && !matches!(new, LogicLevel::Zero)
                 || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::One)
         }
-        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => {
+        Some(false) => {
             matches!(old, LogicLevel::One) && !matches!(new, LogicLevel::One)
                 || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::Zero)
         }
-        DomainKind::Other => false,
+        None => false,
     }
 }
 

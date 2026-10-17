@@ -28,12 +28,16 @@
 //! small program over state variables where possible, so judging a gated
 //! clock does not settle the design.
 
-use celox_design::{DomainKind, EventTopology, GateOp};
+use celox_design::{
+    DomainKind, GateOp,
+    edges::{active_level, settled_edge},
+    schedule::ScheduleModel,
+};
 
 use crate::{
     AbsoluteAddr, SignalRef, SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
-    simulation::{HostBoundary, UnitExecutor, event_level, stable_edge},
+    simulation::{HostBoundary, UnitExecutor, event_level},
     timing::Halt,
 };
 
@@ -296,19 +300,12 @@ impl DerivedTickScratch {
 /// Empty when the design has no derived clocks.
 pub type DerivedTickPlans<E> = std::sync::Arc<[Option<DerivedTickPlan<E>>]>;
 
-fn active_level(kind: Option<DomainKind>) -> u8 {
-    match kind {
-        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => 0,
-        _ => 1,
-    }
-}
-
 /// Resolve the derived domains of every event of `backend`.
 pub fn build_derived_tick_plans<B: SimBackend>(
     backend: &B,
-    events: &EventTopology<AbsoluteAddr>,
-    kinds: &fxhash::FxHashMap<AbsoluteAddr, DomainKind>,
+    model: &ScheduleModel<AbsoluteAddr>,
 ) -> (DerivedTickPlans<B::Event>, DerivedTickScratch) {
+    let events = &model.events;
     let mut scratch = DerivedTickScratch::default();
     if events.derived_events.is_empty() && events.combinational_derived.is_empty() {
         return (std::sync::Arc::from([]), scratch);
@@ -317,7 +314,7 @@ pub fn build_derived_tick_plans<B: SimBackend>(
     let derived = |target: &AbsoluteAddr| {
         Some(DerivedDomain {
             signal: backend.resolve_signal(target),
-            kind: kinds.get(target).copied(),
+            kind: model.kind(target),
             domain: EventDomain::resolve(backend, target)?,
         })
     };
@@ -361,7 +358,7 @@ pub fn build_derived_tick_plans<B: SimBackend>(
         } else {
             Box::new([(
                 backend.resolve_signal(&canonical),
-                active_level(kinds.get(&canonical).copied()),
+                active_level(model.kind(&canonical)),
             )])
         };
         let fast = two_state && gated.iter().all(|gated| gated.gate.is_some());
@@ -518,7 +515,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
             let backend = executor.backend();
             let before = self.gate_level(backend, domain, Phase::Inactive);
             let after = self.gate_level(backend, domain, Phase::Active);
-            let fired = stable_edge(domain.derived.kind, before, after);
+            let fired = settled_edge(domain.derived.kind, before, after);
             if fired {
                 scratch.ready.push(index);
             }
@@ -570,7 +567,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
         for (index, domain) in self.gated.iter().enumerate() {
             let before = scratch.flags[base + index] & WAS != 0;
             let after = event_level(executor.backend(), domain.derived.signal) != 0;
-            let fired = stable_edge(domain.derived.kind, before, after);
+            let fired = settled_edge(domain.derived.kind, before, after);
             if fired {
                 scratch.ready.push(index);
             }
@@ -671,7 +668,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
                     continue;
                 }
                 let is = event_level(executor.backend(), domain.signal) != 0;
-                if stable_edge(domain.kind, state & WAS != 0, is) {
+                if settled_edge(domain.kind, state & WAS != 0, is) {
                     scratch.ready.push(index);
                 }
             }
@@ -681,7 +678,7 @@ impl<E: EventHandle> DerivedTickPlan<E> {
                     continue;
                 }
                 let is = self.gate_level(executor.backend(), domain, phase);
-                if stable_edge(domain.derived.kind, state & WAS != 0, is) {
+                if settled_edge(domain.derived.kind, state & WAS != 0, is) {
                     scratch.ready.push(base + index);
                 }
             }
