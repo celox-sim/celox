@@ -9,6 +9,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./wasm-edges": {
+      "import": "./dist/wasm-edges.js",
+      "types": "./dist/wasm-edges.d.ts"
     }
   },
   "files": [

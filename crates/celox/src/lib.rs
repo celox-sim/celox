@@ -10,6 +10,10 @@ pub use component::{
     register_static_component_manifest,
 };
 mod debug;
+mod edge_plans;
+pub use edge_plans::{
+    EdgePlanDomain, EdgePlanEvent, EdgePlanSignal, EdgePlans, edge_plans, event_addresses,
+};
 mod diagnostics;
 // Without a host runtime nothing builds simulators, so nothing links DPI-C.
 #[cfg_attr(not(feature = "host-runtime"), allow(dead_code))]
@@ -98,8 +102,9 @@ mod host_api {
     pub use crate::testbench::{AssertionResult, SourceLocation, TestResult, TestResultDetailed};
     pub use celox_macros::veryl_test;
     pub use celox_runtime::{
-        BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, VcdSignalDesc,
-        VcdStatistics, VcdWriter,
+        BackendExecutor, DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, Edge, EdgeOutcome,
+        EventEdge, EventEdges, Halt, SignalWrite, VcdSignalDesc, VcdStatistics, VcdWriter,
+        move_signal, run_edge, run_edges, set_level,
     };
 
     pub struct IOContext<'a, B: SimBackend = DefaultBackend> {
