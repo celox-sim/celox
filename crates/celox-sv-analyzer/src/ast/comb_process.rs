@@ -18,7 +18,7 @@ pub(super) fn comb_processes_from_module_node(
         &packed_dimensions.type_aliases,
     )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
-    for item in &active {
+    for (creation_order, item) in active.iter().enumerate() {
         let ScopeItem::Module(node) = item.node else {
             continue;
         };
@@ -51,10 +51,11 @@ pub(super) fn comb_processes_from_module_node(
             state,
         )?;
         for process in &mut processes[start..] {
+            process.creation_order = creation_order;
             for assignment in &mut process.assignments {
                 item.assignment(assignment);
             }
-            for stmt in &mut process.body {
+            for stmt in process.body.iter_mut().chain(&mut process.sensitivity_body) {
                 procedural::qualify_stmt(item, stmt);
             }
         }
@@ -328,11 +329,19 @@ fn comb_process_from_always_construct(
     for stmt in &mut body {
         procedural::substitute_stmt_constants(stmt, &HashMap::default(), parameter_literals);
     }
-    Ok(Some(CombProcess::procedural(
-        CombProcessKind::AlwaysComb,
-        condition,
-        body,
-    )))
+    let sensitivity_body = std::mem::take(&mut builder.sensitivity_body);
+    Ok(Some(CombProcess {
+        sensitivity_body,
+        ..CombProcess::procedural(
+            if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
+                CombProcessKind::AlwaysComb
+            } else {
+                CombProcessKind::AlwaysStar
+            },
+            condition,
+            body,
+        )
+    }))
 }
 
 #[cfg(test)]

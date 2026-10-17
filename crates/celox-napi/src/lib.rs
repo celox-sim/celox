@@ -684,6 +684,9 @@ struct CachedBuild {
     state_schema: Arc<celox::StateSchema>,
     /// Pre-computed VCD signal descriptors so VCD works on cache hits.
     vcd_descs: Vec<celox::VcdSignalDesc>,
+    /// Derived clock domains per event, valid for every backend sharing
+    /// `shared_code`.
+    derived_ticks: celox::DerivedTickPlans<DefaultEvent>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -875,7 +878,52 @@ enum HandleBackend {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+type DefaultEvent = <celox::DefaultBackend as celox::SimBackend>::Event;
+
+/// Derived clock domains per event, for the backend variant of a handle.
+#[cfg(not(target_arch = "wasm32"))]
+enum HandleDerivedTicks {
+    Default(celox::DerivedTickPlans<DefaultEvent>),
+    Tiered(celox::DerivedTickPlans<celox::TieredEventRef>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl HandleBackend {
+    /// Tick an event as `Simulator::tick` does: settle, run its domain,
+    /// settle, and run the derived clock domains the tick reaches.
+    fn tick(
+        &mut self,
+        event_id: usize,
+        derived: &HandleDerivedTicks,
+        scratch: &mut celox::DerivedTickScratch,
+    ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+        fn tick_with<B: celox::SimBackend>(
+            backend: &mut B,
+            event_id: usize,
+            plans: &celox::DerivedTickPlans<B::Event>,
+            scratch: &mut celox::DerivedTickScratch,
+        ) -> std::result::Result<(), celox::RuntimeErrorCode> {
+            let event = backend.id_to_event_slice()[event_id];
+            match plans.get(event_id) {
+                Some(Some(plan)) => plan.tick(&mut celox::BackendExecutor(backend), scratch, true),
+                _ => {
+                    backend.eval_comb()?;
+                    backend.eval_apply_ff_at(event)?;
+                    backend.eval_comb()
+                }
+            }
+        }
+        match (self, derived) {
+            (Self::Default(backend), HandleDerivedTicks::Default(plans)) => {
+                tick_with(backend, event_id, plans, scratch)
+            }
+            (Self::Tiered(backend), HandleDerivedTicks::Tiered(plans)) => {
+                tick_with(backend.as_mut(), event_id, plans, scratch)
+            }
+            _ => unreachable!("derived tick plans belong to the handle's backend"),
+        }
+    }
+
     fn event_count(&self) -> usize {
         match self {
             Self::Default(backend) => backend.id_to_event_slice().len(),
@@ -887,22 +935,6 @@ impl HandleBackend {
         match self {
             Self::Default(backend) => backend.eval_comb(),
             Self::Tiered(backend) => backend.eval_comb(),
-        }
-    }
-
-    fn eval_apply_ff_at(
-        &mut self,
-        event_id: usize,
-    ) -> std::result::Result<(), celox::RuntimeErrorCode> {
-        match self {
-            Self::Default(backend) => {
-                let event = backend.id_to_event_slice()[event_id];
-                backend.eval_apply_ff_at(event)
-            }
-            Self::Tiered(backend) => {
-                let event = backend.id_to_event_slice()[event_id];
-                backend.eval_apply_ff_at(event)
-            }
         }
     }
 
@@ -981,6 +1013,8 @@ pub struct NativeSimulatorHandle {
     total_size: u32,
     state_fingerprint: u64,
     state_schema: Arc<celox::StateSchema>,
+    derived_ticks: HandleDerivedTicks,
+    derived_scratch: celox::DerivedTickScratch,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1035,6 +1069,7 @@ impl NativeSimulatorHandle {
         let state_schema = sim.state_schema();
         let vcd_descs = sim.build_vcd_descs(four_state);
         let runtime_errors = runtime_errors_by_name(sim.program());
+        let derived_ticks = sim.derived_tick_plans();
 
         let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
@@ -1061,6 +1096,7 @@ impl NativeSimulatorHandle {
                 state_fingerprint,
                 state_schema: Arc::clone(&state_schema),
                 vcd_descs: vcd_descs.clone(),
+                derived_ticks: Arc::clone(&derived_ticks),
             });
             let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(key, cached);
@@ -1091,6 +1127,8 @@ impl NativeSimulatorHandle {
             total_size: total_size as u32,
             state_fingerprint,
             state_schema,
+            derived_ticks: HandleDerivedTicks::Default(derived_ticks),
+            derived_scratch: Default::default(),
         })
     }
 
@@ -1128,6 +1166,7 @@ impl NativeSimulatorHandle {
 
         // Extract the backend from Simulator (drops runtime metadata which is
         // no longer needed).
+        let derived_ticks = HandleDerivedTicks::Tiered(sim.derived_tick_plans());
         let backend = HandleBackend::Tiered(Box::new(sim.into_backend()));
 
         Ok(Self {
@@ -1142,6 +1181,8 @@ impl NativeSimulatorHandle {
             total_size: total_size as u32,
             state_fingerprint,
             state_schema,
+            derived_ticks,
+            derived_scratch: Default::default(),
         })
     }
 
@@ -1175,6 +1216,8 @@ impl NativeSimulatorHandle {
             total_size: cached.total_size,
             state_fingerprint: cached.state_fingerprint,
             state_schema: Arc::clone(&cached.state_schema),
+            derived_ticks: HandleDerivedTicks::Default(Arc::clone(&cached.derived_ticks)),
+            derived_scratch: Default::default(),
         })
     }
 
@@ -1394,12 +1437,12 @@ impl NativeSimulatorHandle {
             .as_mut()
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         validate_event_id(event_id, b.event_count())?;
-        b.eval_comb()
-            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-        b.eval_apply_ff_at(event_id as usize)
-            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-        b.eval_comb()
-            .map_err(|e| napi_runtime_error(&runtime_errors, e))
+        b.tick(
+            event_id as usize,
+            &self.derived_ticks,
+            &mut self.derived_scratch,
+        )
+        .map_err(|e| napi_runtime_error(&runtime_errors, e))
     }
 
     /// Trigger a clock/event N times in a single NAPI call.
@@ -1414,12 +1457,12 @@ impl NativeSimulatorHandle {
         // call-shape-dependent treatment at the N-API boundary.
         validate_event_id(event_id, b.event_count())?;
         for _ in 0..count {
-            b.eval_comb()
-                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-            b.eval_apply_ff_at(event_id as usize)
-                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-            b.eval_comb()
-                .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
+            b.tick(
+                event_id as usize,
+                &self.derived_ticks,
+                &mut self.derived_scratch,
+            )
+            .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
         }
         Ok(())
     }
@@ -1864,6 +1907,31 @@ impl NativeSimulationHandle {
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         sim.run_until(end_time as u64)
             .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
+    /// Advance until `end_time` taking at most `max_steps` steps. Returns
+    /// false, at the time of the last step, when the steps ran out first.
+    #[napi]
+    pub fn run_until_bounded(&mut self, end_time: f64, max_steps: f64) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.run_until_bounded(end_time as u64, max_steps as u64)
+            .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
+    /// Report that the host wrote the state through the shared memory: the
+    /// next step settles the current time when a process may see the writes
+    /// or an event signal changed.
+    #[napi]
+    pub fn note_host_writes(&mut self) -> Result<()> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.note_raw_writes();
+        Ok(())
     }
 
     /// Advance to the next event. Returns the new time, or null if no events.
@@ -3724,6 +3792,50 @@ mod tests {
         assert_eq!(simulation_ids, [0, 1]);
         simulation.add_clock(0, 10.0, 0.0).unwrap();
         simulation.schedule(1, 5.0, 1.0).unwrap();
+    }
+
+    /// `tick` and `tickN` run the domains of clocks derived from the ticked
+    /// one, on freshly built, cached and tiered handles.
+    #[test]
+    fn native_handle_ticks_fire_derived_clock_domains() {
+        let source = "module Top (
+            clk: input clock, en: input logic,
+            half_count: output logic<8>, gated_count: output logic<8>,
+        ) {
+            var half: logic;
+            always_ff (clk) { half = ~half; }
+            let half_clk: '_ clock = half;
+            always_ff (half_clk) { half_count += 1; }
+            let gated: '_ clock = clk & en;
+            always_ff (gated) { gated_count += 1; }
+        }";
+        for mode in ["fresh", "cached", "tiered"] {
+            let mut handle = if mode == "tiered" {
+                NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), None)
+            } else {
+                NativeSimulatorHandle::new(napi_sources(source), "Top".into(), None)
+            }
+            .unwrap();
+            let events: HashMap<String, u32> = serde_json::from_str(&handle.events_json()).unwrap();
+            let layout: serde_json::Value = serde_json::from_str(&handle.layout_json()).unwrap();
+            let offset = |name: &str| layout[name]["offset"].as_u64().unwrap() as usize;
+            let (en, half_count, gated_count) =
+                (offset("en"), offset("half_count"), offset("gated_count"));
+            let memory = |handle: &mut NativeSimulatorHandle| {
+                let (ptr, len) = handle.backend.as_mut().unwrap().memory_as_mut_ptr();
+                unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+            };
+            memory(&mut handle)[en] = 1;
+            handle.tick(events["clk"]).unwrap();
+            handle.tick_n(events["clk"], 3).unwrap();
+            assert_eq!(memory(&mut handle)[half_count], 2, "{mode}: half clock");
+            assert_eq!(memory(&mut handle)[gated_count], 4, "{mode}: gated clock");
+            memory(&mut handle)[en] = 0;
+            handle.tick_n(events["clk"], 2).unwrap();
+            assert_eq!(memory(&mut handle)[half_count], 3, "{mode}: half clock");
+            assert_eq!(memory(&mut handle)[gated_count], 4, "{mode}: closed gate");
+            handle.dispose().unwrap();
+        }
     }
 
     #[test]

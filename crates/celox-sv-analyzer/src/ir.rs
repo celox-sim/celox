@@ -5,6 +5,9 @@ use crate::{ast, symbol::ModuleId, typecheck};
 pub use crate::procedural::{
     CaseKind, CaseLabel, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
 };
+pub use crate::system_functions::{
+    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
+};
 
 /// A procedural statement of the analyzed IR.
 pub type Stmt = StmtBase<Expr, LValue>;
@@ -666,7 +669,7 @@ pub enum ConstExpr {
         signed: bool,
     },
     Function {
-        name: String,
+        callee: Callee,
         args: Vec<ConstExpr>,
         /// Tells a user subroutine call apart from a call written alike: a
         /// select repeats its index in its bounds and range checks, and the
@@ -775,13 +778,25 @@ impl LValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
+    creation_order: usize,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
     body: Vec<Stmt>,
+    sensitivity_body: Vec<Stmt>,
 }
 
 impl CombProcess {
+    /// Reads removed from executable branches still affect implicit sensitivity.
+    pub fn sensitivity_body(&self) -> &[Stmt] {
+        &self.sensitivity_body
+    }
+
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(
         kind: CombProcessKind,
         condition: Option<ConstExpr>,
@@ -789,6 +804,8 @@ impl CombProcess {
         body: Vec<Stmt>,
     ) -> Self {
         Self {
+            creation_order: 0,
+            sensitivity_body: Vec::new(),
             kind,
             condition,
             assignments,
@@ -819,17 +836,28 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
-        Self { events, body }
+        Self {
+            creation_order: 0,
+            events,
+            body,
+        }
     }
 
     pub fn events(&self) -> &[FfEvent] {
@@ -844,18 +872,32 @@ impl FfProcess {
 /// An `initial` process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
+    creation_order: usize,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
+    synthetic: bool,
 }
 
 impl InitialProcess {
+    /// Position among elaborated module items, shared across process kinds.
+    pub fn creation_order(&self) -> usize {
+        self.creation_order
+    }
+
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
+            creation_order: 0,
             condition,
             body,
             initializer,
+            synthetic: false,
         }
+    }
+
+    /// Compiler-generated storage initialization, without a user static process.
+    pub fn is_synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// Whether this process holds variable declaration initializers, which
@@ -935,7 +977,7 @@ pub enum Expr {
         else_expr: Box<Expr>,
     },
     Call {
-        name: String,
+        callee: Callee,
         /// Missing actuals retain their formal slots for declaration-scope defaults.
         args: Vec<Option<Expr>>,
         /// Formal positions in source evaluation/copy-out order; empty means positional.
@@ -1010,8 +1052,8 @@ impl From<ast::ConstExpr> for ConstExpr {
                 lsb: Box::new((*lsb).into()),
                 signed,
             },
-            ast::ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name,
+            ast::ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
@@ -1066,8 +1108,8 @@ impl From<ConstExpr> for ast::ConstExpr {
                 lsb: Box::new((*lsb).into()),
                 signed,
             },
-            ConstExpr::Function { name, args, site } => ast::ConstExpr::Function {
-                name,
+            ConstExpr::Function { callee, args, site } => ast::ConstExpr::Function {
+                callee,
                 site,
                 args: args.into_iter().map(Into::into).collect(),
             },
@@ -1135,7 +1177,7 @@ impl From<ast::LValue> for LValue {
 
 impl From<ast::CombProcess> for CombProcess {
     fn from(process: ast::CombProcess) -> Self {
-        CombProcess::new(
+        let mut result = CombProcess::new(
             process.kind().into(),
             process.condition().cloned().map(Into::into),
             process
@@ -1150,7 +1192,15 @@ impl From<ast::CombProcess> for CombProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result.sensitivity_body = process
+            .sensitivity_body()
+            .iter()
+            .cloned()
+            .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
+            .collect();
+        result
     }
 }
 
@@ -1159,13 +1209,14 @@ impl From<ast::CombProcessKind> for CombProcessKind {
         match kind {
             ast::CombProcessKind::ContinuousAssign => CombProcessKind::ContinuousAssign,
             ast::CombProcessKind::AlwaysComb => CombProcessKind::AlwaysComb,
+            ast::CombProcessKind::AlwaysStar => CombProcessKind::AlwaysStar,
         }
     }
 }
 
 impl From<ast::FfProcess> for FfProcess {
     fn from(process: ast::FfProcess) -> Self {
-        Self::new(
+        let mut result = Self::new(
             process.events().iter().cloned().map(Into::into).collect(),
             process
                 .body()
@@ -1173,13 +1224,15 @@ impl From<ast::FfProcess> for FfProcess {
                 .cloned()
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result
     }
 }
 
 impl From<ast::InitialProcess> for InitialProcess {
     fn from(process: ast::InitialProcess) -> Self {
-        Self::new(
+        let mut result = Self::new(
             process.condition().cloned().map(Into::into),
             process
                 .body()
@@ -1188,7 +1241,10 @@ impl From<ast::InitialProcess> for InitialProcess {
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
             process.is_initializer(),
-        )
+        );
+        result.creation_order = process.creation_order();
+        result.synthetic = process.is_synthetic();
+        result
     }
 }
 
@@ -1256,12 +1312,12 @@ impl From<ast::Expr> for Expr {
                 else_expr: Box::new((*else_expr).into()),
             },
             ast::Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name,
+                callee,
                 args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {

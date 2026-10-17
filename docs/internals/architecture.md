@@ -178,28 +178,87 @@ its boundaries.
 
 ### Process kernels
 
-A procedural process with delays is compiled into a process kernel: one SIR
-execution unit that runs the process from its last suspension point to the
-next. Each process owns three hidden two-state state objects:
+A procedural process is compiled into a process kernel: one SIR execution unit
+that runs the process from its last suspension point to the next. Each process
+owns three hidden two-state state objects:
 
 - a resume slot, which the kernel's entry block dispatches on with a `Switch`
   (two levels beyond 255 suspension points);
-- a status slot, in which the kernel reports a delay, the end of the process,
-  or `$finish` before it returns;
-- a delay slot, which holds the wait amount.
+- a status slot, in which the kernel reports how it returned: a delay, an
+  inactive-region delay, a wait, a still-pending wait, a staged nonblocking
+  assignment, a yield, the end of the process, or `$finish`;
+- a delay slot, which holds the wait amount, or the index of the wait or
+  nonblocking site.
 
 A suspension stores these slots and returns, so no backend needs a new
 terminator. Kernels are never merged with each other or with a phase, and
 every backend compiles each one as its own function, invoked through
-`SimBackend::run_process`.
+`SimBackend::run_process`. `ProcessKernelBuilder` is the frontend interface:
+`delay`, `inactive_delay`, `yield_now`, `suspend_wait` with `wake_if` and
+`wait_level`, `nonblocking` and `finish`.
 
-The timed scheduler keeps a queue of process wakeups next to its event queue.
-At each time it applies the scheduled values, then runs the processes that
-resume at that time in declaration order. It detects the clock edges they cause
-by comparing event signals before and after, and then settles as for scheduled
-events. Processes that waited for zero time resume in a further round at the
-same time, which repeats the edge detection and settling. Because the slots are ordinary state, a checkpoint captures suspended
-processes. The optimizer does not yet optimize kernels, but it treats their
+#### Watched and counted signals
+
+A wait names its terms: a signal and the occurrence it waits for (any change,
+a positive or a negative edge, IEEE 1800-2023 9.4.2 Table 9-2). Most signals
+change at most once between two points at which the runtime checks them: a
+scheduled or host write, a flip-flop publication, a continuous assignment
+settling, or a kernel storing it once between suspensions. For these the
+runtime keeps the value each waiting process last saw and compares, and
+flip-flop domains keep today's edge detection.
+
+A signal is *counted* when a unit may store it twice without a check in
+between, so an intermediate value would otherwise be lost: a kernel storing it
+twice between two suspensions or inside a loop without one, or an imperative
+combinational unit storing it twice on one path (`y = 0; if (a) y = 1;`).
+Frontends report such candidates with counter objects
+(`watch::multi_store_candidates`, `CounterSlots`); assembly counts only the
+candidates a flip-flop domain or a wait watches. It then rewrites exactly the
+stores to them in kernels and combinational process units with
+`watch::emit_watched`, which bumps changes/rises/falls counters around each
+store in plain SIR. A counted domain triggers when its counter moves, and a
+wait on a counted signal compares counters. Combinational process units run
+only when an input changed (IEEE 1800-2023 9.2.2.2), so settling again never
+repeats an intermediate write. Nothing else in the design changes.
+
+#### Time slots
+
+A time slot is a sequence of rounds. A round is the batch step described above
+with a process phase in front of the flip-flop domains, following the regions
+of IEEE 1800-2023 4.5:
+
+1. apply the scheduled values of the time;
+2. run the ready processes in declaration order, including those they wake,
+   then settle once (the batch step's settle) and wake the processes the
+   settled values satisfy; when only inactive-region (`#0`) processes remain,
+   evaluate the domains triggered so far first and keep their nonblocking
+   assignments for the NBA region;
+3. evaluate and publish the triggered domains as in the batch step, and
+   publish the processes' nonblocking assignments with them;
+4. wake the processes the published values satisfy; they, and processes that
+   waited for a zero `Delay`, run in the next round of the same time.
+
+A process woken by an edge therefore runs before that edge's domains publish:
+it reads flip-flop outputs from before the edge, and a process that drives a
+flip-flop input at the same edge races with the flip-flop, as in
+SystemVerilog. A round without ready processes, waiting processes or counted
+signals does exactly the batch step, with the fused evaluate-and-apply and
+parallel units. A domain evaluated twice before its nonblocking assignments
+publish keeps the earlier evaluation's working state, and both publish in
+order. Nonblocking assignments of kernels go through an ordered queue, or a
+single pending value per site when the frontend knows that nothing else
+assigns the destination.
+
+`$finish`, from a kernel or from flip-flop or combinational code, ends a timed
+simulation where it is: the scheduler propagates it as a control result, and
+the simulator freezes so that evaluation, host writes and dumps change
+nothing. A host write is an update of the current time; the next step settles
+it at that time, then advances, so host writes never hold the simulation at
+one time. Checkpoints, state files and exported schedules carry
+the waiting processes with what each compares against, the ready and inactive
+processes, the queued nonblocking assignments and the counter values counted
+domains last triggered on; the slots and counters themselves are ordinary
+state. The optimizer does not yet optimize kernels, but it treats their
 accesses like those of FF domains, so identity aliasing and dead-store
 elimination keep the state they use.
 

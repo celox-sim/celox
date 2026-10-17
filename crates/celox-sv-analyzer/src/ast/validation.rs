@@ -158,20 +158,7 @@ fn validate_folded_parameter_names(
             }
         };
         if let RefNode::SystemTfCall(call) = node
-            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
-                matches!(
-                    name,
-                    "$bits"
-                        | "$size"
-                        | "$left"
-                        | "$right"
-                        | "$low"
-                        | "$high"
-                        | "$increment"
-                        | "$dimensions"
-                        | "$unpacked_dimensions"
-                )
-            })
+            && called_system_function(call, tree).is_some_and(SystemFunction::is_data_query)
             && let sv_parser::SystemTfCall::ArgExpression(call) = call
         {
             let arguments = call.nodes.1.nodes.1.0.contents();
@@ -272,6 +259,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
     syntax_tree: &SyntaxTree,
     indexed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
+    reject_constant_random_calls(node.clone(), syntax_tree)?;
     let const_env = &indexed_dimensions.const_env;
     let type_aliases = &indexed_dimensions.type_aliases;
     let is_module = matches!(
@@ -405,19 +393,13 @@ fn reject_silently_ignored_constructs_with_dimensions(
             parameters::reject_unbounded_data_query(call, syntax_tree, const_env, true)?;
         }
         if let RefNode::SystemTfCall(call) = child.clone()
-            && system_tf_call_parts(call, syntax_tree)
-                .is_some_and(|(name, _)| name == "$isunbounded")
+            && called_system_function(call, syntax_tree) == Some(SystemFunction::Isunbounded)
         {
-            let (name, args) = system_tf_call_parts(call, syntax_tree).unwrap();
-            system_functions::check_call(
-                name,
-                args.as_deref(),
-                system_functions::CallSite::Expression,
-            )?;
+            let function = expressions::system_function_call(call, syntax_tree)?.unwrap();
             let value = parameters::isunbounded_call(call, syntax_tree, const_env)?;
             if value.is_none() && !procedural_queries.contains(&call) {
                 return Err(AnalyzerError::InvalidSystemTfCall {
-                    name: name.into(),
+                    name: function.name().into(),
                     detail: "argument must name a value parameter".into(),
                 });
             }
@@ -475,18 +457,17 @@ fn reject_silently_ignored_constructs_with_dimensions(
             }
         }
         match child {
-            RefNode::SystemTfCall(call) if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| name == "$printtimescale") => {
+            RefNode::SystemTfCall(call) if called_system_task(call, syntax_tree) == Some(SystemTask::Printtimescale) => {
                 let site = if print_statements.contains(&call) { system_functions::CallSite::Statement(system_functions::Body::Subroutine) } else { system_functions::CallSite::Expression };
                 timescales::print_message(call, syntax_tree, site)?;
             }
             RefNode::SystemTfCall(call)
-                if system_tf_call_parts(call, syntax_tree).is_some_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision")) =>
+                if matches!(called_system_function(call, syntax_tree), Some(SystemFunction::Timeunit | SystemFunction::Timeprecision)) =>
             {
                 timescales::query(call, syntax_tree)?;
             }
             RefNode::SystemTfCall(call)
-                if system_tf_call_parts(call, syntax_tree)
-                    .is_some_and(|(name, _)| name == "$bits")
+                if called_system_function(call, syntax_tree) == Some(SystemFunction::Bits)
                     && !procedural_queries.contains(&call) =>
             {
                 // First preserve diagnostics from the operand's own calls;
@@ -494,8 +475,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 deferred_bits_queries.push(call);
             }
             RefNode::SystemTfCall(call)
-                if system_tf_call_parts(call, syntax_tree)
-                    .is_some_and(|(name, _)| name == "$dimensions")
+                if called_system_function(call, syntax_tree) == Some(SystemFunction::Dimensions)
                     && !procedural_queries.contains(&call) =>
             {
                 // Preliminary parameter lowering may defer a type query.
@@ -505,8 +485,8 @@ fn reject_silently_ignored_constructs_with_dimensions(
                 ).ok_or_else(|| unsupported(format!("operand of `$dimensions`: {}", syntax_tree.get_str(call).unwrap_or_default())))?;
             }
             RefNode::SystemTfCall(call)
-                if system_tf_call_parts(call, syntax_tree)
-                    .is_some_and(|(name, _)| name == "$unpacked_dimensions")
+                if called_system_function(call, syntax_tree)
+                    == Some(SystemFunction::UnpackedDimensions)
                     && !procedural_queries.contains(&call) =>
             {
                 // Preliminary parameter lowering may defer a type query.
@@ -818,6 +798,58 @@ fn reject_silently_ignored_constructs_with_dimensions(
         }
     }
 
+    Ok(())
+}
+
+/// Type queries may inspect an impure call, but a constant value may not
+/// execute it, including in an unused or short-circuited initializer.
+fn reject_constant_random_calls(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<()> {
+    let mut unevaluated = HashSet::<*const sv_parser::SystemTfCall>::default();
+    for child in node.clone() {
+        let RefNode::SystemTfCall(call) = child else {
+            continue;
+        };
+        if !called_system_function(call, tree).is_some_and(SystemFunction::is_data_query) {
+            continue;
+        }
+        let sv_parser::SystemTfCall::ArgExpression(call) = call else {
+            continue;
+        };
+        if let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first() {
+            for descendant in argument.into_iter() {
+                if let RefNode::SystemTfCall(call) = descendant {
+                    unevaluated.insert(call as *const _);
+                }
+            }
+        }
+    }
+    let mut constant = vec![false];
+    for event in node.into_iter().event() {
+        match event {
+            sv_parser::NodeEvent::Leave(_) => {
+                constant.pop();
+            }
+            sv_parser::NodeEvent::Enter(child) => {
+                let in_constant = *constant.last().unwrap()
+                    || matches!(
+                        child,
+                        RefNode::ConstantExpression(_) | RefNode::ConstantParamExpression(_)
+                    );
+                constant.push(in_constant);
+                if in_constant
+                    && let RefNode::SystemTfCall(call) = child
+                    && let Some(function) = called_system_function(call, tree)
+                    && function.is_effectful()
+                    && !unevaluated.contains(&(call as *const _))
+                {
+                    return Err(AnalyzerError::InvalidSystemTfCall {
+                        name: function.name().into(),
+                        detail: "not permitted in a constant-value expression".into(),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 

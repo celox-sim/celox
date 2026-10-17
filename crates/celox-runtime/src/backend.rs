@@ -5,6 +5,23 @@ use num_bigint::BigUint;
 pub use crate::SimulatorErrorCode;
 use crate::{AbsoluteAddr, MemoryLayout, RuntimeEventBuffer, SignalRef};
 
+/// The event IDs marked in a memory image's triggered bits, one bit per
+/// event, least significant bit first. Read a word at a time: few bits are
+/// set.
+pub fn triggered_bits_from_bytes(bytes: &[u8]) -> bit_set::BitSet {
+    let mut bits = bit_set::BitSet::with_capacity(bytes.len() * 8);
+    for (index, chunk) in bytes.chunks(8).enumerate() {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        let mut word = u64::from_le_bytes(word);
+        while word != 0 {
+            bits.insert(index * 64 + word.trailing_zeros() as usize);
+            word &= word - 1;
+        }
+    }
+    bits
+}
+
 /// Marker trait for backend-specific event handles.
 ///
 /// An event handle is an opaque reference to a compiled clock or
@@ -170,5 +187,21 @@ pub trait SimBackend {
                 trace.mark_range(ptr.cast_mut(), signal.offset, len);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::triggered_bits_from_bytes;
+
+    #[test]
+    fn triggered_bits_follow_the_bytes_least_significant_bit_first() {
+        let mut bytes = vec![0u8; 11];
+        bytes[0] = 0b101;
+        bytes[7] = 0x80;
+        bytes[10] = 0x01;
+        let bits: Vec<_> = triggered_bits_from_bytes(&bytes).iter().collect();
+        assert_eq!(bits, [0, 2, 63, 80]);
+        assert!(triggered_bits_from_bytes(&[]).is_empty());
     }
 }

@@ -1,0 +1,39 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_native().unwrap()), &ops, observe)"
+---
+modify [("a", 0)]
+run_until 0
+  step -> Some(0): host_writes(0) process(0) process(1) comb process(0) comb finish_step(0)
+  time 0 finished false: changes=1
+modify [("a", 37)]
+run_until 2
+  step -> Some(0): host_writes(0) comb process(0) comb finish_step(0)
+  time 2 finished false: changes=2
+modify [("a", 74)]
+run_until 4
+  step -> Some(2): host_writes(0) comb process(0) comb finish_step(2)
+  time 4 finished false: changes=3
+modify [("a", 111)]
+run_until 6
+  step -> Some(4): host_writes(0) comb process(0) comb finish_step(4)
+  time 6 finished false: changes=4
+modify [("a", 148)]
+run_until 8
+  step -> Some(6): host_writes(0) comb process(0) comb finish_step(6)
+  time 8 finished false: changes=5
+modify [("a", 185)]
+run_until 10
+  step -> Some(8): host_writes(0) comb process(0) comb finish_step(8)
+  time 10 finished false: changes=6
+modify [("a", 222)]
+run_until 12
+  step -> Some(10): host_writes(0) comb process(0) comb finish_step(10)
+  time 12 finished false: changes=7
+modify [("a", 1), ("a", 0)]
+run_until 14
+  step -> Some(12): host_writes(0) comb finish_step(12)
+  time 14 finished false: changes=7
+steps 12
+  step -> None: 
+  time 14 finished false: changes=7

@@ -14,14 +14,20 @@ import {
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { generateSidecars } from "../../vite-plugin/src/sidecar.js";
 import { withSidecarLock } from "../../vite-plugin/src/sidecar-lock.js";
 import type { GenTsJsonOutput } from "../../vite-plugin/src/types.js";
 
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	return { ...fs, readFileSync: vi.fn(fs.readFileSync) };
+});
+
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
 afterEach(async () => {
+	vi.mocked(readFileSync).mockReset();
 	for (const child of children) {
 		if (child.exitCode === null && child.signalCode === null)
 			child.kill("SIGKILL");
@@ -249,3 +255,53 @@ test("synchronous generation does not prevent lease renewal", async () => {
 		expect(statSync(lease).mtimeMs).toBeGreaterThan(before);
 	});
 });
+
+// Inject the Windows deletion race on every host so it is deterministic.
+test.each(["recover", "waiting", "removed", "persistent", "EACCES"])(
+	"ticket read error: %s",
+	async (mode) => {
+		const path = root();
+		const { claim } = abandoned(path, false);
+		let reads = 0;
+		let entered = false;
+		const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+		vi.mocked(readFileSync).mockImplementation((...args) => {
+			if (String(args[0]) === join(claim, "ticket")) {
+				reads++;
+				if (
+					(mode === "waiting" ? reads === 2 || reads === 3 : reads <= 2) ||
+					mode === "persistent" ||
+					mode === "EACCES"
+				)
+					throw Object.assign(new Error("ticket unavailable"), {
+						code: mode === "EACCES" ? "EACCES" : "EPERM",
+					});
+				if (mode === "removed") rmSync(claim, { recursive: true });
+			}
+			return actual.readFileSync(...args);
+		});
+		const pending = withSidecarLock(path, () => {
+			entered = true;
+		});
+		if (mode === "persistent" || mode === "EACCES") {
+			await expect(pending).rejects.toThrow("ticket unavailable");
+			expect(entered).toBe(false);
+			expect(reads).toBe(mode === "persistent" ? 6 : 1);
+		} else {
+			try {
+				if (mode === "removed") {
+					await pending;
+					expect(reads).toBe(3);
+				} else {
+					await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(4));
+					expect(entered).toBe(false);
+					rmSync(claim, { recursive: true });
+				}
+			} finally {
+				rmSync(claim, { recursive: true, force: true });
+				await pending;
+			}
+			expect(entered).toBe(true);
+		}
+	},
+);

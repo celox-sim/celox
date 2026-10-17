@@ -1,0 +1,45 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_interpreter().unwrap()), &ops, observe)"
+---
+modify [("clk", 0)]
+run_until 0
+  step -> Some(0): host_writes(0) process(0) comb finish_step(0)
+  time 0 finished false: a=0 edges=0
+modify [("clk", 37)]
+run_until 2
+  step -> Some(0): host_writes(0) comb stage(e0@0) eval_apply(e0) fire(e0@0) comb finish_step(0)
+  time 2 finished false: a=0 edges=1
+modify [("clk", 74)]
+run_until 4
+  step -> Some(4): host_writes(0) comb finish_step(2) host_writes(0) process(0) finish_step(4) freeze
+  time 4 finished true: a=1 edges=1
+modify [("clk", 111)]
+run_until 6
+  time 4 finished true: a=1 edges=1
+modify [("clk", 148)]
+run_until 8
+  time 4 finished true: a=1 edges=1
+modify [("clk", 185)]
+run_until 10
+  time 4 finished true: a=1 edges=1
+modify [("clk", 222)]
+run_until 12
+  time 4 finished true: a=1 edges=1
+modify [("clk", 1), ("clk", 0)]
+run_until 14
+  time 4 finished true: a=1 edges=1
+schedule clk @15 = 1
+schedule clk @16 = 0
+schedule clk @17 = 1
+schedule clk @17 = 0
+schedule clk @18 = 1
+schedule clk @19 = 0
+run_until 20
+  time 4 finished true: a=1 edges=1
+clock clk period 4 delay 21
+run_until 40
+  time 4 finished true: a=1 edges=1
+steps 12
+  step -> None: 
+  time 4 finished true: a=1 edges=1

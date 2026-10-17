@@ -517,3 +517,94 @@
   (assert_eq known 0xa)
   (assert_eq partial (fourstate 0xd 0x5))
   (assert_eq unset (fourstate 0xf 0xf)))
+
+; Processes at the rising and the falling edge of one clock, here a divided
+; clock `q`, each evaluate against the state before their edge
+; (IEEE 1800-2023 9.4.2, 10.4.2).
+(case always_ff_at_both_edges_of_one_clock
+  (source "both_edges.sv" #"
+                module Top(input logic clk, output logic [7:0] rise, fall, at_rise, at_fall);
+                    logic q = 1'b0;
+                    logic [7:0] r = 8'd0, f = 8'd0, ar = 8'd0, af = 8'd0;
+                    always_ff @(posedge clk) q <= ~q;
+                    always_ff @(negedge q) begin f <= f + 8'd1; af <= r; end
+                    always_ff @(posedge q) begin r <= r + 8'd1; ar <= f; end
+                    assign rise = r;
+                    assign fall = f;
+                    assign at_rise = ar;
+                    assign at_fall = af;
+                endmodule
+            "#)
+  (top Top)
+  (for k (list 1 2 3)
+    (tick clk)
+    (assert_eq rise k)
+    (assert_eq fall (- k 1))
+    (assert_eq at_rise (- k 1))
+    (tick clk)
+    (assert_eq fall k)
+    (assert_eq at_fall k)))
+
+; A child senses both edges of its clock port; its rising-edge register
+; samples the parent's before the parent's rising edge commits.
+(case always_ff_at_both_edges_of_a_child_clock_port
+  (source "both_edges_child.sv" #"
+                module Child(input logic c, input logic [7:0] p,
+                             output logic [7:0] sampled, falls);
+                    logic [7:0] s = 8'd0, f = 8'd0;
+                    always_ff @(negedge c) f <= f + 8'd1;
+                    always_ff @(posedge c) s <= p;
+                    assign sampled = s;
+                    assign falls = f;
+                endmodule
+                module Top(input logic clk, output logic [7:0] parent, sampled, falls);
+                    logic q = 1'b0;
+                    logic [7:0] p = 8'd0;
+                    always_ff @(posedge clk) q <= ~q;
+                    always_ff @(posedge q) p <= p + 8'd1;
+                    Child u(.c(q), .p(p), .sampled(sampled), .falls(falls));
+                    assign parent = p;
+                endmodule
+            "#)
+  (top Top)
+  (for k (list 1 2 3)
+    (tick clk)
+    (assert_eq parent k)
+    (assert_eq sampled (- k 1))
+    (assert_eq falls (- k 1))
+    (tick clk)
+    (assert_eq falls k)))
+
+; One asynchronous reset `r` sensed active high and active low, and also as a
+; clock at both edges.
+(case always_ff_reset_at_both_edges_and_as_a_clock
+  (source "both_edges_reset.sv" #"
+                module Top(input logic clk, d, output logic [7:0] high, low, rises, falls);
+                    logic r = 1'b0;
+                    logic [7:0] h = 8'd0, l = 8'd0, ri = 8'd0, fa = 8'd0;
+                    always_ff @(posedge clk) r <= d;
+                    always_ff @(posedge clk or posedge r) if (r) h <= 8'd0; else h <= h + 8'd1;
+                    always_ff @(posedge clk or negedge r) if (!r) l <= 8'd0; else l <= l + 8'd1;
+                    always_ff @(posedge r) ri <= ri + 8'd1;
+                    always_ff @(negedge r) fa <= fa + 8'd1;
+                    assign high = h;
+                    assign low = l;
+                    assign rises = ri;
+                    assign falls = fa;
+                endmodule
+            "#)
+  (top Top)
+  (for (value h l ri fa)
+       (list
+         (0 1 0 0 0)
+         (1 0 0 1 0)
+         (1 0 1 1 0)
+         (1 0 2 1 0)
+         (0 0 0 1 1)
+         (0 1 0 1 1))
+    (modify (set d value))
+    (tick clk)
+    (assert_eq high h)
+    (assert_eq low l)
+    (assert_eq rises ri)
+    (assert_eq falls fa)))

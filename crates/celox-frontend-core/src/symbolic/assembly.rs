@@ -9,10 +9,11 @@ use crate::{
     SourceAddr, SourceLocation, SourceVarId, VariableInfo, flattening,
 };
 use celox_design::{
-    BitAccess, DomainKind, ElaboratedDesign, EventTopology, ExternFunction, InitialStateValue,
-    InstanceId, ModuleId, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr,
-    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema,
-    STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase, VariableMetadata,
+    BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
+    EventTopology, EventWatch, ExternFunction, GateOp, InitialStateValue, InstanceId, ModuleId,
+    NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
+    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -415,7 +416,7 @@ fn check_package_variable_drivers(
     }
     // A continuous driver overlaps every other write.
     for path in comb_blocks {
-        let celox_slt::LogicPathTarget::Var(target) = &path.target else {
+        let Some(target) = path.target.var() else {
             continue;
         };
         if ff_writes
@@ -644,7 +645,7 @@ pub fn schedule_symbolic_rtl(
         runtime_event_sites,
         extern_functions,
         next_runtime_error_code,
-        processes,
+        mut processes,
     ) = timed_sub!(
         "relocate_units",
         relocate_units(
@@ -662,6 +663,39 @@ pub fn schedule_symbolic_rtl(
             &mut trace,
         )
     )?;
+    let timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let counted = {
+        // Flip-flop event domains and the aliases that resolve to them.
+        let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .keys()
+            .copied()
+            .chain(
+                clock_domains
+                    .iter()
+                    .filter(|(_, canonical)| eval_apply_ffs.contains_key(canonical))
+                    .map(|(alias, _)| *alias),
+            )
+            .collect();
+        let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
+            .iter()
+            .flat_map(|(&instance, module)| {
+                modules[module].variables.iter().map(move |(&var_id, var)| {
+                    (
+                        bindings.locate(instance, var_id),
+                        (var.metadata.width, var.metadata.is_4state),
+                    )
+                })
+            })
+            .collect();
+        instrument_counted_signals(
+            &timing,
+            &event_addresses,
+            &variables,
+            four_state,
+            &mut processes,
+            &mut comb_blocks,
+        )
+    };
     check_package_variable_drivers(
         bindings,
         &instance_modules,
@@ -700,7 +734,13 @@ pub fn schedule_symbolic_rtl(
         }
     }
 
-    let (topological_clocks, cascaded_clocks) = timed_sub!(
+    let ClockAnalysis {
+        topological_clocks,
+        cascaded_clocks,
+        derived_events,
+        combinational_derived,
+        independent_derived,
+    } = timed_sub!(
         "analyze_clock_dependencies",
         analyze_clock_dependencies(
             bindings,
@@ -753,6 +793,7 @@ pub fn schedule_symbolic_rtl(
         &mut comb_observers,
         &runtime_event_sites,
         &mut global_arena,
+        &unpacked_element_widths,
     )?;
     for (site_id, site) in runtime_event_sites.iter().enumerate() {
         if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
@@ -869,6 +910,18 @@ pub fn schedule_symbolic_rtl(
             )
             .collect::<HashSet<_>>()
     });
+    let mut persistent_comb_state = HashSet::default();
+    for path in &comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            for block in unit.blocks.values() {
+                for inst in &block.instructions {
+                    if let SIRInstruction::Store(address, ..) = inst {
+                        persistent_comb_state.insert(*address);
+                    }
+                }
+            }
+        }
+    }
     let parallel_comb_blocks = parallel.enabled().then(|| comb_blocks.clone());
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
@@ -1125,7 +1178,12 @@ pub fn schedule_symbolic_rtl(
         .values()
         .filter(|units| !units.is_empty())
         .count();
-    let needs_split_path = active_ff_domains > 1 || !cascaded_clocks.is_empty();
+    // With process kernels, a round in which a zero delay is pending after
+    // domains triggered evaluates them before the inactive region and
+    // publishes them in the NBA region (IEEE 1800-2023 4.5). Only those
+    // rounds use the split units; the fused units stay the default.
+    let needs_split_path =
+        active_ff_domains > 1 || !cascaded_clocks.is_empty() || !processes.is_empty();
     let parallel_sir = parallel.enabled().then(|| {
         let mut events = eval_apply_ffs
             .iter()
@@ -1218,6 +1276,11 @@ pub fn schedule_symbolic_rtl(
         .into_iter()
         .map(|process| (process.kernel, process.slots))
         .unzip();
+    let TimingMetadata {
+        wait_sites,
+        nba_sites,
+        ..
+    } = timing;
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
@@ -1276,6 +1339,45 @@ pub fn schedule_symbolic_rtl(
             .collect(),
         ordered_events: topological_clocks.into_iter().map(project).collect(),
         cascaded_events: cascaded_clocks.into_iter().map(project).collect(),
+        derived_events: derived_events
+            .into_iter()
+            .map(|(event, targets)| (project(event), targets.into_iter().map(project).collect()))
+            .collect(),
+        independent_derived: independent_derived.into_iter().map(project).collect(),
+        combinational_derived: combinational_derived
+            .into_iter()
+            .map(|(event, clocks)| {
+                let clocks = clocks
+                    .into_iter()
+                    .map(|derived| CombDerivedClock {
+                        clock: project(derived.clock),
+                        // A gate reading an address without a state object
+                        // falls back to settling the design.
+                        gate: derived.gate.and_then(|gate| {
+                            gate.into_iter()
+                                .map(|op| match op {
+                                    GateOp::Load {
+                                        address,
+                                        lsb,
+                                        width,
+                                    } => source_to_state.get(&address).map(|state| GateOp::Load {
+                                        address: *state,
+                                        lsb,
+                                        width,
+                                    }),
+                                    op => {
+                                        Some(op.map_addr(|_| {
+                                            unreachable!("only loads have addresses")
+                                        }))
+                                    }
+                                })
+                                .collect()
+                        }),
+                    })
+                    .collect();
+                (project(event), clocks)
+            })
+            .collect(),
         reset_clocks: reset_clock_map
             .into_iter()
             .map(|(reset, clock)| (project(reset), project(clock)))
@@ -1373,6 +1475,63 @@ pub fn schedule_symbolic_rtl(
         .into_iter()
         .map(|slots| slots.map(project))
         .collect();
+    let watches: Vec<EventWatch<StateAddr>> = {
+        let event_kinds = ElaboratedDesign {
+            state_objects: state_objects.clone(),
+            events: events.clone(),
+            initial_state: Vec::new(),
+        }
+        .event_kinds();
+        counted
+            .values()
+            .map(|slots| {
+                let signal = project(slots.signal);
+                let object = &state_objects[&signal];
+                let canonical = events.canonical(signal);
+                let domains = event_kinds
+                    .get(&canonical)
+                    .filter(|_| events.ordered_events.contains(&signal) || canonical != signal)
+                    .map(|&kind| (canonical, CounterKind::for_domain(kind)))
+                    .into_iter()
+                    .collect();
+                EventWatch {
+                    signal,
+                    width: object.width,
+                    four_state: object.is_4state,
+                    changes: Some(project(slots.changes)),
+                    rises: Some(project(slots.rises)),
+                    falls: Some(project(slots.falls)),
+                    domains,
+                }
+            })
+            .collect()
+    };
+    let wait_sites: Vec<WaitSite<StateAddr>> =
+        wait_sites.iter().map(|site| site.map(project)).collect();
+    let nba_sites: Vec<NbaSite<StateAddr>> =
+        nba_sites.iter().map(|site| site.map(project)).collect();
+    // The runtime reads counters, the signals waits watch and staged
+    // nonblocking values directly; no unit loads a wait's signal.
+    let timing_read_roots = watches
+        .iter()
+        .flat_map(|watch| {
+            watch
+                .counters()
+                .map(|(_, counter)| counter)
+                .collect::<Vec<_>>()
+        })
+        .chain(
+            wait_sites
+                .iter()
+                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+        )
+        .chain(
+            nba_sites
+                .iter()
+                .flat_map(|site| [Some(site.value), site.offset, site.pending])
+                .flatten(),
+        )
+        .collect();
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -1381,6 +1540,7 @@ pub fn schedule_symbolic_rtl(
         .map(|(source, state)| (*state, *source))
         .collect();
 
+    let persistent_comb_state = persistent_comb_state.into_iter().map(project).collect();
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -1405,12 +1565,16 @@ pub fn schedule_symbolic_rtl(
             runtime_event_sites,
             extern_functions,
             comb_observers,
-            testbench_read_roots: Default::default(),
+            testbench_read_roots: timing_read_roots,
             rtl_writes,
             comb_writes: Default::default(),
+            persistent_comb_state,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
+            watches,
+            wait_sites,
+            nba_sites,
         },
     };
 
@@ -1748,29 +1912,51 @@ fn unify_clock_domains(
     modules: &HashMap<ModuleId, SimModule>,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     let mut drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
+    // The edge each clock is sensed at: `true` rising, `false` falling.
+    let mut polarities: HashMap<AbsoluteAddr, bool> = HashMap::default();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
 
+        let width = |module: &SimModule, var: SourceVarId| {
+            module
+                .variables
+                .get(&var)
+                .map(|variable| variable.metadata.width)
+        };
+        let mut record_polarity = |module: &SimModule, instance: InstanceId, var: SourceVarId| {
+            let polarity =
+                module
+                    .variables
+                    .get(&var)
+                    .and_then(|variable| match variable.metadata.kind {
+                        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
+                        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
+                        _ => None,
+                    });
+            if let Some(polarity) = polarity {
+                polarities.insert(bindings.locate(instance, var), polarity);
+            }
+        };
+
         // Internal aliases (e.g. `assign clk_internal = clk_port;`)
         for logic_path in &sim_module.comb_blocks {
-            // Only unify direct aliases, not complex logic like gated clocks
-            if logic_path.sources.len() == 1 {
-                let expr_node = sim_module.arena.get(logic_path.expr);
-                let is_alias = matches!(
-                    expr_node,
-                    celox_slt::SLTNode::Input { .. } | celox_slt::SLTNode::Slice { .. }
-                );
-                if is_alias {
-                    let Some(target) = logic_path.target.var() else {
-                        continue;
-                    };
-                    let target_abs = bindings.locate(*id, target.id);
-                    let source_abs =
-                        bindings.locate(*id, logic_path.sources.iter().next().unwrap().id);
-                    drive_graph.entry(source_abs).or_default().push(target_abs);
-                }
+            // Only unify whole-variable copies. Gated clocks and part-selects
+            // such as `let divided = counter[0];` are clocks of their own: the
+            // runtime edge-senses the canonical variable as a whole.
+            if let Some((target, source)) = whole_variable_copy(
+                &sim_module.arena,
+                logic_path,
+                |target| width(sim_module, target),
+                |source| width(sim_module, source),
+            ) {
+                record_polarity(sim_module, *id, target);
+                record_polarity(sim_module, *id, source);
+                drive_graph
+                    .entry(bindings.locate(*id, source))
+                    .or_default()
+                    .push(bindings.locate(*id, target));
             }
         }
         for (inst_name, glue_blocks) in &sim_module.glue_blocks {
@@ -1778,34 +1964,110 @@ fn unify_clock_domains(
                 let mut child_path = path.0.clone();
                 child_path.push((inst_name.clone(), sim_module.instance_index(inst_name, idx)));
                 let child_id = expanded[&InstancePath(child_path)];
+                let child_module = &modules[&glue_block.module_id];
+                let glue_width = |var: GlueAddr| match var {
+                    GlueAddr::Parent(var) => width(sim_module, var),
+                    GlueAddr::Child(var) => width(child_module, var),
+                };
 
                 // Inputs: Parent -> Child (Parent drives Child)
-                for (parent_vars, logic_path) in &glue_block.input_ports {
-                    if let Some(target) = logic_path.target.var()
-                        && let GlueAddr::Child(child_var_id) = target.id
+                for (_, logic_path) in &glue_block.input_ports {
+                    if let Some((GlueAddr::Child(child_var), GlueAddr::Parent(parent_var))) =
+                        whole_variable_copy(&glue_block.arena, logic_path, glue_width, glue_width)
                     {
-                        let child_abs = bindings.locate(child_id, child_var_id);
-                        for parent_var in parent_vars {
-                            let parent_abs = bindings.locate(*id, *parent_var);
-                            drive_graph.entry(parent_abs).or_default().push(child_abs);
-                        }
+                        record_polarity(child_module, child_id, child_var);
+                        record_polarity(sim_module, *id, parent_var);
+                        drive_graph
+                            .entry(bindings.locate(*id, parent_var))
+                            .or_default()
+                            .push(bindings.locate(child_id, child_var));
                     }
                 }
                 // Outputs: Child -> Parent (Child drives Parent)
                 for (parent_vars, logic_path) in &glue_block.output_ports {
-                    for parent_var in parent_vars {
-                        let parent_abs = bindings.locate(*id, *parent_var);
-                        for source in &logic_path.sources {
-                            if let GlueAddr::Child(child_var_id) = source.id {
-                                let child_abs = bindings.locate(child_id, child_var_id);
-                                drive_graph.entry(child_abs).or_default().push(parent_abs);
-                            }
-                        }
+                    let [parent_var] = parent_vars.as_slice() else {
+                        continue;
+                    };
+                    let parent_width = width(sim_module, *parent_var);
+                    if let Some((_, GlueAddr::Child(child_var))) = whole_variable_copy(
+                        &glue_block.arena,
+                        logic_path,
+                        |_| parent_width,
+                        glue_width,
+                    ) {
+                        record_polarity(child_module, child_id, child_var);
+                        record_polarity(sim_module, *id, *parent_var);
+                        drive_graph
+                            .entry(bindings.locate(child_id, child_var))
+                            .or_default()
+                            .push(bindings.locate(*id, *parent_var));
                     }
                 }
             }
         }
     }
+
+    // A copy sensed at the opposite edge of its source is a clock of its own:
+    // `always_ff @(negedge d)` with `assign c = clk; assign d = c;` runs when
+    // `clk` falls, not in `clk`'s rising domain. A copy sensed at no edge
+    // takes the edge of its drivers, and a root sensed at no edge the edge of
+    // its first copy sensed at one. Copies that join edges of both kinds are
+    // cut apart.
+    let drivers = {
+        let mut drivers: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = HashMap::default();
+        for (src, sinks) in &drive_graph {
+            for sink in sinks {
+                drivers.entry(*sink).or_default().push(*src);
+            }
+        }
+        drivers
+    };
+    let root_polarity = |root: AbsoluteAddr| {
+        polarities.get(&root).copied().or_else(|| {
+            let mut stack = vec![root];
+            let mut visited = HashSet::default();
+            while let Some(addr) = stack.pop() {
+                if !visited.insert(addr) {
+                    continue;
+                }
+                if let Some(&polarity) = polarities.get(&addr) {
+                    return Some(polarity);
+                }
+                if let Some(sinks) = drive_graph.get(&addr) {
+                    stack.extend(sinks.iter().rev());
+                }
+            }
+            None
+        })
+    };
+    let effective_polarity = |addr: AbsoluteAddr| {
+        let mut current = addr;
+        let mut visited = HashSet::default();
+        loop {
+            if let Some(&polarity) = polarities.get(&current) {
+                return Some(polarity);
+            }
+            match drivers.get(&current).and_then(|sources| sources.first()) {
+                Some(&next) if visited.insert(next) => current = next,
+                _ => return root_polarity(current),
+            }
+        }
+    };
+    let drive_graph: HashMap<AbsoluteAddr, Vec<AbsoluteAddr>> = drive_graph
+        .iter()
+        .map(|(src, sinks)| {
+            let src_polarity = effective_polarity(*src);
+            let sinks = sinks
+                .iter()
+                .copied()
+                .filter(|sink| match (src_polarity, effective_polarity(*sink)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                })
+                .collect();
+            (*src, sinks)
+        })
+        .collect();
 
     // Resolve Canonical Clock Domains: Find the root driver for each connected component
     let mut clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr> = HashMap::default();
@@ -1850,6 +2112,44 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+/// The `(target, source)` of a path that copies one whole variable into
+/// another variable of the same width, unchanged.
+///
+/// Only such a copy is the same signal as its source, so only it may share the
+/// source's clock domain. A part-select, an element of an array, a resized
+/// read, or an assignment to part of the target is a different value, whose
+/// edges are not the edges of the source variable as a whole.
+fn whole_variable_copy<A: Copy + std::hash::Hash + Eq>(
+    arena: &SLTNodeArena<A>,
+    path: &LogicPath<A>,
+    target_width: impl Fn(A) -> Option<usize>,
+    source_width: impl Fn(A) -> Option<usize>,
+) -> Option<(A, A)> {
+    let target = path.target.var()?;
+    let [source] = path.sources.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let width = source_width(source.id).filter(|&width| width > 0)?;
+    let whole = |access: &BitAccess| access.lsb == 0 && access.msb + 1 == width;
+    let reads_whole_source = |mut node: NodeId| loop {
+        match arena.get(node) {
+            celox_slt::SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => break *variable == source.id && index.is_empty() && whole(access),
+            celox_slt::SLTNode::Slice { expr, access } if whole(access) => node = *expr,
+            _ => break false,
+        }
+    };
+    (target_width(target.id) == Some(width)
+        && whole(&target.access)
+        && whole(&source.access)
+        && reads_whole_source(path.expr))
+    .then_some((target.id, source.id))
 }
 
 fn build_fused_ff_actions(
@@ -1919,6 +2219,55 @@ fn build_fused_ff_actions(
     result
 }
 
+/// always_comb starts after every initial procedure has reached its first
+/// suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
+/// until that happens; all control slots are ordinary checkpointed state.
+fn after_initial_processes(
+    unit: &ExecutionUnit<AbsoluteAddr>,
+    statuses: &[AbsoluteAddr],
+) -> ExecutionUnit<AbsoluteAddr> {
+    use celox_sir::{SIRBuilder, SIROffset, SIRValue};
+    let mut b = SIRBuilder::new();
+    let mut ready = b.alloc_bit(1, false);
+    b.emit(SIRInstruction::Imm(ready, SIRValue::new(1u8)));
+    for status in statuses {
+        let value = b.alloc_bit(celox_design::PROCESS_STATUS_WIDTH, false);
+        b.emit(SIRInstruction::Load(
+            value,
+            *status,
+            SIROffset::Static(0),
+            celox_design::PROCESS_STATUS_WIDTH,
+        ));
+        let started = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Unary(
+            started,
+            celox_design::UnaryOp::Or,
+            value,
+        ));
+        let next = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Binary(
+            next,
+            ready,
+            celox_design::BinaryOp::And,
+            started,
+        ));
+        ready = next;
+    }
+    let execute = b.new_block();
+    let done = b.new_block();
+    b.seal_block(SIRTerminator::Branch {
+        cond: ready,
+        true_block: (execute, vec![]),
+        false_block: (done, vec![]),
+    });
+    b.switch_to_block(execute);
+    b.inline_execution_unit(unit);
+    b.seal_block(SIRTerminator::Jump(done, vec![]));
+    b.switch_to_block(done);
+    b.flush_eu()
+        .expect("process activation gate has instructions")
+}
+
 fn relocate_units(
     bindings: &PackageBindings,
     expanded: &HashMap<InstancePath, InstanceId>,
@@ -1971,6 +2320,17 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
+    let mut initial_statuses: Vec<_> = expanded
+        .values()
+        .flat_map(|id| {
+            modules[&instance_modules[id]]
+                .processes
+                .iter()
+                .map(|process| bindings.locate(*id, process.slots.status))
+        })
+        .collect();
+    initial_statuses.sort();
+    initial_statuses.dedup();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -2155,6 +2515,25 @@ fn relocate_units(
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
+        for path in &mut relocated_module.comb_blocks {
+            if let celox_slt::LogicPathTarget::Process {
+                unit,
+                after_initials,
+                ..
+            } = &mut path.target
+            {
+                **unit = relocate_executation_unit_with_errors(
+                    unit,
+                    &|addr| *addr,
+                    &runtime_error_codes,
+                    &runtime_event_site_map,
+                    &extern_function_map,
+                );
+                if *after_initials && !initial_statuses.is_empty() {
+                    **unit = after_initial_processes(unit, &initial_statuses);
+                }
+            }
+        }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
 
@@ -2240,6 +2619,7 @@ fn relocate_units(
                         &extern_function_map,
                     ),
                     slots: process.slots.map(|var_id| bindings.locate(*id, var_id)),
+                    key: (*id, index),
                 },
             ));
         }
@@ -2330,6 +2710,128 @@ fn relocate_units(
 struct RelocatedProcess {
     kernel: ExecutionUnit<RegionedAbsoluteAddr>,
     slots: ProcessSlots<AbsoluteAddr>,
+    /// The instance and the module-local index of the process.
+    key: (InstanceId, usize),
+}
+
+/// Counter slots, wait sites and nonblocking sites of the whole design.
+struct TimingMetadata {
+    counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
+    wait_sites: Vec<WaitSite<AbsoluteAddr>>,
+    nba_sites: Vec<NbaSite<AbsoluteAddr>>,
+}
+
+/// Place the timing metadata of every instance. Sites name the global index
+/// of their process; a kernel numbers its sites in the order they appear
+/// here, which is the module's order.
+fn relocate_timing(
+    bindings: &PackageBindings,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    modules: &HashMap<ModuleId, SimModule>,
+    processes: &[RelocatedProcess],
+) -> TimingMetadata {
+    let process_index: HashMap<(InstanceId, usize), usize> = processes
+        .iter()
+        .enumerate()
+        .map(|(index, process)| (process.key, index))
+        .collect();
+    let mut instances = instance_modules.iter().collect::<Vec<_>>();
+    instances.sort_unstable_by_key(|(instance, _)| **instance);
+    let mut metadata = TimingMetadata {
+        counter_slots: Vec::new(),
+        wait_sites: Vec::new(),
+        nba_sites: Vec::new(),
+    };
+    for (&instance, module) in instances {
+        let module = &modules[module];
+        let locate = |var_id| bindings.locate(instance, var_id);
+        metadata
+            .counter_slots
+            .extend(module.counter_slots.iter().map(|slots| slots.map(locate)));
+        metadata
+            .wait_sites
+            .extend(module.wait_sites.iter().map(|site| WaitSite {
+                process: process_index[&(instance, site.process)],
+                ..site.map(locate)
+            }));
+        metadata
+            .nba_sites
+            .extend(module.nba_sites.iter().map(|site| NbaSite {
+                process: process_index[&(instance, site.process)],
+                ..site.map(locate)
+            }));
+    }
+    metadata
+}
+
+/// Counted signals: those a unit may store twice between two runtime checks
+/// (a frontend declared counters for them) and that a flip-flop domain or a
+/// wait watches. Returns their counters by signal and instruments the
+/// process kernels and combinational process units that write them; no
+/// other unit changes.
+fn instrument_counted_signals(
+    timing: &TimingMetadata,
+    event_addresses: &HashSet<AbsoluteAddr>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    processes: &mut [RelocatedProcess],
+    comb_blocks: &mut [LogicPath<AbsoluteAddr>],
+) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
+    let waited: HashSet<AbsoluteAddr> = timing
+        .wait_sites
+        .iter()
+        .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+        .collect();
+    let counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> = timing
+        .counter_slots
+        .iter()
+        .filter(|slots| event_addresses.contains(&slots.signal) || waited.contains(&slots.signal))
+        .map(|slots| (slots.signal, *slots))
+        .collect();
+    if counted.is_empty() {
+        return counted;
+    }
+    let code = |signal: AbsoluteAddr| {
+        let slots = counted.get(&signal)?;
+        let (width, is_4state) = variables[&signal];
+        Some((slots, width, four_state && is_4state))
+    };
+    for process in processes {
+        crate::watch::instrument_unit(&mut process.kernel, |address| {
+            if address.region != STABLE_REGION {
+                return None;
+            }
+            let (slots, width, four_state) = code(address.absolute_addr())?;
+            let stable =
+                |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+            Some(crate::watch::WatchCode {
+                signal: stable(slots.signal),
+                width,
+                four_state,
+                counters: CounterKind::ALL
+                    .into_iter()
+                    .map(|kind| (kind, stable(slots.counter(kind))))
+                    .collect(),
+            })
+        });
+    }
+    for path in comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            crate::watch::instrument_unit(unit, |address| {
+                let (slots, width, four_state) = code(*address)?;
+                Some(crate::watch::WatchCode {
+                    signal: slots.signal,
+                    width,
+                    four_state,
+                    counters: CounterKind::ALL
+                        .into_iter()
+                        .map(|kind| (kind, slots.counter(kind)))
+                        .collect(),
+                })
+            });
+        }
+    }
+    counted
 }
 
 fn build_comb_observer_capture_paths(
@@ -2337,12 +2839,13 @@ fn build_comb_observer_capture_paths(
     observers: &mut [CombObserver<AbsoluteAddr>],
     sites: &[RuntimeEventSite],
     arena: &mut SLTNodeArena<AbsoluteAddr>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) -> Result<(), ParserError> {
     if observers.is_empty() {
         return Ok(());
     }
 
-    annotate_comb_capture_enable_sites(comb_blocks, observers);
+    annotate_comb_capture_enable_sites(comb_blocks, observers, unpacked_element_widths);
 
     let mut group_members: HashMap<u32, Vec<usize>> = HashMap::default();
     for (idx, observer) in observers.iter().enumerate() {
@@ -2806,6 +3309,7 @@ fn capture_contains_nested_snapshot(node: NodeId, arena: &SLTNodeArena<AbsoluteA
 fn annotate_comb_capture_enable_sites(
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     observers: &[CombObserver<AbsoluteAddr>],
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
 ) {
     let mut group_sites: HashMap<u32, Vec<u32>> = HashMap::default();
     for observer in observers {
@@ -2828,6 +3332,109 @@ fn annotate_comb_capture_enable_sites(
                     }
                 }
             }
+        }
+    }
+    // A process executes all its writes on its first output projection.
+    // Compare exactly the observed bits around each store: a dynamic select
+    // may change another bit of the same object without waking the observer.
+    use celox_sir::{RegisterId, RegisterType, SIROffset};
+    let mut process_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<AbsoluteAddr>>> =
+        HashMap::default();
+    for path in comb_blocks.iter() {
+        if let LogicPathTarget::Process {
+            process, target, ..
+        } = &path.target
+        {
+            process_writes.entry(*process).or_default().push(*target);
+        }
+    }
+    for path in comb_blocks.iter_mut() {
+        let LogicPathTarget::Process { process, unit, .. } = &mut path.target else {
+            continue;
+        };
+        let mut probes: Vec<(VarAtomBase<AbsoluteAddr>, Vec<u32>)> = Vec::new();
+        for observer in observers {
+            for atom in &observer.sensitivity {
+                if !process_writes[&*process]
+                    .iter()
+                    .any(|written| written.id == atom.id && written.access.overlaps(&atom.access))
+                {
+                    continue;
+                }
+                let index = match probes.iter().position(|(probe, _)| probe == atom) {
+                    Some(index) => index,
+                    None => {
+                        probes.push((*atom, Vec::new()));
+                        probes.len() - 1
+                    }
+                };
+                for site in &group_sites[&observer.activation_group] {
+                    if !probes[index].1.contains(site) {
+                        probes[index].1.push(*site);
+                    }
+                }
+            }
+        }
+        let unit = &mut **unit;
+        let mut next_register = unit
+            .register_map
+            .keys()
+            .map(|reg| reg.0 + 1)
+            .max()
+            .unwrap_or(0);
+        for block in unit.blocks.values_mut() {
+            let mut instructions = Vec::new();
+            for inst in std::mem::take(&mut block.instructions) {
+                let mut captures = Vec::new();
+                if let SIRInstruction::Store(address, offset, width, ..) = &inst {
+                    let written = offset.constant_bit_offset().and_then(|lsb| {
+                        Some(BitAccess::new(lsb, lsb.checked_add(width.checked_sub(1)?)?))
+                    });
+                    for (atom, sites) in &probes {
+                        if atom.id != *address
+                            || written.is_some_and(|written| !written.overlaps(&atom.access))
+                        {
+                            continue;
+                        }
+                        let width = atom.access.msb - atom.access.lsb + 1;
+                        let offset = match unpacked_element_widths.get(address) {
+                            Some(element_width)
+                                if width > *element_width
+                                    && atom.access.lsb.is_multiple_of(*element_width)
+                                    && width.is_multiple_of(*element_width) =>
+                            {
+                                SIROffset::PackedElements {
+                                    bit_offset: atom.access.lsb,
+                                    element_width: *element_width,
+                                }
+                            }
+                            _ => SIROffset::Static(atom.access.lsb),
+                        };
+                        let old = RegisterId(next_register);
+                        let new = RegisterId(next_register + 1);
+                        next_register += 2;
+                        unit.register_map.insert(old, RegisterType::Logic { width });
+                        unit.register_map.insert(new, RegisterType::Logic { width });
+                        instructions.push(SIRInstruction::Load(
+                            old,
+                            *address,
+                            offset.clone(),
+                            width,
+                        ));
+                        captures.push((old, new, *address, offset, width, sites));
+                    }
+                }
+                instructions.push(inst);
+                for (old, new, address, offset, width, sites) in captures {
+                    instructions.push(SIRInstruction::Load(new, address, offset, width));
+                    instructions.push(SIRInstruction::CombCaptureEnableIfChanged {
+                        old,
+                        new,
+                        sites: sites.clone(),
+                    });
+                }
+            }
+            block.instructions = instructions;
         }
     }
 }
@@ -2941,6 +3548,20 @@ fn atom_overlaps_any<A: Eq + std::hash::Hash + Copy>(
     })
 }
 
+/// Event-domain ordering and cascade structure of a flattened design.
+struct ClockAnalysis {
+    topological_clocks: Vec<AbsoluteAddr>,
+    cascaded_clocks: BTreeSet<AbsoluteAddr>,
+    /// Each event to the derived domains an occurrence of it can trigger,
+    /// transitively, in `topological_clocks` order.
+    derived_events: BTreeMap<AbsoluteAddr, Vec<AbsoluteAddr>>,
+    /// Each event to the clocks computed combinationally from its signal.
+    combinational_derived: BTreeMap<AbsoluteAddr, Vec<CombDerivedClock<AbsoluteAddr>>>,
+    /// Events whose combinationally derived domains may run before them in
+    /// turn instead of together.
+    independent_derived: BTreeSet<AbsoluteAddr>,
+}
+
 fn analyze_clock_dependencies(
     bindings: &PackageBindings,
     eval_apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
@@ -2952,13 +3573,15 @@ fn analyze_clock_dependencies(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
-) -> (Vec<AbsoluteAddr>, BTreeSet<AbsoluteAddr>) {
+) -> ClockAnalysis {
     // Build static clock dependency graph & Topo Sort
     let mut clock_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     let mut unique_clocks: BTreeSet<AbsoluteAddr> = BTreeSet::new();
 
     // 1. Identify all variables written by FFs (direct sequential outputs)
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
+    // Each FF output to the event domains that store it.
+    let mut ff_writers: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     unique_clocks.extend(eval_apply_ffs.keys().copied());
 
     // Include event-typed signals even when no FF is directly driven by them.
@@ -2997,6 +3620,7 @@ fn analyze_clock_dependencies(
                         let canonical_target = clock_domains.get(&abs).copied().unwrap_or(abs);
 
                         ff_outputs.insert(abs);
+                        ff_writers.entry(abs).or_default().insert(*domain_clock);
 
                         if canonical_target != *domain_clock
                             && unique_clocks.contains(&canonical_target)
@@ -3022,7 +3646,11 @@ fn analyze_clock_dependencies(
         };
         let target_abs = target.id;
         let mut sources = HashSet::default();
-        crate::flattening::collect_inputs(path.expr, arena, &mut sources);
+        if matches!(path.target, celox_slt::LogicPathTarget::Process { .. }) {
+            sources.extend(path.sources.iter().cloned());
+        } else {
+            crate::flattening::collect_inputs(path.expr, arena, &mut sources);
+        }
         for source in sources {
             comb_deps.entry(target_abs).or_default().insert(source.id);
         }
@@ -3070,17 +3698,42 @@ fn analyze_clock_dependencies(
         }
     }
 
+    // Which derived domains each event can trigger directly: a clock computed
+    // from the event's signal, or from state the event's domain writes.
+    let mut trigger_edges: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
+    let mut comb_derived_clocks: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for target_clock in &unique_clocks {
         let mut sources = BTreeSet::new();
+        let mut upstream = BTreeSet::new();
         collect_upstream_clocks(
             *target_clock,
             *target_clock,
             &comb_deps,
             clock_domains,
             &unique_clocks,
-            &mut BTreeSet::new(),
+            &mut upstream,
             &mut sources,
         );
+        for source in &sources {
+            trigger_edges
+                .entry(*source)
+                .or_default()
+                .insert(*target_clock);
+            comb_derived_clocks
+                .entry(*source)
+                .or_default()
+                .insert(*target_clock);
+        }
+        for node in &upstream {
+            for writer in ff_writers.get(node).into_iter().flatten() {
+                if writer != target_clock {
+                    trigger_edges
+                        .entry(*writer)
+                        .or_default()
+                        .insert(*target_clock);
+                }
+            }
+        }
         if !sources.is_empty() {
             clock_deps.entry(*target_clock).or_default().extend(sources);
         }
@@ -3209,5 +3862,331 @@ fn analyze_clock_dependencies(
         }
     }
 
-    (topological_clocks, cascaded_clocks)
+    // Close the direct edges transitively: a domain triggered by the event
+    // may itself write the source of another derived clock.
+    let order: HashMap<AbsoluteAddr, usize> = topological_clocks
+        .iter()
+        .enumerate()
+        .map(|(index, clock)| (*clock, index))
+        .collect();
+    let mut derived_events = BTreeMap::new();
+    for event in trigger_edges.keys() {
+        let mut reached = BTreeSet::new();
+        let mut pending = vec![*event];
+        while let Some(source) = pending.pop() {
+            for target in trigger_edges.get(&source).into_iter().flatten() {
+                if target != event && reached.insert(*target) {
+                    pending.push(*target);
+                }
+            }
+        }
+        // Clocks computed from the event's own signal change with the event
+        // itself; they are judged at its edge, not after its commit.
+        let combinational = comb_derived_clocks.get(event);
+        let mut targets: Vec<_> = reached
+            .into_iter()
+            .filter(|target| !combinational.is_some_and(|clocks| clocks.contains(target)))
+            .collect();
+        targets.sort_by_key(|target| order.get(target).copied().unwrap_or(usize::MAX));
+        if !targets.is_empty() {
+            derived_events.insert(*event, targets);
+        }
+    }
+
+    // Combinational definitions by target, for the gate programs.
+    let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
+        .iter()
+        .flat_map(|(&instance, module)| {
+            modules[module]
+                .variables
+                .iter()
+                .map(move |(var_id, var)| (bindings.locate(instance, *var_id), var.metadata.width))
+        })
+        .collect();
+    let mut definitions: HashMap<AbsoluteAddr, Option<&LogicPath<AbsoluteAddr>>> =
+        HashMap::default();
+    for path in comb_blocks {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let whole = var_widths
+            .get(&target.id)
+            .is_some_and(|&width| target.access.lsb == 0 && target.access.msb + 1 == width);
+        let simple = whole && path.local_inputs.is_empty() && path.previous_sources.is_empty();
+        definitions
+            .entry(target.id)
+            .and_modify(|definition| *definition = None)
+            .or_insert(simple.then_some(path));
+    }
+    let gates = GateBuilder {
+        arena,
+        definitions: &definitions,
+        var_widths: &var_widths,
+        clock_domains,
+    };
+    // The state each domain reads and writes, or `None` when it has side
+    // effects whose order is observable.
+    let access = |domain: &AbsoluteAddr| {
+        let mut reads = BTreeSet::new();
+        let mut writes = BTreeSet::new();
+        for unit in eval_apply_ffs.get(domain).into_iter().flatten() {
+            for block in unit.blocks.values() {
+                for instruction in &block.instructions {
+                    match instruction {
+                        SIRInstruction::Load(_, address, ..) => {
+                            reads.insert(address.absolute_addr());
+                        }
+                        SIRInstruction::Store(address, ..) => {
+                            writes.insert(address.absolute_addr());
+                        }
+                        SIRInstruction::Commit(source, target, ..) => {
+                            reads.insert(source.absolute_addr());
+                            writes.insert(target.absolute_addr());
+                        }
+                        SIRInstruction::RuntimeEvent { .. }
+                        | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                        | SIRInstruction::ExternCall { .. } => return None,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Some((reads, writes))
+    };
+    let mut independent_derived = BTreeSet::new();
+    let combinational_derived = comb_derived_clocks
+        .into_iter()
+        .map(|(event, clocks)| {
+            let mut clocks: Vec<_> = clocks.into_iter().collect();
+            clocks.sort_by_key(|clock| order.get(clock).copied().unwrap_or(usize::MAX));
+            // Run in turn, the derived domains in order and then the event's
+            // own, each must find the state the earlier ones left untouched.
+            let independent = (|| {
+                let mut written = BTreeSet::new();
+                for domain in clocks.iter().chain(std::iter::once(&event)) {
+                    let (reads, writes) = access(domain)?;
+                    if !reads.is_disjoint(&written) || !writes.is_disjoint(&written) {
+                        return None;
+                    }
+                    written.extend(writes);
+                }
+                Some(())
+            })()
+            .is_some();
+            if independent {
+                independent_derived.insert(event);
+            }
+            let clocks = clocks
+                .into_iter()
+                .map(|clock| CombDerivedClock {
+                    clock,
+                    gate: gates.program(event, clock),
+                })
+                .collect();
+            (event, clocks)
+        })
+        .collect();
+
+    ClockAnalysis {
+        topological_clocks,
+        cascaded_clocks,
+        derived_events,
+        combinational_derived,
+        independent_derived,
+    }
+}
+
+/// Builds [`GateOp`] programs: a derived clock's combinational cone with its
+/// source event's signal as a parameter and state variables as loads.
+struct GateBuilder<'a> {
+    arena: &'a SLTNodeArena<AbsoluteAddr>,
+    /// The single whole-variable combinational definition of a variable, or
+    /// `None` when it has several or a procedural one.
+    definitions: &'a HashMap<AbsoluteAddr, Option<&'a LogicPath<AbsoluteAddr>>>,
+    var_widths: &'a HashMap<AbsoluteAddr, usize>,
+    clock_domains: &'a HashMap<AbsoluteAddr, AbsoluteAddr>,
+}
+
+/// A gate program under construction.
+#[derive(Default)]
+struct GateProgram {
+    ops: Vec<GateOp<AbsoluteAddr>>,
+    stack: usize,
+    max_stack: usize,
+}
+
+impl GateProgram {
+    /// Larger cones settle the design instead.
+    const MAX_OPS: usize = 64;
+    const MAX_STACK: usize = 16;
+
+    fn push(&mut self, op: GateOp<AbsoluteAddr>, pops: usize) -> Option<()> {
+        if self.ops.len() >= Self::MAX_OPS {
+            return None;
+        }
+        self.ops.push(op);
+        self.stack = self.stack.checked_sub(pops)? + 1;
+        self.max_stack = self.max_stack.max(self.stack);
+        Some(())
+    }
+}
+
+fn gate_u32(value: usize) -> Option<u32> {
+    u32::try_from(value).ok()
+}
+
+impl GateBuilder<'_> {
+    const MAX_DEPTH: usize = 32;
+
+    fn program(
+        &self,
+        source: AbsoluteAddr,
+        clock: AbsoluteAddr,
+    ) -> Option<Vec<GateOp<AbsoluteAddr>>> {
+        if self.var_widths.get(&clock) != Some(&1) {
+            return None;
+        }
+        let definition = (*self.definitions.get(&clock)?)?;
+        let mut program = GateProgram::default();
+        self.emit(source, definition.expr, 0, &mut program)?;
+        (program.stack == 1 && program.max_stack <= GateProgram::MAX_STACK).then_some(program.ops)
+    }
+
+    fn width(&self, node: NodeId) -> Option<usize> {
+        self.arena
+            .node_width(node)
+            .filter(|width| (1..=64).contains(width))
+    }
+
+    fn emit(
+        &self,
+        source: AbsoluteAddr,
+        node: NodeId,
+        depth: usize,
+        program: &mut GateProgram,
+    ) -> Option<()> {
+        use celox_design::{BinaryOp, UnaryOp};
+        use celox_slt::SLTNode;
+        if depth > Self::MAX_DEPTH {
+            return None;
+        }
+        let result = self.width(node)?;
+        match self.arena.get(node) {
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } => {
+                if !index.is_empty() {
+                    return None;
+                }
+                let bits = access.msb.checked_sub(access.lsb)? + 1;
+                let canonical = self.clock_domains.get(variable).unwrap_or(variable);
+                if *canonical == source {
+                    return if access.lsb == 0 && bits == 1 {
+                        program.push(GateOp::Source, 0)
+                    } else {
+                        None
+                    };
+                }
+                let var_width = *self.var_widths.get(variable)?;
+                match self.definitions.get(variable) {
+                    Some(Some(definition)) => {
+                        self.emit(source, definition.expr, depth + 1, program)?;
+                        if access.lsb != 0 || bits != var_width {
+                            program.push(
+                                GateOp::Slice {
+                                    lsb: gate_u32(access.lsb)?,
+                                    width: gate_u32(bits)?,
+                                },
+                                1,
+                            )?;
+                        }
+                        Some(())
+                    }
+                    Some(None) => None,
+                    None if var_width <= 64 => program.push(
+                        GateOp::Load {
+                            address: *variable,
+                            lsb: gate_u32(access.lsb)?,
+                            width: gate_u32(bits)?,
+                        },
+                        0,
+                    ),
+                    None => None,
+                }
+            }
+            SLTNode::Constant(payload, mask, _, _) => {
+                if mask.bits() != 0 {
+                    return None;
+                }
+                program.push(GateOp::Const(u64::try_from(payload).ok()?), 0)
+            }
+            &SLTNode::Binary(lhs, op, rhs) => {
+                let (left, right) = (self.width(lhs)?, self.width(rhs)?);
+                let same = left == right && left == result;
+                let op = match op {
+                    BinaryOp::And if same => GateOp::And,
+                    BinaryOp::Or if same => GateOp::Or,
+                    BinaryOp::Xor if same => GateOp::Xor,
+                    BinaryOp::Eq if left == right => GateOp::Eq,
+                    BinaryOp::Ne if left == right => GateOp::Ne,
+                    BinaryOp::LogicAnd => GateOp::LogicAnd,
+                    BinaryOp::LogicOr => GateOp::LogicOr,
+                    _ => return None,
+                };
+                self.emit(source, lhs, depth + 1, program)?;
+                self.emit(source, rhs, depth + 1, program)?;
+                program.push(op, 2)
+            }
+            &SLTNode::Unary(op, operand) => {
+                let operand_width = self.width(operand)?;
+                let op = match op {
+                    UnaryOp::Ident if operand_width == result => None,
+                    UnaryOp::BitNot if operand_width == result => Some(GateOp::Not {
+                        width: gate_u32(result)?,
+                    }),
+                    UnaryOp::LogicNot => Some(GateOp::LogicNot),
+                    UnaryOp::And => Some(GateOp::ReduceAnd {
+                        width: gate_u32(operand_width)?,
+                    }),
+                    UnaryOp::Or => Some(GateOp::ReduceOr),
+                    UnaryOp::Xor => Some(GateOp::ReduceXor),
+                    _ => return None,
+                };
+                self.emit(source, operand, depth + 1, program)?;
+                match op {
+                    Some(op) => program.push(op, 1),
+                    None => Some(()),
+                }
+            }
+            SLTNode::Slice { expr, access } => {
+                let bits = access.msb.checked_sub(access.lsb)? + 1;
+                self.emit(source, *expr, depth + 1, program)?;
+                program.push(
+                    GateOp::Slice {
+                        lsb: gate_u32(access.lsb)?,
+                        width: gate_u32(bits)?,
+                    },
+                    1,
+                )
+            }
+            &SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                if self.width(then_expr)? != result || self.width(else_expr)? != result {
+                    return None;
+                }
+                self.emit(source, cond, depth + 1, program)?;
+                self.emit(source, then_expr, depth + 1, program)?;
+                self.emit(source, else_expr, depth + 1, program)?;
+                program.push(GateOp::Mux, 3)
+            }
+            _ => None,
+        }
+    }
 }

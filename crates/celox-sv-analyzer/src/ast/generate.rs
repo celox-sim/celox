@@ -260,8 +260,10 @@ impl Item<'_> {
                     }
                 }
             }
-            Expr::Call { name, args, .. } => {
-                *name = self.name(name);
+            Expr::Call { callee, args, .. } => {
+                if let Callee::Subroutine(name) = callee {
+                    *name = self.name(name);
+                }
                 args.iter_mut().flatten().for_each(|e| self.expr(e));
             }
         }
@@ -280,8 +282,10 @@ impl Item<'_> {
                 self.constant(expr);
                 self.constant(bit);
             }
-            ConstExpr::Function { name, args, .. } => {
-                *name = self.name(name);
+            ConstExpr::Function { callee, args, .. } => {
+                if let Callee::Subroutine(name) = callee {
+                    *name = self.name(name);
+                }
                 args.iter_mut().for_each(|e| self.constant(e));
             }
             ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => self.constant(expr),
@@ -557,11 +561,13 @@ impl<'a> Elaborator<'a, '_> {
 
     fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
         match expr {
-            ConstExpr::Function { name, args, .. } => {
+            ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
                     self.expand_constant_calls(arg, scope)?;
                 }
-                if self.functions.contains_key(name) {
+                if let Callee::Subroutine(name) = callee
+                    && self.functions.contains_key(name)
+                {
                     if scope.shadowed.contains(name) {
                         return None;
                     }

@@ -369,6 +369,24 @@ impl SIRTranslator {
             } else {
                 r
             };
+            // Logical shifts by at least the physical width produce zero.
+            // `r` is zero-extended from a logical width no wider than
+            // `common_ty`, so this compares the real count without truncation.
+            let logical_shift_in_range = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+                Some(state.builder.ins().icmp_imm_u(
+                    IntCC::UnsignedLessThan,
+                    r,
+                    i64::from(common_ty.bits()),
+                ))
+            } else {
+                None
+            };
+            let saturate_logical_shift = |builder: &mut FunctionBuilder, shifted: Value| {
+                let in_range =
+                    logical_shift_in_range.expect("logical shift count range is computed");
+                let zero = builder.ins().iconst(common_ty, 0);
+                builder.ins().select(in_range, shifted, zero)
+            };
 
             let build_icmp = |builder: &mut FunctionBuilder, cc: IntCC| {
                 let b1_res = builder.ins().icmp(cc, l, r);
@@ -424,11 +442,13 @@ impl SIRTranslator {
                 BinaryOp::Or => state.builder.ins().bor(l, r),
                 BinaryOp::Xor => state.builder.ins().bxor(l, r),
                 BinaryOp::Shr => {
-                    let shifted = state.builder.ins().ushr(l, r);
+                    let raw = state.builder.ins().ushr(l, r);
+                    let shifted = saturate_logical_shift(state.builder, raw);
                     apply_d_width_mask(state, shifted, common_ty, d_width)
                 }
                 BinaryOp::Shl => {
-                    let shifted = state.builder.ins().ishl(l, r);
+                    let raw = state.builder.ins().ishl(l, r);
+                    let shifted = saturate_logical_shift(state.builder, raw);
                     apply_d_width_mask(state, shifted, common_ty, d_width)
                 }
                 BinaryOp::Sar => {
@@ -510,7 +530,8 @@ impl SIRTranslator {
                     BinaryOp::Shr => {
                         let zero = state.builder.ins().iconst(common_ty, 0);
                         let shift_amt_has_x = state.builder.ins().icmp(IntCC::NotEqual, r_m, zero);
-                        let shifted_m = state.builder.ins().ushr(l_m, r);
+                        let raw_m = state.builder.ins().ushr(l_m, r);
+                        let shifted_m = saturate_logical_shift(state.builder, raw_m);
                         let all_ones = state.builder.ins().iconst(common_ty, -1);
                         let m = state
                             .builder
@@ -521,7 +542,8 @@ impl SIRTranslator {
                     BinaryOp::Shl => {
                         let zero = state.builder.ins().iconst(common_ty, 0);
                         let shift_amt_has_x = state.builder.ins().icmp(IntCC::NotEqual, r_m, zero);
-                        let shifted_m = state.builder.ins().ishl(l_m, r);
+                        let raw_m = state.builder.ins().ishl(l_m, r);
+                        let shifted_m = saturate_logical_shift(state.builder, raw_m);
                         let all_ones = state.builder.ins().iconst(common_ty, -1);
                         let m = state
                             .builder

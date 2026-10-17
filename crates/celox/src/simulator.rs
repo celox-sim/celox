@@ -49,6 +49,7 @@ mod host {
             RuntimeEventKind, RuntimeEventSite, RuntimeProgram, SignalRef, VariableInfo,
         },
     };
+    use celox_runtime::backend::EventHandle as _;
     use celox_testbench::{
         DisplayFormatArg, FieldSpec, format_sv_display_arg, format_veryl_display_arg,
         pad_veryl_field,
@@ -97,6 +98,8 @@ mod host {
     /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
+        /// Dynamic testbench strings, keyed by the bound variable location.
+        pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
         pub(crate) program: RuntimeProgram,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
@@ -115,6 +118,22 @@ mod host {
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
         tick_timing_eval_comb_ns: u64,
+        /// Per event ID, the derived clock domains a tick can trigger.
+        /// Empty for a design without derived clocks.
+        derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
+        /// Boxed, so that taking it out for a tick moves one pointer.
+        derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+        /// The design finished a timed simulation (`$finish`). Evaluation,
+        /// host writes and waveform dumps no longer change anything.
+        pub(crate) frozen: bool,
+        /// Host writes a timed simulation observes one at a time.
+        pub(crate) host_watch: celox_runtime::HostWatch,
+        /// Runtime-event sequence up to which a timed simulation looked for
+        /// `$finish` records.
+        pub(crate) finish_scan_seq: u64,
+        /// Whether a timed simulation runs the design and it has a `$finish`
+        /// runtime event site.
+        pub(crate) finish_sites: bool,
     }
 
     /// Why [`Simulator::try_dump`] failed.
@@ -658,12 +677,37 @@ mod host {
             program: RuntimeProgram,
             warnings: Vec<CompilationWarning>,
         ) -> Self {
+            let mut sim = Self::with_backend_and_program_for_simulation(backend, program, warnings);
+            // Simulator does not execute initial kernels. Release combinational
+            // time-zero gates that would otherwise wait forever for them.
+            for process in &sim.program.runtime_schema.processes {
+                let status = sim.backend.resolve_signal(&process.status);
+                if sim.backend.get_as::<u8>(status) == 0 {
+                    sim.backend
+                        .set(status, celox_design::ProcessStatus::Done.code());
+                }
+            }
+            sim
+        }
+
+        /// Construct the engine before a timed scheduler starts initial kernels.
+        pub(crate) fn with_backend_and_program_for_simulation(
+            backend: B,
+            program: RuntimeProgram,
+            warnings: Vec<CompilationWarning>,
+        ) -> Self {
+            let (derived_ticks, derived_scratch) = celox_runtime::build_derived_tick_plans(
+                &backend,
+                &program.design.events,
+                &program.design.event_kinds(),
+            );
             let mut sim = Self {
                 backend,
                 program,
                 vcd_writer: None,
                 dirty: false,
                 warnings,
+                testbench_strings: Default::default(),
                 components: Default::default(),
                 component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
@@ -676,6 +720,12 @@ mod host {
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,
                 tick_timing_eval_comb_ns: 0,
+                derived_ticks,
+                derived_scratch: Some(Box::new(derived_scratch)),
+                frozen: false,
+                host_watch: Default::default(),
+                finish_scan_seq: 0,
+                finish_sites: false,
             };
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
@@ -930,6 +980,36 @@ mod host {
             }
         }
 
+        /// Whether the design wrote a `$finish` record since the last call.
+        pub(crate) fn take_runtime_finish(&mut self) -> bool {
+            if !self.finish_sites {
+                return false;
+            }
+            let write_seq = self.runtime_event_write_seq();
+            if write_seq == self.finish_scan_seq {
+                return false;
+            }
+            let events = self.peek_backend_runtime_events_from(self.finish_scan_seq);
+            self.finish_scan_seq = write_seq;
+            let sites = &self.program.runtime_schema.runtime_event_sites;
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    RawRuntimeEvent::Event { site_id, .. }
+                        if sites.get(*site_id).is_some_and(|site| {
+                            matches!(site.kind, RuntimeEventKind::Finish)
+                        })
+                )
+            })
+        }
+
+        /// Start looking for `$finish` records at the current sequence.
+        pub(crate) fn skip_runtime_finish(&mut self) {
+            if self.finish_sites {
+                self.finish_scan_seq = self.runtime_event_write_seq();
+            }
+        }
+
         fn runtime_event_write_seq(&self) -> u64 {
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
@@ -1012,6 +1092,9 @@ mod host {
         /// VCD file. Fails if combinational evaluation or writing fails, or
         /// if `timestamp` is earlier than the last dumped timestamp.
         pub fn try_dump(&mut self, timestamp: u64) -> Result<(), DumpError> {
+            if self.frozen {
+                return Ok(());
+            }
             if self.dirty {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
@@ -1107,8 +1190,12 @@ mod host {
         where
             F: FnOnce(&mut IOContext<B>),
         {
+            if self.frozen {
+                return Ok(());
+            }
             let mut ctx = IOContext {
                 backend: &mut self.backend,
+                watch: &mut self.host_watch,
             };
             f(&mut ctx);
             self.dirty = true;
@@ -1125,6 +1212,9 @@ mod host {
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
+            if self.frozen {
+                return Ok(());
+            }
             let (result, events) = self.eval_comb_capturing_events();
             let fatal_status = matches!(
                 &result,
@@ -1285,7 +1375,24 @@ mod host {
         }
 
         /// Manually triggers a clock or event to process sequential logic.
+        ///
+        /// A tick is one active edge of the event. Clock domains derived from
+        /// it run as in the timed [`crate::Simulation`]: a clock computed
+        /// combinationally from the event's signal, such as `clk & enable`,
+        /// is judged from the state before the edge and its domain evaluates
+        /// together with the event's own; domains clocked from state the
+        /// tick changes, such as a register bit, a divider or a gate whose
+        /// enable the commit raises, run after the commit, transitively.
+        ///
+        /// Only the active edge is ticked, and the event's signal is left
+        /// unchanged. Domains that react to the opposite edge of the event's
+        /// signal, such as one clocked by `~clk` or by a falling `clk & en`,
+        /// do not run; drive the signal's levels with the timed
+        /// [`crate::Simulation`] for them.
         pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            if let Some(Some(_)) = self.derived_ticks.get(event.id()) {
+                return self.tick_derived(event);
+            }
             let timing_enabled = self.diagnostics.tick_timing_every.is_some();
             let mut eval_comb_ns = 0u64;
             let mut eval_apply_ns = 0u64;
@@ -1323,6 +1430,72 @@ mod host {
             Ok(())
         }
 
+        /// Per event ID, the derived clock domains a tick of the event can
+        /// trigger, for hosts that drive the backend without this facade.
+        /// Empty when the design has no derived clocks.
+        pub fn derived_tick_plans(&self) -> celox_runtime::DerivedTickPlans<B::Event> {
+            std::sync::Arc::clone(&self.derived_ticks)
+        }
+
+        /// [`Self::tick`] of an event whose ticks can trigger derived domains,
+        /// kept out of line so that the plain tick stays small.
+        #[inline(never)]
+        fn tick_derived(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let Some(Some(plan)) = plans.get(event.id()) else {
+                unreachable!("tick_derived needs a plan");
+            };
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let dirty = self.dirty;
+            let result = plan.tick(self, &mut scratch, dirty);
+            self.derived_scratch = Some(scratch);
+            if result.is_ok() {
+                self.dirty = false;
+            }
+            result
+        }
+
+        /// [`Self::tick_events`] of coincident domains, one of which can
+        /// trigger derived domains: the ticked domains evaluate and commit
+        /// together, then the derived domains of all of them follow.
+        #[cold]
+        fn tick_events_derived(
+            &mut self,
+            domains: &[(B::Event, B::Event, B::Event)],
+            unsplit: &[B::Event],
+        ) -> Result<(), RuntimeErrorCode> {
+            let sources: Vec<_> = domains
+                .iter()
+                .map(|&(event, eval_only, apply)| celox_runtime::EventDomain {
+                    eval_apply: event,
+                    eval_only: Some(eval_only),
+                    apply: Some(apply),
+                })
+                .chain(unsplit.iter().map(|&event| celox_runtime::EventDomain {
+                    eval_apply: event,
+                    eval_only: None,
+                    apply: None,
+                }))
+                .collect();
+            let plans = std::sync::Arc::clone(&self.derived_ticks);
+            let plan = celox_runtime::DerivedTickPlan::merge(
+                sources,
+                domains
+                    .iter()
+                    .map(|(event, _, _)| event)
+                    .chain(unsplit)
+                    .filter_map(|event| plans.get(event.id())?.as_ref()),
+            );
+            let mut scratch = self.derived_scratch.take().unwrap_or_default();
+            let dirty = self.dirty;
+            let result = plan.tick(self, &mut scratch, dirty);
+            self.derived_scratch = Some(scratch);
+            if result.is_ok() {
+                self.dirty = false;
+            }
+            result
+        }
+
         /// Advance several events as one coincident edge.
         ///
         /// Every triggered domain samples the state settled before the edge,
@@ -1332,6 +1505,10 @@ mod host {
         /// [`Self::tick`] calls cannot express: each of them would settle
         /// the design between the domains. Events of the same domain are
         /// applied once. A single event behaves like [`Self::tick`].
+        ///
+        /// Derived domains of the ticked events run as in [`Self::tick`]:
+        /// gated clocks with the ticked domains, state-derived ones after
+        /// all of them commit.
         pub fn tick_events(&mut self, events: &[B::Event]) -> Result<(), RuntimeErrorCode> {
             use celox_runtime::backend::EventHandle;
             // Deduplicate domains before requiring split kernels: a design
@@ -1361,6 +1538,16 @@ mod host {
                     (Some(eval_only), Some(apply)) => domains.push((event, eval_only, apply)),
                     _ => unsplit.push(event),
                 }
+            }
+            if !self.derived_ticks.is_empty()
+                && domains.len() + unsplit.len() > 1
+                && domains
+                    .iter()
+                    .map(|(event, _, _)| event)
+                    .chain(&unsplit)
+                    .any(|event| matches!(self.derived_ticks.get(event.id()), Some(Some(_))))
+            {
+                return self.tick_events_derived(&domains, &unsplit);
             }
             match domains.as_slice() {
                 [] => {
@@ -1410,7 +1597,10 @@ mod host {
             &mut self,
             event: B::Event,
         ) -> Result<(), RuntimeErrorCode> {
-            if !self.program.runtime_schema.comb_observers.is_empty() {
+            if !self.program.runtime_schema.comb_observers.is_empty()
+                || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+            {
+                // Derived domains need the settled state to see their edges.
                 return self.tick(event);
             }
             if self.dirty {
@@ -1433,7 +1623,10 @@ mod host {
             if count == 0 {
                 return (0, Ok(()));
             }
-            if !self.program.runtime_schema.comb_observers.is_empty() || !self.dirty {
+            if !self.program.runtime_schema.comb_observers.is_empty()
+                || !self.dirty
+                || matches!(self.derived_ticks.get(event.id()), Some(Some(_)))
+            {
                 return (1, self.tick_deferred_comb(event));
             }
             let (completed, result) = self.backend.eval_comb_apply_ff_many_at(event, count);
@@ -1665,6 +1858,11 @@ mod host {
         pub fn named_events(&self) -> Vec<NamedEvent<B>> {
             let mut result = Vec::new();
             for (id, addr) in self.backend.id_to_addr_slice().iter().enumerate() {
+                // A hidden event, such as the copy of a clock sensed at its
+                // other edge, has no name to list.
+                if !self.event_is_named(addr) {
+                    continue;
+                }
                 let name = self.program.get_path(addr);
                 if let Some(ev) = self.backend.resolve_event_opt(addr) {
                     result.push(NamedEvent {
@@ -1675,6 +1873,19 @@ mod host {
                 }
             }
             result
+        }
+
+        /// Whether the event at `addr` is a variable a path names.
+        fn event_is_named(&self, addr: &crate::ir::AbsoluteAddr) -> bool {
+            self.program
+                .design
+                .instance(addr.instance_id)
+                .is_some_and(|instance| {
+                    self.program
+                        .design
+                        .variable(addr)
+                        .is_some_and(|variable| instance.resolves_path_to(&variable.path, *addr))
+                })
         }
 
         /// Triggers a clock/event by its numeric ID.

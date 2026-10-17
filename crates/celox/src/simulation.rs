@@ -7,7 +7,8 @@ use crate::{
     },
 };
 use celox_runtime::{
-    EventInfo, ProcessRefs, SimulationExecutor, SimulationSnapshot, SimulationState,
+    CountedDomainRefs, CountedRefs, EventInfo, Halt, HostBoundary, HostWatch, NbaSiteRefs,
+    ProcessRefs, SimulationSnapshot, SimulationState, TermRefs, TickExecutor, UnitExecutor,
 };
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -15,6 +16,9 @@ use celox_runtime::{
 pub struct SimulationCheckpoint<B: SimBackend = crate::DefaultBackend> {
     simulator: Checkpoint,
     schedule: SimulationSnapshot<B>,
+    /// Host writes of waited signals the next step has yet to show the
+    /// waits.
+    host_writes: Vec<(SignalRef, celox_runtime::timing::Value)>,
 }
 
 impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
@@ -22,6 +26,7 @@ impl<B: SimBackend> Clone for SimulationCheckpoint<B> {
         Self {
             simulator: self.simulator.clone(),
             schedule: self.schedule.clone(),
+            host_writes: self.host_writes.clone(),
         }
     }
 }
@@ -65,7 +70,7 @@ impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
     }
 }
 
-impl<B: SimBackend> SimulationExecutor for Simulator<B> {
+impl<B: SimBackend> UnitExecutor for Simulator<B> {
     type Backend = B;
 
     fn backend(&self) -> &B {
@@ -76,26 +81,53 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         &mut self.backend
     }
 
-    fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.eval_comb_checked()
+    #[inline]
+    fn eval_comb(&mut self) -> Result<(), Halt> {
+        self.eval_comb_checked()?;
+        self.runtime_finish()
     }
 
-    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.eval_apply_ff_at_checked(event)
+    #[inline]
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_apply_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.eval_only_ff_at_checked(event)
+    #[inline]
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_only_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        self.apply_ff_at_checked(event)
+    #[inline]
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.apply_ff_at_checked(event)?;
+        self.runtime_finish()
     }
 
-    fn run_process(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
+    fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         self.backend
             .run_process(index)
-            .map_err(|e| self.decorate_runtime_error(e))
+            .map_err(|e| self.decorate_runtime_error(e))?;
+        self.runtime_finish()
+    }
+}
+
+impl<B: SimBackend> TickExecutor for Simulator<B> {
+    #[inline]
+    fn eval_comb_apply_ff_at(&mut self, event: B::Event) -> Result<(), Halt> {
+        self.eval_comb_apply_ff_at_checked(event)?;
+        self.runtime_finish()
+    }
+}
+
+impl<B: SimBackend> HostBoundary for Simulator<B> {
+    fn take_host_writes(&mut self) -> Vec<(SignalRef, celox_runtime::timing::Value)> {
+        self.host_watch.take_log()
+    }
+
+    fn freeze(&mut self) {
+        self.frozen = true;
     }
 
     fn stage_external_event(
@@ -129,6 +161,22 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
+    }
+}
+
+impl<B: SimBackend> Simulator<B> {
+    /// A `$finish` the design's flip-flop or combinational code executed
+    /// ends a timed simulation (IEEE 1800-2023 20.2).
+    #[inline]
+    fn runtime_finish(&mut self) -> Result<(), Halt> {
+        if !self.finish_sites {
+            return Ok(());
+        }
+        if self.take_runtime_finish() {
+            Err(Halt::Finish)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -171,7 +219,7 @@ impl Simulation {
 
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
     let num_events = simulator.backend.num_events();
-    let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
+    let topo_signals: Vec<(SignalRef, usize)> = simulator
         .program
         .design
         .events
@@ -184,19 +232,13 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
                 .resolve_event_opt(addr)
                 .map(|ev| ev.id())
                 .unwrap_or(usize::MAX);
-            let canonical = simulator.program.design.events.canonical(*addr);
-            let canonical_id = simulator
-                .backend
-                .resolve_event_opt(&canonical)
-                .map(|ev| ev.id())
-                .unwrap_or(usize::MAX);
-            (signal, id, canonical_id)
+            (signal, id)
         })
         .collect();
 
     let mut domain_kinds = vec![None; num_events];
     let kinds = simulator.program.design.event_kinds();
-    for (_, id, _) in topo_signals.iter().copied() {
+    for (_, id) in topo_signals.iter().copied() {
         if id != usize::MAX {
             let addr = simulator.backend.id_to_addr_slice()[id];
             domain_kinds[id] = kinds.get(&addr).copied();
@@ -239,29 +281,136 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
         }
     }
 
-    let processes = simulator
-        .program
-        .runtime_schema
-        .processes
+    let schema = &simulator.program.runtime_schema;
+    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
+    let counted: Vec<CountedDomainRefs> = schema
+        .watches
         .iter()
-        .map(|slots| ProcessRefs {
-            status: simulator.backend.resolve_signal(&slots.status),
-            delay: simulator.backend.resolve_signal(&slots.delay),
+        .filter_map(|watch| {
+            Some(CountedDomainRefs {
+                refs: CountedRefs {
+                    signal: resolve(&watch.signal),
+                    changes: resolve(&watch.changes?),
+                    rises: resolve(&watch.rises?),
+                    falls: resolve(&watch.falls?),
+                },
+                domains: watch
+                    .domains
+                    .iter()
+                    .filter_map(|(event, kind)| {
+                        Some((simulator.backend.resolve_event_opt(event)?.id(), *kind))
+                    })
+                    .collect(),
+            })
         })
         .collect();
+    // Signals design code writes; the rest only the host and the scheduler
+    // write.
+    let driven: crate::HashSet<crate::AbsoluteAddr> =
+        schema.rtl_writes.iter().map(|atom| atom.id).collect();
+    let counter_of = |signal: SignalRef, kind| {
+        counted
+            .iter()
+            .find(|counted| counted.refs.signal == signal)
+            .map(|counted| counted.refs.counter(kind))
+    };
+    let mut processes: Vec<ProcessRefs> = schema
+        .processes
+        .iter()
+        .map(|slots| ProcessRefs::new(resolve(&slots.status), resolve(&slots.delay)))
+        .collect();
+    for site in &schema.wait_sites {
+        let terms = site
+            .terms
+            .iter()
+            .map(|(address, kind)| {
+                let signal = resolve(address);
+                TermRefs {
+                    signal,
+                    kind: *kind,
+                    counter: counter_of(signal, *kind),
+                    driven: driven.contains(address),
+                }
+            })
+            .collect();
+        processes[site.process].wait_sites.push(terms);
+    }
+    for site in &schema.nba_sites {
+        processes[site.process].nba_sites.push(NbaSiteRefs {
+            target: resolve(&site.target),
+            lsb: site.lsb,
+            width: site.width,
+            value: resolve(&site.value),
+            offset: site.offset.as_ref().map(resolve),
+            pending: site.pending.as_ref().map(resolve),
+        });
+    }
 
-    SimulationState::new(
+    let mut state = SimulationState::new(
         &simulator.backend,
         topo_signals,
         domain_kinds,
         event_info,
         processes,
     )
+    .with_counted(&simulator.backend, counted);
+    let events = &simulator.program.design.events;
+    if !events.combinational_derived.is_empty() {
+        let derived = simulator
+            .backend
+            .id_to_addr_slice()
+            .iter()
+            .map(|address| {
+                events
+                    .combinational_derived
+                    .get(&events.canonical(*address))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|derived| simulator.backend.resolve_event_opt(&derived.clock))
+                    .map(|event| event.id())
+                    .collect()
+            })
+            .collect();
+        state.set_combinational_derived(derived);
+    }
+    state
+}
+
+/// Host writes a timed simulation of `simulator` observes one at a time:
+/// those of counted signals and of signals a wait watches.
+fn host_watch<B: SimBackend>(simulator: &Simulator<B>) -> HostWatch {
+    let schema = &simulator.program.runtime_schema;
+    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
+    HostWatch::new(
+        schema.watches.iter().filter_map(|watch| {
+            Some(CountedRefs {
+                signal: resolve(&watch.signal),
+                changes: resolve(&watch.changes?),
+                rises: resolve(&watch.rises?),
+                falls: resolve(&watch.falls?),
+            })
+        }),
+        schema
+            .wait_sites
+            .iter()
+            .flat_map(|site| site.terms.iter().map(|(signal, _)| resolve(signal).offset))
+            .collect(),
+    )
 }
 
 impl<B: SimBackend> Simulation<B> {
-    pub(crate) fn new(simulator: Simulator<B>) -> Self {
+    pub(crate) fn new(mut simulator: Simulator<B>) -> Self {
         let state = simulation_state(&simulator);
+        simulator.host_watch = host_watch(&simulator);
+        // Only a timed simulation ends at an RTL `$finish`; a bare
+        // `Simulator`, ticks included, leaves that to the host.
+        simulator.finish_sites = simulator
+            .program
+            .runtime_schema
+            .runtime_event_sites
+            .iter()
+            .any(|site| matches!(site.kind, crate::ir::RuntimeEventKind::Finish));
+        simulator.skip_runtime_finish();
         Self { simulator, state }
     }
 
@@ -275,18 +424,20 @@ impl<B: SimBackend> Simulation<B> {
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
+            host_writes: self.simulator.host_watch.log().to_vec(),
         })
     }
 
     /// Save the value of every state object by path, together with the
     /// simulation time, clocks and pending events by name.
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
-        if self.has_processes() {
-            return Err(StateError::Processes);
-        }
         let mut file = self.simulator.save_state()?;
+        // Settling for the file may have executed a `$finish`.
+        self.sync_finish();
         let parts = self.state.export_schedule(&self.simulator.backend);
-        file.schedule = Some(self.simulator.name_schedule(parts));
+        let mut record = self.simulator.name_schedule(parts);
+        record.processes.host_writes = self.simulator.name_host_writes();
+        file.schedule = Some(record);
         Ok(file)
     }
 
@@ -294,14 +445,16 @@ impl<B: SimBackend> Simulation<B> {
     /// clocks and pending events. See [`Simulator::load_state`] for how
     /// objects are matched.
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
-        if self.has_processes() {
-            return Err(StateError::Processes);
-        }
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
         let parts = self.simulator.resolve_schedule(record)?;
+        let host_writes = self
+            .simulator
+            .resolve_host_writes(&record.processes.host_writes)?;
         self.simulator.load_state(file)?;
         self.state.import_schedule(parts);
+        self.simulator.host_watch.set_log(host_writes);
+        self.simulator.frozen = self.state.is_finished();
         Ok(())
     }
 
@@ -323,17 +476,32 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)
+        self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator
+            .host_watch
+            .set_log(checkpoint.host_writes.clone());
+        Ok(())
+    }
+
+    /// A `$finish` that flip-flop or combinational code executed outside a
+    /// step, during a direct settle, read or dump, ends the simulation too.
+    fn sync_finish(&mut self) {
+        if !self.state.is_finished() && self.simulator.take_runtime_finish() {
+            self.state.finish(&mut self.simulator);
+        }
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.
     pub fn dump(&mut self, timestamp: u64) {
         self.simulator.dump(timestamp);
+        self.sync_finish();
     }
 
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
-        self.simulator.try_dump(timestamp)
+        let result = self.simulator.try_dump(timestamp);
+        self.sync_finish();
+        result
     }
 
     /// See [`Simulator::switch_vcd`].
@@ -352,15 +520,27 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Retrieves the current value of a variable using a pre-resolved [`SignalRef`] handle.
     pub fn get(&mut self, signal: SignalRef) -> num_bigint::BigUint {
-        self.simulator.get(signal)
+        let value = self.simulator.get(signal);
+        self.sync_finish();
+        value
     }
 
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
+    ///
+    /// A write that changes an event signal, and any write while a process
+    /// waits or a signal is counted, is an update of the current time: the
+    /// next [`Self::step`] or [`Self::run_until`] settles it at that time,
+    /// then advances.
     pub fn modify<F>(&mut self, f: F) -> Result<(), RuntimeErrorCode>
     where
         F: FnOnce(&mut crate::IOContext<B>),
     {
-        self.simulator.modify(f)
+        let result = self.simulator.modify(f);
+        self.sync_finish();
+        result?;
+        let logged = self.simulator.host_watch.has_log();
+        self.state.note_host_writes(&self.simulator.backend, logged);
+        Ok(())
     }
 
     /// Register a clock signal and its period, enqueuing the first edge.
@@ -391,9 +571,17 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Advance time to the next scheduled event and process all events at that time.
-    /// Returns the new simulation time, or None if no events are scheduled.
+    /// Host writes since the last step are settled at the current time first.
+    /// Returns the new simulation time, the current time when only host
+    /// writes were settled, or None if nothing was to do.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
         self.state.step(&mut self.simulator)
+    }
+
+    /// [`Self::step`] that, after settling host writes at the current time,
+    /// does not advance past `end_time`.
+    fn step_until(&mut self, end_time: u64) -> Result<Option<u64>, RuntimeErrorCode> {
+        self.state.step_until(&mut self.simulator, end_time)
     }
 
     /// Advance time and run until `end_time` (inclusive).
@@ -409,7 +597,7 @@ impl<B: SimBackend> Simulation<B> {
             if next_time > end_time {
                 break;
             }
-            self.step()?;
+            self.step_until(end_time)?;
         }
         if self.state.is_finished() {
             return Ok(());
@@ -419,8 +607,30 @@ impl<B: SimBackend> Simulation<B> {
         Ok(())
     }
 
-    fn has_processes(&self) -> bool {
-        !self.simulator.program.runtime_schema.processes.is_empty()
+    /// Like [`Self::run_until`], but takes at most `max_steps` steps.
+    /// Returns `false`, with the simulation at the time of its last step,
+    /// when another step would be needed to reach `end_time`.
+    pub fn run_until_bounded(
+        &mut self,
+        end_time: u64,
+        max_steps: u64,
+    ) -> Result<bool, RuntimeErrorCode> {
+        if end_time < self.state.time() {
+            return Ok(true);
+        }
+        let mut steps = 0;
+        while let Some(next_time) = self.state.next_event_time() {
+            if next_time > end_time {
+                break;
+            }
+            if steps >= max_steps {
+                return Ok(false);
+            }
+            self.step_until(end_time)?;
+            steps += 1;
+        }
+        self.run_until(end_time)?;
+        Ok(true)
     }
 
     /// Whether a process of the design requested the end of the simulation.
@@ -454,7 +664,9 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
-        self.simulator.eval_comb()
+        let result = self.simulator.eval_comb();
+        self.sync_finish();
+        result
     }
 
     /// Returns a raw pointer to the backend memory and its total size in bytes.
@@ -465,6 +677,14 @@ impl<B: SimBackend> Simulation<B> {
     /// Returns a mutable raw pointer to the backend memory and its total size in bytes.
     pub fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize) {
         self.simulator.memory_as_mut_ptr()
+    }
+
+    /// The host wrote the state through [`Self::memory_as_mut_ptr`]. Like
+    /// [`Self::modify`], the next step then settles the current time when the
+    /// writes may wake a process or changed an event signal. Waits and
+    /// counters see the values the writes left, not each write.
+    pub fn note_raw_writes(&mut self) {
+        self.state.note_host_writes(&self.simulator.backend, false);
     }
 
     /// Returns an opaque owner that keeps the backend memory allocation alive.
@@ -785,6 +1005,248 @@ mod process_tests {
             check(build().build_native().unwrap());
         }
     }
+    /// A clock taken from one bit of a register is edge-sensed on that bit on
+    /// every backend, not on the register as a whole. In four-state mode the
+    /// WebAssembly backend leaves the X-initialized bits above the one-bit
+    /// clock set, which the scheduler must not read as a high level.
+    #[test]
+    fn register_bit_clocks_follow_the_selected_bit_on_every_backend() {
+        fn check<B: crate::SimBackend>(backend: crate::Simulator<B>, step: u64, bit: u64) {
+            let mut sim = Simulation::new(backend);
+            let a = sim.signal("cnt1");
+            let b = sim.signal("cnt2");
+            sim.schedule("rst", 0, 0).unwrap();
+            sim.schedule("clk", 0, 0).unwrap();
+            sim.step().unwrap();
+            sim.schedule("rst", 5, 1).unwrap();
+            sim.step().unwrap();
+            let mut count = 0u64;
+            for edge in 1..=12u64 {
+                sim.schedule("clk", edge * 20 - 10, 1).unwrap();
+                sim.step().unwrap();
+                let (before, after) = (((edge - 1) * step) >> bit, (edge * step) >> bit);
+                count += u64::from(before & 1 == 0 && after & 1 == 1);
+                assert_eq!(sim.get(a), ((edge * step) & 0xff).into());
+                assert_eq!(sim.get(b), count.into(), "a[{bit}] after edge {edge}");
+                sim.schedule("clk", edge * 20, 0).unwrap();
+                sim.step().unwrap();
+            }
+        }
+        for (step, bit) in [(1, 0), (2, 0), (1, 2)] {
+            let code = format!(
+                "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
+                             cnt1: output logic<8>, cnt2: output logic<8>) {{
+                    var a: logic<8>;
+                    var b: logic<8>;
+                    always_ff (clk, rst) {{ if_reset {{ a = 0; }} else {{ a = a + 8'd{step}; }} }}
+                    let divided: '_ clock = a[{bit}];
+                    always_ff (divided, rst) {{ if_reset {{ b = 0; }} else {{ b = b + 8'd1; }} }}
+                    assign cnt1 = a;
+                    assign cnt2 = b;
+                }}"
+            );
+            for four_state in [false, true] {
+                let build = || {
+                    crate::Simulator::builder(&code, "Top")
+                        .four_state(four_state)
+                        .emit_triggers()
+                };
+                check(build().build_interpreter().unwrap(), step, bit);
+                check(build().build_cranelift().unwrap(), step, bit);
+                check(build().build_wasm().unwrap(), step, bit);
+                check(build().build_tiered().unwrap(), step, bit);
+                #[cfg(any(
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+                ))]
+                check(build().build_native().unwrap(), step, bit);
+            }
+        }
+    }
+
+    /// Clocks computed from `clk` share its edge: `clk & en` is gated by the
+    /// enable from before the edge (here a register of `clk`'s own domain)
+    /// and its domain reads the state from before `clk`'s domain commits; an
+    /// edge raising `en` raises the gate after the commit, a further edge
+    /// that reads the committed state. `~clk` rises when `clk` falls, which
+    /// the timed steps drive and a tick, the active edge only, does not. Timed steps and
+    /// event-based ticks agree on every backend, in both state modes; the
+    /// four-state ticks judge the gate by settling the design.
+    #[test]
+    fn gated_clocks_share_their_source_edge_on_every_backend() {
+        const CODE: &str = "module Top (clk: input '_ clock, rst: input '_ reset_async_low,
+                en_in: input logic, cnt1: output logic<8>, sampled: output logic<8>,
+                fired: output logic<8>, inverted_sampled: output logic<8>) {
+            var a: logic<8>;
+            var en: logic;
+            var b: logic<8>;
+            var c: logic<8>;
+            var d: logic<8>;
+            always_ff (clk, rst) {
+                if_reset { a = 0; en = 1; } else { a = a + 8'd1; en = en_in; }
+            }
+            let gated: '_ clock = clk & en;
+            always_ff (gated, rst) {
+                if_reset { b = 0; c = 0; } else { b = a; c = c + 8'd1; }
+            }
+            let inverted: '_ clock = ~clk;
+            always_ff (inverted, rst) { if_reset { d = 0; } else { d = a; } }
+            assign cnt1 = a;
+            assign sampled = b;
+            assign fired = c;
+            assign inverted_sampled = d;
+        }";
+        const ENABLES: [u8; 8] = [1, 1, 0, 0, 1, 1, 0, 1];
+        fn expected() -> Vec<[u64; 4]> {
+            let (mut gate, mut sampled, mut fired) = (1, 0, 0);
+            ENABLES
+                .iter()
+                .zip(1u64..)
+                .map(|(&enable, edge)| {
+                    if gate == 1 {
+                        // The edge passes the open gate before any commit.
+                        sampled = edge - 1;
+                        fired += 1;
+                    } else if enable == 1 {
+                        // The commit raises `en` while `clk` is high.
+                        sampled = edge;
+                        fired += 1;
+                    }
+                    gate = enable;
+                    [edge, sampled, fired, edge]
+                })
+                .collect()
+        }
+        fn observe<B: crate::SimBackend>(sim: &mut crate::Simulator<B>) -> [u64; 4] {
+            ["cnt1", "sampled", "fired", "inverted_sampled"].map(|name| {
+                let signal = sim.signal(name);
+                sim.get(signal).try_into().unwrap()
+            })
+        }
+        fn timed<B: crate::SimBackend>(backend: crate::Simulator<B>) -> Vec<[u64; 4]> {
+            let mut sim = Simulation::new(backend);
+            let en_in = sim.signal("en_in");
+            // Assert the reset with an edge, then release it.
+            for (port, time, value) in [("rst", 0, 1), ("clk", 0, 0), ("rst", 2, 0), ("rst", 5, 1)]
+            {
+                sim.schedule(port, time, value).unwrap();
+                sim.step().unwrap();
+            }
+            ENABLES
+                .iter()
+                .zip(1u64..)
+                .map(|(&enable, edge)| {
+                    sim.modify(|io| io.set(en_in, enable)).unwrap();
+                    sim.schedule("clk", edge * 20 - 10, 1).unwrap();
+                    sim.step().unwrap();
+                    sim.schedule("clk", edge * 20, 0).unwrap();
+                    sim.step().unwrap();
+                    observe(&mut sim.simulator)
+                })
+                .collect()
+        }
+        fn ticked<B: crate::SimBackend>(mut sim: crate::Simulator<B>) -> Vec<[u64; 4]> {
+            let clk = sim.event("clk");
+            let (rst, en_in) = (sim.signal("rst"), sim.signal("en_in"));
+            sim.modify(|io| io.set(rst, 0u8)).unwrap();
+            sim.tick(clk).unwrap();
+            sim.modify(|io| io.set(rst, 1u8)).unwrap();
+            ENABLES
+                .iter()
+                .map(|&enable| {
+                    sim.modify(|io| io.set(en_in, enable)).unwrap();
+                    let clk_before = sim.get_four_state(sim.signal("clk"));
+                    sim.tick(clk).unwrap();
+                    let mut observed = observe(&mut sim);
+                    assert_eq!(
+                        sim.get_four_state(sim.signal("clk")),
+                        clk_before,
+                        "a tick leaves clk as it was"
+                    );
+                    // A tick is not a falling edge of `clk`: `~clk` stays put.
+                    observed[3] = 0;
+                    observed
+                })
+                .collect()
+        }
+        let want = expected();
+        let want_ticked: Vec<_> = want.iter().map(|&[a, b, c, _]| [a, b, c, 0]).collect();
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulator::builder(CODE, "Top")
+                    .four_state(four_state)
+                    .emit_triggers()
+            };
+            let context = |mode: &str| format!("{mode}, four_state={four_state}");
+            assert_eq!(
+                timed(build().build_interpreter().unwrap()),
+                want,
+                "{}",
+                context("interp timed")
+            );
+            assert_eq!(
+                ticked(build().build_interpreter().unwrap()),
+                want_ticked,
+                "{}",
+                context("interp tick")
+            );
+            assert_eq!(
+                timed(build().build_cranelift().unwrap()),
+                want,
+                "{}",
+                context("cranelift timed")
+            );
+            assert_eq!(
+                ticked(build().build_cranelift().unwrap()),
+                want_ticked,
+                "{}",
+                context("cranelift tick")
+            );
+            assert_eq!(
+                timed(build().build_wasm().unwrap()),
+                want,
+                "{}",
+                context("wasm timed")
+            );
+            assert_eq!(
+                ticked(build().build_wasm().unwrap()),
+                want_ticked,
+                "{}",
+                context("wasm tick")
+            );
+            assert_eq!(
+                timed(build().build_tiered().unwrap()),
+                want,
+                "{}",
+                context("tiered timed")
+            );
+            assert_eq!(
+                ticked(build().build_tiered().unwrap()),
+                want_ticked,
+                "{}",
+                context("tiered tick")
+            );
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                assert_eq!(
+                    timed(build().build_native().unwrap()),
+                    want,
+                    "{}",
+                    context("native timed")
+                );
+                assert_eq!(
+                    ticked(build().build_native().unwrap()),
+                    want_ticked,
+                    "{}",
+                    context("native tick")
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "systemverilog")]
     const GENERATED_ALIAS_SOURCE: &str = r#"
 module Generator(input logic clk, output logic g);
@@ -921,3 +1383,6 @@ endmodule
         }
     }
 }
+
+#[cfg(all(test, feature = "host-runtime"))]
+mod runtime_core_tests;

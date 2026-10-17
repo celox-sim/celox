@@ -164,6 +164,10 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
+    let mut sensitivity_body = process.sensitivity_body;
+    for stmt in &mut sensitivity_body {
+        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+    }
     let condition = process
         .condition
         .map(|condition| substitute_const_expr_constants(condition, const_env));
@@ -172,9 +176,13 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
         for stmt in &mut body {
             procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
         }
-        return CombProcess::procedural(process.kind, condition, body);
+        return CombProcess {
+            creation_order: process.creation_order,
+            sensitivity_body,
+            ..CombProcess::procedural(process.kind, condition, body)
+        };
     }
-    CombProcess::new(
+    let mut result = CombProcess::new(
         process.kind,
         condition,
         process
@@ -188,7 +196,10 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
                 )
             })
             .collect(),
-    )
+    );
+    result.creation_order = process.creation_order;
+    result.sensitivity_body = sensitivity_body;
+    result
 }
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
@@ -383,7 +394,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .collect(),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => {
@@ -399,7 +410,8 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                     })
                 })
                 .collect();
-            if matches!(name.as_str(), "$signed" | "$unsigned")
+            let function = callee.system();
+            if let Some(function @ (SystemFunction::Signed | SystemFunction::Unsigned)) = function
                 && let [Some(arg)] = args.as_slice()
                 && let Some(constant) = expr_to_const(arg.clone())
                 && let Some(ty) =
@@ -408,13 +420,13 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 Expr::Resize {
                     expr: Box::new(arg.clone()),
                     width: ty.width,
-                    signed: name == "$signed",
+                    signed: function == SystemFunction::Signed,
                 }
-            } else if name == "$countbits" {
+            } else if function == Some(SystemFunction::Countbits) {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
                 fold_const_integral_expr_preserving_mask(
                     Expr::Call {
-                        name,
+                        callee,
                         args,
                         arg_order,
                     },
@@ -422,7 +434,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 )
             } else {
                 Expr::Call {
-                    name,
+                    callee,
                     args,
                     arg_order,
                 }
@@ -523,8 +535,8 @@ fn substitute_const_expr_constants_impl(
                 preserve_enum_types,
             )),
         },
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name,
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
             site,
             args: args
                 .into_iter()
@@ -810,7 +822,7 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             else_expr: Box::new(expr_to_const(*else_expr)?),
         }),
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => {
@@ -818,7 +830,7 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
                 return None;
             }
             Some(ConstExpr::call(
-                name,
+                callee,
                 args.into_iter()
                     .map(|arg| expr_to_const(arg?))
                     .collect::<Option<_>>()?,
@@ -882,7 +894,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
         }),
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => {
@@ -892,7 +904,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                 return None;
             }
             Some(ConstExpr::call(
-                name,
+                callee,
                 args.into_iter()
                     .map(|arg| expr_to_index_const(arg?, dimensions))
                     .collect::<Option<_>>()?,
@@ -1290,13 +1302,9 @@ pub(super) fn const_expr_from_ref_node_with_env(
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
                 if let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0
                 {
-                    let (name, args) = some!(system_tf_call_parts(system_call, syntax_tree));
-                    system_functions::check_call(
-                        name,
-                        args.as_deref(),
-                        system_functions::CallSite::Expression,
-                    )?;
-                    if matches!(name, "$timeunit" | "$timeprecision") {
+                    let function =
+                        some!(expressions::system_function_call(system_call, syntax_tree)?);
+                    if let SystemFunction::Timeunit | SystemFunction::Timeprecision = function {
                         return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
                             i128::from(timescales::query(system_call, syntax_tree)?),
                             32,
@@ -1309,47 +1317,50 @@ pub(super) fn const_expr_from_ref_node_with_env(
                         const_env,
                         false,
                     )?;
-                    if name == "$isunbounded" {
+                    match function {
                         // Imported aliases may not be bound in preliminary
                         // collection. Retain the query for later resolution,
                         // including its one-bit type for dependent queries.
-                        return const_expr_from_function_subroutine_call(
-                            &call.nodes.0,
-                            syntax_tree,
-                            const_env,
-                        );
-                    }
-                    if name == "$dimensions"
-                        && let Some(count) = dimensions::dimensions_system_function_call_value(
-                            system_call,
-                            syntax_tree,
-                            const_env,
-                            type_aliases,
-                            None,
-                        )
-                    {
-                        return Ok(Some(ConstExpr::Literal(count.to_string())));
-                    }
-                    if name == "$unpacked_dimensions"
-                        && let Some(count) = dimensions::unpacked_dimensions_call_value(
-                            system_call,
-                            syntax_tree,
-                            const_env,
-                            type_aliases,
-                            None,
-                        )
-                    {
-                        return Ok(Some(ConstExpr::Literal(count.to_string())));
-                    }
-                    if matches!(name, "$left" | "$right" | "$low" | "$high" | "$increment") {
-                        return Ok(dimensions::array_query_call(
-                            system_call,
-                            syntax_tree,
-                            const_env,
-                            type_aliases,
-                            None,
-                        )
-                        .and_then(expr_to_const));
+                        SystemFunction::Isunbounded => {
+                            return const_expr_from_function_subroutine_call(
+                                &call.nodes.0,
+                                syntax_tree,
+                                const_env,
+                            );
+                        }
+                        SystemFunction::Dimensions => {
+                            if let Some(count) = dimensions::dimensions_system_function_call_value(
+                                system_call,
+                                syntax_tree,
+                                const_env,
+                                type_aliases,
+                                None,
+                            ) {
+                                return Ok(Some(ConstExpr::Literal(count.to_string())));
+                            }
+                        }
+                        SystemFunction::UnpackedDimensions => {
+                            if let Some(count) = dimensions::unpacked_dimensions_call_value(
+                                system_call,
+                                syntax_tree,
+                                const_env,
+                                type_aliases,
+                                None,
+                            ) {
+                                return Ok(Some(ConstExpr::Literal(count.to_string())));
+                            }
+                        }
+                        SystemFunction::ArrayQuery(_) => {
+                            return Ok(dimensions::array_query_call(
+                                system_call,
+                                syntax_tree,
+                                const_env,
+                                type_aliases,
+                                None,
+                            )
+                            .and_then(expr_to_const));
+                        }
+                        _ => {}
                     }
                 }
                 if let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0
@@ -1378,8 +1389,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     syntax_tree,
                     const_env,
                 )?;
-                if let Some(ConstExpr::Function { name, args, .. }) = &lowered
-                    && name == "$bits"
+                if let Some(ConstExpr::Function {
+                    callee: Callee::System(SystemFunction::Bits),
+                    args,
+                    ..
+                }) = &lowered
                     && let [arg] = args.as_slice()
                     && let Some(r#type) =
                         infer_const_expr_type(arg, &parameter_types_from_const_env(const_env))
@@ -1589,14 +1603,14 @@ fn const_user_call(
         // Effectful runtime named calls keep their source order. Constant calls
         // are folded only when their bodies and actuals evaluate successfully.
         let literal = const_functions::eval_expression_literal(&expression, constants)?;
-        let Expr::Call { name, args, .. } = &expression else {
+        let Expr::Call { callee, args, .. } = &expression else {
             unreachable!()
         };
         let types = parameter_types_from_const_env(constants)
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        let args = const_functions::resolved_arguments(name, args)?
+        let args = const_functions::resolved_arguments(callee, args)?
             .into_iter()
             .map(|arg| {
                 expr_to_const(arg.clone()).or_else(|| {
@@ -1607,7 +1621,7 @@ fn const_user_call(
         // Keep references to parameters for consumers that re-specialize the
         // declaration contract; retain the native function's result type too.
         return Some(ConstExpr::Resize {
-            expr: Box::new(ConstExpr::call(name.clone(), args)),
+            expr: Box::new(ConstExpr::call(callee.clone(), args)),
             width: literal.width,
             signed: literal.signed,
         });
@@ -1654,29 +1668,26 @@ fn const_expr_from_function_subroutine_call(
         }
         _ => return Ok(None),
     };
-    let (name, args) = some!(system_tf_call_parts(system_call, syntax_tree));
-    system_functions::check_call(
-        name,
-        args.as_deref(),
-        system_functions::CallSite::Expression,
-    )?;
-    if name == "$isunbounded" {
+    let function = some!(expressions::system_function_call(system_call, syntax_tree)?);
+    if function == SystemFunction::Isunbounded {
         if let Some(value) = parameters::isunbounded_call(system_call, syntax_tree, const_env)? {
             return Ok(Some(value));
         }
         let argument = expressions::single_expression_argument(system_call).unwrap();
         return Ok(Some(ConstExpr::call(
-            name.into(),
+            Callee::System(function),
             vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
         )));
     }
     let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
         return Ok(None);
     };
-    if matches!(
-        name,
-        "$countbits" | "$countones" | "$onehot" | "$onehot0" | "$isunknown"
-    ) {
+    if let SystemFunction::Countbits
+    | SystemFunction::Countones
+    | SystemFunction::Onehot
+    | SystemFunction::Onehot0
+    | SystemFunction::Isunknown = function
+    {
         // Use expression lowering so selections are never silently discarded
         // by the limited constant-primary identifier path below. Unsupported
         // constant argument forms must remain unresolved rather than counting
@@ -1688,7 +1699,7 @@ fn const_expr_from_function_subroutine_call(
         )
         .ok();
         return Ok(expression.and_then(|expression| {
-            if name == "$countbits" {
+            if function == SystemFunction::Countbits {
                 countbits_constant_call(expression, const_env)
             } else {
                 expr_to_const(expression)
@@ -1701,7 +1712,7 @@ fn const_expr_from_function_subroutine_call(
         let argument = some!(argument.as_ref());
         lowered.push(parsed!(const_expr_from_expr(argument, syntax_tree)));
     }
-    Ok(Some(ConstExpr::call(name.to_string(), lowered)))
+    Ok(Some(ConstExpr::call(Callee::System(function), lowered)))
 }
 
 // ConstExpr represents bit selects but not concatenations or part selects.
@@ -1711,7 +1722,7 @@ fn countbits_constant_call(
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let Expr::Call { name, args, .. } = expression else {
+    let Expr::Call { args, .. } = expression else {
         return None;
     };
     let mut args = args.into_iter().collect::<Option<Vec<_>>>()?;
@@ -1726,12 +1737,11 @@ fn countbits_constant_call(
             control => expr_to_const(control),
         })
         .collect::<Option<Vec<_>>>()?;
-    countbits_constant_operand(operand, &name, &controls, const_env)
+    countbits_constant_operand(operand, &controls, const_env)
 }
 
 fn countbits_constant_operand(
     operand: Expr,
-    name: &str,
     controls: &[ConstExpr],
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
@@ -1739,7 +1749,7 @@ fn countbits_constant_operand(
         let mut args = Vec::with_capacity(controls.len() + 1);
         args.push(operand);
         args.extend_from_slice(controls);
-        ConstExpr::call(name.to_string(), args)
+        ConstExpr::call(Callee::System(SystemFunction::Countbits), args)
     };
     let sum = |mut terms: Vec<ConstExpr>| {
         // Keep large selected vectors from creating a deeply nested sum.
@@ -1780,15 +1790,14 @@ fn countbits_constant_operand(
         }
         Expr::Concat(parts) => sum(parts
             .into_iter()
-            .map(|part| countbits_constant_operand(part, name, controls, const_env))
+            .map(|part| countbits_constant_operand(part, controls, const_env))
             .collect::<Option<Vec<_>>>()?),
         Expr::RepeatConcat { count, parts } => {
             let count = eval_ast_const_expr(&count, const_env)?;
             if count < 0 {
                 return None;
             }
-            let counted =
-                countbits_constant_operand(Expr::Concat(parts), name, controls, const_env)?;
+            let counted = countbits_constant_operand(Expr::Concat(parts), controls, const_env)?;
             Some(ConstExpr::Binary {
                 left: Box::new(counted),
                 op: BinaryOp::Mul,

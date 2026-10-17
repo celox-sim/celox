@@ -23,6 +23,21 @@ export function batchPullRequestNumbers(metadata) {
   return numbers;
 }
 
+// Mergify's queue lands stack members on the stack root, while each member
+// targets the head branch of the member below it. Resolve that root through
+// the `Depends-On:` chain, matching the queue's own stack recognition.
+export async function stackRootRef(repository, pull, api = githubJson) {
+  for (let depth = 0; depth < 20; depth++) {
+    const ref = pull.base?.ref;
+    const below = /^Depends-On: #(\d+)\s*$/m.exec(pull.body ?? "");
+    if (!ref?.startsWith("stack/") || !below) return ref;
+    pull = await api(`/repos/${repository}/pulls/${below[1]}`);
+    if (pull.head?.ref !== ref || pull.head?.repo?.full_name !== repository)
+      return ref;
+  }
+  throw new Error("Stack is deeper than the merge queue supports");
+}
+
 export async function validateBatch(
   { repository, number, sha, metadata },
   api = githubJson,
@@ -93,7 +108,7 @@ export async function validateBatch(
     if (sourceNumber === number) throw new Error("Batch cannot contain itself");
     const source = await api(`/repos/${repository}/pulls/${sourceNumber}`);
     if (
-      source.base?.ref !== batch.base.ref ||
+      (await stackRootRef(repository, source, api)) !== batch.base.ref ||
       !isConventionalPrTitle(source.title)
     ) {
       throw new Error(`Invalid title or base for #${sourceNumber}`);

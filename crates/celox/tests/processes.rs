@@ -267,14 +267,26 @@ fn checkpoint_restores_a_suspended_process() {
 }
 
 #[test]
-fn state_files_reject_processes() {
+fn state_files_record_suspended_processes() {
     let mut sim = Simulation::from_frontend(clocked_counter())
         .build()
         .unwrap();
-    assert!(matches!(
-        sim.save_state(),
-        Err(celox::StateError::Processes)
-    ));
+    sim.run_until(52).unwrap();
+    let file = sim.save_state().unwrap();
+    let mut bytes = Vec::new();
+    file.write_to(&mut bytes).unwrap();
+    let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+
+    let mut restored = Simulation::from_frontend(clocked_counter())
+        .build()
+        .unwrap();
+    restored.load_state(&file).unwrap();
+    assert_eq!(restored.time(), 52);
+    let count = restored.signal("count");
+    assert_eq!(restored.get(count), 5u8.into());
+    // The clock process resumes where it was suspended.
+    restored.run_until(100).unwrap();
+    assert_eq!(restored.get(count), 10u8.into());
 }
 
 #[test]

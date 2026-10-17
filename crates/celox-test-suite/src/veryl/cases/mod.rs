@@ -8,6 +8,10 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/veryl/cases/tb_string.vtest",
+        text: include_str!("tb_string.vtest"),
+    },
+    Group {
         file: "src/veryl/cases/partial_word_shift.vtest",
         text: include_str!("partial_word_shift.vtest"),
     },
@@ -134,6 +138,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/veryl/cases/linear_sorter_pull.vtest",
         text: include_str!("linear_sorter_pull.vtest"),
+    },
+    Group {
+        file: "src/veryl/cases/logical_shift_count.vtest",
+        text: include_str!("logical_shift_count.vtest"),
     },
     Group {
         file: "src/veryl/cases/loop_idiom.vtest",

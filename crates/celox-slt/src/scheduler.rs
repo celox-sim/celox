@@ -692,6 +692,16 @@ where
             }
         }
     }
+    // A process publishes multiple outputs but owns one activation guard and
+    // RNG state. Keep its projections ordered, including in cyclic schedules.
+    let mut previous_process_path = HashMap::default();
+    for (index, path) in input.iter().enumerate() {
+        if let LogicPathTarget::Process { process, .. } = &path.target {
+            if let Some(previous) = previous_process_path.insert(*process, index) {
+                dependencies.push(previous, index);
+            }
+        }
+    }
     dependencies.canonicalize();
     values.canonicalize();
     Ok(LogicPathMemorySsa {
@@ -1014,6 +1024,13 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                     sites: path.comb_capture_enable_sites.clone(),
                 });
             }
+        }
+        LogicPathTarget::Process { unit, .. } => {
+            // The unit can write every output of its process, not only this
+            // path's scheduling target. Do not reuse values across the call.
+            lower_cache.clear();
+            builder.inline_execution_unit(unit);
+            lower_cache.clear();
         }
         LogicPathTarget::CombCaptureEvent {
             site_id,
@@ -1724,7 +1741,7 @@ fn build_fold_group_schedule_index<Addr: Clone + Eq + Ord + Hash + Copy>(
             .map(|(_, node)| *node)
             .chain(path.pre_lower_nodes.iter().copied())
             .chain(match &path.target {
-                LogicPathTarget::Var(_) => Vec::new(),
+                LogicPathTarget::Var(_) | LogicPathTarget::Process { .. } => Vec::new(),
                 LogicPathTarget::CombCaptureEvent {
                     guard,
                     args,
@@ -2906,8 +2923,10 @@ fn stable_topological_sccs(
 }
 
 fn logic_path_is_scheduling_barrier<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> bool {
-    matches!(path.target, LogicPathTarget::CombCaptureEvent { .. })
-        || !path.comb_capture_enable_sites.is_empty()
+    matches!(
+        path.target,
+        LogicPathTarget::CombCaptureEvent { .. } | LogicPathTarget::Process { .. }
+    ) || !path.comb_capture_enable_sites.is_empty()
 }
 
 fn cached_logic_path_roots<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> Vec<NodeId> {
