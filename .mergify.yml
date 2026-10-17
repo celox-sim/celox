@@ -130,7 +130,13 @@ queue_rules:
     queue_conditions:
       - -head ~= ^renovate/
       - -head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
-      - base ~= ^(master|develop)$
+      - or:
+          - base ~= ^(master|develop)$
+          # A Mergify stack member targets the member below it; the queue
+          # lands the stack on its root, which the bottom member must match.
+          - and:
+              - base ~= ^stack/
+              - 'body ~= (?m)^Depends-On: '
       - -draft
       - -label = release:hold
       # A release is only eligible after the weekly workflow requests it.
@@ -143,7 +149,13 @@ queue_rules:
 pull_request_rules:
   - name: Queue explicitly requested merges
     conditions:
-      - base ~= ^(master|develop)$
+      - or:
+          - base ~= ^(master|develop)$
+          # A Mergify stack member targets the member below it; the queue
+          # lands the stack on its root, which the bottom member must match.
+          - and:
+              - base ~= ^stack/
+              - 'body ~= (?m)^Depends-On: '
       - label = merge-ready
       - -label = release:hold
       - -label = dequeued

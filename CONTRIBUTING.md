@@ -149,6 +149,14 @@ This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
 See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
+[Mergify stacks](https://docs.mergify.com/merge-queue/stacks/) (`stack/*`
+heads pushed by `mergify stack push --no-github-native`) use the `changes`
+queue. A member above the bottom targets the branch below it and carries a
+`Depends-On: #N` marker; the queue accepts it on that basis and lands the whole
+chain on the stack root, bottom-up. Queueing the top member queues every member
+below it. The batch validator resolves each member's root through the same
+marker chain, so a stack branch without it is still refused.
+
 Lydite tests use the independent change-selected and daily cadence described
 below, including on Mergify queue draft PRs.
 The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;
