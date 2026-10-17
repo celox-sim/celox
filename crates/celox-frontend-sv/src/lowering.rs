@@ -139,8 +139,8 @@ pub(crate) struct LoweredSvInstance {
 pub(crate) struct LoweredSvParameterOverride {
     pub name: String,
     pub value: Option<sv::ir::ConstExpr>,
-    /// The data type bound to a `parameter type`, as source text.
-    pub type_text: Option<String>,
+    /// The data type resolved in the instantiating scope.
+    pub bound_type: Option<sv::ast::Type>,
     pub pattern_text: Option<String>,
 }
 
@@ -1294,7 +1294,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 .map(|(name, value)| LoweredSvParameterOverride {
                     name: name.clone(),
                     value: Some(value.expression()),
-                    type_text: None,
+                    bound_type: None,
                     pattern_text: None,
                 })
                 .collect();
@@ -1309,7 +1309,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 .map(|(name, value)| LoweredSvParameterOverride {
                     name: name.clone(),
                     value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
-                    type_text: None,
+                    bound_type: None,
                     pattern_text: None,
                 })
                 .collect();
@@ -1370,7 +1370,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                         .map(|(name, value)| LoweredSvParameterOverride {
                             name: name.clone(),
                             value: Some(value.expression()),
-                            type_text: None,
+                            bound_type: None,
                             pattern_text: None,
                         })
                         .collect();
@@ -1579,7 +1579,7 @@ pub fn schedule_sources(
             .map(|(name, value)| LoweredSvParameterOverride {
                 name: name.clone(),
                 value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
-                type_text: None,
+                bound_type: None,
                 pattern_text: None,
             })
             .collect(),
@@ -1764,11 +1764,11 @@ fn specialize_module(
     ff_parts: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    // A `parameter type` is bound by rewriting its default in the module source.
-    let type_overrides: Vec<(String, String)> = key
+    // Type bindings are already resolved in the caller scope.
+    let type_overrides: Vec<_> = key
         .parameter_overrides
         .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.type_text.clone()?)))
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_type.clone()?)))
         .collect();
     let pattern_overrides: Vec<_> = key
         .parameter_overrides
@@ -2157,7 +2157,7 @@ fn lower_parameter_overrides(
             LoweredSvParameterOverride {
                 name: parameter.name().to_string(),
                 value,
-                type_text: parameter.type_text().map(str::to_string),
+                bound_type: parameter.bound_type().cloned(),
                 pattern_text: parameter.pattern_text().map(str::to_string),
             }
         })

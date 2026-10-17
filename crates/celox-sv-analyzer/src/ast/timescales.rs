@@ -1631,19 +1631,28 @@ mod tests {
         )
         .unwrap();
         let packages = crate::ParsedSource::analyze_packages(&[&source, &unused]).unwrap();
-        for ty in ["logic [7:0]", "logic [3:0]", "logic [7:0]"] {
+        for width in [8, 4, 8] {
+            let mut ty = Type::new(TypeKind::Logic);
+            ty.packed_ranges = vec![PackedRange::new(
+                ConstExpr::Literal((width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            )];
             let before = COLLECTIONS.with(std::cell::Cell::get);
             let result = source
                 .analyze_module(
                     "Child",
                     &HashMap::default(),
-                    &[("T".into(), ty.into())],
+                    &[("T".into(), ty)],
                     &ModuleInterfaces::default(),
                     &packages,
                 )
                 .unwrap();
             let after = COLLECTIONS.with(std::cell::Cell::get);
-            assert_eq!(after - before, 1, "recollected time scopes for {ty}");
+            assert_eq!(
+                after - before,
+                0,
+                "recollected cached time scopes for width {width}"
+            );
             let values: Vec<_> = result.modules()[0]
                 .parameters()
                 .iter()

@@ -417,7 +417,7 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
-    type_text: Option<String>,
+    bound_type: Option<crate::ast::Type>,
     pattern_text: Option<String>,
 }
 
@@ -425,13 +425,13 @@ impl ParameterOverride {
     pub(crate) fn new(
         name: String,
         value: Option<ConstExpr>,
-        type_text: Option<String>,
+        bound_type: Option<crate::ast::Type>,
         pattern_text: Option<String>,
     ) -> Self {
         Self {
             name,
             value,
-            type_text,
+            bound_type,
             pattern_text,
         }
     }
@@ -449,9 +449,9 @@ impl ParameterOverride {
         self.value.as_ref()
     }
 
-    /// The source text of the data type bound to a `parameter type`.
-    pub fn type_text(&self) -> Option<&str> {
-        self.type_text.as_deref()
+    /// The data type resolved in the instantiating scope.
+    pub fn bound_type(&self) -> Option<&crate::ast::Type> {
+        self.bound_type.as_ref()
     }
 }
 

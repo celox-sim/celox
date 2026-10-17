@@ -769,3 +769,122 @@ endmodule
   (assert_eq wide_match 1)
   (modify (set wide (fourstate (<< 1 65) (<< 1 100))))
   (assert_eq wide_match 2))
+
+(case type_parameter_bindings_use_caller_scope
+  (source "caller_type_bindings.sv" #"
+    package bindings_pkg;
+      typedef logic signed [7:0] signed_byte_t;
+    endpackage
+    module Child #(parameter int W = 2, parameter type T = logic [W-1:0],
+                   parameter type U = T)
+        (input U a, output U y, output logic [7:0] width, output logic negative);
+      typedef U value_t;
+      function automatic value_t identity(input value_t x); return x; endfunction
+      assign y = identity(a);
+      assign width = $bits(T);
+      assign negative = a < 0;
+    endmodule
+    module Mid #(parameter type U = logic [7:0])
+        (input U a, output U y, output logic [7:0] width, output logic negative);
+      Child #(.T(U)) child(.a(a), .y(y), .width(width), .negative(negative));
+    endmodule
+    module Top(input logic [7:0] a,
+               output logic [7:0] literal_y, named_y, forwarded_y,
+               output logic [7:0] literal_width, named_width, forwarded_width,
+               output logic literal_negative, named_negative, forwarded_negative);
+      localparam W = 8;
+      Child #(.T(logic signed [W-1:0])) literal_inst
+        (.a(a), .y(literal_y), .width(literal_width), .negative(literal_negative));
+      Child #(.T(bindings_pkg::signed_byte_t)) named_inst
+        (.a(a), .y(named_y), .width(named_width), .negative(named_negative));
+      Mid #(.U(bindings_pkg::signed_byte_t)) forwarded_inst
+        (.a(a), .y(forwarded_y), .width(forwarded_width), .negative(forwarded_negative));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 7 127 128 255)
+    (modify (set a value))
+    (assert_eq literal_y value)
+    (assert_eq named_y value)
+    (assert_eq forwarded_y value)
+    (assert_eq literal_width 8)
+    (assert_eq named_width 8)
+    (assert_eq forwarded_width 8)
+    (assert_eq literal_negative (>= value 128))
+    (assert_eq named_negative (>= value 128))
+    (assert_eq forwarded_negative (>= value 128))))
+
+(case type_parameter_bindings_preserve_packed_members
+  (source "packed_type_bindings.sv" #"
+    module Child #(type T = logic [7:0])(input T a, output T y,
+                                        output logic [7:0] width);
+      assign y = a;
+      assign width = $bits(T);
+    endmodule
+    module Mid #(parameter type T = logic [7:0])(input T a, output T y,
+                                                output logic [7:0] width);
+      Child #(T) c(.a(a), .y(y), .width(width));
+    endmodule
+    module Top(input logic [7:0] a, output logic [3:0] hi, lo,
+               output logic [7:0] width);
+      typedef struct packed {logic [3:0] upper; logic [3:0] lower;} pair_t;
+      pair_t result;
+      Mid #(.T(pair_t)) m(.a(a), .y(result), .width(width));
+      assign hi = result.upper;
+      assign lo = result.lower;
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 15 16 165 255)
+    (modify (set a value))
+    (assert_eq hi (>> value 4))
+    (assert_eq lo (& value 15))
+    (assert_eq width 8)))
+
+(case type_parameter_bindings_preserve_alias_dimensions
+  (source "type_alias_dimensions.sv" #"
+    module Child #(parameter type T = logic signed [3:0],
+                   parameter type U = T [1:0])
+        (input T a, output T y, output U pairs,
+         output logic [7:0] t_bits, u_bits,
+         output logic whole_negative, element_negative);
+      assign y = a;
+      assign pairs = {a, a};
+      assign t_bits = $bits(T);
+      assign u_bits = $bits(U);
+      assign whole_negative = a < 0;
+      assign element_negative = a[0] < 0;
+    endmodule
+    module Top(input logic [7:0] a, output logic [7:0] y,
+               output logic [15:0] pairs,
+               output logic [7:0] t_bits, u_bits,
+               output logic whole_negative, element_negative,
+               output logic [3:0] default_y,
+               output logic [7:0] default_pairs, default_t_bits, default_u_bits,
+               output logic default_whole_negative, default_element_negative);
+      typedef logic signed [3:0] nibble_t;
+      localparam N = 2;
+      Child #(.T(nibble_t [N-1:0])) bound_inst
+        (.a(a), .y(y), .pairs(pairs), .t_bits(t_bits), .u_bits(u_bits),
+         .whole_negative(whole_negative), .element_negative(element_negative));
+      Child default_inst
+        (.a(a[3:0]), .y(default_y), .pairs(default_pairs),
+         .t_bits(default_t_bits), .u_bits(default_u_bits),
+         .whole_negative(default_whole_negative), .element_negative(default_element_negative));
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 7 8 15 128 165 255)
+    (modify (set a value))
+    (assert_eq y value)
+    (assert_eq pairs (| (<< value 8) value))
+    (assert_eq t_bits 8)
+    (assert_eq u_bits 16)
+    (assert_eq whole_negative 0)
+    (assert_eq element_negative (>= (& value 15) 8))
+    (assert_eq default_y (& value 15))
+    (assert_eq default_pairs (* (& value 15) 17))
+    (assert_eq default_t_bits 4)
+    (assert_eq default_u_bits 8)
+    (assert_eq default_whole_negative (>= (& value 15) 8))
+    (assert_eq default_element_negative 0)))

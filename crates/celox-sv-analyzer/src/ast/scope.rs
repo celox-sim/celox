@@ -22,6 +22,8 @@ pub(super) struct ScopeSymbols {
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
     pub type_aliases: HashMap<String, Type>,
+    /// Bound type parameters, keyed by their declaration offset in this tree.
+    pub type_parameter_bindings: HashMap<usize, Type>,
     pub enum_constants: EnumMemberConstants,
     pub functions: HashMap<String, Function>,
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
@@ -370,6 +372,7 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            type_parameter_bindings: self.type_parameter_bindings.clone(),
             const_env,
             parameter_values: self
                 .parameter_values
