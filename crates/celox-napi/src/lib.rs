@@ -1909,6 +1909,31 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("{}", e)))
     }
 
+    /// Advance until `end_time` taking at most `max_steps` steps. Returns
+    /// false, at the time of the last step, when the steps ran out first.
+    #[napi]
+    pub fn run_until_bounded(&mut self, end_time: f64, max_steps: f64) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.run_until_bounded(end_time as u64, max_steps as u64)
+            .map_err(|e| Error::from_reason(format!("{}", e)))
+    }
+
+    /// Report that the host wrote the state through the shared memory: the
+    /// next step settles the current time when a process may see the writes
+    /// or an event signal changed.
+    #[napi]
+    pub fn note_host_writes(&mut self) -> Result<()> {
+        let sim = self
+            .sim
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        sim.note_raw_writes();
+        Ok(())
+    }
+
     /// Advance to the next event. Returns the new time, or null if no events.
     #[napi]
     pub fn step(&mut self) -> Result<Option<f64>> {

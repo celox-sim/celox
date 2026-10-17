@@ -1985,22 +1985,15 @@ impl SimBackend for InterpBackend {
     }
 
     fn get_triggered_bits(&self) -> bit_set::BitSet {
-        let mut bits = bit_set::BitSet::with_capacity(self.num_events());
         let base_ptr = self.memory.as_ptr() as *const u8;
-        let triggered_bits_ptr = unsafe { base_ptr.add(self.layout.triggered_bits_offset) };
-        let total_size = self.layout.triggered_bits_total_size;
-
-        for i in 0..total_size {
-            let byte = unsafe { *triggered_bits_ptr.add(i) };
-            if byte != 0 {
-                for j in 0..8 {
-                    if (byte & (1 << j)) != 0 {
-                        bits.insert(i * 8 + j);
-                    }
-                }
-            }
-        }
-        bits
+        // Safety: the triggered bits lie within the memory image.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                base_ptr.add(self.layout.triggered_bits_offset),
+                self.layout.triggered_bits_total_size,
+            )
+        };
+        celox_runtime::backend::triggered_bits_from_bytes(bytes)
     }
 }
 

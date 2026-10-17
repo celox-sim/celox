@@ -131,7 +131,8 @@ with the same width. If any is missing, nothing is changed and the error lists
 the differences. Combinational signals are recomputed after loading, so they
 need not match; their saved values only seed combinational loops declared with
 `true_loop`, which settle back into the saved state. A `Simulation` state file also records the time, clocks and
-pending events by name.
+pending events by name, and where the design's processes are suspended or
+waiting.
 
 The `celox` command line tool inspects state files:
 

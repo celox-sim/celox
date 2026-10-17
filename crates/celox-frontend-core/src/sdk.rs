@@ -1,13 +1,14 @@
 //! Projection from the stable frontend SDK into Celox symbolic internals.
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId,
-    PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase,
-    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
+    BinaryOp, BitAccess, CounterKind, DomainKind, InitialStateData, InitialStateValue, ModuleId,
+    NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots,
+    RegionedVarAddrBase, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata,
+    WORKING_REGION, WaitSite,
 };
 use celox_frontend_sdk::{
-    ActiveLevel, Direction, Edge, ExprId, ExprNode, FrontendArtifact, SignalId, SignalSlice,
-    Statement, ValueType,
+    ActiveLevel, Direction, Edge, EventEdge, ExprId, ExprNode, FrontendArtifact, SignalId,
+    SignalSlice, Statement, ValueType,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -1029,34 +1030,222 @@ fn lower_registers(
     Ok(())
 }
 
+/// Hidden state objects the lowering declares after the artifact's signals:
+/// process control slots, counters, staging and gate objects. None of them
+/// is a signal of the design.
+struct HiddenObjects<'a> {
+    next_id: u32,
+    variables: &'a mut HashMap<SourceVarId, SymbolicVariable>,
+}
+
+impl HiddenObjects<'_> {
+    fn declare(&mut self, path: Vec<String>, width: usize, four_state: bool) -> SourceVarId {
+        let id = SourceVarId(self.next_id);
+        self.next_id += 1;
+        self.variables.insert(
+            id,
+            SymbolicVariable {
+                path,
+                kind: VariableKind::Variable,
+                signed: false,
+                metadata: VariableMetadata {
+                    width,
+                    is_4state: four_state,
+                    kind: DomainKind::Other,
+                    type_kind: if four_state {
+                        PortTypeKind::Logic
+                    } else {
+                        PortTypeKind::Bit
+                    },
+                    array_dims: Vec::new(),
+                },
+                packed_dims: vec![width],
+                source: None,
+                module_affiliated: false,
+            },
+        );
+        id
+    }
+}
+
+/// Timing metadata collected while lowering the processes of an artifact.
+struct ProcessLowering<'a, 'h> {
+    artifact: &'a FrontendArtifact,
+    hidden: &'a mut HiddenObjects<'h>,
+    wait_sites: Vec<WaitSite<SourceVarId>>,
+    nba_sites: Vec<NbaSite<SourceVarId>>,
+    /// Signals that exactly one nonblocking statement of the artifact
+    /// assigns. An artifact is one flat module whose processes never run
+    /// inside another design, so nothing outside it writes its signals and
+    /// these sites stage a single pending value.
+    single_nba_targets: HashSet<SignalId>,
+    process: usize,
+    process_wait_sites: u32,
+    process_nba_sites: u32,
+    /// Loops given an iteration counter so far.
+    counted_loops: usize,
+}
+
+fn collect_nonblocking_targets(statements: &[Statement], targets: &mut Vec<SignalId>) {
+    for statement in statements {
+        match statement {
+            Statement::Nonblocking { target, .. } => targets.push(target.signal()),
+            Statement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_nonblocking_targets(then_body, targets);
+                collect_nonblocking_targets(else_body, targets);
+            }
+            Statement::While { body, .. } | Statement::Forever { body } => {
+                collect_nonblocking_targets(body, targets);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A one-bit two-state register that holds when `condition` is nonzero: some
+/// bit is a known one.
+fn truth(
+    artifact: &FrontendArtifact,
+    condition: ExprId,
+    builder: &mut SIRBuilder<RegionedSourceAddr>,
+) -> Result<RegisterId, FrontendArtifactError> {
+    let value_type = artifact
+        .expression(condition)
+        .ok_or(FrontendArtifactError::UnknownExpression(condition.index()))?
+        .value_type();
+    let value = lower_sir_expression(artifact, condition, builder, &mut HashMap::default())?;
+    let any = alloc_register(
+        builder,
+        ValueType::new(1, false, value_type.is_four_state())?,
+    );
+    builder.emit(SIRInstruction::Unary(any, UnaryOp::Or, value));
+    if !value_type.is_four_state() {
+        return Ok(any);
+    }
+    let known = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, any));
+    Ok(known)
+}
+
+fn store_assignment(
+    artifact: &FrontendArtifact,
+    builder: &mut SIRBuilder<RegionedSourceAddr>,
+    target: SignalSlice,
+    value: ExprId,
+    cache: &mut HashMap<ExprId, RegisterId>,
+) -> Result<(), FrontendArtifactError> {
+    let target_type = signal_slice_type(artifact, target)?;
+    let value = coerce_sir_expression(artifact, value, target_type, builder, cache)?;
+    builder.emit(SIRInstruction::Store(
+        RegionedSourceAddr {
+            region: STABLE_REGION,
+            var_id: source_id(target.signal()),
+        },
+        SIROffset::Static(target.lsb()),
+        target.width(),
+        value,
+        Vec::new(),
+        Vec::new(),
+    ));
+    Ok(())
+}
+
 /// Lower `statements` at the kernel's open block. Returns whether control
 /// can continue after them; if not, no block is left open.
+/// Whether `statements` always suspend the process: a loop around them
+/// returns to the runtime in each iteration. A level wait whose condition
+/// holds does not suspend.
+fn always_suspends(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::Delay { .. } | Statement::InactiveDelay { .. } | Statement::WaitEvent { .. }
+        )
+    })
+}
+
+/// Iterations, as a power of two, between the yields of a loop that may not
+/// suspend. A finite loop pays one counter update per iteration, and only a
+/// loop of about 2^40 iterations in one time slot exhausts the runtime's
+/// return budget.
+const LOOP_YIELD_BITS: usize = 16;
+
+/// Close a loop iteration that may not suspend: count it, yield every
+/// 2^[`LOOP_YIELD_BITS`] iterations, and continue at `header`. The count
+/// lives in a hidden object, so it survives the yield.
+fn yield_now_and_then(
+    lowering: &mut ProcessLowering<'_, '_>,
+    kernel: &mut ProcessKernelBuilder,
+    header: BlockId,
+) -> Result<(), FrontendArtifactError> {
+    let counter = stable(lowering.hidden.declare(
+        vec![
+            format!("$loop[{}]", lowering.counted_loops),
+            "iterations".to_string(),
+        ],
+        LOOP_YIELD_BITS,
+        false,
+    ));
+    lowering.counted_loops += 1;
+    let builder = kernel.builder();
+    let count = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Load(
+        count,
+        counter,
+        SIROffset::Static(0),
+        LOOP_YIELD_BITS,
+    ));
+    let one = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+    let next = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+    builder.emit(SIRInstruction::Store(
+        counter,
+        SIROffset::Static(0),
+        LOOP_YIELD_BITS,
+        next,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let zero = builder.alloc_bit(LOOP_YIELD_BITS, false);
+    builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+    let wrapped = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Binary(wrapped, next, BinaryOp::Eq, zero));
+    let yield_block = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: wrapped,
+        true_block: (yield_block, Vec::new()),
+        false_block: (header, Vec::new()),
+    });
+    builder.switch_to_block(yield_block);
+    kernel.yield_now()?;
+    kernel
+        .builder()
+        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+    Ok(())
+}
+
+/// Lower `statements` into `kernel`. A loop whose body may not suspend
+/// yields every 2^[`LOOP_YIELD_BITS`] iterations, so that the runtime
+/// charges it against the time slot's budget instead of spinning in the
+/// kernel.
 fn lower_statements(
-    artifact: &FrontendArtifact,
+    lowering: &mut ProcessLowering<'_, '_>,
     kernel: &mut ProcessKernelBuilder,
     statements: &[Statement],
 ) -> Result<bool, FrontendArtifactError> {
+    let artifact = lowering.artifact;
     for statement in statements {
         // Registers do not live across statements: a suspension in between
         // returns to the runtime, and each read must see the current state.
         let mut cache = HashMap::default();
         match statement {
             Statement::Assign { target, value } => {
-                let target_type = signal_slice_type(artifact, *target)?;
-                let builder = kernel.builder();
-                let value =
-                    coerce_sir_expression(artifact, *value, target_type, builder, &mut cache)?;
-                builder.emit(SIRInstruction::Store(
-                    RegionedSourceAddr {
-                        region: STABLE_REGION,
-                        var_id: source_id(target.signal()),
-                    },
-                    SIROffset::Static(target.lsb()),
-                    target.width(),
-                    value,
-                    Vec::new(),
-                    Vec::new(),
-                ));
+                store_assignment(artifact, kernel.builder(), *target, *value, &mut cache)?;
             }
             Statement::If {
                 condition,
@@ -1075,7 +1264,7 @@ fn lower_statements(
                 let mut join = None;
                 for (block, body) in [(then_block, then_body), (else_block, else_body)] {
                     kernel.builder().switch_to_block(block);
-                    if lower_statements(artifact, kernel, body)? {
+                    if lower_statements(lowering, kernel, body)? {
                         let builder = kernel.builder();
                         let target = *join.get_or_insert_with(|| builder.new_block());
                         builder.seal_block(SIRTerminator::Jump(target, Vec::new()));
@@ -1100,10 +1289,14 @@ fn lower_statements(
                     false_block: (exit, Vec::new()),
                 });
                 builder.switch_to_block(body_block);
-                if lower_statements(artifact, kernel, body)? {
-                    kernel
-                        .builder()
-                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                if lower_statements(lowering, kernel, body)? {
+                    if always_suspends(body) {
+                        kernel
+                            .builder()
+                            .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                    } else {
+                        yield_now_and_then(lowering, kernel, header)?;
+                    }
                 }
                 kernel.builder().switch_to_block(exit);
             }
@@ -1112,14 +1305,18 @@ fn lower_statements(
                 let header = builder.new_block();
                 builder.seal_block(SIRTerminator::Jump(header, Vec::new()));
                 builder.switch_to_block(header);
-                if lower_statements(artifact, kernel, body)? {
-                    kernel
-                        .builder()
-                        .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                if lower_statements(lowering, kernel, body)? {
+                    if always_suspends(body) {
+                        kernel
+                            .builder()
+                            .seal_block(SIRTerminator::Jump(header, Vec::new()));
+                    } else {
+                        yield_now_and_then(lowering, kernel, header)?;
+                    }
                 }
                 return Ok(false);
             }
-            Statement::Delay { amount } => {
+            Statement::Delay { amount } | Statement::InactiveDelay { amount } => {
                 let amount = coerce_sir_expression(
                     artifact,
                     *amount,
@@ -1127,7 +1324,101 @@ fn lower_statements(
                     kernel.builder(),
                     &mut cache,
                 )?;
-                kernel.delay(amount)?;
+                if matches!(statement, Statement::Delay { .. }) {
+                    kernel.delay(amount)?;
+                } else {
+                    kernel.inactive_delay(amount)?;
+                }
+            }
+            Statement::WaitEvent { terms } => {
+                let index = lowering.process_wait_sites;
+                lowering.process_wait_sites += 1;
+                lowering.wait_sites.push(WaitSite {
+                    process: lowering.process,
+                    terms: terms
+                        .iter()
+                        .map(|term| {
+                            let kind = match term.edge {
+                                EventEdge::Change => CounterKind::Changes,
+                                EventEdge::Posedge => CounterKind::Rises,
+                                EventEdge::Negedge => CounterKind::Falls,
+                            };
+                            (source_id(term.signal), kind)
+                        })
+                        .collect(),
+                });
+                // The runtime resumes the process at the first occurrence
+                // after the wait began; no condition is left to check.
+                kernel.suspend_wait(index)?;
+                let woken = kernel.builder().alloc_bit(1, false);
+                kernel
+                    .builder()
+                    .emit(SIRInstruction::Imm(woken, SIRValue::new(1u8)));
+                kernel.wake_if(woken);
+            }
+            Statement::WaitLevel { condition } => {
+                let index = lowering.process_wait_sites;
+                lowering.process_wait_sites += 1;
+                let mut sources = HashSet::default();
+                expression_sources(artifact, *condition, &mut sources, &mut HashSet::default())?;
+                let mut signals = sources.into_iter().map(|atom| atom.id).collect::<Vec<_>>();
+                signals.sort_unstable();
+                signals.dedup();
+                lowering.wait_sites.push(WaitSite {
+                    process: lowering.process,
+                    terms: signals
+                        .into_iter()
+                        .map(|signal| (signal, CounterKind::Changes))
+                        .collect(),
+                });
+                let mut error = None;
+                kernel.wait_level(index, |builder| {
+                    truth(artifact, *condition, builder).unwrap_or_else(|e| {
+                        error = Some(e);
+                        let never = builder.alloc_bit(1, false);
+                        builder.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
+                        never
+                    })
+                })?;
+                if let Some(error) = error {
+                    return Err(error);
+                }
+            }
+            Statement::Nonblocking { target, value } => {
+                let index = lowering.process_nba_sites;
+                lowering.process_nba_sites += 1;
+                let target_type = signal_slice_type(artifact, *target)?;
+                let site_index = lowering.nba_sites.len();
+                let name = |slot: &str| vec![format!("$nba[{site_index}]"), slot.to_string()];
+                let staged = lowering.hidden.declare(
+                    name("value"),
+                    target.width(),
+                    target_type.is_four_state(),
+                );
+                let pending = lowering
+                    .single_nba_targets
+                    .contains(&target.signal())
+                    .then(|| lowering.hidden.declare(name("pending"), 1, false));
+                let site = NbaSite {
+                    process: lowering.process,
+                    target: source_id(target.signal()),
+                    lsb: target.lsb(),
+                    width: target.width(),
+                    value: staged,
+                    offset: None,
+                    pending,
+                };
+                kernel.nonblocking(index, &site, |builder| {
+                    let value = coerce_sir_expression(
+                        artifact,
+                        *value,
+                        target_type,
+                        builder,
+                        &mut HashMap::default(),
+                    )?;
+                    Ok::<_, FrontendArtifactError>((value, None))
+                })?;
+                lowering.nba_sites.push(site);
             }
             Statement::Finish => {
                 kernel.finish();
@@ -1139,56 +1430,308 @@ fn lower_statements(
     Ok(true)
 }
 
+/// Lower the statements of a combinational process: assignments and
+/// conditionals, writing stable state as they execute.
+fn lower_comb_statements(
+    artifact: &FrontendArtifact,
+    builder: &mut SIRBuilder<RegionedSourceAddr>,
+    statements: &[Statement],
+) -> Result<(), FrontendArtifactError> {
+    for statement in statements {
+        let mut cache = HashMap::default();
+        match statement {
+            Statement::Assign { target, value } => {
+                store_assignment(artifact, builder, *target, *value, &mut cache)?;
+            }
+            Statement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let condition = lower_sir_expression(artifact, *condition, builder, &mut cache)?;
+                let then_block = builder.new_block();
+                let else_block = builder.new_block();
+                let join = builder.new_block();
+                builder.seal_block(SIRTerminator::Branch {
+                    cond: condition,
+                    true_block: (then_block, Vec::new()),
+                    false_block: (else_block, Vec::new()),
+                });
+                for (block, body) in [(then_block, then_body), (else_block, else_body)] {
+                    builder.switch_to_block(block);
+                    lower_comb_statements(artifact, builder, body)?;
+                    builder.seal_block(SIRTerminator::Jump(join, Vec::new()));
+                }
+                builder.switch_to_block(join);
+            }
+            _ => return Err(FrontendArtifactError::UnsupportedOperation),
+        }
+    }
+    Ok(())
+}
+
+/// The bits of `atom` outside every range of `written`.
+fn unwritten_bits(
+    atom: VarAtomBase<SourceVarId>,
+    written: &[VarAtomBase<SourceVarId>],
+) -> Vec<VarAtomBase<SourceVarId>> {
+    let mut ranges = vec![(atom.access.lsb, atom.access.msb)];
+    for written in written.iter().filter(|written| written.id == atom.id) {
+        ranges = ranges
+            .into_iter()
+            .flat_map(|(lsb, msb)| {
+                if written.access.msb < lsb || written.access.lsb > msb {
+                    return vec![(lsb, msb)];
+                }
+                let mut kept = Vec::new();
+                if lsb < written.access.lsb {
+                    kept.push((lsb, written.access.lsb - 1));
+                }
+                if written.access.msb < msb {
+                    kept.push((written.access.msb + 1, msb));
+                }
+                kept
+            })
+            .collect();
+    }
+    ranges
+        .into_iter()
+        .map(|(lsb, msb)| VarAtomBase::new(atom.id, lsb, msb))
+        .collect()
+}
+
+fn statement_sources(
+    artifact: &FrontendArtifact,
+    statements: &[Statement],
+    sources: &mut HashSet<VarAtomBase<SourceVarId>>,
+) -> Result<(), FrontendArtifactError> {
+    for statement in statements {
+        let mut visited = HashSet::default();
+        match statement {
+            Statement::Assign { value, .. } => {
+                expression_sources(artifact, *value, sources, &mut visited)?
+            }
+            Statement::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                expression_sources(artifact, *condition, sources, &mut visited)?;
+                statement_sources(artifact, then_body, sources)?;
+                statement_sources(artifact, else_body, sources)?;
+            }
+            _ => return Err(FrontendArtifactError::UnsupportedOperation),
+        }
+    }
+    Ok(())
+}
+
+fn stable(var_id: SourceVarId) -> RegionedSourceAddr {
+    RegionedSourceAddr {
+        region: STABLE_REGION,
+        var_id,
+    }
+}
+
+fn stable_signal(address: &RegionedSourceAddr, signals: usize) -> Option<SourceVarId> {
+    (address.region == STABLE_REGION && (address.var_id.0 as usize) < signals)
+        .then_some(address.var_id)
+}
+
+/// Lower each combinational process to one unit that runs only when it has
+/// not run yet or bits it reads and does not write changed (IEEE 1800-2023
+/// 9.2.2.2, 9.2.2.2.1), and to a path for each slice it assigns.
+fn lower_comb_processes(
+    artifact: &FrontendArtifact,
+    hidden: &mut HiddenObjects<'_>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    candidates: &mut Vec<SourceVarId>,
+) -> Result<Vec<LogicPath<SourceVarId>>, FrontendArtifactError> {
+    let mut paths = Vec::new();
+    for (index, process) in artifact.comb_processes().iter().enumerate() {
+        let mut builder = SIRBuilder::new();
+        lower_comb_statements(artifact, &mut builder, process.body())?;
+        let body = seal_builder(builder);
+        candidates.extend(crate::watch::multi_store_candidates(&body, |address| {
+            stable_signal(address, artifact.signals().len())
+        }));
+
+        let mut targets = Vec::new();
+        for block in body.blocks.values() {
+            for instruction in &block.instructions {
+                if let SIRInstruction::Store(address, SIROffset::Static(lsb), width, ..) =
+                    instruction
+                {
+                    let atom = VarAtomBase::new(address.var_id, *lsb, lsb + width - 1);
+                    if !targets.contains(&atom) {
+                        targets.push(atom);
+                    }
+                }
+            }
+        }
+        targets.sort_unstable_by_key(|atom| (atom.id, atom.access.lsb, atom.access.msb));
+        // One path per range the process drives, however often it writes it.
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for target in targets {
+            match merged.last_mut() {
+                Some(last) if last.id == target.id && target.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(target.access.msb);
+                }
+                _ => merged.push(target),
+            }
+        }
+        let targets = merged;
+        // A process is not sensitive to what it writes (IEEE 1800-2023
+        // 9.2.2.2.1): its inputs are the bits it reads outside its targets.
+        let mut reads = HashSet::default();
+        statement_sources(artifact, process.body(), &mut reads)?;
+        let mut sources: Vec<VarAtomBase<SourceVarId>> = reads
+            .into_iter()
+            .flat_map(|atom| unwritten_bits(atom, &targets))
+            .collect();
+        sources.sort_unstable_by_key(|atom| (atom.id, atom.access.lsb, atom.access.msb));
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for source in sources {
+            match merged.last_mut() {
+                Some(last) if last.id == source.id && source.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(source.access.msb);
+                }
+                _ => merged.push(source),
+            }
+        }
+        let sources = merged;
+        let name = |slot: String| vec![format!("$comb[{index}]"), slot];
+        let gate_inputs = sources
+            .iter()
+            .map(|atom| {
+                let value_type = artifact
+                    .signals()
+                    .get(atom.id.0 as usize)
+                    .ok_or(FrontendArtifactError::UnknownSignal(atom.id.0))?
+                    .value_type();
+                let width = atom.access.msb - atom.access.lsb + 1;
+                Ok(crate::watch::GateInput {
+                    input: stable(atom.id),
+                    lsb: atom.access.lsb,
+                    shadow: stable(hidden.declare(
+                        name(format!(
+                            "input[{}][{}:{}]",
+                            atom.id.0, atom.access.msb, atom.access.lsb
+                        )),
+                        width,
+                        value_type.is_four_state(),
+                    )),
+                    width,
+                    four_state: value_type.is_four_state(),
+                })
+            })
+            .collect::<Result<Vec<_>, FrontendArtifactError>>()?;
+        let ran = hidden.declare(name("ran".to_string()), 1, false);
+        let unit = crate::watch::gate_on_input_change(&body, &gate_inputs, &stable(ran))
+            .into_map_addr(&mut |address| address.var_id);
+        let sources: HashSet<_> = sources.into_iter().collect();
+        for target in targets {
+            let expr = arena.alloc(SLTNode::Input {
+                variable: target.id,
+                signed: false,
+                index: Vec::new(),
+                access: target.access,
+            })?;
+            paths.push(LogicPath {
+                target: LogicPathTarget::Process {
+                    process: ran,
+                    after_initials: true,
+                    target,
+                    unit: Box::new(unit.clone()),
+                },
+                sources: sources.clone(),
+                previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+        }
+    }
+    Ok(paths)
+}
+
+/// Lowered processes of an artifact and their timing metadata.
+struct LoweredProcesses {
+    processes: Vec<SymbolicProcess>,
+    wait_sites: Vec<WaitSite<SourceVarId>>,
+    nba_sites: Vec<NbaSite<SourceVarId>>,
+}
+
 /// Declare the control slots of every process after the artifact's signals
 /// and lower each process body to a kernel.
 fn lower_processes(
     artifact: &FrontendArtifact,
-    variables: &mut HashMap<SourceVarId, SymbolicVariable>,
-) -> Result<Vec<SymbolicProcess>, FrontendArtifactError> {
-    let mut next_id = artifact.signals().len() as u32;
-    let mut declare = |path: Vec<String>, width: usize| {
-        let id = SourceVarId(next_id);
-        next_id += 1;
-        variables.insert(
-            id,
-            SymbolicVariable {
-                path,
-                kind: VariableKind::Variable,
-                signed: false,
-                metadata: VariableMetadata {
-                    width,
-                    is_4state: false,
-                    kind: DomainKind::Other,
-                    type_kind: PortTypeKind::Bit,
-                    array_dims: Vec::new(),
-                },
-                packed_dims: vec![width],
-                source: None,
-                // Control slots are not signals of the design.
-                module_affiliated: false,
-            },
-        );
-        id
-    };
-    artifact
-        .processes()
-        .iter()
-        .enumerate()
-        .map(|(index, process)| {
-            let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
-            let slots = ProcessSlots {
-                resume: declare(name("resume"), PROCESS_RESUME_WIDTH),
-                status: declare(name("status"), PROCESS_STATUS_WIDTH),
-                delay: declare(name("delay"), PROCESS_DELAY_WIDTH),
-            };
-            let mut kernel = ProcessKernelBuilder::new(slots);
-            lower_statements(artifact, &mut kernel, process.body())?;
-            Ok(SymbolicProcess {
-                kernel: kernel.build(),
-                slots,
+    hidden: &mut HiddenObjects<'_>,
+    candidates: &mut Vec<SourceVarId>,
+) -> Result<LoweredProcesses, FrontendArtifactError> {
+    let mut nonblocking_targets = Vec::new();
+    for process in artifact.processes() {
+        collect_nonblocking_targets(process.body(), &mut nonblocking_targets);
+    }
+    let mut counts: HashMap<SignalId, usize> = HashMap::default();
+    for target in nonblocking_targets {
+        *counts.entry(target).or_default() += 1;
+    }
+    let mut lowering = ProcessLowering {
+        artifact,
+        hidden,
+        wait_sites: Vec::new(),
+        nba_sites: Vec::new(),
+        // A port may have writers outside the module (`NbaSite::pending`).
+        single_nba_targets: counts
+            .into_iter()
+            .filter(|&(target, count)| {
+                count == 1
+                    && artifact
+                        .signal(target)
+                        .is_some_and(|signal| signal.direction() == Direction::Internal)
             })
-        })
-        .collect()
+            .map(|(target, _)| target)
+            .collect(),
+        process: 0,
+        process_wait_sites: 0,
+        process_nba_sites: 0,
+        counted_loops: 0,
+    };
+    let mut processes = Vec::new();
+    for (index, process) in artifact.processes().iter().enumerate() {
+        let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
+        let slots = ProcessSlots {
+            resume: lowering
+                .hidden
+                .declare(name("resume"), PROCESS_RESUME_WIDTH, false),
+            status: lowering
+                .hidden
+                .declare(name("status"), PROCESS_STATUS_WIDTH, false),
+            delay: lowering
+                .hidden
+                .declare(name("delay"), PROCESS_DELAY_WIDTH, false),
+        };
+        lowering.process = index;
+        lowering.process_wait_sites = 0;
+        lowering.process_nba_sites = 0;
+        let mut kernel = ProcessKernelBuilder::new(slots);
+        lower_statements(&mut lowering, &mut kernel, process.body())?;
+        let kernel = kernel.build();
+        candidates.extend(crate::watch::multi_store_candidates(&kernel, |address| {
+            stable_signal(address, artifact.signals().len())
+        }));
+        processes.push(SymbolicProcess { kernel, slots });
+    }
+    Ok(LoweredProcesses {
+        processes,
+        wait_sites: lowering.wait_sites,
+        nba_sites: lowering.nba_sites,
+    })
 }
 
 fn set_role(
@@ -1281,9 +1824,21 @@ pub fn lower_frontend_artifact(
         })
         .collect();
 
-    let processes = lower_processes(artifact, &mut variables)?;
-
+    let mut hidden = HiddenObjects {
+        next_id: artifact.signals().len() as u32,
+        variables: &mut variables,
+    };
+    let mut candidates = Vec::new();
+    let LoweredProcesses {
+        processes,
+        wait_sites,
+        nba_sites,
+    } = lower_processes(artifact, &mut hidden, &mut candidates)?;
     let mut arena = SLTNodeArena::new();
+    let comb_process_paths =
+        lower_comb_processes(artifact, &mut hidden, &mut arena, &mut candidates)?;
+    let counter_slots = crate::watch::declare_counter_slots(hidden.variables, candidates);
+
     let mut node_cache = HashMap::default();
     let mut comb_blocks = Vec::new();
     for assignment in artifact.assignments() {
@@ -1310,6 +1865,7 @@ pub fn lower_frontend_artifact(
             )?,
         });
     }
+    comb_blocks.extend(comb_process_paths);
 
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
@@ -1362,6 +1918,9 @@ pub fn lower_frontend_artifact(
         reset_clock_map,
         processes,
         package_bindings: HashMap::default(),
+        counter_slots,
+        wait_sites,
+        nba_sites,
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),
