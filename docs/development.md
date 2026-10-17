@@ -3,7 +3,8 @@
 The Linux development environment is defined in `flake.nix` and `flake.lock`.
 It supports x86-64 and AArch64. The host and both devcontainer variants use the
 same tools: Rust, Node.js 24, pnpm, Python with cocotb, Verilator, C/C++ build
-tools, mold, cargo-insta, and mbx. Rust reads `rust-toolchain.toml`. Corepack selects
+tools, mold, cargo-insta, mbx, and the Mergify CLI (`mergify`) for stacked pull
+requests. Rust reads `rust-toolchain.toml`. Corepack selects
 pnpm from the nearest `package.json` with a `packageManager` field, so pnpm
 updates do not depend on the version available in nixpkgs. The first use of a
 version requires network access to download it into the user's Corepack cache;
@@ -213,6 +214,10 @@ is not supported by the pinned overlay fails CI before merge.
 When updating pnpm, update `packageManager` in `package.json` and the pnpm
 lockfile as needed; no Nix version or hash update is required. Verify with
 `nix develop --command pnpm --version` (also from a workspace package directory).
+The Mergify CLI is defined in `nix/mergify-cli.nix` from upstream's prebuilt
+release binaries, the only unfree package the flake allows. To update it, set
+its version and replace both Linux hashes with the SRI form of the release's
+`SHA256SUMS` entries (`nix hash convert --hash-algo sha256 --to sri <hex>`).
 mbx comes from [tignear/nix-packages](https://github.com/tignear/nix-packages).
 Run `nix flake update nix-packages` to update its pinned package definition.
 The `Update mbx` workflow checks that input daily at 05:37 UTC and can also

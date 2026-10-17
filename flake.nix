@@ -33,6 +33,8 @@
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
+            # Only the proprietary Mergify CLI may bypass the free-license check.
+            config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "mergify-cli";
           };
           toolchain = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
           rust = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
@@ -46,6 +48,7 @@
             targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [ "wasm32-unknown-unknown" ]);
           };
           mbx = nix-packages.packages.${system}.mbx;
+          mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };
           # mbx recognizes a symlink named cargo and preserves Cargo's CLI,
           # including --version. Real Cargo must remain later on PATH.
           cargoShim = pkgs.runCommand "celox-cargo-shim" { } ''
@@ -77,6 +80,7 @@
             pkgs.git
             pkgs.curl
             pkgs.jq
+            mergify-cli
             pkgs.direnv
             pkgs.nix-direnv
             pkgs.nixfmt
@@ -87,6 +91,7 @@
           inherit
             pkgs
             mbx
+            mergify-cli
             tools
             python
             rust
@@ -102,7 +107,7 @@
           e = environments.${system};
         in
         {
-          inherit (e) mbx;
+          inherit (e) mbx mergify-cli;
           # The devcontainer uses this profile for editor and non-shell commands.
           dev-tools = e.pkgs.buildEnv {
             name = "celox-dev-tools";
