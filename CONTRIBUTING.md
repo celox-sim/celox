@@ -225,7 +225,10 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   replaces it. Re-enable nothing under the old path.
 - Shared dependency/toolchain configuration runs the core lane; an unreadable
   diff or dependency graph runs both lanes. The graph includes optional, build
-  and dev edges.
+  and dev edges. A `Cargo.lock` diff selects a lane only when a changed lock
+  entry is in that lane's lockfile dependency closure, so adding a dependency
+  to a Celox crate does not run Lydite. The Nix flake and `ci.yml` do not
+  select Lydite; its jobs use neither.
 - Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
   formatting/lint/build checks remain there. The dedicated workflow tests the
   selected Lydite packages, including doctests, and installs its solver.
