@@ -86,7 +86,7 @@ synthesis and is tested at the design level.
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range` and `$random` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
-| System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -304,8 +304,19 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **System functions called as statements**, such as `$countones(f(a));`, are
   checked and evaluated like the same call in an expression, and their value
   is discarded. `$bits` and `$size` do not evaluate their operand.
-- **Simulation suspension** (`$stop`) is rejected explicitly. The host API does
-  not provide suspended-process continuation; `$finish` remains supported.
+- **Simulation suspension.** `$stop` in an `initial` block suspends the
+  simulation (IEEE 1800-2023 20.2): `Simulation::step` and `run_until` return
+  at the time of the stop with `is_stopped()` set, the other processes of that
+  time wait, and the next call continues after the `$stop`, also inside loops
+  and functions. The suspended time step keeps the edges the process made
+  before the stop. A checkpoint or state file cannot be taken while the
+  simulation is suspended (`CheckpointError::Stopped`). In an `always` process, `$stop` is reported as
+  `RuntimeEvent::Stop`, as `$finish` is reported as `RuntimeEvent::Finish`.
+  Its diagnostic level argument prints nothing. Batch hosts without an
+  interactive mode, such as the VPI host, end the run at `$stop`.
+- **`$exit`** ends the initial procedures of the program block that calls it
+  (24.7). Celox has no program blocks, and a call from anywhere else is
+  ignored, as 24.7 specifies.
 - **Immediate cover** executes its pass statement when the condition is true.
   Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
   is rejected because its scheduling is not modeled.

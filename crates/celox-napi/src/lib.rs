@@ -957,8 +957,9 @@ impl HandleBackend {
             )
             .map_or_else(
                 |halt| match halt {
-                    // A bare backend reports no `$finish`; settle next time.
-                    celox::Halt::Finish => Ok(false),
+                    // A bare backend reports no `$finish` or `$stop`; settle
+                    // next time.
+                    celox::Halt::Finish | celox::Halt::Stop => Ok(false),
                     celox::Halt::Error(error) => Err(error),
                 },
                 |outcome| {
@@ -2095,6 +2096,17 @@ impl NativeSimulationHandle {
             .as_ref()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         Ok(sim.is_finished())
+    }
+
+    /// Returns whether the last step or run returned early because a process
+    /// of the design executed `$stop`. The next step continues it.
+    #[napi]
+    pub fn is_stopped(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.is_stopped())
     }
 
     /// Evaluate combinational logic.

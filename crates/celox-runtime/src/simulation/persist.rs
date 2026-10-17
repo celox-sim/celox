@@ -58,6 +58,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state.clone_from(&snapshot.process_state);
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
+        self.stopped = false;
+        self.suspended = None;
         Ok(())
     }
 }
@@ -168,6 +170,8 @@ impl<B: SimBackend> SimulationState<B> {
         self.process_state = parts.process_state;
         self.host_pending = parts.host_pending;
         self.finished = parts.finished;
+        self.stopped = false;
+        self.suspended = None;
     }
 }
 

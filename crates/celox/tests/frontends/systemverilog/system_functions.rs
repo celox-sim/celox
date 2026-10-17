@@ -1250,21 +1250,182 @@ fn readmem_diagnostics_identify_task_and_requested_range() {
 }
 
 #[test]
-fn rejects_stop_and_deferred_cover_instead_of_discarding_their_semantics() {
-    for body in [
-        "initial $stop;",
-        "always_comb begin $stop(0); y = 0; end",
-        "always_ff @(posedge clk) begin $stop; y <= 0; end",
-        "function automatic int f(); $stop; return 1; endfunction initial y = f();",
-    ] {
-        let source = format!("module Top(input logic clk, output logic y); {body} endmodule");
-        assert!(build_error(&source).contains("system task `$stop`"));
-    }
+fn rejects_deferred_cover_instead_of_discarding_its_semantics() {
     for timing in ["#0", "final"] {
         let source =
             format!("module Top(output logic y); initial cover {timing} (1) y = 1; endmodule");
         assert!(build_error(&source).contains("deferred immediate cover"));
     }
+}
+
+/// IEEE 1800-2023 20.2: `$stop` suspends the simulation, and continuing it
+/// resumes after the call, including inside loops and functions. The other
+/// processes of the round wait for the simulation to continue.
+#[test]
+fn stop_suspends_the_simulation_until_it_continues() {
+    let source = r#"
+        module Top(input int rounds, output int count, other, sum);
+          int acc;
+          function automatic int bump(input int x);
+            $stop;
+            return x + 1;
+          endfunction
+          initial begin
+            count = 1;
+            $stop;
+            count = 2;
+            acc = 10;
+            for (int i = 0; i < rounds; i++) begin
+              if (i != 1) $stop(0);
+              count = count + 1;
+              acc = acc + i;
+            end
+            count = bump(count);
+            $display("done %0d %0d", count, acc);
+          end
+          // Reading an input keeps this block a process instead of initial
+          // state.
+          initial other = rounds + 2;
+          assign sum = count + other;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let rounds = sim.signal("rounds");
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    let (count, other, sum) = (sim.signal("count"), sim.signal("other"), sim.signal("sum"));
+    for expected in [1u8, 2, 4, 5] {
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert!(sim.is_stopped());
+        assert_eq!(sim.get(count), expected.into());
+        assert_eq!(sim.get(other), 0u8.into());
+        assert_eq!(sim.get(sum), expected.into());
+        assert_eq!(sim.drain_runtime_events(), Vec::new());
+        // A suspended time step cannot be captured.
+        assert!(matches!(
+            sim.checkpoint(),
+            Err(celox::CheckpointError::Stopped)
+        ));
+    }
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(!sim.is_stopped());
+    assert!(!sim.is_finished());
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
+    assert_eq!(sim.get(sum), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"done 6 13".to_vec(),
+        }],
+    );
+    assert_eq!(sim.step().unwrap(), None);
+    assert!(sim.checkpoint().is_ok());
+
+    // `run_until` returns at the stop, before reaching its target time, and
+    // continues when called again.
+    let mut sim = initial_simulation(source);
+    let rounds = sim.signal("rounds");
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    for expected in [1u8, 2, 4, 5] {
+        sim.run_until(10).unwrap();
+        assert!(sim.is_stopped());
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.get(count), expected.into());
+    }
+    sim.run_until(10).unwrap();
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.time(), 10);
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
+}
+
+/// The time step a `$stop` suspends continues where it stopped: an edge a
+/// process made before the stop triggers its domain after the rest of the
+/// process has run.
+#[test]
+fn stop_keeps_the_edges_of_its_time_step() {
+    let source = r#"
+        module Top(input int start, output logic clk, output int q);
+          always_ff @(posedge clk) q <= q + 1;
+          initial begin
+            clk = start[0];
+            clk = 1;
+            $stop;
+            $display("q=%0d", q);
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let q = sim.signal("q");
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(sim.is_stopped());
+    assert_eq!(sim.get(q), 0u8.into());
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(!sim.is_stopped());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"q=0".to_vec(),
+        }],
+    );
+    assert_eq!(sim.get(q), 1u8.into());
+}
+
+/// Outside a process kernel, `$stop` is reported to the host like `$finish`.
+#[test]
+fn stop_in_a_clocked_or_combinational_process_is_an_event() {
+    let source = r#"
+        module Top(input logic clk, enabled, output logic y);
+          always_ff @(posedge clk) if (enabled) $stop;
+          always_comb begin
+            if (enabled) $stop(2);
+            y = enabled;
+          end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("stop.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.drain_runtime_events();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    let enabled = sim.signal("enabled");
+    sim.modify(|io| io.set(enabled, 1u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Stop]);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Stop]);
+}
+
+/// IEEE 1800-2023 24.7: `$exit` outside a program block is ignored.
+#[test]
+fn exit_outside_a_program_block_is_ignored() {
+    let source = r#"
+        module Top(input logic clk, output int a, b);
+          initial begin
+            a = 1;
+            $exit;
+            a = 2;
+            $exit();
+            a = 3;
+          end
+          always_ff @(posedge clk) begin
+            $exit;
+            b <= b + 1;
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.run_until(0).unwrap();
+    assert!(!sim.is_finished());
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.get(sim.signal("a")), 3u8.into());
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    let error =
+        build_error("module Top(output logic y); initial $exit(1); assign y = 0; endmodule");
+    assert!(
+        error.contains("$exit") && error.contains("expected 0 arguments"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1360,8 +1521,8 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system task `$stop`",
-            "module Top(output logic y); initial $stop; assign y = 0; endmodule",
+            "system task `$dumpvars`",
+            "module Top(output logic y); initial $dumpvars; assign y = 0; endmodule",
         ),
         (
             "system task `$stacktrace`",
