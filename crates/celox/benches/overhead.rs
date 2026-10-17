@@ -49,63 +49,73 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
     }
 
     // Benchmark 1b/1c: Simulator::tick with a derived clock domain: a gated
-    // clock (`clk & en`) and a register-driven divider.
-    for (name, derived) in [
-        (
-            "simulator_tick_gated_x10000",
-            "let gated: '_ clock = clk & en; always_ff (gated) { extra += 1; }",
-        ),
-        (
-            "simulator_tick_divided_x10000",
-            "var half: logic; always_ff (clk) { half = ~half; }
-             let divided: '_ clock = half; always_ff (divided) { extra += 1; }",
-        ),
-    ] {
-        let code = CODE.replace(
-            "cnt: output logic<32>[N],\n    ) {",
-            &format!(
-                "cnt: output logic<32>[N],\n        en: input logic,\n        extra: output logic<32>,\n    ) {{\n        {derived}"
-            ),
-        );
-        let mut sim = Simulator::builder(&code, "Top").build().unwrap();
-        let clk = sim.event("clk");
-        let rst = sim.signal("rst");
-        let en = sim.signal("en");
-        sim.modify(|io| {
-            io.set(rst, 0u8);
-            io.set(en, 1u8);
-        })
-        .unwrap();
-        sim.tick(clk).unwrap();
-        sim.modify(|io| io.set(rst, 1u8)).unwrap();
-
-        c.bench_function(name, |b| {
-            b.iter(|| {
-                for _ in 0..10000 {
-                    sim.tick(clk).unwrap();
+    // clock (`clk & en`) and a register-driven divider. The `_4state`
+    // variants build the same designs in four-state mode, where edges of
+    // derived clocks also read their unknown masks (IEEE 1800-2023
+    // Table 9-2).
+    for four_state in [false, true] {
+        let suffix = if four_state { "_4state" } else { "" };
+        for (name, derived) in DERIVED {
+            let mut sim = Simulator::builder(&derived_code(derived), "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+            let clk = sim.event("clk");
+            let rst = sim.signal("rst");
+            let en = sim.signal("en");
+            let half = (name == "divided").then(|| sim.signal("half"));
+            sim.modify(|io| {
+                io.set(rst, 0u8);
+                io.set(en, 1u8);
+                // A four-state divider starts at x and would never toggle.
+                if let Some(half) = half {
+                    io.set(half, 0u8);
                 }
             })
-        });
+            .unwrap();
+            sim.tick(clk).unwrap();
+            sim.modify(|io| io.set(rst, 1u8)).unwrap();
+
+            c.bench_function(&format!("simulator_tick_{name}{suffix}_x10000"), |b| {
+                b.iter(|| {
+                    for _ in 0..10000 {
+                        sim.tick(clk).unwrap();
+                    }
+                })
+            });
+        }
     }
 
-    // Benchmark 2: Simulation::step
-    {
-        let mut sim = Simulation::builder(CODE, "Top").build().unwrap();
-        sim.add_clock("clk", 10, 10);
+    // Benchmark 2: Simulation::step, plain and with a register-driven
+    // divider, in both state modes.
+    for four_state in [false, true] {
+        let suffix = if four_state { "_4state" } else { "" };
+        let divided = derived_code(DERIVED[1].1);
+        for (name, code) in [("", CODE), ("_divided", divided.as_str())] {
+            let mut sim = Simulation::builder(code, "Top")
+                .four_state(four_state)
+                .build()
+                .unwrap();
+            if !name.is_empty() {
+                let half = sim.signal("half");
+                sim.modify(|io| io.set(half, 0u8)).unwrap();
+            }
+            sim.add_clock("clk", 10, 10);
 
-        // Reset
-        // simulation currently doesn't have a direct reset method,
-        // but we can schedule events or just let it run.
-        // For this benchmark, we just want to measure the steady state overhead.
+            // Reset
+            // simulation currently doesn't have a direct reset method,
+            // but we can schedule events or just let it run.
+            // For this benchmark, we just want to measure the steady state overhead.
 
-        c.bench_function("simulation_step_x20000", |b| {
-            b.iter(|| {
-                // 20000 steps = 10000 cycles (rising + falling)
-                for _ in 0..20000 {
-                    sim.step().unwrap();
-                }
-            })
-        });
+            c.bench_function(&format!("simulation_step{name}{suffix}_x20000"), |b| {
+                b.iter(|| {
+                    // 20000 steps = 10000 cycles (rising + falling)
+                    for _ in 0..20000 {
+                        sim.step().unwrap();
+                    }
+                })
+            });
+        }
     }
 
     // Benchmark 3: Simulation::step of SystemVerilog counters at the rising
@@ -151,6 +161,28 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
             })
         });
     }
+}
+
+/// Derived clock domains added to [`CODE`] by [`derived_code`].
+const DERIVED: [(&str, &str); 2] = [
+    (
+        "gated",
+        "let gated: '_ clock = clk & en; always_ff (gated) { extra += 1; }",
+    ),
+    (
+        "divided",
+        "var half: logic; always_ff (clk) { half = ~half; }
+             let divided: '_ clock = half; always_ff (divided) { extra += 1; }",
+    ),
+];
+
+fn derived_code(derived: &str) -> String {
+    CODE.replace(
+        "cnt: output logic<32>[N],\n    ) {",
+        &format!(
+            "cnt: output logic<32>[N],\n        en: input logic,\n        extra: output logic<32>,\n    ) {{\n        {derived}"
+        ),
+    )
 }
 
 criterion_group!(benches, benchmark_simulation_overhead);
