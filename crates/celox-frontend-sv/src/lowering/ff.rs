@@ -2090,8 +2090,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             return Ok(true);
         }
-        // IEEE 1800-2023 24.7: `$exit` outside a program block is ignored.
+        // IEEE 1800-2023 24.7: `$exit` outside a program block is ignored,
+        // with a warning.
         if task == sv::ir::SystemTask::Exit {
+            self.m
+                .warn(crate::FrontendWarningKind::ExitOutsideProgram, site);
             return Ok(true);
         }
         let kind =

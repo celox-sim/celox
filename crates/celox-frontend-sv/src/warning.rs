@@ -26,6 +26,10 @@ pub enum FrontendWarningKind {
         file: String,
         detail: String,
     },
+    /// `$exit` outside a program block, which IEEE 1800-2023 24.7 ignores.
+    /// Celox has no program blocks, so every call is ignored.
+    #[error("`$exit` outside a program block is ignored")]
+    ExitOutsideProgram,
 }
 
 /// Where a warning is in the source.
@@ -94,6 +98,7 @@ impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
+            FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
         }))
     }
 
@@ -105,6 +110,9 @@ impl miette::Diagnostic for FrontendWarning {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MemoryFileWordCount { .. } => {
                 "give one word per address of the range, or place the words with `@address` directives"
+            }
+            FrontendWarningKind::ExitOutsideProgram => {
+                "end the simulation with `$finish`, or remove the call"
             }
         }))
     }

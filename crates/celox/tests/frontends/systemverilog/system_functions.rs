@@ -1531,6 +1531,27 @@ fn exit_outside_a_program_block_is_ignored() {
     assert!(!sim.is_stopped());
     assert_eq!(sim.get(sim.signal("a")), 3u8.into());
     assert_eq!(sim.drain_runtime_events(), Vec::new());
+    // Each call warns once, at its line.
+    let warned: Vec<_> = sim
+        .warnings()
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => location.line,
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("$exit"))
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>()
+    );
     let error =
         build_error("module Top(output logic y); initial $exit(1); assign y = 0; endmodule");
     assert!(

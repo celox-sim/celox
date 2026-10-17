@@ -424,16 +424,14 @@ impl<'a> ProcModule<'a> {
             finish,
         )
         .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
-        let warning = parsed.warning.map(|detail| {
-            (
-                crate::FrontendWarningKind::MemoryFileWordCount {
+        let warning =
+            parsed
+                .warning
+                .map(|detail| crate::FrontendWarningKind::MemoryFileWordCount {
                     task: name.to_string(),
                     file: unescape(filename),
                     detail,
-                },
-                site.cloned(),
-            )
-        });
+                });
         let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
@@ -460,8 +458,15 @@ impl<'a> ProcModule<'a> {
                 });
             }
         }
-        self.warnings.extend(warning);
+        if let Some(warning) = warning {
+            self.warn(warning, site);
+        }
         Ok((id, words))
+    }
+
+    /// Report a warning of the statement at `site`.
+    pub fn warn(&mut self, kind: crate::FrontendWarningKind, site: Option<&sv::ir::SourceSpan>) {
+        self.warnings.push((kind, site.cloned()));
     }
 
     /// Register a runtime event site and return its local number.

@@ -1922,11 +1922,18 @@ impl<'p, 'a> Comb<'p, 'a> {
                 Ok(store)
             }
             // IEEE 1800-2023 24.7: `$exit` outside a program block is
-            // ignored.
+            // ignored, with a warning.
             sv::ir::Stmt::SystemTask {
                 task: sv::ir::SystemTask::Exit,
+                site,
                 ..
-            } => Ok(store),
+            } => {
+                self.m.warn(
+                    crate::FrontendWarningKind::ExitOutsideProgram,
+                    site.as_ref(),
+                );
+                Ok(store)
+            }
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
