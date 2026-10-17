@@ -5487,15 +5487,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "mixed clock-edge polarities for one signal",
-            r#"
-            module Top(input logic clk, a, b, output logic qa, qb);
-                always_ff @(posedge clk) qa <= a;
-                always_ff @(negedge clk) qb <= b;
-            endmodule
-        "#,
-        ),
-        (
             "streaming concatenation",
             r#"
             module Top(input logic [7:0] a, output logic [7:0] y);
@@ -5729,39 +5720,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [3:0] a, b, output logic [7:0] y);
                 always_comb y = {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
-            "mixed reset-edge polarities for one signal",
-            r#"
-            module Top(input logic clk1, clk2, rst, d, output logic q1, q2);
-                always_ff @(posedge clk1 or posedge rst)
-                    if (rst) q1 <= 1'b0; else q1 <= d;
-                always_ff @(posedge clk2 or negedge rst)
-                    if (!rst) q2 <= 1'b0; else q2 <= d;
-            endmodule
-        "#,
-        ),
-        (
-            "mixed clock/reset-edge polarities for one signal",
-            r#"
-            module Top(input logic sig, clk2, rst2, d, output logic q1, q2);
-                always_ff @(posedge sig or posedge rst2)
-                    if (rst2) q1 <= 1'b0; else q1 <= d;
-                always_ff @(posedge clk2 or negedge sig)
-                    if (!sig) q2 <= 1'b0; else q2 <= d;
-            endmodule
-        "#,
-        ),
-        (
-            "mixed clock/reset-edge polarities for one signal",
-            r#"
-            module Top(input logic sig, clk2, rst2, d, output logic q1, q2);
-                always_ff @(posedge sig or posedge rst2)
-                    if (rst2) q1 <= 1'b0; else q1 <= d;
-                always_ff @(posedge clk2 or posedge sig)
-                    if (sig) q2 <= 1'b0; else q2 <= d;
             endmodule
         "#,
         ),
@@ -8491,5 +8449,80 @@ fn commits_ff_output_actuals_whose_index_calls_a_function() {
         sim.tick(clk).unwrap();
         assert_eq!(sim.get_as::<u8>(st), 1 << index, "k = {index}");
         assert_eq!(sim.get_as::<u8>(bits), 4);
+    }
+}
+
+/// The designs once rejected for sensing one signal at two edges or in two
+/// roles (#443, #471) run each process at its own edge.
+#[test]
+fn runs_processes_sensing_one_signal_at_two_edges_or_roles() {
+    const BOTH_EDGES: &str = "module Top(input logic clk, a, b, output logic qa, qb);
+            always_ff @(posedge clk) qa <= a;
+            always_ff @(negedge clk) qb <= b;
+        endmodule";
+    // The source, its data inputs (driven to 1), the scheduled event levels in
+    // order, and the outputs with their values afterwards.
+    type Case<'a> = (
+        &'a str,
+        &'a [&'a str],
+        &'a [(&'a str, u64)],
+        [(&'a str, u64); 2],
+    );
+    let cases: [Case; 4] = [
+        (
+            BOTH_EDGES,
+            &["a", "b"],
+            &[("clk", 1)],
+            [("qa", 1), ("qb", 0)],
+        ),
+        (
+            BOTH_EDGES,
+            &["a", "b"],
+            &[("clk", 1), ("clk", 0)],
+            [("qa", 1), ("qb", 1)],
+        ),
+        (
+            "module Top(input logic clk1, clk2, rst, d, output logic q1, q2);
+                always_ff @(posedge clk1 or posedge rst)
+                    if (rst) q1 <= 1'b0; else q1 <= d;
+                always_ff @(posedge clk2 or negedge rst)
+                    if (!rst) q2 <= 1'b0; else q2 <= d;
+            endmodule",
+            &["d"],
+            // `q2` loads at `clk2` while `rst` is high, then `rst` falls;
+            // `q1` loads at `clk1` once `rst` is low.
+            &[("rst", 1), ("clk2", 1), ("rst", 0), ("clk1", 1)],
+            [("q1", 1), ("q2", 0)],
+        ),
+        (
+            "module Top(input logic sig, clk2, rst2, d, output logic q1, q2);
+                always_ff @(posedge sig or posedge rst2)
+                    if (rst2) q1 <= 1'b0; else q1 <= d;
+                always_ff @(posedge clk2 or negedge sig)
+                    if (!sig) q2 <= 1'b0; else q2 <= d;
+            endmodule",
+            &["d"],
+            &[("sig", 1), ("clk2", 1), ("sig", 0)],
+            [("q1", 1), ("q2", 0)],
+        ),
+    ];
+    for (source, inputs, stimulus, expected) in cases {
+        let mut sim =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("both_edges.sv"))], "Top")
+                .build()
+                .unwrap();
+        for input in inputs {
+            let signal = sim.signal(input);
+            sim.modify(|io| io.set(signal, 1u8)).unwrap();
+        }
+        for (index, &(port, level)) in stimulus.iter().enumerate() {
+            sim.schedule(port, index as u64 * 10 + 10, level).unwrap();
+            sim.step().unwrap();
+        }
+        let observed = expected.map(|(name, _)| {
+            let signal = sim.signal(name);
+            (name, u64::try_from(sim.get(signal)).unwrap())
+        });
+        assert_eq!(observed, expected, "{source}");
     }
 }

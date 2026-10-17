@@ -107,6 +107,50 @@ fn benchmark_simulation_overhead(c: &mut Criterion) {
             })
         });
     }
+
+    // Benchmark 3: Simulation::step of SystemVerilog counters at the rising
+    // edge only, half at each edge of `clk`, and half at the falling edge of
+    // a copy of `clk`.
+    #[cfg(feature = "systemverilog")]
+    for (name, falling) in [
+        ("sv_simulation_step_posedge_x20000", "posedge clk"),
+        ("sv_simulation_step_both_edges_x20000", "negedge clk"),
+        ("sv_simulation_step_negedge_copy_x20000", "negedge c"),
+    ] {
+        let source = format!(
+            "module Top #(parameter int N = 1000) (input logic clk, input logic rst,
+                                                  output logic [31:0] cnt [N]);
+                 logic c;
+                 assign c = clk;
+                 for (genvar i = 0; i < N; i++) begin : g
+                     if (i % 2 == 0) begin : rise
+                         always_ff @(posedge clk or posedge rst)
+                             if (rst) cnt[i] <= 0; else cnt[i] <= cnt[i] + 1;
+                     end else begin : fall
+                         always_ff @({falling} or posedge rst)
+                             if (rst) cnt[i] <= 0; else cnt[i] <= cnt[i] + 1;
+                     end
+                 end
+             endmodule"
+        );
+        let path = std::path::Path::new("overhead.sv");
+        let mut sim = Simulation::from_sv_sources(vec![(source.as_str(), path)], "Top")
+            .build()
+            .unwrap();
+        sim.schedule("rst", 0, 1).unwrap();
+        sim.step().unwrap();
+        sim.schedule("rst", 1, 0).unwrap();
+        sim.step().unwrap();
+        sim.add_clock("clk", 10, 10);
+
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                for _ in 0..20000 {
+                    sim.step().unwrap();
+                }
+            })
+        });
+    }
 }
 
 criterion_group!(benches, benchmark_simulation_overhead);

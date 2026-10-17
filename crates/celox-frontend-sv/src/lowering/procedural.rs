@@ -523,6 +523,41 @@ impl<'a> ProcModule<'a> {
         (id, name)
     }
 
+    /// A hidden one-bit copy of the event signal `signal`, sensed as `kind`.
+    /// It has no name a SystemVerilog identifier can denote, and is not
+    /// addressable by path.
+    pub fn event_copy(&mut self, signal: SourceVarId, kind: DomainKind) -> SourceVarId {
+        let source = &self.variables[&signal];
+        let suffix = match kind {
+            DomainKind::ClockPosedge => "posedge",
+            DomainKind::ClockNegedge => "negedge",
+            DomainKind::ResetAsyncHigh => "reset_high",
+            DomainKind::ResetAsyncLow => "reset_low",
+            DomainKind::Other => "event",
+        };
+        let mut path = source.path.clone();
+        if let Some(last) = path.last_mut() {
+            last.push('@');
+            last.push_str(suffix);
+        }
+        let variable = SvVariable {
+            path,
+            width: 1,
+            signed: false,
+            is_4state: source.is_4state,
+            packed_ranges: vec![(0, 0)],
+            array_dims: Vec::new(),
+            domain_kind: kind,
+            kind: VariableKind::Variable,
+            type_kind: source.type_kind,
+            source: None,
+            hidden: true,
+        };
+        let id = next_var_id(&mut self.next_id);
+        self.variables.insert(id, variable);
+        id
+    }
+
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
     }
