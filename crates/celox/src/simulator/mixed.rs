@@ -1178,7 +1178,7 @@ fn sv_value(
         Ok(match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(id, index, select, _)
-                    if index.0.is_empty() && select.is_empty() =>
+                    if index.indices.is_empty() && index.range.is_none() && select.is_empty() =>
                 {
                     variables
                         .get(id)

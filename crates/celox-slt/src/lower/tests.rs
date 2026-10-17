@@ -287,6 +287,18 @@ fn execute_fold_group_sir_with_memory(
                                 .unwrap_or(0);
                             element * element_width + bit_offset + dynamic_bit_offset
                         }
+                        SIROffset::ElementRun {
+                            index,
+                            element_width,
+                        } => {
+                            values[index]
+                                .payload
+                                .to_u64_digits()
+                                .first()
+                                .copied()
+                                .unwrap_or(0) as usize
+                                * element_width
+                        }
                     };
                     let source = memory
                         .get(address)
