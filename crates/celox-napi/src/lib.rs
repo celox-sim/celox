@@ -1977,6 +1977,17 @@ impl NativeSimulationHandle {
         Ok(sim.is_finished())
     }
 
+    /// Returns whether the last step or run returned early because a process
+    /// of the design executed `$stop`. The next step continues it.
+    #[napi]
+    pub fn is_stopped(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.is_stopped())
+    }
+
     /// Evaluate combinational logic.
     #[napi]
     pub fn eval_comb(&mut self) -> Result<()> {

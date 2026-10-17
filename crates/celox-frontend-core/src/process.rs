@@ -156,6 +156,12 @@ impl ProcessKernelBuilder {
         self.suspend(ProcessStatus::Yield)
     }
 
+    /// Suspend the simulation (`$stop`), and continue at a new resume point
+    /// when it continues.
+    pub fn stop(&mut self) -> Result<(), ProcessKernelError> {
+        self.suspend(ProcessStatus::Stop)
+    }
+
     /// Suspend at wait site `site` of this process. The open block
     /// afterwards is the site's resume point: the caller lowers the wait's
     /// condition there and ends it with [`Self::wake_if`].

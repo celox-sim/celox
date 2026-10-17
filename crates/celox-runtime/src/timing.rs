@@ -21,6 +21,9 @@ use crate::{SignalRef, SimulatorErrorCode, backend::SimBackend};
 pub enum Halt {
     /// `$finish`: the simulation ends where it is (IEEE 1800-2023 20.2).
     Finish,
+    /// `$stop`: the simulation is suspended where it is (IEEE 1800-2023
+    /// 20.2), and continues there with the next step.
+    Stop,
     Error(SimulatorErrorCode),
 }
 

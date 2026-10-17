@@ -515,6 +515,16 @@ export class Simulation<P = Record<string, unknown>> {
 	}
 
 	/**
+	 * Whether the last `step()` or `runUntil()` returned early because a
+	 * process of the design executed `$stop`. The next call continues the
+	 * simulation after the `$stop`.
+	 */
+	isStopped(): boolean {
+		this.ensureAlive();
+		return this._handle.isStopped?.() ?? false;
+	}
+
+	/**
 	 * Step until `condition()` returns true.
 	 *
 	 * @returns The simulation time when the condition became true.

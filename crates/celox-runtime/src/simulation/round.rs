@@ -7,7 +7,7 @@ use bit_set::BitSet;
 use super::host::SimulationExecutor;
 use super::nba::{restore_working_image, working_image};
 use super::time::PeriodicEventKey;
-use super::{EventInfo, SimulationState, event_level};
+use super::{EventInfo, SimulationState, Suspended, event_level};
 use crate::{
     SimulatorErrorCode,
     backend::{EventHandle, SimBackend},
@@ -383,7 +383,6 @@ impl<B: SimBackend> SimulationState<B> {
             self.observe_host_write(signal, &value);
         }
 
-        let num_events = executor.backend().num_events();
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
@@ -431,8 +430,41 @@ impl<B: SimBackend> SimulationState<B> {
 
         // The check after the batch already saw every signal.
         let entry = entry && events_to_process.is_empty();
-        self.process_phase(executor, current_time, &mut round, entry)?;
+        self.continue_round(
+            executor,
+            current_time,
+            round,
+            periodic_events_to_process,
+            entry,
+        )
+    }
 
+    /// The rest of a round from its process phase. A `$stop` there suspends
+    /// the round, and the next step continues it here.
+    pub(super) fn continue_round<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        mut round: Box<Round>,
+        periodic_events_to_process: Vec<SimEvent<B>>,
+        entry: bool,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match self.process_phase(executor, current_time, &mut round, entry) {
+            Ok(()) => {}
+            Err(Halt::Stop) => {
+                self.suspended = Some(Suspended {
+                    round,
+                    periodic: periodic_events_to_process,
+                });
+                return Err(Halt::Stop);
+            }
+            Err(halt) => return Err(halt),
+        }
+
+        let num_events = executor.backend().num_events();
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         let mut comb_already_done = false;

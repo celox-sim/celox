@@ -28,7 +28,7 @@ use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
     schedule::ResolvedSchedule,
-    scheduler::Scheduler,
+    scheduler::{Scheduler, SimEvent},
     timing::{Halt, ProcessState},
 };
 
@@ -74,6 +74,13 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
     }
 }
 
+/// A round suspended by `$stop` in its process phase: the round and the
+/// periodic events it processes.
+struct Suspended<B: SimBackend> {
+    round: Box<Round>,
+    periodic: Vec<SimEvent<B>>,
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
@@ -88,6 +95,10 @@ pub struct SimulationState<B: SimBackend> {
     host_pending: bool,
     /// A process requested the end of the simulation.
     finished: bool,
+    /// A process suspended the simulation (`$stop`) in the last step.
+    stopped: bool,
+    /// The round a `$stop` suspended, which the next step continues.
+    suspended: Option<Suspended<B>>,
     /// Buffers of the round in progress, kept between rounds.
     scratch: Option<Box<Round>>,
     /// Rounds and process-phase passes one time slot may run, and kernel
@@ -138,6 +149,8 @@ impl<B: SimBackend> SimulationState<B> {
             process_state,
             host_pending: false,
             finished: false,
+            stopped: false,
+            suspended: None,
             scratch: None,
             round_budget: SLOT_ROUND_BUDGET,
             return_budget: SLOT_RETURN_BUDGET,
@@ -167,6 +180,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.stopped = false;
         match self.step_time(executor, limit) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
@@ -175,6 +189,8 @@ impl<B: SimBackend> SimulationState<B> {
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }
+            // The time slot goes on when the simulation continues.
+            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => Err(error),
         }
     }
@@ -191,6 +207,20 @@ impl<B: SimBackend> SimulationState<B> {
     /// Whether a process requested the end of the simulation.
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Whether the last step returned because a process suspended the
+    /// simulation with `$stop` (IEEE 1800-2023 20.2). The simulation is
+    /// suspended in the middle of a time slot, and the next step continues it
+    /// after the `$stop`.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Whether the simulation is suspended in the middle of a time slot, so
+    /// that its scheduling state cannot be captured.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.is_some()
     }
 
     /// Settle externally driven state against the previous edge baseline even
@@ -214,6 +244,7 @@ impl<B: SimBackend> SimulationState<B> {
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }
+            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => Err(error),
         }
     }
