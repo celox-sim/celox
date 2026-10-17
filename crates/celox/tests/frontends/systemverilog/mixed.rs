@@ -64,15 +64,12 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
         let warnings: Vec<_> = sim.warnings().iter().map(ToString::to_string).collect();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            matches!(
-                &sim.warnings()[0],
-                celox::CompilationWarning::SystemVerilog(
-                    celox::SvFrontendWarning::MemoryFileWordCount { .. }
-                )
-            ),
-            "{warnings:?}"
-        );
+        let celox::CompilationWarning::SystemVerilog(warning) = &sim.warnings()[0] else {
+            panic!("{warnings:?}");
+        };
+        assert!(matches!(warning.kind, celox::SvFrontendWarningKind::MemoryFileWordCount { .. }));
+        let location = warning.location.as_ref().unwrap();
+        assert_eq!((location.path.as_str(), location.line), ("child.sv", 4));
     }
 
     fn resolves_veryl_interface_parameter_types_after_prior_overrides(sim) {

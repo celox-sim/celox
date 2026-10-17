@@ -213,7 +213,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
                 }
                 // `$readmemh` writes its destination immediately.
-                sv::ir::Stmt::SystemTask { task, args } => {
+                sv::ir::Stmt::SystemTask { task, args, .. } => {
                     if let Some(destination) = readmem_destination(*task, args) {
                         writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
                     }
@@ -2035,7 +2035,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.eval(expr, None)?;
                 Ok(true)
             }
-            sv::ir::Stmt::SystemTask { task, args } => self.system_task(*task, args),
+            sv::ir::Stmt::SystemTask { task, args, site } => {
+                self.system_task(*task, args, site.as_ref())
+            }
         }
     }
 
@@ -2045,6 +2047,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<bool, sv::AnalyzerError> {
         if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
@@ -2068,7 +2071,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .ok_or_else(|| unsupported(format!("`{task}` address")))?,
                 );
             }
-            let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
+            let (id, words) = self
+                .m
+                .readmem(format, args, addresses[0], addresses[1], site)?;
             for word in words {
                 let width = word.access.msb - word.access.lsb + 1;
                 let reg = if word.mask.is_zero() {

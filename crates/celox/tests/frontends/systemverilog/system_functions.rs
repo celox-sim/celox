@@ -979,25 +979,49 @@ sv_backends! {
         assert_eq!(sim.get(y), 0xbbcc3344u32.into());
         assert_eq!(sim.get(short_y), 0x112233aau32.into());
         // IEEE 1800-2023 21.4: a count mismatch without address directives
-        // issues a warning, once per call even though the process is
-        // lowered more than once.
-        let mut warned: Vec<_> = sim
-            .warnings()
-            .iter()
-            .map(|warning| match warning {
-                celox::CompilationWarning::SystemVerilog(
-                    celox::SvFrontendWarning::MemoryFileWordCount { task, file, .. },
-                ) => (task.as_str(), file.clone()),
-                warning => panic!("unexpected warning: {warning}"),
-            })
-            .collect();
-        warned.sort();
-        let mut expected = vec![
-            ("$readmemh", long.display().to_string()),
-            ("$readmemh", short.display().to_string()),
-        ];
-        expected.sort();
-        assert_eq!(warned, expected);
+        // issues a warning, at each call.
+        let warned = readmem_warnings(sim.warnings());
+        assert_eq!(warned, vec![
+            ("readmem.sv".to_string(), source_line(&source, "short_mem, 3, 2"), short.display().to_string()),
+            ("readmem.sv".to_string(), source_line(&source, "mem, -1, 0"), long.display().to_string()),
+        ]);
+    }
+
+    fn readmem_count_mismatch_warns_once_per_call(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"
+                module Child #(parameter int P = 0) (output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{file}", mem);
+                    assign y = mem[0] + P;
+                endmodule
+                module Top(output logic [31:0] y);
+                    logic [7:0] a [0:1];
+                    logic [7:0] b [0:1];
+                    initial $readmemh("{file}", a);
+                    initial $readmemh("{file}", b);
+                    Child #(.P(0)) c0(y[23:16]);
+                    Child #(.P(1)) c1(y[31:24]);
+                    assign y[15:0] = {{a[0], b[0]}};
+                endmodule
+            "#, file = file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("calls.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xabaaaaaau32.into());
+        // Calls that read the same file into equal ranges warn separately;
+        // a call in a module specialized twice warns once.
+        let file = file.display().to_string();
+        assert_eq!(readmem_warnings(sim.warnings()), vec![
+            ("calls.sv".to_string(), source_line(&source, "\", mem);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", a);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", b);"), file),
+        ]);
+        let rendered = celox::render_diagnostic(&sim.warnings()[1]);
+        let line = source_line(&source, "\", a);");
+        assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
     }
     fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
     fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
@@ -1109,6 +1133,32 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
             assert!(result.is_err(), "invalid call should be rejected: {call}");
         }
     }
+}
+
+/// The file, line and memory file of each `$readmem` word-count warning.
+fn readmem_warnings(warnings: &[celox::CompilationWarning]) -> Vec<(String, usize, String)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::MemoryFileWordCount { task, file, .. },
+                location: Some(location),
+            }) => {
+                assert_eq!(task, "$readmemh");
+                (location.path.clone(), location.line, file.clone())
+            }
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line of the first line of `source` containing `needle`.
+fn source_line(source: &str, needle: &str) -> usize {
+    source
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap()
+        + 1
 }
 
 fn build_error(source: &str) -> String {
@@ -2685,4 +2735,35 @@ fn time_is_zero_in_a_simulator_without_time() {
     let clk = sim.event("clk");
     sim.tick(clk).unwrap();
     assert_eq!(sim.drain_runtime_events(), displays(&["0 0"]));
+}
+
+#[test]
+fn readmem_warnings_survive_a_later_lowering_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    // The top's inout port fails the build after its processes lowered.
+    let source = format!(
+        r#"
+        module Top(inout wire x, output logic [7:0] y);
+            logic [7:0] mem [0:1];
+            initial $readmemh("{}", mem);
+            assign y = mem[0];
+        endmodule
+    "#,
+        file.display()
+    );
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(&source, Path::new("inout.sv"))], "Top").build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        readmem_warnings(error.warnings()),
+        vec![(
+            "inout.sv".to_string(),
+            source_line(&source, "$readmemh"),
+            file.display().to_string()
+        )]
+    );
 }

@@ -3,7 +3,7 @@
 use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::procedural::{
-    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,

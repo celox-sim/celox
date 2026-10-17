@@ -44,8 +44,9 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
-    /// Warnings found while lowering, for the caller to report.
-    pub warnings: Vec<crate::FrontendWarning>,
+    /// Where the warnings found while lowering go. A process lowered more
+    /// than once repeats its warnings; the frontend reports each once.
+    warnings: &'a mut Vec<crate::warning::PendingWarning>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -64,6 +65,7 @@ impl<'a> ProcModule<'a> {
         constants: &'a HashMap<String, i128>,
         parameter_types: &'a HashMap<String, (usize, bool)>,
         four_state: bool,
+        warnings: &'a mut Vec<crate::warning::PendingWarning>,
     ) -> Self {
         let next_id = SourceVarId(
             variables
@@ -142,7 +144,7 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
-            warnings: Vec::new(),
+            warnings,
         }
     }
 
@@ -341,6 +343,7 @@ impl<'a> ProcModule<'a> {
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         start: Option<i128>,
         finish: Option<i128>,
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
         let radix = format.base();
@@ -421,13 +424,16 @@ impl<'a> ProcModule<'a> {
             finish,
         )
         .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
-        let warning = parsed
-            .warning
-            .map(|detail| crate::FrontendWarning::MemoryFileWordCount {
-                task: name.to_string(),
-                file: unescape(filename),
-                detail,
-            });
+        let warning = parsed.warning.map(|detail| {
+            (
+                crate::FrontendWarningKind::MemoryFileWordCount {
+                    task: name.to_string(),
+                    file: unescape(filename),
+                    detail,
+                },
+                site.cloned(),
+            )
+        });
         let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
