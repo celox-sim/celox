@@ -1,0 +1,1 @@
+Address review: a nested block import of the module's declaration hides an enclosing block's binding
