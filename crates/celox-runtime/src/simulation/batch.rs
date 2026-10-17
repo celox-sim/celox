@@ -2,7 +2,7 @@
 //! stable-edge helpers it calls, kept in one module.
 
 use bit_set::BitSet;
-use celox_design::DomainKind;
+use celox_design::edges::{scheduled_edge, settled_edge};
 
 use super::SimulationState;
 use super::host::SimulationExecutor;
@@ -26,35 +26,29 @@ pub(crate) fn event_level<B: SimBackend>(backend: &B, signal: SignalRef) -> u8 {
     }
 }
 
-/// Whether a settled level change from `was` to `is` is an active edge of a
-/// domain of `kind`. A domain of unknown kind reacts to any change.
-pub(crate) fn stable_edge(kind: Option<DomainKind>, was: bool, is: bool) -> bool {
-    match kind {
-        Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => !was && is,
-        Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => was && !is,
-        _ => was != is,
-    }
-}
-
 impl<B: SimBackend> SimulationState<B> {
     pub(super) fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
-        let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+        let Some((signal, _)) = self
+            .model
+            .topo_signals
+            .get(self.model.signal_index_by_id[id])
+        else {
             return true;
         };
         let was_nonzero = self.last_clock_values.contains(id);
         let is_nonzero = event_level(backend, *signal) != 0;
-        stable_edge(self.domain_kinds[id], was_nonzero, is_nonzero)
+        settled_edge(self.model.domain_kinds[id], was_nonzero, is_nonzero)
     }
 
     pub(super) fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
         backend.clear_triggered_bits();
-        for (signal, id) in &self.topo_signals {
+        for (signal, id) in &self.model.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
             let was_nonzero = self.last_clock_values.contains(*id);
             let is_nonzero = event_level(backend, *signal) != 0;
-            if stable_edge(self.domain_kinds[*id], was_nonzero, is_nonzero) {
+            if settled_edge(self.model.domain_kinds[*id], was_nonzero, is_nonzero) {
                 backend.mark_triggered_bit(*id);
             }
         }
@@ -117,7 +111,8 @@ impl<B: SimBackend> SimulationState<B> {
         executor.backend_mut().clear_triggered_bits();
 
         let scheduled = events_to_process.iter().filter_map(|event| {
-            self.signal_to_id
+            self.model
+                .signal_to_id
                 .get(&event.signal)
                 .map(|&id| (id, event.next_val != 0))
         });
@@ -128,21 +123,14 @@ impl<B: SimBackend> SimulationState<B> {
             let was_nonzero = self.last_clock_values.contains(id);
             if was_nonzero != is_nonzero
                 && self
+                    .model
                     .combinational_derived
                     .get(id)
                     .is_some_and(|derived| !derived.is_empty())
             {
                 gating_sources.push(id);
             }
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
+            let triggered = scheduled_edge(self.model.domain_kinds[id], was_nonzero, is_nonzero);
             if triggered {
                 scheduled_trigger_ids.insert(id);
                 executor.backend_mut().mark_triggered_bit(id);
@@ -176,14 +164,18 @@ impl<B: SimBackend> SimulationState<B> {
         // NBA region do.
         let mut edge_approved: Option<BitSet> = None;
         for &source in &gating_sources {
-            for &id in self.combinational_derived[source].iter() {
+            for &id in self.model.combinational_derived[source].iter() {
                 if self.stable_edge_triggered(executor.backend(), id) {
                     executor.backend_mut().mark_triggered_bit(id);
                     edge_approved
                         .get_or_insert_with(|| BitSet::with_capacity(num_events))
                         .insert(id);
                 }
-                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+                let Some((signal, _)) = self
+                    .model
+                    .topo_signals
+                    .get(self.model.signal_index_by_id[id])
+                else {
                     continue;
                 };
                 if event_level(executor.backend(), *signal) != 0 {
@@ -208,7 +200,7 @@ impl<B: SimBackend> SimulationState<B> {
                     triggered_domains.is_empty() && marked_bits.count() == 1;
                 if can_use_eval_apply {
                     let single_id = marked_bits.iter().next().expect("one marked trigger");
-                    let info = self.event_info[single_id];
+                    let info = self.model.event_info[single_id];
                     can_use_eval_apply = !info.is_cascaded;
                     if can_use_eval_apply {
                         if let Some(event) = info.eval_ff_event {
@@ -232,7 +224,7 @@ impl<B: SimBackend> SimulationState<B> {
                     if discovered_in_this_step.contains(id) {
                         continue;
                     }
-                    let info = self.event_info[id];
+                    let info = self.model.event_info[id];
                     if triggered_domains.contains(info.canonical_id) {
                         continue;
                     }
@@ -276,12 +268,12 @@ impl<B: SimBackend> SimulationState<B> {
             }
 
             for id in &newly_triggered {
-                if let Some(event) = self.event_info[*id].apply_event {
+                if let Some(event) = self.model.event_info[*id].apply_event {
                     executor.apply_ff_at(event)?;
                 }
             }
             for id in &newly_triggered {
-                if let Some(event) = self.event_info[*id].eval_ff_event {
+                if let Some(event) = self.model.event_info[*id].eval_ff_event {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
@@ -296,7 +288,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id) in &self.topo_signals {
+        for (signal, id) in &self.model.topo_signals {
             if *id == usize::MAX {
                 continue;
             }

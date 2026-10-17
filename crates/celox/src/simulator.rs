@@ -101,6 +101,8 @@ mod host {
         /// Dynamic testbench strings, keyed by the bound variable location.
         pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
         pub(crate) program: RuntimeProgram,
+        /// The program's scheduling facts.
+        pub(crate) schedule: celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
@@ -696,14 +698,16 @@ mod host {
             program: RuntimeProgram,
             warnings: Vec<CompilationWarning>,
         ) -> Self {
-            let (derived_ticks, derived_scratch) = celox_runtime::build_derived_tick_plans(
-                &backend,
-                &program.design.events,
-                &program.design.event_kinds(),
+            let schedule = celox_design::schedule::ScheduleModel::derive(
+                &program.design,
+                &program.runtime_schema,
             );
+            let (derived_ticks, derived_scratch) =
+                celox_runtime::build_derived_tick_plans(&backend, &schedule);
             let mut sim = Self {
                 backend,
                 program,
+                schedule,
                 vcd_writer: None,
                 dirty: false,
                 warnings,

@@ -1926,15 +1926,10 @@ fn unify_clock_domains(
                 .map(|variable| variable.metadata.width)
         };
         let mut record_polarity = |module: &SimModule, instance: InstanceId, var: SourceVarId| {
-            let polarity =
-                module
-                    .variables
-                    .get(&var)
-                    .and_then(|variable| match variable.metadata.kind {
-                        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Some(true),
-                        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Some(false),
-                        _ => None,
-                    });
+            let polarity = module
+                .variables
+                .get(&var)
+                .and_then(|variable| celox_design::edges::polarity(variable.metadata.kind));
             if let Some(polarity) = polarity {
                 polarities.insert(bindings.locate(instance, var), polarity);
             }

@@ -6,6 +6,7 @@ mod error;
 mod event_buffer;
 pub mod parallel;
 mod reflection;
+mod schedule;
 pub mod scheduler;
 mod simulation;
 mod state_file;
@@ -23,6 +24,7 @@ pub use reflection::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
 };
+pub use schedule::{ResolvedSchedule, host_watch};
 pub use simulation::{
     EventInfo, HostBoundary, ScheduleParts, SimulationExecutor, SimulationSnapshot,
     SimulationState, UnitExecutor,
