@@ -6,13 +6,23 @@
 //! suspension stores the next resume point, a [`ProcessStatus`] and its wait
 //! amount into the process's control slots and returns to the runtime.
 //!
+//! A delay resumes after a time. An event or level wait resumes at the first
+//! occurrence of one of the terms of its [`WaitSite`] after the wait began.
+//! A level wait, or an event control on an expression, checks its condition
+//! at the resume point and either continues or reports
+//! [`ProcessStatus::Pending`].
+//!
 //! The builder is source-independent: a frontend lowers statements and
 //! expressions into [`ProcessKernelBuilder::builder`] and calls the
-//! suspension methods where the source suspends.
+//! suspension methods where the source suspends. Wait and nonblocking
+//! sites are numbered per process, in the order the frontend lists them in
+//! the module's metadata.
+//!
+//! [`WaitSite`]: celox_design::WaitSite
 
 use celox_design::{
-    PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots, ProcessStatus, RegionedVarAddrBase,
-    STABLE_REGION,
+    NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots, ProcessStatus,
+    RegionedVarAddrBase, STABLE_REGION,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRSwitchCase,
@@ -40,12 +50,18 @@ pub enum ProcessKernelError {
     TooManySuspensions,
 }
 
+/// Width of the bit offset staged by a nonblocking assignment whose position
+/// is computed at run time ([`NbaSite::offset`]).
+pub const NBA_OFFSET_WIDTH: usize = 64;
+
 /// Builder of one process kernel.
 pub struct ProcessKernelBuilder {
     builder: SIRBuilder<RegionedSourceAddr>,
     slots: ProcessSlots<SourceVarId>,
     /// The block each resume point continues in; point 0 is the start.
     resume_blocks: Vec<BlockId>,
+    /// The wait site whose resume point is being lowered.
+    wait_site: Option<u32>,
 }
 
 impl ProcessKernelBuilder {
@@ -58,6 +74,7 @@ impl ProcessKernelBuilder {
             builder,
             slots,
             resume_blocks: vec![start],
+            wait_site: None,
         }
     }
 
@@ -95,25 +112,167 @@ impl ProcessKernelBuilder {
         self.builder.seal_block(SIRTerminator::Return);
     }
 
-    /// Suspend for the number of time units in `amount`, an unsigned
-    /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
-    /// a new resume point.
-    pub fn delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+    /// Store `value` into the delay slot.
+    fn store_delay_constant(&mut self, value: u64) {
+        self.store_constant(self.slots.delay, PROCESS_DELAY_WIDTH, value);
+    }
+
+    /// Store the next resume point, return with `status` and continue in a
+    /// new block at that point.
+    fn suspend(&mut self, status: ProcessStatus) -> Result<(), ProcessKernelError> {
         let point = self.resume_blocks.len();
         if point > MAX_PROCESS_SUSPENSIONS {
             return Err(ProcessKernelError::TooManySuspensions);
         }
-        self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, point as u64);
-        self.end(ProcessStatus::Delay);
+        self.end(status);
         let resume = self.builder.new_block();
         self.resume_blocks.push(resume);
         self.builder.switch_to_block(resume);
         Ok(())
     }
 
+    /// Suspend for the number of time units in `amount`, an unsigned
+    /// two-state register of [`PROCESS_DELAY_WIDTH`] bits, and continue at
+    /// a new resume point. A zero delay resumes after the nonblocking
+    /// assignments of the time are published.
+    pub fn delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
+        self.suspend(ProcessStatus::Delay)
+    }
+
+    /// A delay with the scheduling of IEEE 1800-2023: a zero delay resumes
+    /// in the inactive region of the same time (4.4.2.3), before
+    /// nonblocking assignments are published.
+    pub fn inactive_delay(&mut self, amount: RegisterId) -> Result<(), ProcessKernelError> {
+        self.store(self.slots.delay, PROCESS_DELAY_WIDTH, amount);
+        self.suspend(ProcessStatus::InactiveDelay)
+    }
+
+    /// Return to the runtime, which charges its time-slot budget and
+    /// resumes the process at once. Frontends place this in loops without
+    /// timing controls so that a runaway process is reported, not hung in.
+    pub fn yield_now(&mut self) -> Result<(), ProcessKernelError> {
+        self.suspend(ProcessStatus::Yield)
+    }
+
+    /// Suspend at wait site `site` of this process. The open block
+    /// afterwards is the site's resume point: the caller lowers the wait's
+    /// condition there and ends it with [`Self::wake_if`].
+    pub fn suspend_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(u64::from(site));
+        self.suspend(ProcessStatus::Wait)?;
+        self.wait_site = Some(site);
+        Ok(())
+    }
+
+    /// At the resume point of a [`Self::suspend_wait`]: continue when
+    /// `condition`, a one-bit two-state register, holds; otherwise report
+    /// that the wait is still pending and return to the same resume point.
+    /// The continuation block is open afterwards.
+    pub fn wake_if(&mut self, condition: RegisterId) {
+        let site = self.wait_site.take().expect("wake_if follows suspend_wait");
+        let woken = self.builder.new_block();
+        let pending = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (woken, Vec::new()),
+            false_block: (pending, Vec::new()),
+        });
+        self.builder.switch_to_block(pending);
+        self.store_delay_constant(u64::from(site));
+        self.end(ProcessStatus::Pending);
+        self.builder.switch_to_block(woken);
+    }
+
+    /// `wait (condition)` (IEEE 1800-2023 9.4.3) at wait site `site`:
+    /// `predicate` lowers the condition to a one-bit two-state register at
+    /// the open block. It is evaluated once before suspending, so a
+    /// condition that already holds does not suspend, and again whenever
+    /// the process is resumed.
+    pub fn wait_level(
+        &mut self,
+        site: u32,
+        mut predicate: impl FnMut(&mut SIRBuilder<RegionedSourceAddr>) -> RegisterId,
+    ) -> Result<(), ProcessKernelError> {
+        let holds = predicate(&mut self.builder);
+        let join = self.builder.new_block();
+        let wait = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: holds,
+            true_block: (join, Vec::new()),
+            false_block: (wait, Vec::new()),
+        });
+        self.builder.switch_to_block(wait);
+        self.suspend_wait(site)?;
+        let holds = predicate(&mut self.builder);
+        self.wake_if(holds);
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.builder.switch_to_block(join);
+        Ok(())
+    }
+
+    /// The nonblocking assignment of nonblocking site `index` of this
+    /// process, described by `site`: schedule a value for the NBA region of
+    /// the current time (IEEE 1800-2023 10.4.2). `lower` lowers the
+    /// right-hand side at the open block and returns the value, a register
+    /// of `site.width` bits, and for a site with a run-time position the
+    /// bit offset, an unsigned two-state register of [`NBA_OFFSET_WIDTH`]
+    /// bits.
+    ///
+    /// A site with a `pending` flag stages the value without returning. If
+    /// the flag is still set from an earlier execution in the same time
+    /// slot, the kernel first returns [`ProcessStatus::Nba`] so the runtime
+    /// queues the earlier value, and evaluates the right-hand side only
+    /// after that.
+    pub fn nonblocking<E: From<ProcessKernelError>>(
+        &mut self,
+        index: u32,
+        site: &NbaSite<SourceVarId>,
+        lower: impl FnOnce(
+            &mut SIRBuilder<RegionedSourceAddr>,
+        ) -> Result<(RegisterId, Option<RegisterId>), E>,
+    ) -> Result<(), E> {
+        if let Some(pending) = site.pending {
+            let flag = self.builder.alloc_bit(1, false);
+            self.builder.emit(SIRInstruction::Load(
+                flag,
+                stable(pending),
+                SIROffset::Static(0),
+                1,
+            ));
+            let flush = self.builder.new_block();
+            let stage = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond: flag,
+                true_block: (flush, Vec::new()),
+                false_block: (stage, Vec::new()),
+            });
+            self.builder.switch_to_block(flush);
+            self.store_delay_constant(u64::from(index));
+            self.suspend(ProcessStatus::Nba)?;
+            self.builder
+                .seal_block(SIRTerminator::Jump(stage, Vec::new()));
+            self.builder.switch_to_block(stage);
+        }
+        let (value, offset) = lower(&mut self.builder)?;
+        self.store(site.value, site.width, value);
+        if let (Some(slot), Some(offset)) = (site.offset, offset) {
+            self.store(slot, NBA_OFFSET_WIDTH, offset);
+        }
+        if let Some(pending) = site.pending {
+            self.store_constant(pending, 1, 1);
+            return Ok(());
+        }
+        self.store_delay_constant(u64::from(index));
+        self.suspend(ProcessStatus::Nba)?;
+        Ok(())
+    }
+
     /// End the simulation. No block is open afterwards.
     pub fn finish(&mut self) {
+        self.wait_site = None;
         self.end(ProcessStatus::Finish);
     }
 

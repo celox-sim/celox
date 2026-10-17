@@ -157,6 +157,5 @@ timed_cases! {
     #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
     fn cross_file_package_initializers_keep_static_clock_baseline = "timing::cross_file_package_initializers_keep_static_clock_baseline";
     fn initial_blocks_run_at_time_zero = "timing::initial_blocks_run_at_time_zero";
-    #[ignore = "a host write to a clock does not trigger its flip-flops in a timed Simulation"]
     fn host_edges_after_time_zero_clock_flip_flops = "timing::host_edges_after_time_zero_clock_flip_flops";
 }

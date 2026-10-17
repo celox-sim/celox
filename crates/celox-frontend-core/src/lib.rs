@@ -7,6 +7,7 @@ mod sdk;
 pub mod shared;
 pub mod symbolic;
 mod trace;
+pub mod watch;
 
 pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use sdk::{FrontendArtifactError, LoweredFrontendArtifact, lower_frontend_artifact};

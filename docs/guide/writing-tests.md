@@ -144,10 +144,10 @@ try {
 
 ### Timeout Guard for runUntil
 
-Pass `{ maxSteps }` to `runUntil()` to enable step counting. Without it, the fast Rust path is used with no overhead:
+Pass `{ maxSteps }` to `runUntil()` to bound the number of steps. Both forms run in the Rust scheduler:
 
 ```typescript
-// Fast Rust path (no overhead)
+// Unbounded
 sim.runUntil(10000);
 
 // Guarded: throws SimulationTimeoutError if budget is exceeded

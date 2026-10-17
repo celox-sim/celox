@@ -392,6 +392,9 @@ pub(crate) struct NativeRuntimeSchema {
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
+    pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
+    pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
+    pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -493,6 +496,9 @@ impl NativeProgramImage {
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
+                watches: self.runtime_schema.watches.clone(),
+                wait_sites: self.runtime_schema.wait_sites.clone(),
+                nba_sites: self.runtime_schema.nba_sites.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -2269,6 +2275,9 @@ fn compile_program(
                     .copied()
                     .collect(),
                 processes: sir.runtime().runtime_schema.processes.clone(),
+                watches: sir.runtime().runtime_schema.watches.clone(),
+                wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
+                nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
             },
             layout: layout.clone(),
             native_memory_size,
@@ -3272,15 +3281,6 @@ impl super::super::SimBackend for NativeBackend {
     fn get_triggered_bits(&self) -> BitSet {
         let offset = self.compiled.layout.triggered_bits_offset;
         let size = self.compiled.layout.triggered_bits_total_size;
-        let bytes = self.mem_bytes();
-        let mut bs = BitSet::with_capacity(size * 8);
-        for i in 0..size * 8 {
-            let byte_idx = offset + i / 8;
-            let bit_idx = i % 8;
-            if bytes[byte_idx] & (1 << bit_idx) != 0 {
-                bs.insert(i);
-            }
-        }
-        bs
+        celox_runtime::backend::triggered_bits_from_bytes(&self.mem_bytes()[offset..offset + size])
     }
 }

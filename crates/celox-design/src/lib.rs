@@ -216,11 +216,31 @@ pub struct RuntimeErrorInfo<A> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProcessStatus {
     /// Resume after the number of time units stored in [`ProcessSlots::delay`].
+    /// A zero delay resumes at the same time after the nonblocking
+    /// assignments of that time are published.
     Delay,
     /// The process ran to the end of its body.
     Done,
     /// The process requested the end of the simulation.
     Finish,
+    /// Like [`Self::Delay`], but a zero delay resumes in the inactive region
+    /// of the same time, before nonblocking assignments are published (IEEE
+    /// 1800-2023 4.4.2.3).
+    InactiveDelay,
+    /// The process suspended at an event or level wait. The delay slot holds
+    /// the index of its [`WaitSite`]. The runtime resumes the process when a
+    /// counter of that site moves; the kernel then checks the wait itself.
+    Wait,
+    /// The process was resumed at a wait whose condition does not hold. It
+    /// ran no statement and waits at the same site.
+    Pending,
+    /// The process staged one nonblocking assignment. The delay slot holds
+    /// the index of its [`NbaSite`]. The runtime queues the staged value and
+    /// resumes the process at once.
+    Nba,
+    /// The process returned so the runtime can charge its time-slot budget.
+    /// It resumes at once.
+    Yield,
 }
 
 impl ProcessStatus {
@@ -231,6 +251,11 @@ impl ProcessStatus {
             Self::Delay => 1,
             Self::Done => 2,
             Self::Finish => 3,
+            Self::InactiveDelay => 4,
+            Self::Wait => 5,
+            Self::Pending => 6,
+            Self::Nba => 7,
+            Self::Yield => 8,
         }
     }
 
@@ -239,6 +264,11 @@ impl ProcessStatus {
             1 => Some(Self::Delay),
             2 => Some(Self::Done),
             3 => Some(Self::Finish),
+            4 => Some(Self::InactiveDelay),
+            5 => Some(Self::Wait),
+            6 => Some(Self::Pending),
+            7 => Some(Self::Nba),
+            8 => Some(Self::Yield),
             _ => None,
         }
     }
@@ -276,6 +306,191 @@ impl<A> ProcessSlots<A> {
 pub const PROCESS_STATUS_WIDTH: usize = 8;
 /// Width of [`ProcessSlots::delay`].
 pub const PROCESS_DELAY_WIDTH: usize = 64;
+
+/// Width of every occurrence counter of an [`EventWatch`]. Counters wrap;
+/// only their inequality is meaningful.
+pub const EVENT_COUNTER_WIDTH: usize = 32;
+
+/// The occurrences an event counter counts on its watched signal (IEEE
+/// 1800-2023 9.4.2, Table 9-2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CounterKind {
+    /// Any change of the value, including the unknown bits.
+    Changes,
+    /// A positive edge of the least significant bit.
+    Rises,
+    /// A negative edge of the least significant bit.
+    Falls,
+}
+
+impl CounterKind {
+    pub const ALL: [Self; 3] = [Self::Changes, Self::Rises, Self::Falls];
+
+    /// The counter kind that wakes an event domain of `kind`.
+    pub const fn for_domain(kind: DomainKind) -> Self {
+        match kind {
+            DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Self::Rises,
+            DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Self::Falls,
+            DomainKind::Other => Self::Changes,
+        }
+    }
+}
+
+/// A counted signal: a signal that an event control or flip-flop domain
+/// watches and that one unit may store twice without the runtime checking
+/// in between. Its occurrences are counted in two-state counter objects.
+///
+/// Generated code bumps the counters around each such store (see
+/// `celox_frontend_core::watch`) and the host and the scheduler bump them on
+/// their writes. Every other watched signal is checked by value. The
+/// counters are ordinary state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventWatch<A> {
+    pub signal: A,
+    pub width: usize,
+    pub four_state: bool,
+    pub changes: Option<A>,
+    pub rises: Option<A>,
+    pub falls: Option<A>,
+    /// Canonical event domains that the counter of the given kind triggers
+    /// instead of edge detection by value.
+    pub domains: Vec<(A, CounterKind)>,
+}
+
+impl<A: Copy> EventWatch<A> {
+    pub fn counter(&self, kind: CounterKind) -> Option<A> {
+        match kind {
+            CounterKind::Changes => self.changes,
+            CounterKind::Rises => self.rises,
+            CounterKind::Falls => self.falls,
+        }
+    }
+
+    /// The present counters and their kinds.
+    pub fn counters(&self) -> impl Iterator<Item = (CounterKind, A)> + '_ {
+        CounterKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, self.counter(kind)?)))
+    }
+
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> EventWatch<B> {
+        EventWatch {
+            signal: map(self.signal),
+            width: self.width,
+            four_state: self.four_state,
+            changes: self.changes.map(&mut map),
+            rises: self.rises.map(&mut map),
+            falls: self.falls.map(&mut map),
+            domains: self
+                .domains
+                .iter()
+                .map(|&(event, kind)| (map(event), kind))
+                .collect(),
+        }
+    }
+}
+
+/// Counter objects a frontend declares for a signal that one of its units
+/// may store twice between two runtime checks. Assembly turns them into an
+/// [`EventWatch`] only if something watches the signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterSlots<A> {
+    pub signal: A,
+    pub changes: A,
+    pub rises: A,
+    pub falls: A,
+}
+
+impl<A: Copy> CounterSlots<A> {
+    pub fn counter(&self, kind: CounterKind) -> A {
+        match kind {
+            CounterKind::Changes => self.changes,
+            CounterKind::Rises => self.rises,
+            CounterKind::Falls => self.falls,
+        }
+    }
+
+    pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> CounterSlots<B> {
+        CounterSlots {
+            signal: map(self.signal),
+            changes: map(self.changes),
+            rises: map(self.rises),
+            falls: map(self.falls),
+        }
+    }
+}
+
+/// An event or level wait of a process kernel. A kernel suspended with
+/// [`ProcessStatus::Wait`] stores the index of the site among its process's
+/// sites in its delay slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitSite<A> {
+    /// Index of the process in [`RuntimeSchema::processes`].
+    pub process: usize,
+    /// Occurrences that may satisfy the wait. The runtime resumes the
+    /// process at the first one after the wait began; a site whose kernel
+    /// checks a condition at its resume point decides itself whether it
+    /// continues.
+    pub terms: Vec<(A, CounterKind)>,
+}
+
+impl<A: Copy> WaitSite<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> WaitSite<B> {
+        WaitSite {
+            process: self.process,
+            terms: self
+                .terms
+                .iter()
+                .map(|&(signal, kind)| (map(signal), kind))
+                .collect(),
+        }
+    }
+}
+
+/// A nonblocking assignment of a process kernel. A kernel that returns
+/// [`ProcessStatus::Nba`] stores the index of the site among its process's
+/// sites in its delay slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NbaSite<A> {
+    /// Index of the process in [`RuntimeSchema::processes`].
+    pub process: usize,
+    /// The assigned object and the static part of the assigned bit range.
+    pub target: A,
+    pub lsb: usize,
+    pub width: usize,
+    /// Staging object of `width` bits holding the assigned value, with the
+    /// target's state representation.
+    pub value: A,
+    /// Two-state staging object holding a bit offset added to `lsb`, for an
+    /// assignment whose position is computed at run time.
+    pub offset: Option<A>,
+    /// One-bit flag of a site whose destination receives no other
+    /// nonblocking assignment: a variable of the module with no other
+    /// nonblocking site in the module and no writer outside it (not a port,
+    /// not bound to a package variable, not the target of a hierarchical
+    /// reference). A frontend that cannot tell leaves it `None`, so the
+    /// assignment goes through the ordered queue.
+    ///
+    /// The kernel stages the value and sets the flag without returning;
+    /// publication commits flagged sites and clears the flags. A kernel
+    /// reaching the site again while the flag is set returns
+    /// [`ProcessStatus::Nba`] first, so the runtime queues the staged value.
+    pub pending: Option<A>,
+}
+
+impl<A: Copy> NbaSite<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> NbaSite<B> {
+        NbaSite {
+            process: self.process,
+            target: map(self.target),
+            lsb: self.lsb,
+            width: self.width,
+            value: map(self.value),
+            offset: self.offset.map(&mut map),
+            pending: self.pending.map(&mut map),
+        }
+    }
+}
 
 /// Controls which combinational stores dead store elimination preserves.
 ///
@@ -325,6 +540,14 @@ pub struct RuntimeSchema<A> {
     pub live_signals: HashSet<A>,
     /// Control slots of the process kernels, in kernel order.
     pub processes: Vec<ProcessSlots<A>>,
+    /// Counted signals and their occurrence counters.
+    pub watches: Vec<EventWatch<A>>,
+    /// Wait sites of the process kernels. A process's sites appear in the
+    /// order of its local site indices.
+    pub wait_sites: Vec<WaitSite<A>>,
+    /// Nonblocking assignment sites of the process kernels, ordered like
+    /// `wait_sites`.
+    pub nba_sites: Vec<NbaSite<A>>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -341,6 +564,9 @@ impl<A> Default for RuntimeSchema<A> {
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),
+            watches: Vec::new(),
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         }
     }
 }

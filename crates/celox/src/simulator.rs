@@ -123,6 +123,17 @@ mod host {
         derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
         /// Boxed, so that taking it out for a tick moves one pointer.
         derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+        /// The design finished a timed simulation (`$finish`). Evaluation,
+        /// host writes and waveform dumps no longer change anything.
+        pub(crate) frozen: bool,
+        /// Host writes a timed simulation observes one at a time.
+        pub(crate) host_watch: celox_runtime::HostWatch,
+        /// Runtime-event sequence up to which a timed simulation looked for
+        /// `$finish` records.
+        pub(crate) finish_scan_seq: u64,
+        /// Whether a timed simulation runs the design and it has a `$finish`
+        /// runtime event site.
+        pub(crate) finish_sites: bool,
     }
 
     /// Why [`Simulator::try_dump`] failed.
@@ -711,6 +722,10 @@ mod host {
                 tick_timing_eval_comb_ns: 0,
                 derived_ticks,
                 derived_scratch: Some(Box::new(derived_scratch)),
+                frozen: false,
+                host_watch: Default::default(),
+                finish_scan_seq: 0,
+                finish_sites: false,
             };
             sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
             sim
@@ -965,6 +980,36 @@ mod host {
             }
         }
 
+        /// Whether the design wrote a `$finish` record since the last call.
+        pub(crate) fn take_runtime_finish(&mut self) -> bool {
+            if !self.finish_sites {
+                return false;
+            }
+            let write_seq = self.runtime_event_write_seq();
+            if write_seq == self.finish_scan_seq {
+                return false;
+            }
+            let events = self.peek_backend_runtime_events_from(self.finish_scan_seq);
+            self.finish_scan_seq = write_seq;
+            let sites = &self.program.runtime_schema.runtime_event_sites;
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    RawRuntimeEvent::Event { site_id, .. }
+                        if sites.get(*site_id).is_some_and(|site| {
+                            matches!(site.kind, RuntimeEventKind::Finish)
+                        })
+                )
+            })
+        }
+
+        /// Start looking for `$finish` records at the current sequence.
+        pub(crate) fn skip_runtime_finish(&mut self) {
+            if self.finish_sites {
+                self.finish_scan_seq = self.runtime_event_write_seq();
+            }
+        }
+
         fn runtime_event_write_seq(&self) -> u64 {
             if let Some(buffer) = self.backend.runtime_event_buffer() {
                 buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
@@ -1047,6 +1092,9 @@ mod host {
         /// VCD file. Fails if combinational evaluation or writing fails, or
         /// if `timestamp` is earlier than the last dumped timestamp.
         pub fn try_dump(&mut self, timestamp: u64) -> Result<(), DumpError> {
+            if self.frozen {
+                return Ok(());
+            }
             if self.dirty {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
@@ -1142,8 +1190,12 @@ mod host {
         where
             F: FnOnce(&mut IOContext<B>),
         {
+            if self.frozen {
+                return Ok(());
+            }
             let mut ctx = IOContext {
                 backend: &mut self.backend,
+                watch: &mut self.host_watch,
             };
             f(&mut ctx);
             self.dirty = true;
@@ -1160,6 +1212,9 @@ mod host {
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
+            if self.frozen {
+                return Ok(());
+            }
             let (result, events) = self.eval_comb_capturing_events();
             let fatal_status = matches!(
                 &result,
