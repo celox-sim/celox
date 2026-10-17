@@ -33,7 +33,7 @@ const all = {
 
 test("documentation changes only build documentation", () => {
   assert.deepEqual(
-    classifyFiles(["docs/index.md", "adr/README.md", "CONTRIBUTING.md"]),
+    classifyFiles(["docs/index.md", "README.md", "CONTRIBUTING.md"]),
     {
       ...none,
       docs: true,

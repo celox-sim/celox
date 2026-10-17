@@ -143,7 +143,7 @@ export function classifyFiles(files, { releasePlease = false } = {}) {
     }
 
     if (
-      startsWithAny(path, ["docs/", "adr/"]) ||
+      startsWithAny(path, ["docs/"]) ||
       path === "README.md" ||
       path === "CONTRIBUTING.md"
     ) {
