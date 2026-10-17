@@ -814,6 +814,12 @@ export function wrapDirectSimulatorHandle(
 		tickN(eventId: number, count: number): void {
 			raw.tickN(eventId, count);
 		},
+		...(raw.edges && raw.activeEdgeIsRising
+			? {
+					edges: raw.edges.bind(raw),
+					activeEdgeIsRising: raw.activeEdgeIsRising.bind(raw),
+				}
+			: {}),
 		evalComb(): void {
 			raw.evalComb();
 		},

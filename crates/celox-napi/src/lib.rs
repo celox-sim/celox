@@ -687,6 +687,7 @@ struct CachedBuild {
     /// Derived clock domains per event, valid for every backend sharing
     /// `shared_code`.
     derived_ticks: celox::DerivedTickPlans<DefaultEvent>,
+    event_edges: celox::EventEdges,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -924,6 +925,62 @@ impl HandleBackend {
         }
     }
 
+    /// Run coincident edges of event signals, as `Simulator::edges` does.
+    fn edges(
+        &mut self,
+        moves: &[(usize, celox::Edge)],
+        derived: &HandleDerivedTicks,
+        event_edges: &celox::EventEdges,
+        scratch: &mut celox::DerivedTickScratch,
+        dirty: bool,
+    ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
+        fn edges_with<B: celox::SimBackend>(
+            backend: &mut B,
+            moves: &[(usize, celox::Edge)],
+            plans: &celox::DerivedTickPlans<B::Event>,
+            event_edges: &celox::EventEdges,
+            scratch: &mut celox::DerivedTickScratch,
+            dirty: bool,
+        ) -> std::result::Result<bool, celox::RuntimeErrorCode> {
+            let moves: Vec<_> = moves
+                .iter()
+                .map(|&(id, edge)| (backend.id_to_event_slice()[id], edge))
+                .collect();
+            celox::run_edges(
+                &mut celox::BackendExecutor(backend),
+                plans,
+                event_edges,
+                scratch,
+                &moves,
+                dirty,
+                celox::set_level,
+            )
+            .map_or_else(
+                |halt| match halt {
+                    // A bare backend reports no `$finish`; settle next time.
+                    celox::Halt::Finish => Ok(false),
+                    celox::Halt::Error(error) => Err(error),
+                },
+                |outcome| {
+                    Ok(match outcome {
+                        celox::EdgeOutcome::Unchanged | celox::EdgeOutcome::Stored => !dirty,
+                        celox::EdgeOutcome::Moved => false,
+                        celox::EdgeOutcome::Settled => true,
+                    })
+                },
+            )
+        }
+        match (self, derived) {
+            (Self::Default(backend), HandleDerivedTicks::Default(plans)) => {
+                edges_with(backend, moves, plans, event_edges, scratch, dirty)
+            }
+            (Self::Tiered(backend), HandleDerivedTicks::Tiered(plans)) => {
+                edges_with(backend.as_mut(), moves, plans, event_edges, scratch, dirty)
+            }
+            _ => unreachable!("derived tick plans belong to the handle's backend"),
+        }
+    }
+
     fn event_count(&self) -> usize {
         match self {
             Self::Default(backend) => backend.id_to_event_slice().len(),
@@ -1015,6 +1072,7 @@ pub struct NativeSimulatorHandle {
     state_schema: Arc<celox::StateSchema>,
     derived_ticks: HandleDerivedTicks,
     derived_scratch: celox::DerivedTickScratch,
+    event_edges: celox::EventEdges,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1070,6 +1128,7 @@ impl NativeSimulatorHandle {
         let vcd_descs = sim.build_vcd_descs(four_state);
         let runtime_errors = runtime_errors_by_name(sim.program());
         let derived_ticks = sim.derived_tick_plans();
+        let event_edges = sim.event_edges();
 
         let layout_map = build_signal_layout(&signals, four_state);
         let event_map = build_event_map(&events);
@@ -1097,6 +1156,7 @@ impl NativeSimulatorHandle {
                 state_schema: Arc::clone(&state_schema),
                 vcd_descs: vcd_descs.clone(),
                 derived_ticks: Arc::clone(&derived_ticks),
+                event_edges: Arc::clone(&event_edges),
             });
             let mut cache = JIT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(key, cached);
@@ -1129,6 +1189,7 @@ impl NativeSimulatorHandle {
             state_schema,
             derived_ticks: HandleDerivedTicks::Default(derived_ticks),
             derived_scratch: Default::default(),
+            event_edges,
         })
     }
 
@@ -1167,6 +1228,7 @@ impl NativeSimulatorHandle {
         // Extract the backend from Simulator (drops runtime metadata which is
         // no longer needed).
         let derived_ticks = HandleDerivedTicks::Tiered(sim.derived_tick_plans());
+        let event_edges = sim.event_edges();
         let backend = HandleBackend::Tiered(Box::new(sim.into_backend()));
 
         Ok(Self {
@@ -1183,6 +1245,7 @@ impl NativeSimulatorHandle {
             state_schema,
             derived_ticks,
             derived_scratch: Default::default(),
+            event_edges,
         })
     }
 
@@ -1218,6 +1281,7 @@ impl NativeSimulatorHandle {
             state_schema: Arc::clone(&cached.state_schema),
             derived_ticks: HandleDerivedTicks::Default(Arc::clone(&cached.derived_ticks)),
             derived_scratch: Default::default(),
+            event_edges: Arc::clone(&cached.event_edges),
         })
     }
 
@@ -1443,6 +1507,62 @@ impl NativeSimulatorHandle {
             &mut self.derived_scratch,
         )
         .map_err(|e| napi_runtime_error(&runtime_errors, e))
+    }
+
+    /// Move event signals through coincident edges and run every domain
+    /// sensitive to them: `rising[i]` gives the direction of `event_ids[i]`.
+    /// See `Simulator::edges`. `dirty` says whether combinational logic has
+    /// pending changes (default: it has, so it settles first). Returns whether
+    /// combinational logic is settled afterwards: it is not when a signal that
+    /// combinational logic reads moved but no domain ran, or when it was
+    /// dirty and nothing ran.
+    #[napi]
+    pub fn edges(
+        &mut self,
+        event_ids: Vec<u32>,
+        rising: Vec<bool>,
+        dirty: Option<bool>,
+    ) -> Result<bool> {
+        if event_ids.len() != rising.len() {
+            return Err(Error::from_reason(
+                "edges needs one direction per event".to_string(),
+            ));
+        }
+        let runtime_errors = self.runtime_errors.clone();
+        let b = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        let mut moves = Vec::with_capacity(event_ids.len());
+        for (&event_id, &rising) in event_ids.iter().zip(&rising) {
+            validate_event_id(event_id, b.event_count())?;
+            let edge = if rising {
+                celox::Edge::Rising
+            } else {
+                celox::Edge::Falling
+            };
+            moves.push((event_id as usize, edge));
+        }
+        b.edges(
+            &moves,
+            &self.derived_ticks,
+            &self.event_edges,
+            &mut self.derived_scratch,
+            dirty.unwrap_or(true),
+        )
+        .map_err(|e| napi_runtime_error(&runtime_errors, e))
+    }
+
+    /// Whether the event's active edge is a rising one: a positive-edge
+    /// clock or an active-high reset.
+    #[napi]
+    pub fn active_edge_is_rising(&self, event_id: u32) -> Result<bool> {
+        let b = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
+        validate_event_id(event_id, b.event_count())?;
+        Ok(self.event_edges[event_id as usize].active_edge() == celox::Edge::Rising)
     }
 
     /// Trigger a clock/event N times in a single NAPI call.
@@ -2406,23 +2526,23 @@ impl NativeSimulatorHandle {
     /// Returns the WASM module bytes for a specific clock/reset event.
     ///
     /// `event_name` should match a clock or reset port name (e.g. "clk", "rst").
+    ///
+    /// An event without a domain of its own (a clock that only drives a
+    /// gated clock) has no module.
     #[napi]
     pub fn event_wasm_bytes(&self, event_name: String) -> Result<Vec<u8>> {
-        for (addr, units) in &self.program.sir.eval_apply_ffs {
-            let event_path = self.program.get_path(addr);
-            if event_path == event_name {
-                let wasm = celox::wasm_codegen::compile_units(
-                    units,
-                    self.program.layout(),
-                    self.four_state,
-                    false,
-                );
-                return Ok(wasm.bytes);
-            }
+        if let Some(units) = self.event_units(&self.program.sir.eval_apply_ffs, &event_name) {
+            let wasm = celox::wasm_codegen::compile_units(
+                units,
+                self.program.layout(),
+                self.four_state,
+                false,
+            );
+            return Ok(wasm.bytes);
         }
 
         Err(Error::from_reason(format!(
-            "Event '{}' not found. Available events: {}",
+            "Event '{}' has no kernel. Events with kernels: {}",
             event_name,
             self.program
                 .sir
@@ -2432,6 +2552,61 @@ impl NativeSimulatorHandle {
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
+    }
+
+    /// The units of the event named `name` (as `eventsJson` names it, or by
+    /// one of its aliases) in one of the program's kernel maps.
+    fn event_units<'a, U: 'a>(
+        &self,
+        kernels: impl IntoIterator<Item = (&'a celox::AbsoluteAddr, &'a U)>,
+        name: &str,
+    ) -> Option<&'a U> {
+        let events = &self.program.design.events;
+        kernels
+            .into_iter()
+            .find(|(address, _)| {
+                self.program.get_path(address) == name
+                    || self.program.get_path(&events.canonical(**address)) == name
+            })
+            .map(|(_, units)| units)
+    }
+
+    /// Per event name, the derived domains its ticks and edges run, as JSON
+    /// (`celox::EdgePlans`), for the TypeScript runtime that drives the
+    /// event modules itself.
+    #[napi]
+    pub fn edge_plans_json(&self) -> String {
+        serde_json::to_string(&celox::edge_plans(&self.program))
+            .unwrap_or_else(|_| "{\"fourState\":false,\"events\":{}}".to_string())
+    }
+
+    /// The WASM module of one phase of an event's split kernels: `"evalOnly"`
+    /// evaluates its next state without committing, `"apply"` commits it.
+    /// Domains that evaluate together use them to sample the same state.
+    #[napi]
+    pub fn event_phase_wasm_bytes(&self, event_name: String, phase: String) -> Result<Vec<u8>> {
+        let units = match phase.as_str() {
+            "evalOnly" => &self.program.sir.eval_only_ffs,
+            "apply" => &self.program.sir.apply_ffs,
+            _ => {
+                return Err(Error::from_reason(format!(
+                    "unknown event phase '{phase}'; expected 'evalOnly' or 'apply'"
+                )));
+            }
+        };
+        self.event_units(units, &event_name)
+            .map(|units| {
+                celox::wasm_codegen::compile_units(
+                    units,
+                    self.program.layout(),
+                    self.four_state,
+                    false,
+                )
+                .bytes
+            })
+            .ok_or_else(|| {
+                Error::from_reason(format!("event '{event_name}' has no {phase} kernel"))
+            })
     }
 
     /// No-op on wasm32 (no native resources to release).
@@ -2643,13 +2818,14 @@ impl NativeSimulatorHandle {
         serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Build events JSON from finalized SIR.
+    /// Build events JSON from finalized SIR, numbered as the native
+    /// simulator numbers them.
     fn build_events_json(program: &celox::LaidOutProgram) -> String {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
 
-        for (next_id, addr) in program.sir.eval_apply_ffs.keys().enumerate() {
+        for (next_id, addr) in celox::event_addresses(program).iter().enumerate() {
             let name = program.get_path(addr);
             events.insert(name, next_id);
         }
@@ -3834,6 +4010,87 @@ mod tests {
             handle.tick_n(events["clk"], 2).unwrap();
             assert_eq!(memory(&mut handle)[half_count], 3, "{mode}: half clock");
             assert_eq!(memory(&mut handle)[gated_count], 4, "{mode}: closed gate");
+            handle.dispose().unwrap();
+        }
+    }
+
+    /// `edges` moves the clock and runs the domains of each direction, on
+    /// freshly built, cached and tiered handles.
+    #[test]
+    fn native_handle_edges_run_both_directions() {
+        let source = "module Top (
+            clk: input clock, rising: output logic<8>, falling: output logic<8>,
+        ) {
+            always_ff (clk) { rising += 1; }
+            let inverted: '_ clock = ~clk;
+            always_ff (inverted) { falling += 1; }
+        }";
+        for mode in ["fresh", "cached", "tiered"] {
+            let mut handle = if mode == "tiered" {
+                NativeSimulatorHandle::new_tiered(napi_sources(source), "Top".into(), None)
+            } else {
+                NativeSimulatorHandle::new(napi_sources(source), "Top".into(), None)
+            }
+            .unwrap();
+            let events: HashMap<String, u32> = serde_json::from_str(&handle.events_json()).unwrap();
+            let layout: serde_json::Value = serde_json::from_str(&handle.layout_json()).unwrap();
+            let offset = |name: &str| layout[name]["offset"].as_u64().unwrap() as usize;
+            let (clk, rising, falling) = (offset("clk"), offset("rising"), offset("falling"));
+            let memory = |handle: &mut NativeSimulatorHandle| {
+                let (ptr, len) = handle.backend.as_mut().unwrap().memory_as_mut_ptr();
+                unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+            };
+            let clk_event = events["clk"];
+            assert!(handle.active_edge_is_rising(clk_event).unwrap());
+            let _ = handle.edges(vec![clk_event], vec![false], None).unwrap();
+            let start = (memory(&mut handle)[rising], memory(&mut handle)[falling]);
+            assert!(handle.edges(vec![clk_event], vec![true], None).unwrap());
+            assert_eq!(memory(&mut handle)[clk], 1, "{mode}: clk stays high");
+            assert_eq!(
+                memory(&mut handle)[rising],
+                start.0.wrapping_add(1),
+                "{mode}"
+            );
+            assert_eq!(memory(&mut handle)[falling], start.1, "{mode}");
+            let _ = handle.edges(vec![clk_event], vec![false], None).unwrap();
+            assert_eq!(
+                memory(&mut handle)[rising],
+                start.0.wrapping_add(1),
+                "{mode}"
+            );
+            assert_eq!(
+                memory(&mut handle)[falling],
+                start.1.wrapping_add(1),
+                "{mode}"
+            );
+            assert!(handle.edges(vec![clk_event], vec![], None).is_err());
+            handle.dispose().unwrap();
+        }
+    }
+
+    #[test]
+    fn native_handle_edges_of_clocks_comb_logic_does_not_read_stay_settled() {
+        for (seen, comb_read) in [("1'b1", false), ("clk", true)] {
+            let source = format!(
+                "module Top (clk: input clock, count: output logic<8>, seen: output logic) {{
+                    always_ff (clk) {{ count += 1; }}
+                    assign seen = {seen};
+                }}"
+            );
+            let mut handle =
+                NativeSimulatorHandle::new(napi_sources(&source), "Top".into(), None).unwrap();
+            let events: HashMap<String, u32> = serde_json::from_str(&handle.events_json()).unwrap();
+            let clk = events["clk"];
+            assert!(handle.edges(vec![clk], vec![true], None).unwrap());
+            // Moving `clk` without running a domain leaves combinational
+            // logic stale only when it reads `clk`, or already was.
+            assert_eq!(
+                handle.edges(vec![clk], vec![false], Some(false)).unwrap(),
+                !comb_read,
+                "{seen}"
+            );
+            assert!(handle.edges(vec![clk], vec![true], Some(true)).unwrap());
+            assert!(!handle.edges(vec![clk], vec![false], Some(true)).unwrap());
             handle.dispose().unwrap();
         }
     }
