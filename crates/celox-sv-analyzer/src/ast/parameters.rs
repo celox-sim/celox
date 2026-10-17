@@ -63,7 +63,10 @@ pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String
         ConstExpr::Select { expr, bit } => {
             contains_unbounded_operand(expr, env) || contains_unbounded_operand(bit, env)
         }
-        ConstExpr::Function { name, .. } if name == "$isunbounded" => false,
+        ConstExpr::Function {
+            callee: Callee::System(SystemFunction::Isunbounded),
+            ..
+        } => false,
         ConstExpr::Function { args, .. } => {
             args.iter().any(|arg| contains_unbounded_operand(arg, env))
         }
@@ -94,21 +97,10 @@ pub(super) fn reject_unbounded_data_query(
     env: &HashMap<String, i128>,
     complete: bool,
 ) -> Result<(), AnalyzerError> {
-    let Some((name, _)) = system_tf_call_parts(call, tree) else {
+    let Some(function) = called_system_function(call, tree) else {
         return Ok(());
     };
-    if !matches!(
-        name,
-        "$bits"
-            | "$size"
-            | "$dimensions"
-            | "$unpacked_dimensions"
-            | "$left"
-            | "$right"
-            | "$low"
-            | "$high"
-            | "$increment"
-    ) {
+    if !function.is_data_query() {
         return Ok(());
     }
     let sv_parser::SystemTfCall::ArgExpression(call) = call else {
@@ -122,13 +114,12 @@ pub(super) fn reject_unbounded_data_query(
                 sv_parser::NodeEvent::Leave(child) => (false, child),
             };
             if let RefNode::SystemTfCall(nested) = &child
-                && system_tf_call_parts(nested, tree)
-                    .is_some_and(|(name, _)| name == "$isunbounded")
+                && called_system_function(nested, tree) == Some(SystemFunction::Isunbounded)
             {
                 if entering {
                     if complete && isunbounded_call(nested, tree, env)?.is_none() {
                         return Err(AnalyzerError::InvalidSystemTfCall {
-                            name: "$isunbounded".into(),
+                            name: SystemFunction::Isunbounded.name().into(),
                             detail: "argument must name a value parameter".into(),
                         });
                     }
@@ -156,7 +147,7 @@ pub(super) fn reject_unbounded_data_query(
             };
             if unbounded {
                 return Err(AnalyzerError::InvalidSystemTfCall {
-                    name: name.into(),
+                    name: function.name().into(),
                     detail: "unbounded parameter is not valid in this data query".into(),
                 });
             }
@@ -178,7 +169,7 @@ pub(super) fn isunbounded_call(
         .and_then(|arg| const_expr_from_expr(arg, tree).ok().flatten());
     let Some(ConstExpr::Ident(name)) = argument else {
         return Err(AnalyzerError::InvalidSystemTfCall {
-            name: "$isunbounded".into(),
+            name: SystemFunction::Isunbounded.name().into(),
             detail: "argument must name a value parameter".into(),
         });
     };
@@ -632,20 +623,7 @@ pub(super) fn validate_parameter_initializer_literal_widths(
             continue;
         }
         if let RefNode::SystemTfCall(call) = node
-            && system_tf_call_parts(call, tree).is_some_and(|(name, _)| {
-                matches!(
-                    name,
-                    "$bits"
-                        | "$size"
-                        | "$left"
-                        | "$right"
-                        | "$low"
-                        | "$high"
-                        | "$increment"
-                        | "$dimensions"
-                        | "$unpacked_dimensions"
-                )
-            })
+            && called_system_function(call, tree).is_some_and(SystemFunction::is_data_query)
             && let sv_parser::SystemTfCall::ArgExpression(call) = call
             && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
         {
@@ -1680,8 +1658,8 @@ fn replace_oob_const_selects_with_unknown(
                 }
             }
         }
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name,
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
             site,
             args: args
                 .into_iter()
@@ -1788,9 +1766,9 @@ pub(super) fn const_expr_to_expr(expr: ConstExpr) -> Expr {
             width,
             signed,
         },
-        ConstExpr::Function { name, args, .. } => Expr::Call {
+        ConstExpr::Function { callee, args, .. } => Expr::Call {
             arg_order: Vec::new(),
-            name,
+            callee,
             args: args
                 .into_iter()
                 .map(|arg| Some(const_expr_to_expr(arg)))
@@ -1895,17 +1873,21 @@ pub(super) fn substitute_typed_parameter_literals_with_lookup(
                 parameter_types,
             )),
         },
-        ConstExpr::Function { name, args, site } if name == "$isunbounded" => {
+        ConstExpr::Function {
+            callee: callee @ Callee::System(SystemFunction::Isunbounded),
+            args,
+            site,
+        } => {
             if let [ConstExpr::Ident(parameter)] = args.as_slice()
                 && let Some(value) = constants.get(&unbounded_parameter_marker(parameter))
             {
                 ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))
             } else {
-                ConstExpr::Function { name, args, site }
+                ConstExpr::Function { callee, args, site }
             }
         }
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name,
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee,
             site,
             args: args
                 .into_iter()
@@ -2013,23 +1995,22 @@ fn infer_const_expr_type_inner(
             width: 1,
             signed: false,
         }),
-        ConstExpr::Function { name, args, .. } => match name.as_str() {
-            "$signed" | "$unsigned" => {
+        ConstExpr::Function {
+            callee: Callee::System(function),
+            args,
+            ..
+        } => match function {
+            SystemFunction::Signed | SystemFunction::Unsigned => {
                 let [arg] = args.as_slice() else { return None };
                 let mut ty = infer_const_expr_type_inner(arg, parameter_types, bounded_proof)?;
-                ty.signed = name == "$signed";
+                ty.signed = *function == SystemFunction::Signed;
                 Some(ty)
             }
-            "$clog2" | "$countones" | "$countbits" => Some(ExprType {
-                width: 32,
-                signed: true,
-            }),
-            "$onehot" | "$onehot0" | "$isunknown" | "$isunbounded" => Some(ExprType {
-                width: 1,
-                signed: false,
-            }),
-            _ => None,
+            function => function
+                .result_type()
+                .map(|(width, signed)| ExprType { width, signed }),
         },
+        ConstExpr::Function { .. } => None,
         ConstExpr::Unary { op, expr } => {
             let operand = infer_const_expr_type_inner(expr, parameter_types, bounded_proof)?;
             if matches!(

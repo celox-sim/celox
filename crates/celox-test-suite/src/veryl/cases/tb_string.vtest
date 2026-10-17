@@ -1,0 +1,119 @@
+(group tb_string (category control_flow))
+
+(case assignment
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string;
+    var copy: string;
+    initial {
+        text = "short";
+        $assert(text == "short");
+        copy = text;
+        text = "a string longer than sixty-four bits";
+        $assert(text == "a string longer than sixty-four bits");
+        $assert(copy == "short");
+        copy = text;
+        $assert(copy == text);
+        text = "x";
+        $assert(text == "x");
+        $assert(copy != text);
+        text = "";
+        $assert(text == "");
+        $assert(copy != text);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case comparison
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var left: string;
+    var right: string;
+    initial {
+        left = "b";
+        right = "aa";
+        $assert(left >: right);
+        $assert(left >= right);
+        $assert(right <: left);
+        $assert(right <= left);
+        $assert(left != right);
+        right = left;
+        $assert(left == right);
+        $assert(left <= right);
+        $assert(left >= right);
+        left = "";
+        $assert(left <: right);
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case control_flow
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string;
+    var choose: logic;
+    initial {
+        text = "before";
+        $assert(text == "before");
+        choose = 1;
+        text = if choose ? "longer branch value" : "no";
+        $assert(text == "longer branch value");
+        choose = 0;
+        text = if choose ? "no" : "";
+        $assert(text == "");
+        for i in 0..3 {
+            if i == 1 { text = "middle"; }
+        }
+        $assert(text == "middle");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case array_elements
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string[2];
+    var index: u32;
+    initial {
+        text[0] = "first";
+        text[1] = "second element is longer";
+        index = 1;
+        $assert(text[index] == "second element is longer");
+        text[index] = text[0];
+        text[0] = "";
+        $assert(text[0] == "");
+        $assert(text[1] == "first");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))
+
+(case function_argument
+  (source "test.veryl" #"#[test(Top)]
+module Top {
+    var text: string;
+    function identity(value: input string) -> string {
+        return value;
+    }
+    initial {
+        text = "function argument longer than eight bytes";
+        $assert(identity(text) == text);
+        text = identity("");
+        $assert(text == "");
+        $finish();
+    }
+}
+"#)
+  (top Top)
+  (run_testbench))

@@ -221,7 +221,7 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   const lint = job("lint");
   assert.match(
     lint,
-    /name: Check CI runtime dependency exclusions and test scopes\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs scripts\/ci-rust-scope\.test\.mjs/,
+    /name: Check CI runtime dependency exclusions and test scopes\n        if: .*outputs\.rust == 'true' && needs\.changes\.outputs\.scripts != 'true'\n        run: node --test scripts\/ci-changes\.test\.mjs scripts\/ci-rust-scope\.test\.mjs scripts\/ci-lydite-changes\.test\.mjs/,
   );
 });
 
@@ -333,4 +333,43 @@ test("queue validation rejects missing coverage, producer failures and detection
   for (const name of Object.keys(docs)) if (!["changes", "docs"].includes(name)) docs[name].result = "skipped";
   for (const flag of ["rust", "napi", "napi_arm64", "javascript", "scripts"]) docs.changes.outputs[flag] = "false";
   assert.equal(passes(docs), true);
+});
+
+test("PR caches cannot evict the shared default-branch Rust caches", () => {
+  const cacheSteps = [
+    ...workflow.matchAll(
+      /      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|\n  [a-z]|$)/g,
+    ),
+  ];
+  assert.equal(cacheSteps.length, 8);
+  for (const [, step] of cacheSteps) {
+    assert.match(
+      step,
+      /save-if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}/,
+    );
+  }
+});
+
+test("cache warming shares the Rust Tests key and builds without running tests", () => {
+  const warm = readFileSync(
+    new URL("../.github/workflows/rust-cache.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(warm, /branches: \[master\]/);
+  assert.match(warm, /rust-tests:\n    if: github.ref == format/);
+  assert.match(warm, /CARGO_INCREMENTAL: "0"/);
+  assert.match(warm, /cancel-in-progress: false/);
+  assert.doesNotMatch(
+    warm,
+    /pull_request:|cargo nextest run|cargo test|shared-key:/,
+  );
+  assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
+  assert.match(
+    warm,
+    /cargo nextest list --locked --workspace --message-format json/,
+  );
+  const features = job("rust-tests").match(/--features (\S+)/)[1];
+  assert.ok(warm.includes(`--features ${features}`));
+  const nextest = job("rust-tests").match(/tool: (cargo-nextest@\S+)/)[1];
+  assert.ok(warm.includes(`tool: ${nextest}`));
 });

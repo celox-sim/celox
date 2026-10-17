@@ -216,7 +216,7 @@ def validate_group(out, group, summary, checker_hash):
 def source_files():
     repo = ROOT.parent
     paths = {repo / 'Cargo.toml', repo / 'Cargo.lock', Path(__file__).with_name('ci-matrix.json'),
-             repo / '.github/workflows/lydite.yml',
+             repo / '.github/workflows/lydite-checks.yml',
              ROOT / 'conformance/veryl-symbolic/run_automatic_ci.sh',
              ROOT / 'conformance/veryl-proof/tools/z3-tripwire.sh',
              Path(__file__).with_name('test_ci.py')}
@@ -266,7 +266,7 @@ def gate(out, checker):
             'python': sys.version, 'files': fingerprints,
             'source_snapshots': 'source-snapshots'}, indent=2) + '\n')
         scope = ['../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify', 'audit/automatic_proof', 'conformance/veryl-symbolic/run_automatic_ci.sh',
-                 '../.github/workflows/lydite.yml', '../Cargo.toml', '../Cargo.lock']
+                 '../.github/workflows/lydite-checks.yml', '../Cargo.toml', '../Cargo.lock']
         (out / 'dirty.patch').write_bytes(subprocess.check_output(['git', 'diff', '--binary', 'HEAD', '--', *scope], cwd=ROOT))
         (out / 'untracked-source-paths.txt').write_bytes(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '--', *scope], cwd=ROOT))
         tripwire = out / 'tripwire-bin'

@@ -19,14 +19,32 @@
 //!   event count u32, then per event: scheduled event
 //!   periodic count u32, then per marker: scheduled event | count u64
 //!   high count u32, then per event: event str
+//!   processes (version 2):
+//!     wakeup count u32, then per wakeup: process str | time u64
+//!     waiter count u32, then per waiter:
+//!       process str | site u64 | baseline count u32, then per baseline:
+//!         0 u8 | counter u32 | value bytes | mask bytes, or
+//!         1 u8 | value bytes | mask bytes
+//!     ready count u32, then per process: process str
+//!     inactive count u32, then per process: process str
+//!     update count u32, then per update:
+//!       target str | lsb u64 | width u64 | value bytes | mask bytes
+//!     counted count u32, then per signal: signal str | 3 × counter u32
+//!     write count u32, then per host write: signal str | value bytes | mask bytes
+//!     host pending u8 | finished u8
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
+//! bytes: byte length u32 | little-endian bytes
 //! ```
+//!
+//! Version 1 files, which have no process section, still load. A file whose
+//! processes have nothing to record is written as version 1, which older
+//! builds read too.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
 
@@ -77,6 +95,69 @@ pub struct ScheduleRecord {
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
     pub high_events: Vec<String>,
+    /// Scheduling state of the design's processes.
+    pub processes: ProcessRecord,
+}
+
+/// Scheduling state of process kernels, by name. A process is named by the
+/// path of its status slot, a signal by its state object path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProcessRecord {
+    /// Suspended processes and the time each resumes at.
+    pub wakeups: Vec<(String, u64)>,
+    /// Processes suspended at a wait.
+    pub waiters: Vec<WaiterRecord>,
+    /// Processes ready in the active region of the current time.
+    pub ready: Vec<String>,
+    /// Processes resuming in the inactive region of the current time.
+    pub inactive: Vec<String>,
+    /// Queued nonblocking assignments, in issue order.
+    pub nba_queue: Vec<NbaRecord>,
+    /// Counter values each counted domain last triggered on, by counted
+    /// signal, in changes/rises/falls order.
+    pub domain_counters: Vec<(String, [u32; 3])>,
+    /// Values the host wrote to waited signals that the next step has yet
+    /// to show the waits, in write order: signal, value and mask bytes.
+    pub host_writes: Vec<(String, Vec<u8>, Vec<u8>)>,
+    /// The host changed state the next step settles at the current time.
+    pub host_pending: bool,
+    /// A process finished the simulation.
+    pub finished: bool,
+}
+
+/// A process suspended at a wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiterRecord {
+    pub process: String,
+    /// Index of the wait site among the process's sites.
+    pub site: u64,
+    /// What each term of the site compares against.
+    pub baselines: Vec<BaselineRecord>,
+}
+
+/// What one term of a waiting process compares against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineRecord {
+    /// A counted signal's counter value when the wait began, and its value
+    /// at the last check as little-endian bytes.
+    Counter {
+        seen: u32,
+        value: Vec<u8>,
+        mask: Vec<u8>,
+    },
+    /// The signal's value at the last check, as little-endian bytes.
+    Value { value: Vec<u8>, mask: Vec<u8> },
+}
+
+/// A queued nonblocking assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NbaRecord {
+    pub target: String,
+    pub lsb: u64,
+    pub width: u64,
+    /// Little-endian bytes of the assigned value and its unknown bits.
+    pub value: Vec<u8>,
+    pub mask: Vec<u8>,
 }
 
 /// Contents of a state file.
@@ -119,7 +200,12 @@ impl StateFile {
     pub fn write_to(&self, mut writer: impl Write) -> io::Result<()> {
         let w = &mut writer;
         w.write_all(MAGIC)?;
-        put_u16(w, VERSION)?;
+        let processes = self
+            .schedule
+            .as_ref()
+            .map(|schedule| &schedule.processes)
+            .filter(|processes| **processes != ProcessRecord::default());
+        put_u16(w, if processes.is_some() { VERSION } else { 1 })?;
         let mut flags = 0;
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
@@ -168,6 +254,9 @@ impl StateFile {
             for event in &schedule.high_events {
                 put_str(w, event)?;
             }
+            if let Some(processes) = processes {
+                put_processes(w, processes)?;
+            }
         }
         Ok(())
     }
@@ -180,7 +269,7 @@ impl StateFile {
             return Err(StateFileError::BadMagic);
         }
         let version = get_u16(r)?;
-        if version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(StateFileError::UnsupportedVersion(version));
         }
         let flags = get_u16(r)?;
@@ -233,12 +322,18 @@ impl StateFile {
             let high_events = (0..get_u32(r)?)
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
+            let processes = if version >= 2 {
+                get_processes(r)?
+            } else {
+                ProcessRecord::default()
+            };
             Some(ScheduleRecord {
                 time,
                 clocks,
                 events,
                 periodic,
                 high_events,
+                processes,
             })
         } else {
             None
@@ -349,6 +444,153 @@ fn put_event(w: &mut impl Write, event: &ScheduledEvent) -> io::Result<()> {
     w.write_all(&[event.value])
 }
 
+fn put_bytes(w: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    put_len(w, bytes.len())?;
+    w.write_all(bytes)
+}
+
+fn put_names(w: &mut impl Write, names: &[String]) -> io::Result<()> {
+    put_len(w, names.len())?;
+    names.iter().try_for_each(|name| put_str(w, name))
+}
+
+fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()> {
+    put_len(w, processes.wakeups.len())?;
+    for (process, time) in &processes.wakeups {
+        put_str(w, process)?;
+        put_u64(w, *time)?;
+    }
+    put_len(w, processes.waiters.len())?;
+    for waiter in &processes.waiters {
+        put_str(w, &waiter.process)?;
+        put_u64(w, waiter.site)?;
+        put_len(w, waiter.baselines.len())?;
+        for baseline in &waiter.baselines {
+            match baseline {
+                BaselineRecord::Counter { seen, value, mask } => {
+                    w.write_all(&[0])?;
+                    w.write_all(&seen.to_le_bytes())?;
+                    put_bytes(w, value)?;
+                    put_bytes(w, mask)?;
+                }
+                BaselineRecord::Value { value, mask } => {
+                    w.write_all(&[1])?;
+                    put_bytes(w, value)?;
+                    put_bytes(w, mask)?;
+                }
+            }
+        }
+    }
+    put_names(w, &processes.ready)?;
+    put_names(w, &processes.inactive)?;
+    put_len(w, processes.nba_queue.len())?;
+    for update in &processes.nba_queue {
+        put_str(w, &update.target)?;
+        put_u64(w, update.lsb)?;
+        put_u64(w, update.width)?;
+        put_bytes(w, &update.value)?;
+        put_bytes(w, &update.mask)?;
+    }
+    put_len(w, processes.domain_counters.len())?;
+    for (signal, counters) in &processes.domain_counters {
+        put_str(w, signal)?;
+        for counter in counters {
+            w.write_all(&counter.to_le_bytes())?;
+        }
+    }
+    put_len(w, processes.host_writes.len())?;
+    for (signal, value, mask) in &processes.host_writes {
+        put_str(w, signal)?;
+        put_bytes(w, value)?;
+        put_bytes(w, mask)?;
+    }
+    w.write_all(&[processes.host_pending as u8, processes.finished as u8])
+}
+
+fn get_flag(r: &mut impl Read) -> Result<bool, StateFileError> {
+    let mut flag = [0; 1];
+    r.read_exact(&mut flag)?;
+    match flag[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(StateFileError::Malformed(format!("flag {other}"))),
+    }
+}
+
+fn get_len_bytes(r: &mut impl Read) -> Result<Vec<u8>, StateFileError> {
+    let len = get_u32(r)? as usize;
+    Ok(get_bytes(r, len)?)
+}
+
+fn get_names(r: &mut impl Read) -> Result<Vec<String>, StateFileError> {
+    (0..get_u32(r)?).map(|_| get_str(r)).collect()
+}
+
+fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
+    let wakeups = (0..get_u32(r)?)
+        .map(|_| Ok((get_str(r)?, get_u64(r)?)))
+        .collect::<Result<_, StateFileError>>()?;
+    let waiters = (0..get_u32(r)?)
+        .map(|_| {
+            let process = get_str(r)?;
+            let site = get_u64(r)?;
+            let baselines = (0..get_u32(r)?)
+                .map(|_| {
+                    let mut tag = [0; 1];
+                    r.read_exact(&mut tag)?;
+                    match tag[0] {
+                        0 => Ok(BaselineRecord::Counter {
+                            seen: get_u32(r)?,
+                            value: get_len_bytes(r)?,
+                            mask: get_len_bytes(r)?,
+                        }),
+                        1 => Ok(BaselineRecord::Value {
+                            value: get_len_bytes(r)?,
+                            mask: get_len_bytes(r)?,
+                        }),
+                        other => Err(StateFileError::Malformed(format!("baseline {other}"))),
+                    }
+                })
+                .collect::<Result<_, StateFileError>>()?;
+            Ok(WaiterRecord {
+                process,
+                site,
+                baselines,
+            })
+        })
+        .collect::<Result<_, StateFileError>>()?;
+    let ready = get_names(r)?;
+    let inactive = get_names(r)?;
+    let nba_queue = (0..get_u32(r)?)
+        .map(|_| {
+            Ok(NbaRecord {
+                target: get_str(r)?,
+                lsb: get_u64(r)?,
+                width: get_u64(r)?,
+                value: get_len_bytes(r)?,
+                mask: get_len_bytes(r)?,
+            })
+        })
+        .collect::<Result<_, StateFileError>>()?;
+    let domain_counters = (0..get_u32(r)?)
+        .map(|_| Ok((get_str(r)?, [get_u32(r)?, get_u32(r)?, get_u32(r)?])))
+        .collect::<Result<_, StateFileError>>()?;
+    let host_writes = (0..get_u32(r)?)
+        .map(|_| Ok((get_str(r)?, get_len_bytes(r)?, get_len_bytes(r)?)))
+        .collect::<Result<_, StateFileError>>()?;
+    Ok(ProcessRecord {
+        wakeups,
+        waiters,
+        ready,
+        inactive,
+        nba_queue,
+        domain_counters,
+        host_writes,
+        host_pending: get_flag(r)?,
+        finished: get_flag(r)?,
+    })
+}
+
 fn get_u16(r: &mut impl Read) -> io::Result<u16> {
     let mut bytes = [0; 2];
     r.read_exact(&mut bytes)?;
@@ -440,8 +682,53 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
+                processes: ProcessRecord {
+                    wakeups: vec![("$process[0].status".into(), 20)],
+                    waiters: vec![WaiterRecord {
+                        process: "$process[1].status".into(),
+                        site: 2,
+                        baselines: vec![
+                            BaselineRecord::Counter {
+                                seen: 7,
+                                value: vec![2],
+                                mask: vec![0],
+                            },
+                            BaselineRecord::Value {
+                                value: vec![1],
+                                mask: vec![0],
+                            },
+                        ],
+                    }],
+                    ready: vec!["$process[2].status".into()],
+                    inactive: vec!["$process[3].status".into()],
+                    nba_queue: vec![NbaRecord {
+                        target: "q".into(),
+                        lsb: 2,
+                        width: 3,
+                        value: vec![5],
+                        mask: vec![2],
+                    }],
+                    domain_counters: vec![("clk".into(), [1, 2, 3])],
+                    host_writes: vec![("go".into(), vec![1], vec![])],
+                    host_pending: true,
+                    finished: false,
+                },
             }),
         }
+    }
+
+    #[test]
+    fn files_without_process_state_are_version_1() {
+        let mut file = sample();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 2u16.to_le_bytes());
+        file.schedule.as_mut().unwrap().processes = ProcessRecord::default();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        // Version 1 ends after the high events.
+        assert_eq!(bytes[8..10], 1u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 
     #[test]

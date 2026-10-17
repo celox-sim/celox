@@ -2,6 +2,7 @@ mod bit_count;
 mod memory;
 mod packed;
 mod selection;
+mod slice;
 mod sparse;
 mod wide;
 

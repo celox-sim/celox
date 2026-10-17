@@ -1067,6 +1067,7 @@ struct ExprCompiler<'a> {
     lookup: &'a FrontendLookup,
     id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
+    constant_strings: &'a HashMap<StateAddr, Expression>,
     base_instance: InstanceId,
 }
 
@@ -1173,6 +1174,13 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
         context: Option<ValueContext>,
     ) -> ValueContext {
+        // A string's declared width is nominal; its runtime length must never
+        // pass through integer context sizing or assignment truncation.
+        let context = if expr.comptime().r#type.is_string() {
+            None
+        } else {
+            context
+        };
         match expr {
             Expression::Term(f) => {
                 self.emit_factor(f, ops);
@@ -1248,6 +1256,19 @@ impl ExprCompiler<'_> {
                     return self.resize_result(ops, casted, context);
                 }
 
+                if lhs.comptime().r#type.is_string() && rhs.comptime().r#type.is_string() {
+                    self.emit_in_context(lhs, ops, None);
+                    self.emit_in_context(rhs, ops, None);
+                    ops.push(TbOpcode::BinOp(lower_testbench_operator(*op)));
+                    return self.resize_result(
+                        ops,
+                        ValueContext {
+                            width: 1,
+                            signed: false,
+                        },
+                        context,
+                    );
+                }
                 let lhs_width = self.natural_width(lhs);
                 let rhs_width = self.natural_width(rhs);
                 let semantics = binary_semantics(
@@ -1357,6 +1378,40 @@ impl ExprCompiler<'_> {
     }
 
     fn emit_factor(&self, factor: &Factor, ops: &mut Vec<UnboundTbOpcode>) {
+        if factor.comptime().r#type.is_string() {
+            match factor {
+                Factor::Variable(id, index, select, comptime) if !comptime.is_const => {
+                    let (address, info) =
+                        self.local_variable(*id).expect("string variable metadata");
+                    self.emit_string_access(address, info, index, select, ops);
+                    return;
+                }
+                Factor::HierVariable(reference) => {
+                    let (address, info) = self
+                        .hierarchical_variable(reference)
+                        .expect("string variable metadata");
+                    self.emit_string_access(
+                        address,
+                        info,
+                        &reference.index,
+                        &reference.select,
+                        ops,
+                    );
+                    return;
+                }
+                _ => {
+                    if let Ok(value) = factor.comptime().get_value() {
+                        let len = value.width().div_ceil(8);
+                        let bytes = value.payload().to_bytes_be();
+                        let mut result = vec![0; len];
+                        let copied = len.min(bytes.len());
+                        result[len - copied..].copy_from_slice(&bytes[bytes.len() - copied..]);
+                        ops.push(TbOpcode::ConstString(result));
+                        return;
+                    }
+                }
+            }
+        }
         match factor {
             Factor::Variable(var_id, index, select, comptime) => {
                 if comptime.is_const
@@ -1406,6 +1461,41 @@ impl ExprCompiler<'_> {
                 self.emit_constant_value(value, ops);
             }
         }
+    }
+
+    fn emit_string_access(
+        &self,
+        address: StateAddr,
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
+        if let Some(expression) = self.constant_strings.get(&address) {
+            self.emit(expression, ops);
+            return;
+        }
+
+        let target = self
+            .resolve_target_parts(
+                SemanticSignal {
+                    address,
+                    width: info.width,
+                },
+                info,
+                index,
+                select,
+            )
+            .expect("validated string access");
+        if let Some(selection) = target.selection {
+            ops.extend_from_slice(selection.offset.ops());
+        } else {
+            ops.push(TbOpcode::ConstU64(0));
+        }
+        ops.push(TbOpcode::LoadString {
+            location: Self::state_location_at(address, 0),
+            elements: info.width,
+        });
     }
 
     fn emit_constant_value(
@@ -1458,10 +1548,16 @@ impl ExprCompiler<'_> {
                             signed: expression_signed(arg_expr),
                         }),
                     );
-                    ops.push(TbOpcode::StoreU64 {
-                        location: self.state_location(arg_var_id, 0),
-                        byte_size: get_byte_size(sig.width),
-                    });
+                    if arg_expr.comptime().r#type.is_string() {
+                        ops.push(TbOpcode::StoreString {
+                            location: self.state_location(arg_var_id, 0),
+                        });
+                    } else {
+                        ops.push(TbOpcode::StoreU64 {
+                            location: self.state_location(arg_var_id, 0),
+                            byte_size: get_byte_size(sig.width),
+                        });
+                    }
                 }
             }
         }
@@ -1479,10 +1575,16 @@ impl ExprCompiler<'_> {
                                 signed: expression_signed(&a.expr),
                             }),
                         );
-                        ops.push(TbOpcode::StoreU64 {
-                            location: self.state_location(first_dst.id, 0),
-                            byte_size: get_byte_size(dst_sig.width),
-                        });
+                        if a.expr.comptime().r#type.is_string() {
+                            ops.push(TbOpcode::StoreString {
+                                location: self.state_location(first_dst.id, 0),
+                            });
+                        } else {
+                            ops.push(TbOpcode::StoreU64 {
+                                location: self.state_location(first_dst.id, 0),
+                                byte_size: get_byte_size(dst_sig.width),
+                            });
+                        }
                     }
                 }
             }
@@ -1493,7 +1595,15 @@ impl ExprCompiler<'_> {
         // 3. Load return value
         if let Some(ret_var_id) = &func_body.ret {
             if let Some(sig) = self.resolve_var(ret_var_id) {
-                self.emit_load(*ret_var_id, 0, sig.width, ops);
+                if fc.comptime.r#type.is_string() {
+                    ops.push(TbOpcode::ConstU64(0));
+                    ops.push(TbOpcode::LoadString {
+                        location: self.state_location(*ret_var_id, 0),
+                        elements: 1,
+                    });
+                } else {
+                    self.emit_load(*ret_var_id, 0, sig.width, ops);
+                }
             } else {
                 ops.push(TbOpcode::ConstU64(0));
             }
@@ -2530,6 +2640,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let ec = ExprCompiler {
             lookup: self.lookup,
             id_map: &self.testbench_source.id_map,
+            constant_strings: &self.testbench_source.constant_strings,
             functions: &self.testbench_source.functions,
             base_instance,
         };
@@ -2559,6 +2670,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 let ec = ExprCompiler {
                     lookup: self.lookup,
                     id_map: &self.testbench_source.id_map,
+                    constant_strings: &self.testbench_source.constant_strings,
                     functions: &component.functions,
                     base_instance: component.parent_instance,
                 };
@@ -3159,6 +3271,39 @@ fn validate_testbench_expression(
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
+    if let Expression::Term(factor) = expression
+        && factor.comptime().r#type.is_string()
+    {
+        let access = match factor.as_ref() {
+            Factor::Variable(id, index, select, _) => source
+                .id_map
+                .instance_var(lookup, source.base_instance(lookup), *id)
+                .and_then(|id| lookup.instance_variable(source.base_instance(lookup), id))
+                .map(|(_, info)| (info, index, select)),
+            Factor::HierVariable(reference) => Some((
+                resolve_hierarchical_reference_from(
+                    lookup,
+                    source.base_instance(lookup),
+                    reference,
+                )?
+                .1,
+                &reference.index,
+                &reference.select,
+            )),
+            _ => None,
+        };
+        if let Some((info, index, select)) = access
+            && (index.indices.len() > info.array_dims.len()
+                || !select.0.is_empty()
+                || select.1.is_some())
+        {
+            return Err(ParserError::illegal_context(
+                "string character selection",
+                "character indexing and slicing of strings are not supported in Celox testbenches",
+                Some(&factor.comptime().token),
+            ));
+        }
+    }
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => {
@@ -3219,9 +3364,23 @@ fn validate_testbench_expression(
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
+            if inner.comptime().r#type.is_string() {
+                return Err(ParserError::illegal_context(
+                    "unary string operation",
+                    "unary operations on strings are not supported in Celox testbenches",
+                    Some(&inner.comptime().token),
+                ));
+            }
             validate_testbench_expression(inner, lookup, source, active_functions)
         }
         Expression::Binary(lhs, _, rhs, _) => {
+            if lhs.comptime().r#type.is_string() != rhs.comptime().r#type.is_string() {
+                return Err(ParserError::illegal_context(
+                    "mixed string operation",
+                    "operations mixing string and non-string operands are not supported in Celox testbenches",
+                    Some(&expression.comptime().token),
+                ));
+            }
             validate_testbench_expression(lhs, lookup, source, active_functions)?;
             validate_testbench_expression(rhs, lookup, source, active_functions)
         }
@@ -3232,6 +3391,13 @@ fn validate_testbench_expression(
         }
         Expression::Concatenation(items, _) => {
             for (expression, repeat) in items {
+                if expression.comptime().r#type.is_string() {
+                    return Err(ParserError::illegal_context(
+                        "string concatenation or replication",
+                        "string concatenation and replication are not supported in Celox testbenches",
+                        Some(&expression.comptime().token),
+                    ));
+                }
                 validate_testbench_expression(expression, lookup, source, active_functions)?;
                 if let Some(repeat) = repeat {
                     validate_testbench_expression(repeat, lookup, source, active_functions)?;
@@ -3528,6 +3694,7 @@ fn validate_testbench_hierarchical_destination(
     let compiler = ExprCompiler {
         lookup,
         id_map: &source.id_map,
+        constant_strings: &source.constant_strings,
         functions: &source.functions,
         base_instance: source.base_instance(lookup),
     };
@@ -3559,6 +3726,7 @@ fn validate_testbench_destination(
     ExprCompiler {
         lookup,
         id_map: &source.id_map,
+        constant_strings: &source.constant_strings,
         functions: &source.functions,
         base_instance: source.base_instance(lookup),
     }
@@ -3751,6 +3919,7 @@ mod tests {
         let compiler = ExprCompiler {
             lookup: &lookup,
             id_map: &source.id_map,
+            constant_strings: &source.constant_strings,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };
@@ -3770,6 +3939,7 @@ mod tests {
         let compiler = ExprCompiler {
             lookup: &lookup,
             id_map: &source.id_map,
+            constant_strings: &source.constant_strings,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };

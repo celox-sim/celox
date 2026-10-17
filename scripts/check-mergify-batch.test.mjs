@@ -103,6 +103,87 @@ test("rejects source PRs with invalid titles or another target branch", async ()
   }
 });
 
+test("stack members are validated against the stack root", async () => {
+  const f = fixture();
+  const top = {
+    ...f.source,
+    head: {
+      sha: sourceSha,
+      ref: "stack/u/feat/b--2",
+      repo: { full_name: "o/r" },
+    },
+    base: { ref: "stack/u/feat/a--1" },
+    body: "Adds b.\n\nDepends-On: #12\n",
+  };
+  const bottom = {
+    ...f.source,
+    head: {
+      sha: sourceSha,
+      ref: "stack/u/feat/a--1",
+      repo: { full_name: "o/r" },
+    },
+  };
+  const api = async (path) => {
+    if (path === "/repos/o/r/pulls/12") return bottom;
+    if (path === "/repos/o/r/pulls/13") return top;
+    return f.api(path);
+  };
+  assert.deepEqual(
+    await validateBatch(f.input, api, f.commits, f.policy),
+    [12, 13],
+  );
+});
+
+test("rejects stack-like PRs whose chain does not reach the batch base", async () => {
+  for (const [body, below] of [
+    // No marker: the queue keeps the literal stack branch as the target.
+    [
+      "",
+      {
+        head: {
+          sha: sourceSha,
+          ref: "stack/u/a--1",
+          repo: { full_name: "o/r" },
+        },
+      },
+    ],
+    // The marker names a PR that is not the base branch's owner.
+    [
+      "Depends-On: #12",
+      {
+        head: {
+          sha: sourceSha,
+          ref: "stack/u/x--9",
+          repo: { full_name: "o/r" },
+        },
+      },
+    ],
+    // A fork's branch name says nothing about this repository's branches.
+    [
+      "Depends-On: #12",
+      {
+        head: {
+          sha: sourceSha,
+          ref: "stack/u/a--1",
+          repo: { full_name: "fork/r" },
+        },
+      },
+    ],
+  ]) {
+    const f = fixture();
+    const top = { ...f.source, base: { ref: "stack/u/a--1" }, body };
+    const api = async (path) => {
+      if (path === "/repos/o/r/pulls/12") return { ...f.source, ...below };
+      if (path === "/repos/o/r/pulls/13") return top;
+      return f.api(path);
+    };
+    await assert.rejects(
+      validateBatch(f.input, api, f.commits, f.policy),
+      /Invalid title or base for #13/,
+    );
+  }
+});
+
 test("rejects a force-pushed source head absent from the batch", async () => {
   const f = fixture();
   await assert.rejects(

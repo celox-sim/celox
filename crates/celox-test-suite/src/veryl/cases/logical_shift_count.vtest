@@ -1,0 +1,450 @@
+(group logical_shift_count (category operators))
+
+; IEEE 1800-2023 11.4.10: logical shifts fill vacated bits with zero, so a
+; known dynamic count of at least the operand width yields zero.
+
+(case two_state_dynamic_counts
+  (source "test.veryl" #"
+module Top (
+    sh: input logic<8>,
+    a5: input logic<5>,
+    shl5: output logic<5>,
+    shr5: output logic<5>,
+    a8: input logic<8>,
+    shl8: output logic<8>,
+    shr8: output logic<8>,
+    a32: input logic<32>,
+    shl32: output logic<32>,
+    shr32: output logic<32>,
+    a64: input logic<64>,
+    shl64: output logic<64>,
+    shr64: output logic<64>
+) {
+    assign shl5 = a5 << sh;
+    assign shr5 = a5 >> sh;
+    assign shl8 = a8 << sh;
+    assign shr8 = a8 >> sh;
+    assign shl32 = a32 << sh;
+    assign shr32 = a32 >> sh;
+    assign shl64 = a64 << sh;
+    assign shr64 = a64 >> sh;
+}
+"#)
+  (top Top)
+  (modify
+    (set a5 0x1f)
+    (set a8 0xff)
+    (set a32 0xffffffff)
+    (set a64 0xffffffffffffffff))
+  (modify (set sh 1))
+  (assert_eq shl5 0x1e "5-bit << 1")
+  (assert_eq shr5 0xf "5-bit >> 1")
+  (assert_eq shl8 0xfe "8-bit << 1")
+  (assert_eq shr8 0x7f "8-bit >> 1")
+  (assert_eq shl32 0xfffffffe "32-bit << 1")
+  (assert_eq shr32 0x7fffffff "32-bit >> 1")
+  (assert_eq shl64 0xfffffffffffffffe "64-bit << 1")
+  (assert_eq shr64 0x7fffffffffffffff "64-bit >> 1")
+  (modify (set sh 4))
+  (assert_eq shl5 0x10 "5-bit << 4")
+  (assert_eq shr5 0x1 "5-bit >> 4")
+  (assert_eq shl8 0xf0 "8-bit << 4")
+  (assert_eq shr8 0xf "8-bit >> 4")
+  (assert_eq shl32 0xfffffff0 "32-bit << 4")
+  (assert_eq shr32 0xfffffff "32-bit >> 4")
+  (assert_eq shl64 0xfffffffffffffff0 "64-bit << 4")
+  (assert_eq shr64 0xfffffffffffffff "64-bit >> 4")
+  (modify (set sh 5))
+  (assert_eq shl5 0x0 "5-bit << 5")
+  (assert_eq shr5 0x0 "5-bit >> 5")
+  (assert_eq shl8 0xe0 "8-bit << 5")
+  (assert_eq shr8 0x7 "8-bit >> 5")
+  (assert_eq shl32 0xffffffe0 "32-bit << 5")
+  (assert_eq shr32 0x7ffffff "32-bit >> 5")
+  (assert_eq shl64 0xffffffffffffffe0 "64-bit << 5")
+  (assert_eq shr64 0x7ffffffffffffff "64-bit >> 5")
+  (modify (set sh 7))
+  (assert_eq shl5 0x0 "5-bit << 7")
+  (assert_eq shr5 0x0 "5-bit >> 7")
+  (assert_eq shl8 0x80 "8-bit << 7")
+  (assert_eq shr8 0x1 "8-bit >> 7")
+  (assert_eq shl32 0xffffff80 "32-bit << 7")
+  (assert_eq shr32 0x1ffffff "32-bit >> 7")
+  (assert_eq shl64 0xffffffffffffff80 "64-bit << 7")
+  (assert_eq shr64 0x1ffffffffffffff "64-bit >> 7")
+  (modify (set sh 8))
+  (assert_eq shl5 0x0 "5-bit << 8")
+  (assert_eq shr5 0x0 "5-bit >> 8")
+  (assert_eq shl8 0x0 "8-bit << 8")
+  (assert_eq shr8 0x0 "8-bit >> 8")
+  (assert_eq shl32 0xffffff00 "32-bit << 8")
+  (assert_eq shr32 0xffffff "32-bit >> 8")
+  (assert_eq shl64 0xffffffffffffff00 "64-bit << 8")
+  (assert_eq shr64 0xffffffffffffff "64-bit >> 8")
+  (modify (set sh 9))
+  (assert_eq shl5 0x0 "5-bit << 9")
+  (assert_eq shr5 0x0 "5-bit >> 9")
+  (assert_eq shl8 0x0 "8-bit << 9")
+  (assert_eq shr8 0x0 "8-bit >> 9")
+  (assert_eq shl32 0xfffffe00 "32-bit << 9")
+  (assert_eq shr32 0x7fffff "32-bit >> 9")
+  (assert_eq shl64 0xfffffffffffffe00 "64-bit << 9")
+  (assert_eq shr64 0x7fffffffffffff "64-bit >> 9")
+  (modify (set sh 31))
+  (assert_eq shl5 0x0 "5-bit << 31")
+  (assert_eq shr5 0x0 "5-bit >> 31")
+  (assert_eq shl8 0x0 "8-bit << 31")
+  (assert_eq shr8 0x0 "8-bit >> 31")
+  (assert_eq shl32 0x80000000 "32-bit << 31")
+  (assert_eq shr32 0x1 "32-bit >> 31")
+  (assert_eq shl64 0xffffffff80000000 "64-bit << 31")
+  (assert_eq shr64 0x1ffffffff "64-bit >> 31")
+  (modify (set sh 32))
+  (assert_eq shl5 0x0 "5-bit << 32")
+  (assert_eq shr5 0x0 "5-bit >> 32")
+  (assert_eq shl8 0x0 "8-bit << 32")
+  (assert_eq shr8 0x0 "8-bit >> 32")
+  (assert_eq shl32 0x0 "32-bit << 32")
+  (assert_eq shr32 0x0 "32-bit >> 32")
+  (assert_eq shl64 0xffffffff00000000 "64-bit << 32")
+  (assert_eq shr64 0xffffffff "64-bit >> 32")
+  (modify (set sh 33))
+  (assert_eq shl5 0x0 "5-bit << 33")
+  (assert_eq shr5 0x0 "5-bit >> 33")
+  (assert_eq shl8 0x0 "8-bit << 33")
+  (assert_eq shr8 0x0 "8-bit >> 33")
+  (assert_eq shl32 0x0 "32-bit << 33")
+  (assert_eq shr32 0x0 "32-bit >> 33")
+  (assert_eq shl64 0xfffffffe00000000 "64-bit << 33")
+  (assert_eq shr64 0x7fffffff "64-bit >> 33")
+  (modify (set sh 63))
+  (assert_eq shl5 0x0 "5-bit << 63")
+  (assert_eq shr5 0x0 "5-bit >> 63")
+  (assert_eq shl8 0x0 "8-bit << 63")
+  (assert_eq shr8 0x0 "8-bit >> 63")
+  (assert_eq shl32 0x0 "32-bit << 63")
+  (assert_eq shr32 0x0 "32-bit >> 63")
+  (assert_eq shl64 0x8000000000000000 "64-bit << 63")
+  (assert_eq shr64 0x1 "64-bit >> 63")
+  (modify (set sh 64))
+  (assert_eq shl5 0x0 "5-bit << 64")
+  (assert_eq shr5 0x0 "5-bit >> 64")
+  (assert_eq shl8 0x0 "8-bit << 64")
+  (assert_eq shr8 0x0 "8-bit >> 64")
+  (assert_eq shl32 0x0 "32-bit << 64")
+  (assert_eq shr32 0x0 "32-bit >> 64")
+  (assert_eq shl64 0x0 "64-bit << 64")
+  (assert_eq shr64 0x0 "64-bit >> 64")
+  (modify (set sh 65))
+  (assert_eq shl5 0x0 "5-bit << 65")
+  (assert_eq shr5 0x0 "5-bit >> 65")
+  (assert_eq shl8 0x0 "8-bit << 65")
+  (assert_eq shr8 0x0 "8-bit >> 65")
+  (assert_eq shl32 0x0 "32-bit << 65")
+  (assert_eq shr32 0x0 "32-bit >> 65")
+  (assert_eq shl64 0x0 "64-bit << 65")
+  (assert_eq shr64 0x0 "64-bit >> 65")
+  (modify (set sh 128))
+  (assert_eq shl5 0x0 "5-bit << 128")
+  (assert_eq shr5 0x0 "5-bit >> 128")
+  (assert_eq shl8 0x0 "8-bit << 128")
+  (assert_eq shr8 0x0 "8-bit >> 128")
+  (assert_eq shl32 0x0 "32-bit << 128")
+  (assert_eq shr32 0x0 "32-bit >> 128")
+  (assert_eq shl64 0x0 "64-bit << 128")
+  (assert_eq shr64 0x0 "64-bit >> 128")
+  (modify (set sh 255))
+  (assert_eq shl5 0x0 "5-bit << 255")
+  (assert_eq shr5 0x0 "5-bit >> 255")
+  (assert_eq shl8 0x0 "8-bit << 255")
+  (assert_eq shr8 0x0 "8-bit >> 255")
+  (assert_eq shl32 0x0 "32-bit << 255")
+  (assert_eq shr32 0x0 "32-bit >> 255")
+  (assert_eq shl64 0x0 "64-bit << 255")
+  (assert_eq shr64 0x0 "64-bit >> 255"))
+
+(case two_state_single_bit_wrap
+  (source "test.veryl" #"
+module Top (
+    sh: input logic<8>,
+    lo5: input logic<5>,
+    hi5: input logic<5>,
+    shl5: output logic<5>,
+    shr5: output logic<5>,
+    lo8: input logic<8>,
+    hi8: input logic<8>,
+    shl8: output logic<8>,
+    shr8: output logic<8>,
+    lo32: input logic<32>,
+    hi32: input logic<32>,
+    shl32: output logic<32>,
+    shr32: output logic<32>,
+    lo64: input logic<64>,
+    hi64: input logic<64>,
+    shl64: output logic<64>,
+    shr64: output logic<64>
+) {
+    assign shl5 = lo5 << sh;
+    assign shr5 = hi5 >> sh;
+    assign shl8 = lo8 << sh;
+    assign shr8 = hi8 >> sh;
+    assign shl32 = lo32 << sh;
+    assign shr32 = hi32 >> sh;
+    assign shl64 = lo64 << sh;
+    assign shr64 = hi64 >> sh;
+}
+"#)
+  (top Top)
+  (modify
+    (set lo5 0x1)
+    (set hi5 0x10)
+    (set lo8 0x1)
+    (set hi8 0x80)
+    (set lo32 0x1)
+    (set hi32 0x80000000)
+    (set lo64 0x1)
+    (set hi64 0x8000000000000000))
+  (modify (set sh 8))
+  (assert_eq shl5 0x0 "5-bit 1 << 8")
+  (assert_eq shr5 0x0 "5-bit msb >> 8")
+  (assert_eq shl8 0x0 "8-bit 1 << 8")
+  (assert_eq shr8 0x0 "8-bit msb >> 8")
+  (assert_eq shl32 0x100 "32-bit 1 << 8")
+  (assert_eq shr32 0x800000 "32-bit msb >> 8")
+  (assert_eq shl64 0x100 "64-bit 1 << 8")
+  (assert_eq shr64 0x80000000000000 "64-bit msb >> 8")
+  (modify (set sh 32))
+  (assert_eq shl5 0x0 "5-bit 1 << 32")
+  (assert_eq shr5 0x0 "5-bit msb >> 32")
+  (assert_eq shl8 0x0 "8-bit 1 << 32")
+  (assert_eq shr8 0x0 "8-bit msb >> 32")
+  (assert_eq shl32 0x0 "32-bit 1 << 32")
+  (assert_eq shr32 0x0 "32-bit msb >> 32")
+  (assert_eq shl64 0x100000000 "64-bit 1 << 32")
+  (assert_eq shr64 0x80000000 "64-bit msb >> 32")
+  (modify (set sh 64))
+  (assert_eq shl5 0x0 "5-bit 1 << 64")
+  (assert_eq shr5 0x0 "5-bit msb >> 64")
+  (assert_eq shl8 0x0 "8-bit 1 << 64")
+  (assert_eq shr8 0x0 "8-bit msb >> 64")
+  (assert_eq shl32 0x0 "32-bit 1 << 64")
+  (assert_eq shr32 0x0 "32-bit msb >> 64")
+  (assert_eq shl64 0x0 "64-bit 1 << 64")
+  (assert_eq shr64 0x0 "64-bit msb >> 64")
+  (modify (set sh 65))
+  (assert_eq shl5 0x0 "5-bit 1 << 65")
+  (assert_eq shr5 0x0 "5-bit msb >> 65")
+  (assert_eq shl8 0x0 "8-bit 1 << 65")
+  (assert_eq shr8 0x0 "8-bit msb >> 65")
+  (assert_eq shl32 0x0 "32-bit 1 << 65")
+  (assert_eq shr32 0x0 "32-bit msb >> 65")
+  (assert_eq shl64 0x0 "64-bit 1 << 65")
+  (assert_eq shr64 0x0 "64-bit msb >> 65")
+  (modify (set sh 128))
+  (assert_eq shl5 0x0 "5-bit 1 << 128")
+  (assert_eq shr5 0x0 "5-bit msb >> 128")
+  (assert_eq shl8 0x0 "8-bit 1 << 128")
+  (assert_eq shr8 0x0 "8-bit msb >> 128")
+  (assert_eq shl32 0x0 "32-bit 1 << 128")
+  (assert_eq shr32 0x0 "32-bit msb >> 128")
+  (assert_eq shl64 0x0 "64-bit 1 << 128")
+  (assert_eq shr64 0x0 "64-bit msb >> 128"))
+
+(case two_state_wide_count
+  (source "test.veryl" #"
+module Top (
+    n: input logic<72>,
+    a8: input logic<8>,
+    shl8: output logic<8>,
+    shr8: output logic<8>,
+    a64: input logic<64>,
+    shl64: output logic<64>,
+    shr64: output logic<64>
+) {
+    assign shl8 = a8 << n;
+    assign shr8 = a8 >> n;
+    assign shl64 = a64 << n;
+    assign shr64 = a64 >> n;
+}
+"#)
+  (top Top)
+  (modify
+    (set a8 0xff)
+    (set a64 0xffffffffffffffff))
+  (modify (set n 0x3))
+  (assert_eq shl8 0xf8 "8-bit << 0x3")
+  (assert_eq shr8 0x1f "8-bit >> 0x3")
+  (assert_eq shl64 0xfffffffffffffff8 "64-bit << 0x3")
+  (assert_eq shr64 0x1fffffffffffffff "64-bit >> 0x3")
+  (modify (set n 0x40))
+  (assert_eq shl8 0x0 "8-bit << 0x40")
+  (assert_eq shr8 0x0 "8-bit >> 0x40")
+  (assert_eq shl64 0x0 "64-bit << 0x40")
+  (assert_eq shr64 0x0 "64-bit >> 0x40")
+  (modify (set n 0x10000000000000000))
+  (assert_eq shl8 0x0 "8-bit << 0x10000000000000000")
+  (assert_eq shr8 0x0 "8-bit >> 0x10000000000000000")
+  (assert_eq shl64 0x0 "64-bit << 0x10000000000000000")
+  (assert_eq shr64 0x0 "64-bit >> 0x10000000000000000")
+  (modify (set n 0x10000000000000001))
+  (assert_eq shl8 0x0 "8-bit << 0x10000000000000001")
+  (assert_eq shr8 0x0 "8-bit >> 0x10000000000000001")
+  (assert_eq shl64 0x0 "64-bit << 0x10000000000000001")
+  (assert_eq shr64 0x0 "64-bit >> 0x10000000000000001")
+  (modify (set n 0xffffffffffffffffff))
+  (assert_eq shl8 0x0 "8-bit << 0xffffffffffffffffff")
+  (assert_eq shr8 0x0 "8-bit >> 0xffffffffffffffffff")
+  (assert_eq shl64 0x0 "64-bit << 0xffffffffffffffffff")
+  (assert_eq shr64 0x0 "64-bit >> 0xffffffffffffffffff"))
+
+(case four_state_dynamic_counts
+  (four_state)
+  (source "test.veryl" #"
+module Top (
+    sh: input logic<8>,
+    a5: input logic<5>,
+    shl5: output logic<5>,
+    shr5: output logic<5>,
+    a8: input logic<8>,
+    shl8: output logic<8>,
+    shr8: output logic<8>,
+    a32: input logic<32>,
+    shl32: output logic<32>,
+    shr32: output logic<32>,
+    a64: input logic<64>,
+    shl64: output logic<64>,
+    shr64: output logic<64>
+) {
+    assign shl5 = a5 << sh;
+    assign shr5 = a5 >> sh;
+    assign shl8 = a8 << sh;
+    assign shr8 = a8 >> sh;
+    assign shl32 = a32 << sh;
+    assign shr32 = a32 >> sh;
+    assign shl64 = a64 << sh;
+    assign shr64 = a64 >> sh;
+}
+"#)
+  (top Top)
+  (modify
+    (set a5 (fourstate 0x13 0x15))
+    (set a8 (fourstate 0x83 0x91))
+    (set a32 (fourstate 0x80000003 0x80010001))
+    (set a64 (fourstate 0x8000000000000003 0x8000000100000001)))
+  (modify (set sh 1))
+  (assert_eq shl5 (fourstate 0x6 0xa) "5-bit << 1")
+  (assert_eq shr5 (fourstate 0x9 0xa) "5-bit >> 1")
+  (assert_eq shl8 (fourstate 0x6 0x22) "8-bit << 1")
+  (assert_eq shr8 (fourstate 0x41 0x48) "8-bit >> 1")
+  (assert_eq shl32 (fourstate 0x6 0x20002) "32-bit << 1")
+  (assert_eq shr32 (fourstate 0x40000001 0x40008000) "32-bit >> 1")
+  (assert_eq shl64 (fourstate 0x6 0x200000002) "64-bit << 1")
+  (assert_eq shr64 (fourstate 0x4000000000000001 0x4000000080000000) "64-bit >> 1")
+  (modify (set sh 4))
+  (assert_eq shl5 (fourstate 0x10 0x10) "5-bit << 4")
+  (assert_eq shr5 (fourstate 0x1 0x1) "5-bit >> 4")
+  (assert_eq shl8 (fourstate 0x30 0x10) "8-bit << 4")
+  (assert_eq shr8 (fourstate 0x8 0x9) "8-bit >> 4")
+  (assert_eq shl32 (fourstate 0x30 0x100010) "32-bit << 4")
+  (assert_eq shr32 (fourstate 0x8000000 0x8001000) "32-bit >> 4")
+  (assert_eq shl64 (fourstate 0x30 0x1000000010) "64-bit << 4")
+  (assert_eq shr64 (fourstate 0x800000000000000 0x800000010000000) "64-bit >> 4")
+  (modify (set sh 5))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 5")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 5")
+  (assert_eq shl8 (fourstate 0x60 0x20) "8-bit << 5")
+  (assert_eq shr8 (fourstate 0x4 0x4) "8-bit >> 5")
+  (assert_eq shl32 (fourstate 0x60 0x200020) "32-bit << 5")
+  (assert_eq shr32 (fourstate 0x4000000 0x4000800) "32-bit >> 5")
+  (assert_eq shl64 (fourstate 0x60 0x2000000020) "64-bit << 5")
+  (assert_eq shr64 (fourstate 0x400000000000000 0x400000008000000) "64-bit >> 5")
+  (modify (set sh 7))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 7")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 7")
+  (assert_eq shl8 (fourstate 0x80 0x80) "8-bit << 7")
+  (assert_eq shr8 (fourstate 0x1 0x1) "8-bit >> 7")
+  (assert_eq shl32 (fourstate 0x180 0x800080) "32-bit << 7")
+  (assert_eq shr32 (fourstate 0x1000000 0x1000200) "32-bit >> 7")
+  (assert_eq shl64 (fourstate 0x180 0x8000000080) "64-bit << 7")
+  (assert_eq shr64 (fourstate 0x100000000000000 0x100000002000000) "64-bit >> 7")
+  (modify (set sh 8))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 8")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 8")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 8")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 8")
+  (assert_eq shl32 (fourstate 0x300 0x1000100) "32-bit << 8")
+  (assert_eq shr32 (fourstate 0x800000 0x800100) "32-bit >> 8")
+  (assert_eq shl64 (fourstate 0x300 0x10000000100) "64-bit << 8")
+  (assert_eq shr64 (fourstate 0x80000000000000 0x80000001000000) "64-bit >> 8")
+  (modify (set sh 9))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 9")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 9")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 9")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 9")
+  (assert_eq shl32 (fourstate 0x600 0x2000200) "32-bit << 9")
+  (assert_eq shr32 (fourstate 0x400000 0x400080) "32-bit >> 9")
+  (assert_eq shl64 (fourstate 0x600 0x20000000200) "64-bit << 9")
+  (assert_eq shr64 (fourstate 0x40000000000000 0x40000000800000) "64-bit >> 9")
+  (modify (set sh 31))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 31")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 31")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 31")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 31")
+  (assert_eq shl32 (fourstate 0x80000000 0x80000000) "32-bit << 31")
+  (assert_eq shr32 (fourstate 0x1 0x1) "32-bit >> 31")
+  (assert_eq shl64 (fourstate 0x180000000 0x8000000080000000) "64-bit << 31")
+  (assert_eq shr64 (fourstate 0x100000000 0x100000002) "64-bit >> 31")
+  (modify (set sh 32))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 32")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 32")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 32")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 32")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 32")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 32")
+  (assert_eq shl64 (fourstate 0x300000000 0x100000000) "64-bit << 32")
+  (assert_eq shr64 (fourstate 0x80000000 0x80000001) "64-bit >> 32")
+  (modify (set sh 33))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 33")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 33")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 33")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 33")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 33")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 33")
+  (assert_eq shl64 (fourstate 0x600000000 0x200000000) "64-bit << 33")
+  (assert_eq shr64 (fourstate 0x40000000 0x40000000) "64-bit >> 33")
+  (modify (set sh 63))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 63")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 63")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 63")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 63")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 63")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 63")
+  (assert_eq shl64 (fourstate 0x8000000000000000 0x8000000000000000) "64-bit << 63")
+  (assert_eq shr64 (fourstate 0x1 0x1) "64-bit >> 63")
+  (modify (set sh 64))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 64")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 64")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 64")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 64")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 64")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 64")
+  (assert_eq shl64 (fourstate 0x0 0x0) "64-bit << 64")
+  (assert_eq shr64 (fourstate 0x0 0x0) "64-bit >> 64")
+  (modify (set sh 65))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 65")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 65")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 65")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 65")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 65")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 65")
+  (assert_eq shl64 (fourstate 0x0 0x0) "64-bit << 65")
+  (assert_eq shr64 (fourstate 0x0 0x0) "64-bit >> 65")
+  (modify (set sh 255))
+  (assert_eq shl5 (fourstate 0x0 0x0) "5-bit << 255")
+  (assert_eq shr5 (fourstate 0x0 0x0) "5-bit >> 255")
+  (assert_eq shl8 (fourstate 0x0 0x0) "8-bit << 255")
+  (assert_eq shr8 (fourstate 0x0 0x0) "8-bit >> 255")
+  (assert_eq shl32 (fourstate 0x0 0x0) "32-bit << 255")
+  (assert_eq shr32 (fourstate 0x0 0x0) "32-bit >> 255")
+  (assert_eq shl64 (fourstate 0x0 0x0) "64-bit << 255")
+  (assert_eq shr64 (fourstate 0x0 0x0) "64-bit >> 255"))

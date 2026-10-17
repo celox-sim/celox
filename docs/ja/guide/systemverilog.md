@@ -62,7 +62,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
 | 連続論理 | `assign`、`wire w = expr;` |
 | 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
-| 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット |
+| 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
 | initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
 | 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
@@ -71,6 +71,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
+| 乱数 | `$urandom`、`$urandom_range`、`$random` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -101,8 +102,7 @@ package・interface の手続きは宣言元の時間単位と精度を保持し
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、0 起点の降順でない
   多次元 packed 範囲（[#438](https://github.com/celox-sim/celox/issues/438)）、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
-  オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、プロセスをまたいだ同一クロック（[#443](https://github.com/celox-sim/celox/issues/443)）・同一リセット
-  （[#471](https://github.com/celox-sim/celox/issues/471)）の両エッジの使用。
+  オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）。
 - 組み合わせ回路のプロセス：`always_comb` 内のノンブロッキング代入（[#453](https://github.com/celox-sim/celox/issues/453)）。
 - ループ：手続き的なループの展開は 10,000 回までです。反復回数が実行時に決まる組み合わせ
   回路のループは、カウンタ形式の `for` である必要があります。loop-generate は 10,000 回を
@@ -111,8 +111,8 @@ package・interface の手続きは宣言元の時間単位と精度を保持し
 - 式：ストリーミング連結（[#447](https://github.com/celox-sim/celox/issues/447)）、パラメータ式での
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）、X/Z を含む値や 128 ビットを超える値など、単純な整数で
   ないパラメータ上書き（[#461](https://github.com/celox-sim/celox/issues/461)）。
-- システムタスクとシステム関数：Celox は IEEE 1800-2023 第 20・21 章のすべての名前を
-  知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen` など）は、
+- システムタスクとシステム関数：Celox は IEEE 1800-2023 が定義するすべての名前を、
+  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
@@ -223,3 +223,21 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 interface型から解決します。generic interfaceポートとgenerate内のローカルハンドルも
 対象です。`child.info`のように子module内のinterfaceインスタンスを指定する
 スカラー階層も、インスタンスが展開で消える前に解決します。
+
+`$urandom` は周期が2の32乗の決定的な線形合同法を使います
+（IEEE 1800-2023 18.13.1、18.14）。同じシードで同じ列を再現し、
+シード引数は変更しません。サブルーチン内では呼び出し元プロセスの列を使い、
+乱数状態はチェックポイントの保存・復元に含まれます。
+既定シードと具体的な乱数値は実装依存です。
+組み合わせプロセスでは、プロセスの起動時にだけ乱数列が進みます。
+`always_comb` は時刻0と暗黙の感度リストの入力変化時に実行され、
+`always @*` は入力変化を待ちます。入力が変わらない再評価では乱数列は進みません。
+定数値を要求する文脈では診断を返します。
+
+`$urandom_range(maxval, minval)` は `$urandom` の列から両端を含む範囲の値を返し、
+逆順の範囲は入れ替えます。`minval` の既定値は0です（18.13.2）。
+`$random` は IEEE 1800-2023 附属書 N のアルゴリズムに従うため、
+Icarus Verilog などそれを実装するシミュレータと同じ値を返します。
+`$random(seed)` はシード変数を更新します。引数がなければプロセスごとのシードを
+使い、その初期値は0です。そのため `$random` を呼ぶプロセスが1つだけの設計では、
+設計全体で1つのシードを持つシミュレータと一致します。

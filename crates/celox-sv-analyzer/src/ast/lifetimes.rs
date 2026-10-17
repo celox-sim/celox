@@ -664,12 +664,14 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     }
 }
 
-/// Call `f` with the name and arguments of every call in `expr`.
+/// Call `f` with the name and arguments of every subroutine call in `expr`.
 fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Option<Expr>])) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
-        Expr::Call { name, args, .. } => {
-            f(name, args);
+        Expr::Call { callee, args, .. } => {
+            if let Callee::Subroutine(name) = callee {
+                f(name, args);
+            }
             for arg in args.iter().flatten() {
                 visit_calls(arg, f);
             }

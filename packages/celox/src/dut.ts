@@ -29,6 +29,11 @@ import { isFourStateValue } from "./types.js";
  */
 export interface DirtyState {
 	dirty: boolean;
+	/**
+	 * An input was written since the timed scheduler last heard of it; a
+	 * combinational settle for a read does not clear it.
+	 */
+	written?: boolean;
 	disposed?: boolean;
 }
 
@@ -479,6 +484,7 @@ function defineSignalProperty(
 			}
 
 			state.dirty = true;
+			state.written = true;
 		},
 
 		enumerable: true,
@@ -854,6 +860,7 @@ function createArrayDut(
 				if (is4state) storage.write(index, true, 0n);
 			}
 			state.dirty = true;
+			state.written = true;
 		},
 	};
 }

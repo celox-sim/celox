@@ -97,7 +97,20 @@ fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    eval_backend_expr(&mut sim.backend, expr)
+    let (memory, _) = sim.backend.memory_as_ptr();
+    let trace = sim.backend.layout().trace.as_ref();
+    expr.eval_with_strings(
+        memory.cast_mut(),
+        &mut sim.testbench_strings,
+        |offset, len| {
+            if let Some(trace) = trace {
+                // SAFETY: bytecode is bound to this simulator's memory layout.
+                unsafe {
+                    trace.mark_range(memory.cast_mut(), offset, len);
+                }
+            }
+        },
+    )
 }
 
 pub(crate) fn eval_backend_expr<B: SimBackend>(
@@ -126,12 +139,16 @@ fn format_assert_arg<B: SimBackend>(
     field: FieldSpec,
 ) -> Vec<u8> {
     let value = eval_expr(sim, &arg.expr);
+    let width = match &value {
+        TbValue::String(bytes) => bytes.len() * 8,
+        _ => arg.width,
+    };
     let value = value.to_biguint();
     format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
             mask: None,
-            width: arg.width,
+            width,
             signed: arg.signed,
             is_string: arg.is_string,
         },
@@ -223,8 +240,19 @@ fn sim_set_target<B: SimBackend>(
     target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
     value: TbValue,
 ) {
+    if let TbValue::String(bytes) = value {
+        let index = target.selection.as_ref().map_or(0, |selection| {
+            eval_expr(sim, &selection.offset).to_u64() as usize
+        });
+        if index < target.signal.width {
+            sim.testbench_strings
+                .insert((target.signal.offset, index), bytes);
+        }
+        return;
+    }
     let Some(selection) = &target.selection else {
         match value {
+            TbValue::String(_) => unreachable!(),
             TbValue::U64(value) => sim_set_u64(sim, target.signal, value),
             TbValue::Wide(value) => sim.set_wide(target.signal, value),
         }
@@ -400,6 +428,7 @@ fn eval_loop_bound<B: SimBackend>(
                 decode_signed_loop_bound(value, *width)
             } else {
                 match value {
+                    TbValue::String(_) => unreachable!("string loop bound"),
                     TbValue::U64(v) => match usize::try_from(v) {
                         Ok(v) => Ok(EvaluatedLoopBound::Unsigned(v)),
                         Err(_) => Ok(EvaluatedLoopBound::UnsignedWide(BigUint::from(v))),
@@ -427,6 +456,7 @@ fn decode_signed_loop_bound(
 ) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
     let width = width.max(1);
     match value {
+        TbValue::String(_) => unreachable!("string loop bound"),
         TbValue::U64(v) => {
             let raw = if width >= 64 {
                 v as u128

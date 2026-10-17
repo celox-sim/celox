@@ -289,6 +289,7 @@ impl ScopeSymbols {
                 .iter()
                 .filter(|process| initializes(process, target))
                 .map(|process| InitialProcess {
+                    creation_order: process.creation_order,
                     condition: process.condition.clone(),
                     body: process
                         .body
@@ -298,6 +299,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect();
             self.signals.push(signal);
@@ -482,6 +484,7 @@ impl ScopeSymbols {
                 .initial_processes
                 .iter()
                 .map(|process| InitialProcess {
+                    creation_order: process.creation_order,
                     condition: process
                         .condition
                         .clone()
@@ -493,6 +496,7 @@ impl ScopeSymbols {
                         .map(|stmt| rename.stmt(stmt))
                         .collect(),
                     initializer: process.initializer,
+                    synthetic: process.synthetic,
                 })
                 .collect(),
             aliases: HashMap::default(),
@@ -560,8 +564,8 @@ impl Renamer<'_> {
                 expr: Box::new(self.const_expr(*expr)),
                 bit: Box::new(self.const_expr(*bit)),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: self.name(&name),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.map_subroutine(|name| self.name(&name)),
                 args: args.into_iter().map(|arg| self.const_expr(arg)).collect(),
                 site,
             },
@@ -646,12 +650,12 @@ impl Renamer<'_> {
                 else_expr: boxed(else_expr),
             },
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: self.name(&name),
+                callee: callee.map_subroutine(|name| self.name(&name)),
                 args: args
                     .into_iter()
                     .map(|arg| arg.map(|arg| self.expr(arg)))
@@ -888,6 +892,11 @@ impl Renamer<'_> {
                 })
                 .collect(),
             return_var: subroutine.return_var.map(|name| self.name(&name)),
+            sensitivity_body: subroutine
+                .sensitivity_body
+                .into_iter()
+                .map(|stmt| self.stmt(stmt))
+                .collect(),
             body: subroutine
                 .body
                 .into_iter()

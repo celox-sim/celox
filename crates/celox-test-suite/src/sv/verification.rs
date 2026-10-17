@@ -38,7 +38,64 @@ fn element_width(r#type: &Type) -> Option<usize> {
     }
 }
 
+/// The preprocessed `sources` with every procedure and task blanked out, for
+/// a timed design's declarations: the analyzer does not lower every timing
+/// control, and port shapes do not depend on process bodies. Blanking keeps
+/// line breaks, so declaration positions are unchanged.
+fn declarations_only(design: &Design) -> Option<Design> {
+    let mut defines = sv_parser::Defines::default();
+    let mut declarations = design.clone();
+    for source in &mut declarations.sources {
+        let includes: Vec<&std::path::Path> = Vec::new();
+        let (text, next) = sv_parser::preprocess_str(
+            &source.text,
+            &source.path,
+            &defines,
+            &includes,
+            true,
+            false,
+            0,
+            0,
+        )
+        .ok()?;
+        let mut blanked = text.text().as_bytes().to_vec();
+        let (tree, _) = sv_parser::parse_sv_pp(text, next.clone(), false).ok()?;
+        defines = next;
+        for node in &tree {
+            if !matches!(
+                node,
+                sv_parser::RefNode::InitialConstruct(_)
+                    | sv_parser::RefNode::AlwaysConstruct(_)
+                    | sv_parser::RefNode::FinalConstruct(_)
+                    | sv_parser::RefNode::TaskDeclaration(_)
+            ) {
+                continue;
+            }
+            let locates = node.into_iter().filter_map(|inner| match inner {
+                sv_parser::RefNode::Locate(locate) => Some(*locate),
+                _ => None,
+            });
+            for locate in locates {
+                for byte in &mut blanked[locate.offset..locate.offset + locate.len] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+            }
+        }
+        source.text = String::from_utf8(blanked).ok()?;
+    }
+    Some(declarations)
+}
+
 fn design_info(design: &Design) -> Option<DesignInfo> {
+    if design.timed {
+        return analyzed_info(&declarations_only(design)?);
+    }
+    analyzed_info(design)
+}
+
+fn analyzed_info(design: &Design) -> Option<DesignInfo> {
     // Interfaces are expanded as the Celox frontend does; the tools still
     // compile the sources as written.
     let paths: Vec<_> = design

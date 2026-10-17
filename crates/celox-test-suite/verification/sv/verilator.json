@@ -12,6 +12,7 @@
     "verilator/review_regressions.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",
+    "verilator/timing.json",
     "verilator/types.json"
   ],
   "exclude_stronger_than_sv": false,

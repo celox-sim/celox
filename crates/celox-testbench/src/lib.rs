@@ -16,6 +16,9 @@ pub use format::{
 };
 pub use vm::{CompiledExpr, TestbenchValue};
 
+/// Dynamic string values, addressed by a bound variable and flattened array index.
+pub type TestbenchStrings = std::collections::BTreeMap<(usize, usize), Vec<u8>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
     pub address: A,
@@ -507,6 +510,14 @@ pub enum ExprOpcode<L = usize> {
         location: L,
         byte_size: usize,
     },
+    ConstString(Vec<u8>),
+    LoadString {
+        location: L,
+        elements: usize,
+    },
+    StoreString {
+        location: L,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +679,14 @@ impl<A> ExprBytecode<StateLocation<A>> {
         let mut ops = Vec::with_capacity(self.ops.len());
         for op in self.ops {
             let bound = match op {
+                ExprOpcode::ConstString(value) => ExprOpcode::ConstString(value),
+                ExprOpcode::LoadString { location, elements } => ExprOpcode::LoadString {
+                    location: bind_location(location, &mut resolve)?,
+                    elements,
+                },
+                ExprOpcode::StoreString { location } => ExprOpcode::StoreString {
+                    location: bind_location(location, &mut resolve)?,
+                },
                 ExprOpcode::ConstU64(value) => ExprOpcode::ConstU64(value),
                 ExprOpcode::ConstWide(value) => ExprOpcode::ConstWide(value),
                 ExprOpcode::LoadU64 {

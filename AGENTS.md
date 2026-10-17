@@ -43,6 +43,48 @@ or when the next action needs additional authority, is destructive, or affects
 systems outside the requested scope. Autonomy does not permit broadening the task,
 bypassing safety checks, or committing, pushing, or publishing unless requested.
 
+## Stacked pull requests
+
+Split dependent changes into a Mergify stack instead of one large pull request
+or hand-chained branches. The development shell provides `mergify`; it uses the
+`gh` login for GitHub access. Set up each clone once (hooks and config are
+shared by its worktrees):
+
+```bash
+mergify stack setup
+git config mergify-cli.stack-github-native false
+```
+
+`stack setup` adds Change-Id commit hooks and keeps the lefthook pre-push hook.
+The second line keeps stacks on the `Depends-On:` chain that the merge queue
+orders, rather than GitHub-native stacks, which block GitHub's classic merge
+endpoint.
+
+- One commit is one pull request. Its subject becomes the PR title and its body
+  the PR description, so every commit subject must satisfy the PR title rules
+  below, and its type must not exceed the release impact of the change.
+- Every commit must build and pass its checks on its own; put each fix in the
+  commit that needs it rather than in a later commit.
+- Create a stack with `mergify stack new <type>/<name>` from an up-to-date
+  `master`. Publish with `mergify stack push`, never `git push`, and only when
+  pushing was requested.
+- Revise commits instead of adding fix-up commits: `git commit --amend` for the
+  top commit; `mergify stack edit <sha>`, `fixup`, `squash`, `reword`, `move`,
+  `reorder`, or `drop` for others. Never use `git rebase -i`. Before rewriting
+  a pushed commit, record why with `mergify stack note -m "<reason>"`.
+- `mergify stack push` owns PR titles, bodies, and stack bases. Change them
+  through commit messages, not `gh pr edit`, and do not merge or close stack
+  PRs by hand.
+- After a lower PR merges, run `mergify stack sync` to drop merged commits and
+  rebase the rest. `mergify stack list` shows the commit-to-PR mapping and
+  check status.
+- A `merge-ready` label on the top member queues the whole stack; the queue
+  lands it bottom-up on `master` or `develop`. Label a lower member to land
+  only the part of the stack up to it.
+- Pull requests based on a stack branch run lighter CI than those based on
+  `master` (no stable-lane release check or release-impact check); the merge
+  queue validates them in full.
+
 ## Adding tests
 
 When adding tests, consider adding them to `crates/celox-test-suite` so

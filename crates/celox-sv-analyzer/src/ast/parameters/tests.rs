@@ -125,7 +125,7 @@ fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() 
         ),
         (
             ConstExpr::Function {
-                name: "f".into(),
+                callee: Callee::Subroutine("f".into()),
                 args: vec![*a(), *b()],
                 site: Some(17),
             },
@@ -785,7 +785,7 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
             right: Box::new(ConstExpr::Literal("8'h0f".into())),
         },
         ConstExpr::Function {
-            name: "$countones".into(),
+            callee: Callee::System(SystemFunction::Countones),
             args: vec![ConstExpr::Literal("8'h81".into())],
             site: None,
         },
@@ -1057,7 +1057,7 @@ fn referenced_value_projection_matches_full_environment() {
         p(
             "B",
             ConstExpr::Function {
-                name: "missing".into(),
+                callee: Callee::Subroutine("missing".into()),
                 args: vec![id("P")],
                 site: None,
             },
@@ -1176,7 +1176,7 @@ fn compare_full_and_referenced_parameter_values() {
                         Parameter::new(
                             format!("P{i}"),
                             Some(ConstExpr::Function {
-                                name: "uninstalled".into(),
+                                callee: Callee::Subroutine("uninstalled".into()),
                                 args: vec![if i == 0 {
                                     ConstExpr::Literal("0".into())
                                 } else {

@@ -1,0 +1,76 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_native().unwrap()), &ops, observe)"
+---
+modify [("clk", 0)]
+run_until 0
+  step -> Some(0): host_writes(0) process(0) comb finish_step(0)
+  time 0 finished false: q=0 seen=99
+modify [("clk", 37)]
+run_until 2
+  step -> Some(0): host_writes(1) process(0) comb stage(e0@0) eval_apply(e0) fire(e0@0) comb finish_step(0)
+  time 2 finished false: q=1 seen=0
+modify [("clk", 74)]
+run_until 4
+  step -> Some(2): host_writes(1) comb finish_step(2)
+  time 4 finished false: q=1 seen=0
+modify [("clk", 111)]
+run_until 6
+  step -> Some(4): host_writes(1) process(0) comb stage(e0@4) eval_apply(e0) fire(e0@4) comb finish_step(4)
+  time 6 finished false: q=2 seen=1
+modify [("clk", 148)]
+run_until 8
+  step -> Some(6): host_writes(1) comb finish_step(6)
+  time 8 finished false: q=2 seen=1
+modify [("clk", 185)]
+run_until 10
+  step -> Some(8): host_writes(1) process(0) comb stage(e0@8) eval_apply(e0) fire(e0@8) comb finish_step(8)
+  time 10 finished false: q=3 seen=2
+modify [("clk", 222)]
+run_until 12
+  step -> Some(10): host_writes(1) comb finish_step(10)
+  time 12 finished false: q=3 seen=2
+modify [("clk", 1), ("clk", 0)]
+run_until 14
+  step -> Some(12): host_writes(2) process(0) comb finish_step(12)
+  time 14 finished false: q=3 seen=3
+schedule clk @15 = 1
+schedule clk @16 = 0
+schedule clk @17 = 1
+schedule clk @17 = 0
+schedule clk @18 = 1
+schedule clk @19 = 0
+run_until 20
+  step -> Some(15): host_writes(0) process(0) comb stage(e0@15) eval_apply(e0) fire(e0@15) comb finish_step(15)
+  step -> Some(16): host_writes(0) comb finish_step(16)
+  step -> Some(17): host_writes(0) process(0) comb stage(e0@17) eval_apply(e0) fire(e0@17) comb finish_step(17)
+  step -> Some(18): host_writes(0) comb finish_step(18)
+  step -> Some(19): host_writes(0) comb finish_step(19)
+  time 20 finished false: q=5 seen=4
+clock clk period 4 delay 21
+run_until 40
+  step -> Some(21): host_writes(0) process(0) comb stage(e0@21) eval_apply(e0) fire(e0@21) comb finish_step(21)
+  step -> Some(23): host_writes(0) comb finish_step(23)
+  step -> Some(25): host_writes(0) process(0) comb stage(e0@25) eval_apply(e0) fire(e0@25) comb finish_step(25)
+  step -> Some(27): host_writes(0) comb finish_step(27)
+  step -> Some(29): host_writes(0) process(0) comb stage(e0@29) eval_apply(e0) fire(e0@29) comb finish_step(29)
+  step -> Some(31): host_writes(0) comb finish_step(31)
+  step -> Some(33): host_writes(0) process(0) comb stage(e0@33) eval_apply(e0) fire(e0@33) comb finish_step(33)
+  step -> Some(35): host_writes(0) comb finish_step(35)
+  step -> Some(37): host_writes(0) process(0) comb stage(e0@37) eval_apply(e0) fire(e0@37) comb finish_step(37)
+  step -> Some(39): host_writes(0) comb finish_step(39)
+  time 40 finished false: q=10 seen=9
+steps 12
+  step -> Some(41): host_writes(0) process(0) comb stage(e0@41) eval_apply(e0) fire(e0@41) comb finish_step(41)
+  step -> Some(43): host_writes(0) comb finish_step(43)
+  step -> Some(45): host_writes(0) process(0) comb stage(e0@45) eval_apply(e0) fire(e0@45) comb finish_step(45)
+  step -> Some(47): host_writes(0) comb finish_step(47)
+  step -> Some(49): host_writes(0) process(0) comb stage(e0@49) eval_apply(e0) fire(e0@49) comb finish_step(49)
+  step -> Some(51): host_writes(0) comb finish_step(51)
+  step -> Some(53): host_writes(0) process(0) comb stage(e0@53) eval_apply(e0) fire(e0@53) comb finish_step(53)
+  step -> Some(55): host_writes(0) comb finish_step(55)
+  step -> Some(57): host_writes(0) process(0) comb stage(e0@57) eval_apply(e0) fire(e0@57) comb finish_step(57)
+  step -> Some(59): host_writes(0) comb finish_step(59)
+  step -> Some(61): host_writes(0) process(0) comb stage(e0@61) eval_apply(e0) fire(e0@61) comb finish_step(61)
+  step -> Some(63): host_writes(0) comb finish_step(63)
+  time 63 finished false: q=16 seen=15

@@ -46,10 +46,18 @@ pub(super) struct Ff<'p, 'a> {
     /// Read-modify-write views of a variable's working value: alias -> var.
     aliases: HashMap<SourceVarId, SourceVarId>,
     next_alias: u32,
+    /// One persistent RNG of `$urandom` and `$urandom_range` shared by every
+    /// call from this process, including calls in inlined subroutines. Bit
+    /// 32 distinguishes an unseeded state.
+    random: Option<(SourceVarId, String)>,
+    random_seed: u32,
+    /// The seed of this process's `$random` calls without a seed argument.
+    dist_seed: Option<(SourceVarId, String)>,
     /// The kernel of a process being lowered. Its builder is `b` while the
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    direct: bool,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -67,7 +75,7 @@ fn working(var_id: SourceVarId) -> Addr {
 }
 
 impl<'p, 'a> Ff<'p, 'a> {
-    pub fn new(m: &'p mut ProcModule<'a>) -> Self {
+    pub fn new(m: &'p mut ProcModule<'a>, random_seed: u32) -> Self {
         let mut element_widths = HashMap::default();
         for (&id, variable) in m.variables.iter() {
             if let Some(width) = unpacked_element_width(variable) {
@@ -88,14 +96,18 @@ impl<'p, 'a> Ff<'p, 'a> {
             unrolled: 0,
             aliases: HashMap::default(),
             next_alias: u32::MAX,
+            random: None,
+            random_seed,
+            dist_seed: None,
             kernel: None,
+            direct: false,
         }
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
     /// the working region, or stable state in a process kernel.
     fn target(&self, id: SourceVarId) -> Addr {
-        if self.kernel.is_some() {
+        if self.kernel.is_some() || self.direct {
             stable(id)
         } else {
             working(id)
@@ -186,8 +198,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
                 }
                 // `$readmemh` writes its destination immediately.
-                sv::ir::Stmt::SystemTask { name, args } => {
-                    if let Some(destination) = readmem_destination(name, args) {
+                sv::ir::Stmt::SystemTask { task, args } => {
+                    if let Some(destination) = readmem_destination(*task, args) {
                         writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
                     }
                 }
@@ -203,7 +215,26 @@ impl<'p, 'a> Ff<'p, 'a> {
         for stmt in stmts {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
-        while let Some((name, args)) = calls.pop() {
+        while let Some((callee, args)) = calls.pop() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    use sv::ir::SystemFunction;
+                    match function {
+                        SystemFunction::Urandom | SystemFunction::UrandomRange => {
+                            self.urandom_state();
+                        }
+                        SystemFunction::Random if args.is_empty() => {
+                            self.dist_seed();
+                        }
+                        _ => {}
+                    }
+                    for lvalue in written_system_arguments(function, &args) {
+                        self.record_target(&lvalue, true);
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+            };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -235,7 +266,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let aliases = &self.aliases;
         let working_set = &self.working;
         let variables = &*self.m.variables;
-        let direct = self.kernel.is_some();
+        let direct = self.kernel.is_some() || self.direct;
         let map = |id: &SourceVarId| -> Addr {
             if direct {
                 stable(*aliases.get(id).unwrap_or(id))
@@ -488,36 +519,31 @@ impl<'p, 'a> Ff<'p, 'a> {
             expr_from_const_expr(expr).ok_or_else(|| unsupported("operand in a select"))
         };
         Ok(match expr {
-            ConstExpr::Function { name, args, .. }
-                if self.m.subroutines.contains_key(name)
-                    || self.m.dpi_imports.contains_key(name) =>
-            {
+            ConstExpr::Function { callee, args, .. } if self.m.is_callee(callee) => {
                 if let Some((_, result)) = calls.iter().find(|(call, _)| call == expr) {
                     return Ok(result.clone());
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
                     let arg = self.hoist_const(arg, calls)?;
-                    lowered.push(
-                        expr_from_const_expr(&arg).ok_or_else(|| {
-                            unsupported(format!("argument of `{name}` in a select"))
-                        })?,
-                    );
+                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                        unsupported(format!("argument of `{callee}` in a select"))
+                    })?);
                 }
                 let call = sv::ir::Expr::Call {
                     arg_order: Vec::new(),
-                    name: name.clone(),
+                    callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
                 let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
-                    return Err(unsupported(format!("call of `{name}` in a select")));
+                    return Err(unsupported(format!("call of `{callee}` in a select")));
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
                 result
             }
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.hoist_const(arg, calls))
@@ -723,8 +749,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 expr: Box::new(self.freeze_const(expr, copies)?),
                 bit: Box::new(self.freeze_const(bit, copies)?),
             },
-            ConstExpr::Function { name, args, site } => ConstExpr::Function {
-                name: name.clone(),
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| self.freeze_const(arg, copies))
@@ -772,7 +798,28 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Ok(match expr {
             Expr::Call {
-                name,
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
+                args,
+                ..
+            } => {
+                let seed = match args.first().and_then(Option::as_ref) {
+                    Some(seed) => Some(self.hoist(seed)?),
+                    None => None,
+                };
+                self.urandom(seed)?
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::UrandomRange),
+                args,
+                ..
+            } => self.urandom_range(args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Random),
+                args,
+                ..
+            } => self.random(args.first().and_then(Option::as_ref))?,
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
             } if self.m.dpi_imports.contains_key(name) => {
@@ -796,7 +843,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 Expr::Ident(temp_name)
             }
             Expr::Call {
-                name,
+                callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
             } if self.m.subroutines.contains_key(name) => {
@@ -853,12 +900,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
             }
             Expr::Call {
-                name,
+                callee,
                 args,
                 arg_order,
             } => Expr::Call {
                 arg_order: arg_order.clone(),
-                name: name.clone(),
+                callee: callee.clone(),
                 args: args
                     .iter()
                     .map(|arg| arg.as_ref().map(|arg| self.hoist(arg)).transpose())
@@ -1023,6 +1070,245 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     // ---------------------------------------------------------------- stores
+
+    /// The state of this process's `$urandom` stream.
+    fn urandom_state(&mut self) -> (SourceVarId, String) {
+        if self.random.is_none() {
+            let (id, name) = self.m.temp("urandom_state", 33, false, false);
+            self.working.insert(id);
+            self.targets.push((id, BitAccess::new(0, 32)));
+            self.random = Some((id, name));
+        }
+        self.random.clone().expect("a process RNG")
+    }
+
+    /// The seed of this process's `$random` calls without a seed argument.
+    /// It starts at 0, as the seed variable of `$random(seed)` typically
+    /// does, so a design whose one process calls `$random` gets the same
+    /// numbers as other simulators that use one seed for the whole design.
+    fn dist_seed(&mut self) -> (SourceVarId, String) {
+        if self.dist_seed.is_none() {
+            let (id, name) = self.m.temp("random_seed", 32, false, false);
+            self.working.insert(id);
+            self.targets.push((id, BitAccess::new(0, 31)));
+            self.dist_seed = Some((id, name));
+        }
+        self.dist_seed.clone().expect("a process seed")
+    }
+
+    /// Evaluate `expr` into a new hidden variable.
+    fn hidden(
+        &mut self,
+        purpose: &str,
+        expr: &sv::ir::Expr,
+        signed: bool,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let value = self.eval(expr, Some((32, signed)))?;
+        let (id, name) = self.m.temp(purpose, 32, signed, false);
+        self.store(id, SIROffset::Static(0), 32, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `expr` converted to a 32-bit `int` or `int unsigned` formal.
+    fn int_formal(&self, expr: sv::ir::Expr) -> sv::ir::Expr {
+        let signed = self.expr_signed(&expr);
+        sv::ir::Expr::Resize {
+            expr: Box::new(expr),
+            width: 32,
+            signed,
+        }
+    }
+
+    /// IEEE 1800-2023 18.13.1/18.14: a deterministic, process-local stream.
+    /// This full-period 32-bit LCG is implementation-defined; tests compare
+    /// repeatability rather than assuming another simulator's sequence.
+    fn urandom(&mut self, seed: Option<sv::ir::Expr>) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let (id, name) = self.urandom_state();
+        let initial = match seed {
+            Some(seed) => seed,
+            None => Expr::Mux {
+                condition: Box::new(Expr::Binary {
+                    left: Box::new(Expr::Ident(name.clone())),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal("33'd0".into())),
+                }),
+                then_expr: Box::new(Expr::Literal(format!("32'd{}", self.random_seed))),
+                else_expr: Box::new(Expr::Ident(name.clone())),
+            },
+        };
+        // The int seed formal preserves a narrow signed operand's sign bits
+        // before its 32-bit representation becomes unsigned RNG state.
+        let next = Expr::Resize {
+            width: 32,
+            signed: false,
+            expr: Box::new(Expr::Binary {
+                left: Box::new(Expr::Binary {
+                    left: Box::new(self.int_formal(initial)),
+                    op: BinaryOp::Mul,
+                    right: Box::new(Expr::Literal("32'd1664525".into())),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal("32'd1013904223".into())),
+            }),
+        };
+        let result = self.hidden("urandom_result", &next, false)?;
+        let state = Expr::Concat(vec![Expr::Literal("1'b1".into()), result.clone()]);
+        let state = self.eval(&state, Some((33, false)))?;
+        self.store(id, SIROffset::Static(0), 33, state);
+        Ok(result)
+    }
+
+    /// IEEE 1800-2023 18.13.2: a number of the `$urandom` stream between the
+    /// two bounds, in either order, inclusive.
+    fn urandom_range(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let bound = |this: &mut Self, arg: Option<&Expr>| match arg {
+            Some(arg) => {
+                let arg = this.hoist(arg)?;
+                let arg = this.int_formal(arg);
+                this.hidden("urandom_range_bound", &arg, false)
+            }
+            None => Ok(Expr::Literal("32'd0".into())),
+        };
+        let max = bound(self, args.first().and_then(Option::as_ref))?;
+        let min = bound(self, args.get(1).and_then(Option::as_ref))?;
+        let value = self.urandom(None)?;
+        let widen = |expr: Expr, width| Expr::Resize {
+            expr: Box::new(expr),
+            width,
+            signed: false,
+        };
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let reversed = binary(max.clone(), BinaryOp::Lt, min.clone());
+        let pick = |when_reversed: &Expr, otherwise: &Expr| Expr::Mux {
+            condition: Box::new(reversed.clone()),
+            then_expr: Box::new(when_reversed.clone()),
+            else_expr: Box::new(otherwise.clone()),
+        };
+        let (high, low) = (pick(&min, &max), pick(&max, &min));
+        // The span is 2**32 for the full range, so it takes 33 bits. Scaling
+        // takes the offset from the high bits of the number: the low bits of
+        // the LCG have short periods.
+        let span = binary(
+            binary(widen(high, 33), BinaryOp::Sub, widen(low.clone(), 33)),
+            BinaryOp::Add,
+            Expr::Literal("33'd1".into()),
+        );
+        let offset = binary(
+            binary(widen(value, 65), BinaryOp::Mul, widen(span, 65)),
+            BinaryOp::Shr,
+            Expr::Literal("65'd32".into()),
+        );
+        let result = Expr::Resize {
+            expr: Box::new(binary(widen(low, 65), BinaryOp::Add, offset)),
+            width: 32,
+            signed: false,
+        };
+        self.hidden("urandom_range_result", &result, false)
+    }
+
+    /// IEEE 1800-2023 20.14.1 and Annex N: `$random` is
+    /// `rtl_dist_uniform(seed, LONG_MIN, LONG_MAX)` with a 32-bit `long`.
+    ///
+    /// Annex N computes the number in floating point from bits 31:9 of the
+    /// next seed, `m`; the result is exactly `512 * (m + 1) + m / 16384 -
+    /// 2**31`, one less where that is negative and `m` is a multiple of
+    /// 16384 (Annex N takes `r - 1` of a negative integral `r`), and
+    /// `LONG_MIN` where `m` is all ones and the conversion overflows, as the
+    /// reference code returns on x86 and Icarus Verilog does.
+    fn random(&mut self, seed: Option<&sv::ir::Expr>) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let (current, store_back) = match seed {
+            Some(seed) => {
+                let lvalues = lvalue_from_expr(seed)
+                    .ok_or_else(|| unsupported("seed variable of `$random`"))?;
+                (self.hoist(seed)?, Some(lvalues))
+            }
+            None => (Expr::Ident(self.dist_seed().1), None),
+        };
+        let literal = |value: u32| Expr::Literal(format!("32'd{value}"));
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let current = self.int_formal(current);
+        let current = self.hidden("random_seed", &current, false)?;
+        let seeded = Expr::Mux {
+            condition: Box::new(binary(current.clone(), BinaryOp::Eq, literal(0))),
+            then_expr: Box::new(literal(259_341_593)),
+            else_expr: Box::new(current),
+        };
+        let next = binary(
+            binary(seeded, BinaryOp::Mul, literal(69_069)),
+            BinaryOp::Add,
+            literal(1),
+        );
+        let next = self.hidden("random_seed", &next, false)?;
+        // `{m, 9'b0} + 512 + m / 16384`, which wraps only for the all-ones `m`.
+        let scaled = binary(
+            binary(
+                binary(next.clone(), BinaryOp::BitAnd, literal(0xffff_fe00)),
+                BinaryOp::Add,
+                literal(512),
+            ),
+            BinaryOp::Add,
+            binary(next.clone(), BinaryOp::Shr, literal(23)),
+        );
+        let scaled = self.hidden("random_scaled", &scaled, false)?;
+        let integral_negative = binary(
+            binary(scaled.clone(), BinaryOp::Lt, literal(0x8000_0000)),
+            BinaryOp::LogicAnd,
+            binary(
+                binary(next.clone(), BinaryOp::BitAnd, literal(0x007f_fe00)),
+                BinaryOp::Eq,
+                literal(0),
+            ),
+        );
+        let value = Expr::Mux {
+            condition: Box::new(binary(
+                binary(next.clone(), BinaryOp::Shr, literal(9)),
+                BinaryOp::Eq,
+                literal(0x007f_ffff),
+            )),
+            then_expr: Box::new(literal(0x8000_0000)),
+            else_expr: Box::new(binary(
+                binary(scaled, BinaryOp::BitXor, literal(0x8000_0000)),
+                BinaryOp::Sub,
+                Expr::Mux {
+                    condition: Box::new(integral_negative),
+                    then_expr: Box::new(literal(1)),
+                    else_expr: Box::new(literal(0)),
+                },
+            )),
+        };
+        let value = Expr::Resize {
+            expr: Box::new(value),
+            width: 32,
+            signed: true,
+        };
+        let result = self.hidden("random_result", &value, true)?;
+        match store_back {
+            Some(lvalues) => match lvalues.as_slice() {
+                [lvalue] => self.assign(lvalue, &next)?,
+                parts => self.assign_concat(parts, &next)?,
+            },
+            None => {
+                let (id, _) = self.dist_seed();
+                let next = self.eval(&next, Some((32, false)))?;
+                self.store(id, SIROffset::Static(0), 32, next);
+            }
+        }
+        Ok(result)
+    }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
         let target = self.target(id);
@@ -1638,7 +1924,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.eval(expr, None)?;
                 Ok(true)
             }
-            sv::ir::Stmt::SystemTask { name, args } => self.system_task(name, args),
+            sv::ir::Stmt::SystemTask { task, args } => self.system_task(*task, args),
         }
     }
 
@@ -1646,10 +1932,10 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// simulation with an error.
     fn system_task(
         &mut self,
-        name: &str,
+        task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
     ) -> Result<bool, sv::AnalyzerError> {
-        if readmem_destination(name, args).is_some() {
+        if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
             for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
                 let sv::ir::SystemTaskArg::Expr(expr) = arg else {
@@ -1658,7 +1944,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let signed = self.expr_signed(expr);
                 let (value, width) = self
                     .eval_const(expr)?
-                    .ok_or_else(|| unsupported(format!("`{name}` address that is not constant")))?;
+                    .ok_or_else(|| unsupported(format!("`{task}` address that is not constant")))?;
                 let value = num_bigint::BigInt::from(value);
                 let value = if signed && width > 0 && value.bit(width as u64 - 1) {
                     value - (num_bigint::BigInt::from(1u8) << width)
@@ -1668,10 +1954,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 *slot = Some(
                     value
                         .to_i128()
-                        .ok_or_else(|| unsupported(format!("`{name}` address")))?,
+                        .ok_or_else(|| unsupported(format!("`{task}` address")))?,
                 );
             }
-            let (id, words) = self.m.readmem(name, args, addresses[0], addresses[1])?;
+            let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
             for word in words {
                 let width = word.access.msb - word.access.lsb + 1;
                 let reg = if word.mask.is_zero() {
@@ -1689,7 +1975,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(true);
         }
         let kind =
-            system_task_kind(name).ok_or_else(|| unsupported(format!("system task `{name}`")))?;
+            system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         // A process ends the simulation itself; the rest of its body does not
         // run.
         if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
@@ -1698,7 +1984,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
-                return Err(unsupported(format!("condition of `{name}`")));
+                return Err(unsupported(format!("condition of `{task}`")));
             };
             Some(self.eval_truth(condition)?)
         } else {
@@ -1733,7 +2019,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Empty => {
-                    return Err(unsupported(format!("empty argument of `{name}`")));
+                    return Err(unsupported(format!("empty argument of `{task}`")));
                 }
             }
         }
@@ -1777,7 +2063,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if kind.is_fatal() {
             let code = self
                 .m
-                .runtime_error(template.unwrap_or_else(|| "$fatal".to_string()));
+                .runtime_error(template.unwrap_or_else(|| sv::ir::SystemTask::Fatal.to_string()));
             self.b.seal_block(SIRTerminator::Error(code));
             if resume.is_none() {
                 return Ok(false);
@@ -2293,6 +2579,218 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     // -------------------------------------------------------------- process
 
+    /// Lower a stateful combinational process. Its memory guard records the
+    /// implicit sensitivity values, independently of internal settling calls.
+    pub fn lower_comb_process(
+        mut self,
+        body: &[sv::ir::Stmt],
+        sensitivity_body: &[sv::ir::Stmt],
+        kind: sv::ir::CombProcessKind,
+        arena: &mut SLTNodeArena<SourceVarId>,
+    ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
+        let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
+        self.direct = true;
+        let mut reads = self.m.implicit_reads(body, always_comb);
+        reads.extend(self.m.implicit_reads(sensitivity_body, always_comb));
+        for stmt in body {
+            let mut nonblocking = false;
+            stmt.walk(&mut |stmt| {
+                nonblocking |= matches!(
+                    stmt,
+                    sv::ir::Stmt::Assign {
+                        nonblocking: true,
+                        ..
+                    } | sv::ir::Stmt::AssignConcat {
+                        nonblocking: true,
+                        ..
+                    }
+                )
+            });
+            if nonblocking {
+                return Err(unsupported("nonblocking assignment inside always_comb"));
+            }
+        }
+        self.scan(body, &mut HashSet::default());
+        if self.exec_block(body)? {
+            self.b.seal_block(SIRTerminator::Return);
+        }
+        let body_unit = seal_drained(std::mem::replace(&mut self.b, SIRBuilder::new()));
+        let mut targets: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|(id, _)| !self.m.is_hidden(*id))
+            .map(|(id, access)| VarAtomBase::new(*id, access.lsb, access.msb))
+            .collect();
+        targets.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+        let mut merged: Vec<VarAtomBase<SourceVarId>> = Vec::new();
+        for target in targets {
+            match merged.last_mut() {
+                Some(last) if last.id == target.id && target.access.lsb <= last.access.msb + 1 => {
+                    last.access.msb = last.access.msb.max(target.access.msb)
+                }
+                _ => merged.push(target),
+            }
+        }
+        let mut targets = merged;
+        let dependencies = super::comb::subtract_written_sensitivity(reads.clone(), &targets);
+        let mut sources: Vec<_> = if always_comb {
+            dependencies.clone()
+        } else {
+            reads
+        }
+        .into_iter()
+        .collect();
+        sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+        let (initialized, _) = self.m.temp("comb_initialized", 1, false, false);
+        let init = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Load(
+            init,
+            stable(initialized),
+            SIROffset::Static(0),
+            1,
+        ));
+        let mut changed = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
+        let mut snapshots = Vec::new();
+        for source in &sources {
+            let width = source.access.msb - source.access.lsb + 1;
+            let (saved, _) = self.m.temp(
+                "comb_input",
+                width,
+                false,
+                self.m.four_state && self.m.var(source.id).is_4state,
+            );
+            let current = self.b.alloc_logic(width);
+            let previous = self.b.alloc_logic(width);
+            let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+            self.b.emit(SIRInstruction::Load(
+                current,
+                stable(source.id),
+                offset,
+                width,
+            ));
+            self.b.emit(SIRInstruction::Load(
+                previous,
+                stable(saved),
+                SIROffset::Static(0),
+                width,
+            ));
+            let differs = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                differs,
+                current,
+                BinaryOp::NeCase,
+                previous,
+            ));
+            let next = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
+            changed = next;
+            snapshots.push((saved, width, current));
+        }
+        let run = self.b.alloc_bit(1, false);
+        if always_comb {
+            let first = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Unary(first, UnaryOp::LogicNot, init));
+            self.b
+                .emit(SIRInstruction::Binary(run, first, BinaryOp::Or, changed));
+        } else {
+            self.b
+                .emit(SIRInstruction::Binary(run, init, BinaryOp::And, changed));
+        }
+        // Snapshot before executing: writes in the body do not retrigger it.
+        for &(saved, width, current) in &snapshots {
+            self.store(saved, SIROffset::Static(0), width, current);
+        }
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        self.store(initialized, SIROffset::Static(0), 1, one);
+        let execute = self.b.new_block();
+        let done = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: run,
+            true_block: (execute, vec![]),
+            false_block: (done, vec![]),
+        });
+        self.b.switch_to_block(execute);
+        self.b.inline_execution_unit(&body_unit);
+        if !always_comb {
+            // @* is not waiting during its body. Its own writes cannot wake
+            // the same activation, including when another output is published.
+            for (source, &(saved, width, _)) in sources.iter().zip(&snapshots) {
+                let current = self.b.alloc_logic(width);
+                let offset = sv_memory_offset(self.m.var(source.id), source.access.lsb, width);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(source.id),
+                    offset,
+                    width,
+                ));
+                self.store(saved, SIROffset::Static(0), width, current);
+            }
+        }
+        self.jump(done);
+        self.b.switch_to_block(done);
+        let mut private_locals = HashMap::default();
+        let unit = seal_builder(self.b).into_map_addr(&mut |addr| {
+            let id = addr.var_id;
+            if !self.m.is_hidden(id) || self.m.created.contains(&id) {
+                return id;
+            }
+            *private_locals.entry(id).or_insert_with(|| {
+                let variable = self.m.var(id).clone();
+                let (copy, name) = self.m.temp(
+                    "comb_local",
+                    variable.width,
+                    variable.signed,
+                    variable.is_4state,
+                );
+                self.m.variables.insert(
+                    copy,
+                    SvVariable {
+                        path: vec![name],
+                        ..variable
+                    },
+                );
+                copy
+            })
+        });
+        if targets.is_empty() {
+            targets.push(VarAtomBase::new(initialized, 0, 0));
+        }
+        let mut paths = Vec::new();
+        for target in targets {
+            let expr = arena
+                .alloc(SLTNode::Input {
+                    variable: target.id,
+                    signed: false,
+                    index: Vec::new(),
+                    access: target.access,
+                })
+                .map_err(slt_error)?;
+            paths.push(LogicPath {
+                target: LogicPathTarget::Process {
+                    process: initialized,
+                    after_initials: kind == sv::ir::CombProcessKind::AlwaysComb,
+                    target,
+                    unit: Box::new(unit.clone()),
+                },
+                sources: dependencies.clone(),
+                previous_sources: HashSet::default(),
+                address_sources: HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+        }
+        Ok(paths)
+    }
+
     /// Lower one `always_ff` body into its evaluation and commit units.
     pub fn lower_process(
         mut self,
@@ -2461,8 +2959,8 @@ fn substitute_overlay_const(
             expr: Box::new(go(expr)),
             bit: Box::new(go(bit)),
         },
-        ConstExpr::Function { name, args, site } => ConstExpr::Function {
-            name: name.clone(),
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
             site: *site,
             args: args.iter().map(go).collect(),
         },
@@ -2552,12 +3050,12 @@ fn substitute_overlay(
             else_expr: Box::new(go(else_expr)),
         },
         Expr::Call {
-            name,
+            callee,
             args,
             arg_order,
         } => Expr::Call {
             arg_order: arg_order.clone(),
-            name: name.clone(),
+            callee: callee.clone(),
             args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
         },
         Expr::Inside { expr, items } => Expr::Inside {

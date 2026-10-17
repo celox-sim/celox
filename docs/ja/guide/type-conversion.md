@@ -10,6 +10,8 @@
 | `reset` | `bigint` | yes | |
 | `logic<N>` | `bigint` | yes | |
 | `bit<N>` | `bigint` | no | 2 値のみ |
+| `f32` / `f64` | `bigint` | no | IEEE 754 のビットパターン。ポート・変数・フリップフロップでのコピーはできるが、定数でない値の演算・比較・変換・表示は未対応([#1401](https://github.com/celox-sim/celox/issues/1401)) |
+| `string` | — | no | 定数でない string はテストベンチのコードでのみ使える。RTL では文字列リテラル・定数・パラメータを使える([#1400](https://github.com/celox-sim/celox/issues/1400)) |
 
 すべてのシグナルポート値はビット幅に関わらず `bigint` を使用します。これにより、すべてのシグナルで一貫した型が保証され、シグナル幅の変更時に型が変わることがなくなります。
 

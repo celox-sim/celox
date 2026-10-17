@@ -52,13 +52,17 @@ pub(super) fn expr_is_two_state(expr: &Expr, packed_dimensions: &PackedDimension
                     || (expr_is_two_state(condition, packed_dimensions)
                         && expr_is_two_state(else_expr, packed_dimensions)))
         }
-        Expr::Call { name, args, .. } => {
-            typecheck::bit_vector_function_return_type(name, args.len()).is_some()
-                || packed_dimensions
-                    .function_return_types
-                    .get(name)
-                    .is_some_and(|metadata| metadata.is_2state)
-        }
+        Expr::Call {
+            callee: Callee::System(function),
+            ..
+        } => function.result_type().is_some(),
+        Expr::Call {
+            callee: Callee::Subroutine(name),
+            ..
+        } => packed_dimensions
+            .function_return_types
+            .get(name)
+            .is_some_and(|metadata| metadata.is_2state),
     }
 }
 

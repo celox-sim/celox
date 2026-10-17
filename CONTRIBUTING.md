@@ -70,12 +70,11 @@ minimum safety net, not the definition of validation completeness.
 
 ### Code scanning
 
-`.github/workflows/codeql.yml` scans Actions on pull requests that change
-workflow or local action files. Other ordinary PRs and Mergify queue drafts
-do not run this workflow's analysis. Every Sunday at 04:17 UTC, and on manual
+`.github/workflows/codeql.yml` does not gate merges, so pull requests and
+Mergify queue drafts do not run it. Every Sunday at 04:17 UTC, and on manual
 dispatch, it scans Actions, C/C++, JavaScript/TypeScript, Python, and Rust, with
 at most two analyses running concurrently. Compiled languages use CodeQL's
-`none` build mode. There is no push-triggered full scan or merge requirement.
+`none` build mode. There is no push-triggered scan.
 
 The workflow is inactive until the repository variable
 `CODEQL_ADVANCED_ENABLED` is set to `true`. To replace the existing automatic
@@ -88,9 +87,8 @@ scans after this workflow merges:
    using runners on PRs and pushes.
 3. Set the repository Actions variable `CODEQL_ADVANCED_ENABLED` to `true`,
    then manually dispatch `codeql.yml` on `master`.
-4. Confirm that all five analyses upload results and that an Actions-changing
-   PR runs only the Actions analysis. Rust/application-only PRs should not
-   start CodeQL or Code Quality scans.
+4. Confirm that all five analyses upload results and that PRs no longer start
+   CodeQL or Code Quality scans.
 
 For rollback, unset `CODEQL_ADVANCED_ENABLED` and re-enable default setup.
 This variable allows the replacement to be reviewed without running both
@@ -99,9 +97,22 @@ See GitHub's [advanced setup migration instructions](https://docs.github.com/en/
 
 ### Product checks
 
+Rust caches in `ci.yml` are restored on every branch but saved only on the
+default branch. A PR's merge-ref cache cannot be restored by another PR, so
+saving one copy per PR consumes the shared cache quota without warming other
+queues. `rust-cache.yml` builds the Rust Tests targets on master after toolchain,
+manifest, or CI-cache setup changes, or on manual dispatch. It uses the same job
+ID, toolchain, environment and CI features as Rust Tests, skips the build on an
+exact cache hit, and does not execute tests. The normal daily master CI warms
+the other job caches. Caches remain dependency-only; workspace binaries are not
+added to the quota. Toolchain changes and cold caches still require compilation.
+Mergify-only configuration edits run script validation, not product compilation;
+mixed Rust changes and unknown paths retain their existing coverage.
+
+
 Pull requests use `scripts/ci-changes.mjs` to select jobs and scope Rust tests
 by affected crates. Windows and ARM64 checks run in Mergify queue draft PRs,
-legacy merge groups, and daily/manual full runs. Queue drafts run the full Rust
+legacy merge groups, and daily/manual full runs. Queue drafts run the full Celox Rust
 workspace when Rust is affected. Mergify checks up to five batches concurrently
 across three queue rules. Parallel mode separates independent file scopes while
 retaining combined-tree validation for overlapping scopes:
@@ -138,9 +149,17 @@ This does not prioritize jobs inside GitHub Actions or preempt occupied runners.
 See [Mergify priorities](https://docs.mergify.com/merge-queue/priority/) and
 [Mergify queue modes](https://docs.mergify.com/merge-queue/queue-modes/).
 
-The separate lydite proof/editor gates run on queue drafts rather than ordinary
-PRs; develop pushes, weekly runs, and manual dispatch remain enabled.
-The `Queue validation` merge condition requires those pre-merge checks to pass;
+[Mergify stacks](https://docs.mergify.com/merge-queue/stacks/) (`stack/*`
+heads pushed by `mergify stack push --no-github-native`) use the `changes`
+queue. A member above the bottom targets the branch below it and carries a
+`Depends-On: #N` marker; the queue accepts it on that basis and lands the whole
+chain on the stack root, bottom-up. Queueing the top member queues every member
+below it. The batch validator resolves each member's root through the same
+marker chain, so a stack branch without it is still refused.
+
+Lydite tests use the independent change-selected and daily cadence described
+below, including on Mergify queue draft PRs.
+The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;
 ordinary PR checks cannot satisfy it. The `ci:full` label opts a PR into the
 same coverage on its next push. Unrelated paths may still skip jobs.
 
@@ -178,24 +197,56 @@ Job selection:
   including unit tests mixed with implementation, remain conservative.
 - Cargo manifests and lockfiles retain broad coverage. Mixed changes combine
   their requirements; unknown paths and failed change detection run all jobs.
+- Workflow, `scripts/` and `.updatecli/` changes run the repository script
+  tests in `Lint & Format`, including the Heliodor fixture and Updatecli
+  selector tests. A test that runs on pull requests must be a required check
+  or feed one; otherwise it belongs to a scheduled workflow.
 - Rust-only changes still pass through the existing `Rust Test & NAPI Build`
   required check. Only explicitly unneeded producers may be skipped; failures
   and cancellations fail the check.
 
+Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
+
+- Lydite sources and fixtures run its core and bridge lanes. The core lane owns
+  the proof-engine Rust tests, editor and standalone Veryl conformance. The
+  bridge lane (`bridge` job) runs replay and proof-backed Veryl/symbolic corpus
+  gates against the in-tree Celox exporter in one job sharing a release build.
+- The bridge takes about an hour of runner time, so Celox changes do not run it
+  on PRs or queue drafts even when Cargo's dependency graph reaches
+  `lydite-celox`. The daily and manual runs on `master` (scheduled) and
+  `develop` (dispatched by `nightly.yml`) enable every lane and report failures
+  in the issue "Lydite validation is failing on <branch>", closed by the next
+  passing run. NAPI/JS changes, upstream private tests and Markdown do not
+  reach Lydite.
+- Version-only Release Please diffs, including their queue drafts, skip Lydite.
+- PR workflows come from the PR's merge ref, so branches based on an older base
+  still carry the earlier `lydite.yml`, which selected every lane. That
+  workflow file stays disabled in repository settings; `lydite-checks.yml`
+  replaces it. Re-enable nothing under the old path.
+- Shared dependency/toolchain configuration runs the core lane; an unreadable
+  diff or dependency graph runs both lanes. The graph includes optional, build
+  and dev edges.
+- Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
+  formatting/lint/build checks remain there. The dedicated workflow tests the
+  selected Lydite packages, including doctests, and installs its solver.
+- `Lydite checks` accepts skipped lanes only when change detection explicitly
+  excludes them, and fails on selected-job failures or cancellations. Repository
+  branch protection must require this check to make it a merge gate.
+
 The classifier selects CI jobs, not individual Rust tests. Selected Rust CI
-still runs the full workspace suite with CI features, doctests, default-feature
+still runs the Celox workspace suite with CI features, doctests, default-feature
 checks, ARM64 backend checks, and the explicit cocotb test. Local validation
 uses the finer behavior-based matrix above.
 
 | Cadence | Coverage |
 | --- | --- |
-| Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary workspace tests. |
+| Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary Celox workspace tests. |
 | Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
-| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs run only the benchmark tooling tests when those files change. |
+| Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Weekly, and on pull requests with relevant changes | Existing `lydite.yml` proof, conformance, editor, and mutation gates. |
+| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 

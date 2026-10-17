@@ -1,0 +1,39 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_interpreter().unwrap()), &ops, observe)"
+---
+modify [("go", 0)]
+run_until 0
+  step -> Some(0): host_writes(1) process(0) comb finish_step(0)
+  time 0 finished false: wakes=0
+modify [("go", 37)]
+run_until 2
+  step -> Some(0): host_writes(1) process(0) comb finish_step(0)
+  time 2 finished false: wakes=1
+modify [("go", 74)]
+run_until 4
+  step -> Some(2): host_writes(1) comb finish_step(2)
+  time 4 finished false: wakes=1
+modify [("go", 111)]
+run_until 6
+  step -> Some(4): host_writes(1) process(0) comb finish_step(4)
+  time 6 finished false: wakes=2
+modify [("go", 148)]
+run_until 8
+  step -> Some(6): host_writes(1) comb finish_step(6)
+  time 8 finished false: wakes=2
+modify [("go", 185)]
+run_until 10
+  step -> Some(8): host_writes(1) process(0) comb finish_step(8)
+  time 10 finished false: wakes=3
+modify [("go", 222)]
+run_until 12
+  step -> Some(10): host_writes(1) comb finish_step(10)
+  time 12 finished false: wakes=3
+modify [("go", 1), ("go", 0)]
+run_until 14
+  step -> Some(12): host_writes(2) process(0) comb finish_step(12)
+  time 14 finished false: wakes=4
+steps 12
+  step -> None: 
+  time 14 finished false: wakes=4

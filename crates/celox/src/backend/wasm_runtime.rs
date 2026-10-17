@@ -741,22 +741,10 @@ impl WasmBackend {
     }
 
     pub fn get_triggered_bits(&self) -> bit_set::BitSet {
-        let mut bits = bit_set::BitSet::with_capacity(self.num_events());
         let mem = self.memory.data(&self.store);
         let offset = self.layout.triggered_bits_offset;
         let size = self.layout.triggered_bits_total_size;
-
-        for i in 0..size {
-            let byte = mem[offset + i];
-            if byte != 0 {
-                for j in 0..8 {
-                    if (byte & (1 << j)) != 0 {
-                        bits.insert(i * 8 + j);
-                    }
-                }
-            }
-        }
-        bits
+        celox_runtime::backend::triggered_bits_from_bytes(&mem[offset..offset + size])
     }
 }
 

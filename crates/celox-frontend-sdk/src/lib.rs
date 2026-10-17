@@ -15,7 +15,7 @@ use thiserror::Error;
 ///
 /// Version 2 adds [`Process`]es. An artifact without processes is still
 /// written as version 1, so older consumers keep accepting it.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
 
 /// Oldest JSON interchange version [`FrontendArtifact::from_json`] accepts.
 pub const MIN_ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -476,6 +476,62 @@ pub enum Statement {
     Delay { amount: ExprId },
     /// End the simulation.
     Finish,
+    /// Suspend the process for `amount` time units with the scheduling of
+    /// IEEE 1800-2023 `#amount`: a zero delay resumes in the inactive
+    /// region of the same time, before nonblocking assignments of that time
+    /// are published. Unknown bits of the amount count as zero.
+    InactiveDelay { amount: ExprId },
+    /// Suspend until one of `terms` occurs (an event control `@(...)`).
+    /// Every occurrence counts, including a pulse that another process
+    /// writes and undoes without suspending in between.
+    WaitEvent { terms: Vec<EventTerm> },
+    /// Suspend until `condition` is nonzero (`wait (condition)`); continue
+    /// at once if it already is.
+    WaitLevel { condition: ExprId },
+    /// Nonblocking assignment: `value` is evaluated now and assigned to
+    /// `target` in the NBA region of the current time.
+    Nonblocking { target: SignalSlice, value: ExprId },
+}
+
+/// What a term of a [`Statement::WaitEvent`] waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EventEdge {
+    /// Any change of the signal's value.
+    Change,
+    /// A positive edge of its least significant bit (IEEE 1800-2023 9.4.2).
+    Posedge,
+    /// A negative edge of its least significant bit.
+    Negedge,
+}
+
+/// One term of a [`Statement::WaitEvent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventTerm {
+    pub signal: SignalId,
+    pub edge: EventEdge,
+}
+
+impl EventTerm {
+    pub const fn new(signal: SignalId, edge: EventEdge) -> Self {
+        Self { signal, edge }
+    }
+}
+
+/// A combinational process such as `always_comb`: its body runs at time
+/// zero and again whenever a signal it reads changes, but not when only a
+/// signal it writes changes (IEEE 1800-2023 9.2.2.2). Every write is
+/// visible as it happens, so `y = 0; if (a) y = 1;` pulses `y` each time an
+/// input change re-runs the body. Its statements are assignments and
+/// conditionals.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CombProcess {
+    body: Vec<Statement>,
+}
+
+impl CombProcess {
+    pub fn body(&self) -> &[Statement] {
+        &self.body
+    }
 }
 
 /// A procedural process that starts at time zero, such as an `initial`
@@ -509,6 +565,37 @@ pub struct FrontendArtifact {
     port_order: Vec<SignalId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     processes: Vec<Process>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    comb_processes: Vec<CombProcess>,
+}
+
+/// Whether `statements` use a statement of format version 3.
+fn uses_format_3(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::If {
+            then_body,
+            else_body,
+            ..
+        } => uses_format_3(then_body) || uses_format_3(else_body),
+        Statement::While { body, .. } | Statement::Forever { body } => uses_format_3(body),
+        Statement::Assign { .. } | Statement::Delay { .. } | Statement::Finish => false,
+        Statement::InactiveDelay { .. }
+        | Statement::WaitEvent { .. }
+        | Statement::WaitLevel { .. }
+        | Statement::Nonblocking { .. } => true,
+    })
+}
+
+/// The oldest format version that can carry `processes` and
+/// `comb_processes`.
+fn required_format_version(processes: &[Process], comb_processes: &[CombProcess]) -> u32 {
+    if !comb_processes.is_empty() || processes.iter().any(|process| uses_format_3(&process.body)) {
+        3
+    } else if !processes.is_empty() {
+        2
+    } else {
+        MIN_ARTIFACT_FORMAT_VERSION
+    }
 }
 
 impl FrontendArtifact {
@@ -526,7 +613,8 @@ impl FrontendArtifact {
         let artifact: Self = serde_json::from_str(json)?;
         if !(MIN_ARTIFACT_FORMAT_VERSION..=ARTIFACT_FORMAT_VERSION)
             .contains(&artifact.format_version)
-            || (artifact.format_version < 2 && !artifact.processes.is_empty())
+            || artifact.format_version
+                < required_format_version(&artifact.processes, &artifact.comb_processes)
         {
             return Err(ArtifactJsonError::UnsupportedVersion {
                 expected: ARTIFACT_FORMAT_VERSION,
@@ -847,6 +935,19 @@ impl FrontendArtifact {
             }
             insert_driver_target(&mut driver_ranges, register.target, &target.name)?;
         }
+        for process in &self.comb_processes {
+            validate_comb_body(&process.body)?;
+            self.validate_statements(&process.body, &driver_ranges)?;
+        }
+        for process in &self.comb_processes {
+            for target in comb_process_targets(&process.body) {
+                let name = &self
+                    .signal(target.signal)
+                    .ok_or(BuildError::UnknownSignal(target.signal.index()))?
+                    .name;
+                insert_driver_target(&mut driver_ranges, target, name)?;
+            }
+        }
         for process in &self.processes {
             self.validate_statements(&process.body, &driver_ranges)?;
         }
@@ -900,6 +1001,10 @@ impl FrontendArtifact {
 
     pub fn port_order(&self) -> &[SignalId] {
         &self.port_order
+    }
+
+    pub fn comb_processes(&self) -> &[CombProcess] {
+        &self.comb_processes
     }
 
     pub fn processes(&self) -> &[Process] {
@@ -989,6 +1094,10 @@ pub enum BuildError {
     ProcessDriverConflict { name: String },
     #[error("delay amount is {width} bits wide; at most {MAX_DELAY_WIDTH} bits are supported")]
     DelayTooWide { width: usize },
+    #[error("an event control needs at least one term")]
+    EmptyEventControl,
+    #[error("a combinational process contains only assignments and conditionals")]
+    UnsupportedCombStatement,
 }
 
 /// JSON interchange failures for frontend artifacts.
@@ -1014,6 +1123,7 @@ pub struct ModuleBuilder {
     driver_ranges: FxHashMap<SignalId, BTreeMap<usize, usize>>,
     port_order: Vec<SignalId>,
     processes: Vec<Process>,
+    comb_processes: Vec<CombProcess>,
 }
 
 impl ModuleBuilder {
@@ -1033,6 +1143,7 @@ impl ModuleBuilder {
             driver_ranges: FxHashMap::default(),
             port_order: Vec::new(),
             processes: Vec::new(),
+            comb_processes: Vec::new(),
         })
     }
 
@@ -1370,13 +1481,26 @@ impl ModuleBuilder {
         Ok(())
     }
 
+    /// Add a combinational process (see [`CombProcess`]). The signals it
+    /// assigns become driven like the target of a continuous assignment.
+    pub fn comb_process(&mut self, body: Vec<Statement>) -> Result<(), BuildError> {
+        validate_comb_body(&body)?;
+        validate_statements(
+            &body,
+            &|signal| self.signals.get(signal.index() as usize),
+            &|expression| self.expressions.get(expression.index() as usize),
+            &self.driver_ranges,
+        )?;
+        for target in comb_process_targets(&body) {
+            self.record_driver_target(target)?;
+        }
+        self.comb_processes.push(CombProcess { body });
+        Ok(())
+    }
+
     pub fn finish(self) -> FrontendArtifact {
         FrontendArtifact {
-            format_version: if self.processes.is_empty() {
-                MIN_ARTIFACT_FORMAT_VERSION
-            } else {
-                ARTIFACT_FORMAT_VERSION
-            },
+            format_version: required_format_version(&self.processes, &self.comb_processes),
             module_name: self.name,
             signals: self.signals,
             expressions: self.expressions,
@@ -1384,6 +1508,7 @@ impl ModuleBuilder {
             registers: self.registers,
             port_order: self.port_order,
             processes: self.processes,
+            comb_processes: self.comb_processes,
         }
     }
 
@@ -1461,7 +1586,9 @@ fn slices_overlap(a: SignalSlice, b: SignalSlice) -> bool {
 fn collect_process_targets(statements: &[Statement], targets: &mut Vec<SignalSlice>) {
     for statement in statements {
         match statement {
-            Statement::Assign { target, .. } => targets.push(*target),
+            Statement::Assign { target, .. } | Statement::Nonblocking { target, .. } => {
+                targets.push(*target)
+            }
             Statement::If {
                 then_body,
                 else_body,
@@ -1473,9 +1600,51 @@ fn collect_process_targets(statements: &[Statement], targets: &mut Vec<SignalSli
             Statement::While { body, .. } | Statement::Forever { body } => {
                 collect_process_targets(body, targets);
             }
-            Statement::Delay { .. } | Statement::Finish => {}
+            Statement::Delay { .. }
+            | Statement::InactiveDelay { .. }
+            | Statement::WaitEvent { .. }
+            | Statement::WaitLevel { .. }
+            | Statement::Finish => {}
         }
     }
+}
+
+/// The ranges a combinational process drives: the slices it assigns, with
+/// overlapping or adjacent slices of one signal merged, since one process is
+/// one driver however many times it writes a bit.
+fn comb_process_targets(statements: &[Statement]) -> Vec<SignalSlice> {
+    let mut targets = Vec::new();
+    collect_process_targets(statements, &mut targets);
+    targets.sort_by_key(|target| (target.signal, target.lsb));
+    let mut merged: Vec<SignalSlice> = Vec::new();
+    for target in targets {
+        match merged.last_mut() {
+            Some(last) if last.signal == target.signal && target.lsb <= last.lsb + last.width => {
+                let end = (last.lsb + last.width).max(target.lsb + target.width);
+                last.width = end - last.lsb;
+            }
+            _ => merged.push(target),
+        }
+    }
+    merged
+}
+
+fn validate_comb_body(statements: &[Statement]) -> Result<(), BuildError> {
+    for statement in statements {
+        match statement {
+            Statement::Assign { .. } => {}
+            Statement::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                validate_comb_body(then_body)?;
+                validate_comb_body(else_body)?;
+            }
+            _ => return Err(BuildError::UnsupportedCombStatement),
+        }
+    }
+    Ok(())
 }
 
 /// Check the statements of one process against the module's signals,
@@ -1493,7 +1662,7 @@ fn validate_statements<'a>(
     };
     for statement in statements {
         match statement {
-            Statement::Assign { target, value } => {
+            Statement::Assign { target, value } | Statement::Nonblocking { target, value } => {
                 let target_signal = signal(target.signal)
                     .ok_or(BuildError::UnknownSignal(target.signal.index()))?;
                 if target.width == 0 {
@@ -1546,11 +1715,22 @@ fn validate_statements<'a>(
             Statement::Forever { body } => {
                 validate_statements(body, signal, expression, driver_ranges)?;
             }
-            Statement::Delay { amount } => {
+            Statement::Delay { amount } | Statement::InactiveDelay { amount } => {
                 let width = expression_type(*amount)?.width();
                 if width > MAX_DELAY_WIDTH {
                     return Err(BuildError::DelayTooWide { width });
                 }
+            }
+            Statement::WaitEvent { terms } => {
+                if terms.is_empty() {
+                    return Err(BuildError::EmptyEventControl);
+                }
+                for term in terms {
+                    signal(term.signal).ok_or(BuildError::UnknownSignal(term.signal.index()))?;
+                }
+            }
+            Statement::WaitLevel { condition } => {
+                expression_type(*condition)?;
             }
             Statement::Finish => {}
         }
@@ -1590,6 +1770,123 @@ mod tests {
         assert_eq!(artifact.signals().len(), 3);
         assert_eq!(artifact.assignments().len(), 1);
         assert_eq!(artifact.port_order().len(), 3);
+    }
+
+    #[test]
+    fn timing_statements_and_comb_processes_need_format_3() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Timed").unwrap();
+        let go = module.input("go", bit).unwrap();
+        let done = module.output("done", bit).unwrap();
+        let y = module.output("y", bit).unwrap();
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let done_target = module.whole(done).unwrap();
+        module
+            .process(vec![Statement::Delay { amount: one }])
+            .unwrap();
+        module
+            .process(vec![
+                Statement::WaitEvent {
+                    terms: vec![EventTerm::new(go, EventEdge::Posedge)],
+                },
+                Statement::Nonblocking {
+                    target: done_target,
+                    value: one,
+                },
+            ])
+            .unwrap();
+        let read_go = module.read(go).unwrap();
+        let y_target = module.whole(y).unwrap();
+        module
+            .comb_process(vec![Statement::Assign {
+                target: y_target,
+                value: read_go,
+            }])
+            .unwrap();
+        let artifact = module.finish();
+        assert_eq!(artifact.format_version(), 3);
+        let json = artifact.to_json().unwrap();
+        assert_eq!(
+            FrontendArtifact::from_json(&json)
+                .unwrap()
+                .processes()
+                .len(),
+            2
+        );
+
+        // Version 2 cannot carry them.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["format_version"] = 2.into();
+        assert!(FrontendArtifact::from_json(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_timing_statements() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Invalid").unwrap();
+        let go = module.input("go", bit).unwrap();
+        let y = module.output("y", bit).unwrap();
+        assert_eq!(
+            module
+                .process(vec![Statement::WaitEvent { terms: Vec::new() }])
+                .unwrap_err(),
+            BuildError::EmptyEventControl
+        );
+        let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+        assert_eq!(
+            module
+                .comb_process(vec![Statement::Delay { amount: one }])
+                .unwrap_err(),
+            BuildError::UnsupportedCombStatement
+        );
+        // A combinational process drives its targets like an assignment.
+        let read_go = module.read(go).unwrap();
+        let y_target = module.whole(y).unwrap();
+        module
+            .comb_process(vec![Statement::Assign {
+                target: y_target,
+                value: read_go,
+            }])
+            .unwrap();
+        assert!(matches!(
+            module.assign(y_target, read_go),
+            Err(BuildError::OverlappingDrivers { .. })
+        ));
+        assert!(matches!(
+            module.process(vec![Statement::Nonblocking {
+                target: y_target,
+                value: one,
+            }]),
+            Err(BuildError::ProcessDriverConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn a_combinational_process_may_overwrite_part_of_its_own_target() {
+        let byte = ValueType::bits(8).unwrap();
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("Override").unwrap();
+        let a = module.input("a", byte).unwrap();
+        let low = module.input("low", bit).unwrap();
+        let y = module.output("y", byte).unwrap();
+        let read_a = module.read(a).unwrap();
+        let read_low = module.read(low).unwrap();
+        let whole = module.whole(y).unwrap();
+        let first = module.slice(y, 0, 1).unwrap();
+        module
+            .comb_process(vec![
+                Statement::Assign {
+                    target: whole,
+                    value: read_a,
+                },
+                Statement::Assign {
+                    target: first,
+                    value: read_low,
+                },
+            ])
+            .unwrap();
+        let artifact = module.finish();
+        FrontendArtifact::from_json(&artifact.to_json().unwrap()).unwrap();
     }
 
     #[test]
