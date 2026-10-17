@@ -1,0 +1,1 @@
+Address PR #1451 review: preserve named-type use-site dimensions and dependent defaults; resolve ambiguous part-select syntax as a type binding and add regressions
