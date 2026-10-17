@@ -2525,23 +2525,23 @@ impl NativeSimulatorHandle {
     /// Returns the WASM module bytes for a specific clock/reset event.
     ///
     /// `event_name` should match a clock or reset port name (e.g. "clk", "rst").
+    ///
+    /// An event without a domain of its own (a clock that only drives a
+    /// gated clock) has no module.
     #[napi]
     pub fn event_wasm_bytes(&self, event_name: String) -> Result<Vec<u8>> {
-        for (addr, units) in &self.program.sir.eval_apply_ffs {
-            let event_path = self.program.get_path(addr);
-            if event_path == event_name {
-                let wasm = celox::wasm_codegen::compile_units(
-                    units,
-                    self.program.layout(),
-                    self.four_state,
-                    false,
-                );
-                return Ok(wasm.bytes);
-            }
+        if let Some(units) = self.event_units(&self.program.sir.eval_apply_ffs, &event_name) {
+            let wasm = celox::wasm_codegen::compile_units(
+                units,
+                self.program.layout(),
+                self.four_state,
+                false,
+            );
+            return Ok(wasm.bytes);
         }
 
         Err(Error::from_reason(format!(
-            "Event '{}' not found. Available events: {}",
+            "Event '{}' has no kernel. Events with kernels: {}",
             event_name,
             self.program
                 .sir
@@ -2551,6 +2551,23 @@ impl NativeSimulatorHandle {
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
+    }
+
+    /// The units of the event named `name` (as `eventsJson` names it, or by
+    /// one of its aliases) in one of the program's kernel maps.
+    fn event_units<'a, U: 'a>(
+        &self,
+        kernels: impl IntoIterator<Item = (&'a celox::AbsoluteAddr, &'a U)>,
+        name: &str,
+    ) -> Option<&'a U> {
+        let events = &self.program.design.events;
+        kernels
+            .into_iter()
+            .find(|(address, _)| {
+                self.program.get_path(address) == name
+                    || self.program.get_path(&events.canonical(**address)) == name
+            })
+            .map(|(_, units)| units)
     }
 
     /// Per event name, the derived domains its ticks and edges run, as JSON
@@ -2576,10 +2593,8 @@ impl NativeSimulatorHandle {
                 )));
             }
         };
-        units
-            .iter()
-            .find(|(addr, _)| self.program.get_path(addr) == event_name)
-            .map(|(_, units)| {
+        self.event_units(units, &event_name)
+            .map(|units| {
                 celox::wasm_codegen::compile_units(
                     units,
                     self.program.layout(),
@@ -2802,13 +2817,14 @@ impl NativeSimulatorHandle {
         serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Build events JSON from finalized SIR.
+    /// Build events JSON from finalized SIR, numbered as the native
+    /// simulator numbers them.
     fn build_events_json(program: &celox::LaidOutProgram) -> String {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
 
-        for (next_id, addr) in program.sir.eval_apply_ffs.keys().enumerate() {
+        for (next_id, addr) in celox::event_addresses(program).iter().enumerate() {
             let name = program.get_path(addr);
             events.insert(name, next_id);
         }

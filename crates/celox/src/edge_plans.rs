@@ -64,7 +64,31 @@ fn edge_name(kind: Option<DomainKind>) -> &'static str {
     }
 }
 
-/// The edge plans of `program`'s events, named as its event kernels are.
+/// The canonical event domains of `program` in the order every execution
+/// engine numbers them: the semantic event order, then any kernel the event
+/// topology does not list. An event need not have a kernel of its own: a
+/// clock that only drives a gated clock is one.
+pub fn event_addresses(program: &LaidOutProgram) -> Vec<AbsoluteAddr> {
+    let mut addresses = program.design.events.ordered_events.clone();
+    let mut seen: crate::HashSet<_> = addresses.iter().copied().collect();
+    // Preserve legacy/directly constructed programs whose event topology does
+    // not list every kernel, after the semantic IDs used by trigger code.
+    let mut extra: Vec<_> = program
+        .sir
+        .eval_apply_ffs
+        .keys()
+        .chain(program.sir.eval_only_ffs.keys())
+        .chain(program.sir.apply_ffs.keys())
+        .map(|address| program.design.events.canonical(*address))
+        .filter(|address| seen.insert(*address))
+        .collect();
+    extra.sort_unstable();
+    addresses.extend(extra);
+    addresses
+}
+
+/// The edge plans of `program`'s events, named as [`event_addresses`] and
+/// `program.get_path` name them.
 pub fn edge_plans(program: &LaidOutProgram) -> EdgePlans {
     let layout = program.layout();
     let events = &program.design.events;
@@ -78,10 +102,8 @@ pub fn edge_plans(program: &LaidOutProgram) -> EdgePlans {
         signal: signal(address),
         edge: edge_name(kinds.get(address).copied()),
     };
-    let plans = program
-        .sir
-        .eval_apply_ffs
-        .keys()
+    let plans = event_addresses(program)
+        .iter()
         .map(|address| {
             let canonical = events.canonical(*address);
             let plan = EdgePlanEvent {
