@@ -95,6 +95,8 @@ pub struct Checkpoint {
     testbench_strings: celox_testbench::TestbenchStrings,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
+    /// Whether the design had finished a timed simulation.
+    frozen: bool,
 }
 
 impl Checkpoint {
@@ -146,6 +148,7 @@ impl<B: SimBackend> Simulator<B> {
             testbench_strings: self.testbench_strings.clone(),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
+            frozen: self.frozen,
         })
     }
 
@@ -158,6 +161,7 @@ impl<B: SimBackend> Simulator<B> {
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
         self.validate_restore(checkpoint)?;
         let fingerprint = self.state_fingerprint();
+        self.frozen = checkpoint.frozen;
         checkpoint
             .image
             .restore_into(&mut self.backend, fingerprint)?;

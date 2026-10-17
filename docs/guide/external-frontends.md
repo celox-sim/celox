@@ -128,9 +128,13 @@ in order:
 | Statement | Behavior |
 |---|---|
 | `Assign` | Blocking assignment. Later statements read the new value; other logic sees it once the process suspends. |
+| `Nonblocking` | Nonblocking assignment: the value is evaluated now and assigned in the NBA region of the current time. |
 | `If` | Branch on a condition. A condition with unknown bits counts as false. |
 | `While` / `Forever` | Repeat a body while a condition holds, or forever. |
-| `Delay` | Suspend for an amount of time units, at most 64 bits wide. |
+| `Delay` | Suspend for an amount of time units, at most 64 bits wide. A zero delay resumes after the nonblocking assignments of the time are published. |
+| `InactiveDelay` | Like `Delay`, with SystemVerilog's `#0`: a zero delay resumes in the inactive region, before nonblocking assignments are published. |
+| `WaitEvent` | Suspend until one of its terms occurs: any change, a positive or a negative edge of a signal (`@(...)`). |
+| `WaitLevel` | Suspend until a condition is nonzero (`wait (...)`); continue at once if it already is. |
 | `Finish` | End the simulation. |
 
 ```rust
@@ -144,30 +148,56 @@ module.process(vec![Statement::Forever {
         Statement::Assign { target: module.whole(clk)?, value: toggled },
     ],
 }])?;
+
+// always @(posedge clk) count = count + 1;
+module.process(vec![Statement::Forever {
+    body: vec![
+        Statement::WaitEvent { terms: vec![EventTerm::new(clk, EventEdge::Posedge)] },
+        Statement::Assign { target: module.whole(count)?, value: next_count },
+    ],
+}])?;
 ```
 
+`ModuleBuilder::comb_process` adds a combinational process such as
+`always_comb`: assignments and conditionals that run at time zero and again
+whenever a signal they read, and do not write, changes. Each write is visible
+as it happens, so `y = 0; if (a) y = 1;` pulses `y` when an input change re-runs
+the process; settling again with steady inputs does not re-run it.
+
 Processes run only in a timed `Simulation`. Each one is compiled into a
-resumable kernel that the simulation scheduler resumes when its delay expires.
-Processes that resume at the same time run in declaration order. A process
-sees the state settled at the previous time. The clock and reset edges it
-causes trigger registers at the current time, like a scheduled event. A zero
-delay resumes the process later at the same time, after the other processes
-have run and the registers their edges trigger have settled, so a pulse
-separated by a zero delay is still an edge.
+resumable kernel that the simulation scheduler resumes when its delay expires
+or its wait is satisfied. Processes that resume at the same time run in
+declaration order. A time slot follows the regions of IEEE 1800-2023 4.5:
+processes, including those an edge wakes, run in the active region before the
+registers of that edge publish their nonblocking assignments, so a process
+woken by `@(posedge clk)` reads the register outputs from before the edge.
+Zero-delay `InactiveDelay` processes run after the active region, and
+nonblocking assignments publish only when both are empty. A process that
+drives a register's input at the same edge races with the register, as in
+SystemVerilog.
+
+Every write a process makes counts: a pulse such as `clk = 1; clk = 0;`
+without a suspension in between triggers `@(posedge clk)` and the registers of
+`clk` once, and two nonblocking assignments to one signal in one time slot
+publish in order. A host write through `Simulation::modify`, through the
+raw memory view reported with `Simulation::note_raw_writes`, or through a
+TypeScript DUT input, is an update of the current time: the next `step` or
+`run_until` settles it at that time, then advances.
 
 A process may write output and internal signals that no continuous assignment
 or register drives. Several processes may write the same signal. Checkpoints
-capture suspended processes, but state files are not yet supported for a
-simulation with processes. A Veryl native testbench cannot instantiate an
-artifact with processes.
+and state files capture suspended and waiting processes. A Veryl native
+testbench cannot instantiate an artifact with processes.
 
 ## Artifact format limits
 
 Format version 1 accepts one flattened module. It supports typed signals,
 constants, combinational expressions and assignments, edge-triggered registers,
 asynchronous reset, synchronous enable, and initial values. Format version 2
-adds processes. The builder writes version 1 for an artifact without processes,
-so consumers that read only version 1 still accept it. A frontend must lower
+adds processes, and version 3 their nonblocking assignments, inactive delays,
+waits and combinational processes. The builder writes the oldest version that
+can carry the artifact, so consumers that read only an earlier version still
+accept it. A frontend must lower
 hierarchy, memories, latches, custom primitives, and bidirectional signals
 before calling the SDK builder.
 

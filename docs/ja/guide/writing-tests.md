@@ -140,10 +140,10 @@ try {
 
 ### runUntil のタイムアウトガード
 
-`runUntil()` に `{ maxSteps }` を渡すとステップカウントが有効になります。指定しない場合は高速な Rust パスがそのまま使われ、オーバーヘッドはありません：
+`runUntil()` に `{ maxSteps }` を渡すとステップ数に上限を設けられます。どちらの形も Rust のスケジューラで実行されます：
 
 ```typescript
-// 高速 Rust パス (オーバーヘッドなし)
+// 上限なし
 sim.runUntil(10000);
 
 // ガード付き: 上限を超えると SimulationTimeoutError をスロー

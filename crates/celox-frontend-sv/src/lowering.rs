@@ -2075,6 +2075,9 @@ fn lower_module_with_overrides(
             reset_clock_map,
             processes,
             package_bindings: HashMap::default(),
+            counter_slots: Vec::new(),
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         },
         variables,
         port_order,
@@ -2428,6 +2431,24 @@ pub(crate) fn attach_instance_glue(
     push_event_copies(&lowered.event_copies, &mut comb_blocks, &mut arena)?;
     module.comb_boundaries = comb_boundaries(&comb_blocks);
     module.comb_blocks = comb_blocks;
+    // Signals a kernel or an imperative combinational unit may store twice
+    // between two runtime checks get counters; assembly uses them only for
+    // the ones a flip-flop domain or wait watches.
+    let mut candidates = Vec::new();
+    for process in &module.processes {
+        candidates.extend(celox_frontend_core::watch::multi_store_candidates(
+            &process.kernel,
+            |address| (address.region == STABLE_REGION).then_some(address.var_id),
+        ));
+    }
+    for path in &module.comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &path.target {
+            candidates.extend(celox_frontend_core::watch::multi_store_candidates(
+                unit,
+                |address| Some(*address),
+            ));
+        }
+    }
     module.arena = arena;
     // Combinational event sites follow the flip-flop ones, including the
     // events run-time loops emit.
@@ -2496,6 +2517,8 @@ pub(crate) fn attach_instance_glue(
                 arena: glue.2,
             });
     }
+    module.counter_slots =
+        celox_frontend_core::watch::declare_counter_slots(&mut module.variables, candidates);
     Ok(())
 }
 

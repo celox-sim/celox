@@ -562,6 +562,9 @@ pub(crate) fn project_module_with_ids(
                 .collect(),
             processes: Vec::new(),
             package_bindings: HashMap::default(),
+            counter_slots: Vec::new(),
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         },
         ids,
     ))

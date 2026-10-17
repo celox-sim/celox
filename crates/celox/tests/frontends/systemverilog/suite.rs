@@ -6,9 +6,9 @@ use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath}
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
 /// A timed case: the design's own processes and clocks run in a
-/// [`Simulation`]. The runtime does not yet resume the processes a host write
-/// wakes until time advances, and offers no four-state read; the cases that
-/// need either are excluded in `timing.rs`.
+/// [`Simulation`]. A host write is settled at the current time by the next
+/// run operation. A timed simulation offers no four-state read; the cases
+/// that need it are excluded in `timing.rs`.
 struct TimedBackend<B: SimBackend> {
     sim: Simulation<B>,
     four_state: bool,
