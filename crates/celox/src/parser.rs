@@ -593,6 +593,7 @@ pub fn parse_sv(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
@@ -606,6 +607,7 @@ pub fn parse_sv(
         &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
+        warnings,
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
@@ -681,6 +683,7 @@ pub fn parse_mixed(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    sv_warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -716,7 +719,11 @@ pub fn parse_mixed(
     // A native specialization can introduce further SV specializations and
     // interface behavior. Analyze the expanded requests until every alternating
     // language boundary has been prepared; cache native elaboration by key.
+    // Each pass lowers every SV module again, so only the last one's warnings
+    // are kept.
+    let earlier_warnings = sv_warnings.len();
     let external = loop {
+        sv_warnings.truncate(earlier_warnings);
         let borrowed_sources = sources
             .iter()
             .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -801,6 +808,7 @@ pub fn parse_mixed(
             Some(&mut resolver),
             sv_top_parameters,
             &requests,
+            sv_warnings,
         )
         .map_err(|error| match error {
             celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
