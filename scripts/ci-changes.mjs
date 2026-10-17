@@ -236,7 +236,8 @@ function changedFiles(base, head) {
   try {
     const output = execFileSync(
       "git",
-      ["diff", "--name-only", "-z", base, head],
+      // Diff from the merge base: a PR's base.sha is the current base tip.
+      ["diff", "--name-only", "-z", `${base}...${head}`],
       { encoding: "utf8" },
     );
     return output.split("\0").filter(Boolean);
