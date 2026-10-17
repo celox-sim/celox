@@ -777,6 +777,8 @@ impl<B: SimBackend> Simulator<B> {
             event_ref: events[&event.event],
             signal: signals[&event.signal],
             next_val: event.value,
+            // `import_schedule` marks the periodic events.
+            periodic: false,
         };
         Ok(ScheduleParts {
             time: record.time,
