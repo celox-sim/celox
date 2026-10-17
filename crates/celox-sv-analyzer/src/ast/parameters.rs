@@ -41,6 +41,14 @@ pub(super) fn binding_keys(
         keys.push(parameter_dimension_marker(name, index, "left"));
         keys.push(parameter_dimension_marker(name, index, "right"));
     }
+    if let Some(count) = env.get(&variable_dimensions_marker(name)) {
+        for index in 0..*count {
+            if let Ok(index) = usize::try_from(index) {
+                keys.push(dimensions::variable_dimension_marker(name, index, "left"));
+                keys.push(dimensions::variable_dimension_marker(name, index, "right"));
+            }
+        }
+    }
     keys
 }
 
