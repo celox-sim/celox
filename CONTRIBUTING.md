@@ -210,6 +210,11 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   in the issue "Lydite validation is failing on <branch>", closed by the next
   passing run. NAPI/JS changes, upstream private tests and Markdown do not
   reach Lydite.
+- Version-only Release Please diffs, including their queue drafts, skip Lydite.
+- PR workflows come from the PR's merge ref, so branches based on an older base
+  still carry the earlier `lydite.yml`, which selected every lane. That
+  workflow file stays disabled in repository settings; `lydite-checks.yml`
+  replaces it. Re-enable nothing under the old path.
 - Shared dependency/toolchain configuration runs the core lane; an unreadable
   diff or dependency graph runs both lanes. The graph includes optional, build
   and dev edges.
@@ -233,7 +238,7 @@ uses the finer behavior-based matrix above.
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run every shared Veryl and SystemVerilog case against both Verilator and Icarus, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
-| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
+| Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs, and Celox changes skip the bridge. Daily and manual runs enable all lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full CI and external comparisons, regardless of its diff. |
 | Pull requests that cut a release | A `master` pull request or legacy merge group whose diff changes `.release-please-manifest.json` (only the release pull request does there; syncing it into `develop` is not a release) runs full CI and the external comparisons. `Rust Test & NAPI Build` then requires the comparisons to pass, so a release cannot merge after only change-based checks. Daily and manual full runs do not gate on the comparisons; their failures reach the full CI issue below. A `master` pull request or legacy merge group whose diff cannot be determined is treated the same way. |
 

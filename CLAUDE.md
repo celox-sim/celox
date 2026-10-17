@@ -34,7 +34,7 @@ cargo insta accept       # Accept snapshot changes
 | `packages/celox` | TypeScript runtime package |
 | `packages/vite-plugin` | Vite plugin |
 | `crates/lydite-*` | lydite hardware refinement checker (unpublished; CLI is `lydite`) |
-| `lydite/` | lydite docs, examples, editor client, and proof/conformance gates (`.github/workflows/lydite.yml`) |
+| `lydite/` | lydite docs, examples, editor client, and proof/conformance gates (`.github/workflows/lydite-checks.yml`) |
 
 ### lydite
 

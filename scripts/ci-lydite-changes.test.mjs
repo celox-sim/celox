@@ -21,7 +21,7 @@ test("Lydite core changes and shared configuration run both lanes", () => {
     "Cargo.toml",
     "rust-toolchain.toml",
     "flake.lock",
-    ".github/workflows/lydite.yml",
+    ".github/workflows/lydite-checks.yml",
     "scripts/ci-lydite-changes.mjs",
     "vendor/new/src/lib.rs",
     "crates/new/src/lib.rs",
@@ -71,17 +71,44 @@ test("PRs run the bridge only for Lydite-owned changes", () => {
     "crates/celox-test-suite/src/veryl/cases/flip_flop.vtest",
   ])
     assert.deepEqual(pr(path), neither, path);
-  for (const path of ["Cargo.lock", "rust-toolchain.toml", ".github/workflows/ci.yml"])
+  for (const path of [
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/lydite-checks.yml",
+    "scripts/ci-lydite-changes.mjs",
+  ])
     assert.deepEqual(pr(path), { core: true, bridge: false }, path);
   for (const path of [
     "crates/lydite-celox/src/lib.rs",
     "crates/lydite/src/main.rs",
     "lydite/conformance/veryl-proof/case-exceptions.json",
-    ".github/workflows/lydite.yml",
-    "scripts/ci-lydite-changes.mjs",
   ])
     assert.equal(pr(path).bridge, true, path);
   assert.deepEqual(pullRequestScope(null, packages), both);
+});
+
+test("version-only release PRs skip Lydite", () => {
+  const release = [
+    ".release-please-manifest.json",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "VERSION",
+    "crates/celox-napi/package.json",
+    "packages/celox/package.json",
+    "packages/vite-plugin/package.json",
+  ];
+  assert.deepEqual(pullRequestScope(release, packages), neither);
+  // Without the release manifest, Cargo changes are ordinary dependency edits.
+  assert.deepEqual(pullRequestScope(release.slice(1), packages), {
+    core: true,
+    bridge: false,
+  });
+  assert.equal(
+    pullRequestScope([...release, "crates/lydite/src/main.rs"], packages).bridge,
+    true,
+  );
 });
 
 test("dependency selection follows new transitive edges automatically", () => {
@@ -141,7 +168,7 @@ test("workflows transfer Rust tests and gate each Lydite lane", () => {
     ci,
     /cargo test --locked --workspace --exclude 'lydite\*' --doc/,
   );
-  const workflow = readFileSync(`${root}.github/workflows/lydite.yml`, "utf8");
+  const workflow = readFileSync(`${root}.github/workflows/lydite-checks.yml`, "utf8");
   assert.match(
     workflow,
     /pull_request:\n  merge_group:\n  schedule:\n    - cron: "41 3 \* \* \*"/,

@@ -102,6 +102,15 @@ export function cutsRelease(files) {
   );
 }
 
+// A Release Please diff that only bumps versions and changelogs.
+export function isVersionOnlyRelease(files) {
+  const normalized = files.map((path) => path.replace(/^\.\//, ""));
+  return (
+    cutsRelease(normalized) &&
+    normalized.every((path) => RELEASE_PLEASE_FILES.has(path))
+  );
+}
+
 // On master, only the release pull request changes the release manifest, so a
 // PR or legacy merge group carrying it gets full validation before merging
 // instead of the change-based subset. Syncing master into develop carries the
@@ -295,7 +304,7 @@ if (
   });
 }
 
-// Lydite tests are selected independently by lydite.yml, including its bridge.
+// Lydite tests are selected independently by lydite-checks.yml, including its bridge.
 export function celoxRustTestScope(files, packages) {
   return rustTestScope(
     files.filter((path) => !/^(?:\.\/)?(?:lydite\/|crates\/lydite(?:-|\/))/.test(path)),
@@ -304,7 +313,7 @@ export function celoxRustTestScope(files, packages) {
 }
 
 // Queue drafts, merge groups, releases and daily runs keep the Celox
-// workspace. Lydite tests run independently in lydite.yml.
+// workspace. Lydite tests run independently in lydite-checks.yml.
 function rustScopeOutputs(files) {
   let scope = { full: true };
   if (files !== null) {
