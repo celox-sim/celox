@@ -21,7 +21,8 @@ export UPDATECLI_GITHUB_ACTOR=...
 updatecli pipeline diff --config .updatecli/updatecli.d
 ```
 
-Pull request validation uses the read-only `GITHUB_TOKEN`. Scheduled and manual
-updates mint a short-lived token for the `celox-automation` GitHub App from the
+Pull requests run the selector unit tests in the required `Lint & Format`
+check. The weekly and manual `updatecli.yml` runs repeat those tests and preview
+the policy before applying it. Scheduled and manual updates mint a short-lived token for the `celox-automation` GitHub App from the
 existing `RELEASE_APP_ID` variable and `RELEASE_APP_PRIVATE_KEY` secret. Pull
 requests created with that installation token trigger the regular CI workflows.

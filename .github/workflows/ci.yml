@@ -167,7 +167,12 @@ jobs:
 
       - name: Test repository scripts
         if: needs.changes.result != 'success' || needs.changes.outputs.scripts == 'true'
-        run: node --test scripts/*.test.mjs
+        run: |
+          node --test scripts/*.test.mjs
+          bash scripts/tests/convert-heliodor-bench.sh
+          bash scripts/tests/run-heliodor-bench-results.sh
+          bash scripts/tests/run-heliodor-bench-gate.sh
+          python3 -m unittest discover -s .updatecli/tests -v
 
       # A new dependency edge can invalidate the NAPI exclusions or the
       # backend and frontend variants that pull requests narrow celox to.

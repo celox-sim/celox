@@ -498,7 +498,7 @@ mutant and correct source under identical stimuli. An unreachable-only fault
 retains its induction countermodel but has no bounded reset failure and passes
 concrete reset traces. Failure controls also reject internal-state writes,
 malformed/stale witnesses, bad sampling/reset indices, and simulation divergence.
-The mandatory `celox-replay` CI job uploads fresh evidence; `--record` is an
+The `bridge` CI job uploads fresh replay evidence; `--record` is an
 explicit developer action for changing reviewed regressions and is never used
 by CI.
 

@@ -1,23 +1,6 @@
 name: Heliodor Benchmark
 
 on:
-  pull_request:
-    paths:
-      - ".github/actions/setup-rust/**"
-      - ".github/workflows/heliodor-bench.yml"
-      - ".github/workflows/bench.yml"
-      - "scripts/benchmark-workflows.test.mjs"
-      - "scripts/publish-bench.mjs"
-      - "scripts/convert-heliodor-bench.mjs"
-      - "scripts/heliodor-revision"
-      - "scripts/publish-heliodor-bench.mjs"
-      - "scripts/publish-heliodor-bench.test.mjs"
-      - "scripts/heliodor-suite.mjs"
-      - "scripts/heliodor-suite.test.mjs"
-      - "scripts/run-heliodor-bench.sh"
-      - "scripts/tests/convert-heliodor-bench.sh"
-      - "scripts/tests/run-heliodor-bench-results.sh"
-      - "scripts/tests/run-heliodor-bench-gate.sh"
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
@@ -57,8 +40,8 @@ env:
 # Measurement workflows have independent queues; publishers retry against the
 # latest gh-pages tip instead of locking the entire suite behind other benches.
 concurrency:
-  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || format('heliodor-bench-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ (inputs.suite_test || inputs.suite_runner || inputs.suite_arch) && format('heliodor-suite-{0}-{1}-{2}-{3}', github.ref, inputs.suite_test, inputs.suite_runner, inputs.suite_arch) || inputs.arm64_profile && format('heliodor-arm64-profile-{0}', github.ref) || format('heliodor-bench-{0}', github.ref) }}
+  cancel-in-progress: false
 
 jobs:
   validate-dispatch:
@@ -79,27 +62,6 @@ jobs:
           SUITE_RUNNER: ${{ inputs.suite_runner }}
           SUITE_ARCH: ${{ inputs.suite_arch }}
         run: node scripts/heliodor-suite.mjs validate
-
-  converter-test:
-    name: Test Heliodor result conversion
-    if: github.event_name == 'pull_request'
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
-      - name: Test benchmark conversion fixtures
-        shell: bash
-        run: |
-          node --test scripts/benchmark-workflows.test.mjs scripts/heliodor-suite.test.mjs scripts/publish-heliodor-bench.test.mjs
-          bash scripts/tests/convert-heliodor-bench.sh
-          bash scripts/tests/run-heliodor-bench-results.sh
-          bash scripts/tests/run-heliodor-bench-gate.sh
 
   # The stable daily suite already covers this pinned workload. Develop runs
   # its smaller fixed gate daily to check the Veryl HEAD lane without duplicating
