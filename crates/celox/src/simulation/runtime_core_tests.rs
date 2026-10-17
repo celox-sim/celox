@@ -10,6 +10,7 @@ use celox_frontend_sdk::{
 
 use super::Simulation;
 use crate::{SimBackend, Simulator, SimulatorBuilder};
+use celox_runtime::backend::EventHandle as _;
 
 /// Run `$body` with `$sim` bound to a timed simulation of `$builder` on
 /// every backend, including a native program image that went through its
@@ -1789,5 +1790,593 @@ fn long_finite_loops_yield_rarely() {
             assert_eq!(value(&mut sim, "i"), 1 << 17);
             assert_eq!(value(&mut sim, "done"), 1);
         });
+    }
+}
+
+/// Records every call a timed step makes on a simulator, with its
+/// arguments, and forwards it.
+struct Tracing<'a, B: SimBackend> {
+    sim: &'a mut Simulator<B>,
+    calls: Vec<String>,
+}
+
+impl<B: SimBackend> celox_runtime::SimulationExecutor for Tracing<'_, B> {
+    type Backend = B;
+
+    fn backend(&self) -> &B {
+        &self.sim.backend
+    }
+
+    fn backend_mut(&mut self) -> &mut B {
+        &mut self.sim.backend
+    }
+
+    fn eval_comb(&mut self) -> Result<(), celox_runtime::Halt> {
+        self.calls.push("comb".into());
+        celox_runtime::SimulationExecutor::eval_comb(self.sim)
+    }
+
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push(format!("eval_apply(e{})", event.id()));
+        celox_runtime::SimulationExecutor::eval_apply_ff_at(self.sim, event)
+    }
+
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push(format!("eval_only(e{})", event.id()));
+        celox_runtime::SimulationExecutor::eval_only_ff_at(self.sim, event)
+    }
+
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), celox_runtime::Halt> {
+        self.calls.push(format!("apply(e{})", event.id()));
+        celox_runtime::SimulationExecutor::apply_ff_at(self.sim, event)
+    }
+
+    fn run_process(&mut self, index: usize) -> Result<(), celox_runtime::Halt> {
+        self.calls.push(format!("process({index})"));
+        celox_runtime::SimulationExecutor::run_process(self.sim, index)
+    }
+
+    fn take_host_writes(&mut self) -> Vec<(crate::SignalRef, celox_runtime::timing::Value)> {
+        let writes = celox_runtime::SimulationExecutor::take_host_writes(self.sim);
+        self.calls.push(format!("host_writes({})", writes.len()));
+        writes
+    }
+
+    fn freeze(&mut self) {
+        self.calls.push("freeze".into());
+        celox_runtime::SimulationExecutor::freeze(self.sim);
+    }
+
+    fn stage_external_event(
+        &mut self,
+        event: B::Event,
+        timestamp: u64,
+    ) -> Result<(), crate::RuntimeErrorCode> {
+        self.calls
+            .push(format!("stage(e{}@{timestamp})", event.id()));
+        celox_runtime::SimulationExecutor::stage_external_event(self.sim, event, timestamp)
+    }
+
+    fn fire_external_event(
+        &mut self,
+        event: B::Event,
+        timestamp: u64,
+    ) -> Result<(), crate::RuntimeErrorCode> {
+        self.calls
+            .push(format!("fire(e{}@{timestamp})", event.id()));
+        celox_runtime::SimulationExecutor::fire_external_event(self.sim, event, timestamp)
+    }
+
+    fn finish_timed_step(&mut self, timestamp: u64) {
+        self.calls.push(format!("finish_step({timestamp})"));
+        celox_runtime::SimulationExecutor::finish_timed_step(self.sim, timestamp);
+    }
+}
+
+/// One operation of a traced script.
+#[derive(Clone)]
+enum Op {
+    /// Write inputs in one host update.
+    Modify(Vec<(&'static str, u64)>),
+    Schedule(&'static str, u64, u64),
+    Clock(&'static str, u64, u64),
+    /// [`Simulation::run_until`], step by step.
+    Run(u64),
+    /// Up to this many [`Simulation::step`]s.
+    Steps(usize),
+}
+
+/// The executor calls of each step `ops` makes, with the values of
+/// `observe` after each operation that runs time.
+fn trace<B: SimBackend>(mut sim: Simulation<B>, ops: &[Op], observe: &[&str]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let step = |sim: &mut Simulation<B>, limit: u64, out: &mut String| -> bool {
+        let mut tracing = Tracing {
+            sim: &mut sim.simulator,
+            calls: Vec::new(),
+        };
+        let result = sim.state.step_until(&mut tracing, limit);
+        let calls = tracing.calls.join(" ");
+        match result {
+            Ok(time) => {
+                writeln!(out, "  step -> {time:?}: {calls}").unwrap();
+                time.is_some()
+            }
+            Err(error) => {
+                writeln!(out, "  step -> error {error}: {calls}").unwrap();
+                false
+            }
+        }
+    };
+    'ops: for op in ops {
+        match op {
+            Op::Modify(writes) => {
+                writeln!(out, "modify {writes:?}").unwrap();
+                let writes: Vec<_> = writes
+                    .iter()
+                    .map(|&(name, value)| (sim.signal(name), value))
+                    .collect();
+                if let Err(error) = sim.modify(|io| {
+                    for (signal, value) in writes {
+                        io.set_wide(signal, value.into());
+                    }
+                }) {
+                    writeln!(out, "  error {error}").unwrap();
+                    break 'ops;
+                }
+                continue;
+            }
+            Op::Schedule(name, time, value) => {
+                writeln!(out, "schedule {name} @{time} = {value}").unwrap();
+                if let Err(error) = sim.schedule(name, *time, *value) {
+                    writeln!(out, "  error {error}").unwrap();
+                }
+                continue;
+            }
+            Op::Clock(name, period, delay) => {
+                writeln!(out, "clock {name} period {period} delay {delay}").unwrap();
+                sim.add_clock(name, *period, *delay);
+                continue;
+            }
+            // Mirrors `Simulation::run_until`.
+            Op::Run(end_time) => {
+                writeln!(out, "run_until {end_time}").unwrap();
+                if *end_time >= sim.state.time() {
+                    while let Some(next_time) = sim.state.next_event_time() {
+                        if next_time > *end_time {
+                            break;
+                        }
+                        if !step(&mut sim, *end_time, &mut out) {
+                            break 'ops;
+                        }
+                    }
+                    if !sim.state.is_finished() {
+                        sim.state.set_time(*end_time);
+                        sim.simulator.dump_unless_rewound(*end_time);
+                    }
+                }
+            }
+            Op::Steps(count) => {
+                writeln!(out, "steps {count}").unwrap();
+                for _ in 0..*count {
+                    if !step(&mut sim, u64::MAX, &mut out) {
+                        break;
+                    }
+                }
+            }
+        }
+        write!(out, "  time {} finished {}:", sim.time(), sim.is_finished()).unwrap();
+        for name in observe {
+            let signal = sim.signal(name);
+            write!(out, " {name}={}", sim.get(signal)).unwrap();
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Host updates of `inputs` in a fixed pattern, a pulse within one update,
+/// scheduled edges and a periodic clock on `clk`, then free steps.
+fn stimulus(inputs: &[&'static str]) -> Vec<Op> {
+    let mut ops = vec![Op::Run(0)];
+    if inputs.is_empty() {
+        ops.extend([Op::Run(1), Op::Run(5), Op::Steps(12)]);
+        return ops;
+    }
+    ops.insert(
+        0,
+        Op::Modify(inputs.iter().map(|&name| (name, 0)).collect()),
+    );
+    for t in 1..=6u64 {
+        let writes = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, &name)| (name, (t >> index) & 1 | (t * 37 + index as u64) & !1))
+            .collect();
+        ops.push(Op::Modify(writes));
+        ops.push(Op::Run(2 * t));
+    }
+    ops.push(Op::Modify(vec![(inputs[0], 1), (inputs[0], 0)]));
+    ops.push(Op::Run(14));
+    if inputs.contains(&"clk") {
+        for (time, value) in [(15, 1), (16, 0), (17, 1), (17, 0), (18, 1), (19, 0)] {
+            ops.push(Op::Schedule("clk", time, value));
+        }
+        ops.push(Op::Run(20));
+        ops.push(Op::Clock("clk", 4, 21));
+        ops.push(Op::Run(40));
+    }
+    ops.push(Op::Steps(12));
+    ops
+}
+
+/// The executor call sequence of a timed simulation on each backend: a
+/// golden for refactors of the scheduler that must not change behaviour.
+#[test]
+fn executor_call_traces_are_unchanged() {
+    type Case = (
+        &'static str,
+        fn(bool) -> FrontendArtifact,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+    let cases: &[Case] = &[
+        ("pulse", pulse, &[], &["waits", "ffs"]),
+        ("repeated_edges", repeated_edges, &[], &["q", "wakes"]),
+        ("host_clock", host_clock, &["clk"], &["ffs", "waits"]),
+        ("level", level, &[], &["first", "second"]),
+        (
+            "zero_delays",
+            zero_delays,
+            &[],
+            &["q", "inactive_seen", "post_nba_seen"],
+        ),
+        (
+            "nonblocking",
+            nonblocking,
+            &[],
+            &["q", "r", "q_changes", "r_changes"],
+        ),
+        ("finishing", finishing, &["clk"], &["a", "edges"]),
+        ("waiting", waiting, &["go"], &["wakes"]),
+        ("edge_order", edge_order, &["clk"], &["q", "seen"]),
+        (
+            "comb_pulse",
+            comb_pulse,
+            &["a", "b"],
+            &["y", "z", "ffs", "waits"],
+        ),
+        ("rtl", |_| rtl(false), &["clk"], &["a", "b", "sum"]),
+        (
+            "rtl_testbench",
+            |_| rtl(true),
+            &["clk"],
+            &["a", "b", "sum", "edges"],
+        ),
+        ("republished", republished, &[], &["q", "changes"]),
+        ("pulse_around_nba", pulse_around_nba, &[], &["waits", "ffs"]),
+        (
+            "interleaved",
+            interleaved,
+            &[],
+            &["qa", "qb", "falls", "rises"],
+        ),
+        ("low_then_high", low_then_high, &[], &["ffs"]),
+        ("nba_pulse", nba_pulse, &[], &["ffs"]),
+        ("comb_override", comb_override, &["a", "low"], &["y"]),
+        ("wait_on_comb", wait_on_comb, &["a", "b"], &["hits"]),
+        (
+            "nba_pulse_after_one_domain",
+            nba_pulse_after_one_domain,
+            &["clk"],
+            &["a_count", "b_count"],
+        ),
+        ("pulse_across_waves", pulse_across_waves, &[], &["rises"]),
+        ("raw_go", raw_go, &["go"], &["done"]),
+        (
+            "comb_reads_unwritten_bits",
+            comb_reads_unwritten_bits,
+            &["a"],
+            &["y"],
+        ),
+        (
+            "gated_clock",
+            |four_state| gated_clock_with_process(four_state, false),
+            &["clk", "en"],
+            &["count", "ticks", "wakes"],
+        ),
+        (
+            "gated_clock_inactive",
+            |four_state| gated_clock_with_process(four_state, true),
+            &["clk", "en"],
+            &["count", "ticks", "wakes"],
+        ),
+        (
+            "host_steps",
+            |four_state| host_writes_with_processes(four_state, false),
+            &["clk", "d"],
+            &["q", "ticks", "done"],
+        ),
+        (
+            "host_steps_waiting",
+            |four_state| host_writes_with_processes(four_state, true),
+            &["clk", "d"],
+            &["q", "ticks", "done", "rises"],
+        ),
+        (
+            "counted_with_comb_writer",
+            counted_with_comb_writer,
+            &["a"],
+            &["changes"],
+        ),
+        (
+            "comb_pulse_between_waves",
+            comb_pulse_between_waves,
+            &["clk"],
+            &["ffs", "wakes"],
+        ),
+        ("long_loop", long_loop, &[], &["i", "done"]),
+    ];
+    for &(name, design, inputs, observe) in cases {
+        for four_state in [false, true] {
+            let artifact = design(four_state);
+            let ops = stimulus(inputs);
+            let builder = || builder(&artifact, four_state);
+            let suffix = if four_state { "_4state" } else { "" };
+            insta::assert_snapshot!(
+                format!("trace_{name}{suffix}_interpreter"),
+                trace(
+                    Simulation::new(builder().build_interpreter().unwrap()),
+                    &ops,
+                    observe
+                )
+            );
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                insta::assert_snapshot!(
+                    format!("trace_{name}{suffix}_native"),
+                    trace(
+                        Simulation::new(builder().build_native().unwrap()),
+                        &ops,
+                        observe
+                    )
+                );
+                // Parallel flip-flop kernels; their calls are those of the
+                // plain RTL design.
+                if !name.starts_with("rtl") {
+                    continue;
+                }
+                insta::assert_snapshot!(
+                    format!("trace_{name}{suffix}_native_threads"),
+                    trace(
+                        Simulation::new(builder().threads(4).build_native().unwrap()),
+                        &ops,
+                        observe
+                    )
+                );
+            }
+        }
+    }
+}
+
+/// Clock aliases, clocks derived combinationally and from registers,
+/// asynchronous resets, two clocks and both edges of one clock, in Veryl.
+const VERYL_TRACE_DESIGNS: &[(&str, &str, &[&str], &[&str])] = &[
+    (
+        "veryl_derived_register_clock",
+        r#"
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    cnt1: output logic<8>,
+    cnt2: output logic<8>,
+) {
+    var a: logic<8>;
+    var b: logic<8>;
+    always_ff (clk, rst) {
+        if_reset { a = 0; } else { a = a + 8'd3; }
+    }
+    let divided: '_ clock = a[1];
+    always_ff (divided, rst) {
+        if_reset { b = 0; } else { b = b + 8'd1; }
+    }
+    assign cnt1 = a;
+    assign cnt2 = b;
+}
+"#,
+        &["clk", "rst"],
+        &["cnt1", "cnt2"],
+    ),
+    (
+        "veryl_gated_clock",
+        r#"
+module Top (
+    clk: input '_ clock,
+    en: input '_ logic,
+    rst: input '_ reset_async_low,
+    a: output '_ logic<8>,
+    b: output '_ logic<8>,
+) {
+    let gated: '_ clock = clk & en;
+    always_ff (clk, rst) {
+        if_reset { a = 0; } else { a = a + 8'd1; }
+    }
+    always_ff (gated, rst) {
+        if_reset { b = 0; } else { b = b + a; }
+    }
+}
+"#,
+        &["clk", "en", "rst"],
+        &["a", "b"],
+    ),
+    (
+        "veryl_two_clocks",
+        r#"
+module Top (
+    clk: input 'a clock,
+    clk_slow: input 'b clock,
+    rst: input 'a reset,
+    count: output 'a logic<8>,
+    sampled: output 'b logic<8>,
+) {
+    always_ff (clk, rst) {
+        if_reset { count = 0; } else { count = count + 1; }
+    }
+    unsafe (cdc) {
+        always_ff (clk_slow) {
+            sampled = count;
+        }
+    }
+}
+"#,
+        &["clk", "clk_slow", "rst"],
+        &["count", "sampled"],
+    ),
+];
+
+#[test]
+fn executor_call_traces_of_veryl_clock_domains_are_unchanged() {
+    for &(name, source, inputs, observe) in VERYL_TRACE_DESIGNS {
+        let ops = stimulus(inputs);
+        let builder = || Simulator::builder(source, "Top").emit_triggers();
+        insta::assert_snapshot!(
+            format!("trace_{name}_interpreter"),
+            trace(
+                Simulation::new(builder().build_interpreter().unwrap()),
+                &ops,
+                observe
+            )
+        );
+        insta::assert_snapshot!(
+            format!("trace_{name}_default"),
+            trace(
+                Simulation::builder(source, "Top").build().unwrap(),
+                &ops,
+                observe
+            )
+        );
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+mod sv_traces {
+    use super::*;
+
+    /// Clock and reset aliases, a combinationally gated clock, a register
+    /// divided clock, both edges of one clock, and the timing suite's cases
+    /// that Celox runs.
+    const DESIGNS: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "sv_buffered_clock",
+            "module Top(input logic clk, output logic [31:0] up, output logic [31:0] down);
+               logic g1;
+               assign g1 = clk;
+               always_ff @(posedge g1) up <= up + 1;
+               always_ff @(negedge g1) down <= down + 1;
+             endmodule",
+            &["clk"],
+            &["up", "down"],
+        ),
+        (
+            "sv_aliased_reset",
+            "module Top(input logic clk, input logic rst_p, output logic [31:0] q);
+               logic rn;
+               assign rn = rst_p;
+               logic [31:0] r;
+               always_ff @(posedge clk or negedge rn) if (!rn) r <= 0; else r <= r + 1;
+               assign q = r;
+             endmodule",
+            &["clk", "rst_p"],
+            &["q"],
+        ),
+        (
+            "sv_gated_clock",
+            "module Top(input logic clk, input logic en, output logic [7:0] a, output logic [7:0] b);
+               logic gclk;
+               assign gclk = clk & en;
+               always_ff @(posedge clk) a <= a + 8'd1;
+               always_ff @(posedge gclk) b <= b + a;
+             endmodule",
+            &["clk", "en"],
+            &["a", "b"],
+        ),
+        (
+            "sv_divided_clock",
+            "module Top(input logic clk, output logic [7:0] n, output logic div);
+               always_ff @(posedge clk) div <= ~div;
+               always_ff @(posedge div) n <= n + 8'd1;
+             endmodule",
+            &["clk"],
+            &["n", "div"],
+        ),
+        (
+            "sv_both_edges",
+            "module Child(input logic clk, input logic rst, input logic [7:0] p,
+                          output logic [7:0] c, output logic [7:0] f);
+               always_ff @(negedge clk or posedge rst) if (rst) f <= 0; else f <= f + 1;
+               always_ff @(posedge clk or posedge rst) if (rst) c <= 0; else c <= p;
+             endmodule
+             module Top(input logic clk, input logic rst,
+                        output logic [7:0] p, output logic [7:0] c, output logic [7:0] f);
+               always_ff @(posedge clk or posedge rst) if (rst) p <= 0; else p <= p + 1;
+               Child u(.clk(clk), .rst(rst), .p(p), .c(c), .f(f));
+             endmodule",
+            &["clk", "rst"],
+            &["p", "c", "f"],
+        ),
+        (
+            "sv_initial_blocks_run_at_time_zero",
+            "module Top(output bit [7:0] y);
+               initial begin
+                 y = 8'd7;
+                 $display(\"y=%0d\", y);
+               end
+             endmodule",
+            &[],
+            &["y"],
+        ),
+        (
+            "sv_host_edges_after_time_zero_clock_flip_flops",
+            "module Top(input bit clk, output bit [7:0] q);
+               always_ff @(posedge clk) q <= q + 8'd1;
+             endmodule",
+            &["clk"],
+            &["q"],
+        ),
+    ];
+
+    #[test]
+    fn executor_call_traces_of_sv_designs_are_unchanged() {
+        for &(name, source, inputs, observe) in DESIGNS {
+            let ops = stimulus(inputs);
+            let sources = || vec![(source, std::path::Path::new("trace.sv"))];
+            insta::assert_snapshot!(
+                format!("trace_{name}_interpreter"),
+                trace(
+                    Simulation::new(
+                        Simulator::from_sv_sources(sources(), "Top")
+                            .emit_triggers()
+                            .build_interpreter()
+                            .unwrap()
+                    ),
+                    &ops,
+                    observe
+                )
+            );
+            insta::assert_snapshot!(
+                format!("trace_{name}_default"),
+                trace(
+                    Simulation::from_sv_sources(sources(), "Top")
+                        .build()
+                        .unwrap(),
+                    &ops,
+                    observe
+                )
+            );
+        }
     }
 }

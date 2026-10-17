@@ -1,0 +1,15 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_native().unwrap()), &ops, observe)"
+---
+run_until 0
+  step -> Some(0): host_writes(0) process(0) process(1) comb finish_step(0)
+  time 0 finished false: q=0 wakes=0
+run_until 1
+  step -> Some(1): host_writes(0) process(0) comb process(1) comb stage(e0@1) eval_only(e0) process(0) comb process(0) comb process(1) comb stage(e0@1) eval_only(e0) process(0) comb apply(e0) apply(e0) fire(e0@1) comb finish_step(1)
+  time 1 finished false: q=2 wakes=2
+run_until 5
+  time 5 finished false: q=2 wakes=2
+steps 12
+  step -> None: 
+  time 5 finished false: q=2 wakes=2

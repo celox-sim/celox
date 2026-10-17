@@ -1,0 +1,31 @@
+---
+source: crates/celox/src/simulation/runtime_core_tests.rs
+expression: "trace(Simulation::new(builder().build_interpreter().unwrap()), &ops, observe)"
+---
+modify [("a", 0)]
+run_until 0
+  time 0 finished false: y=0
+modify [("a", 37)]
+run_until 2
+  time 2 finished false: y=3
+modify [("a", 74)]
+run_until 4
+  time 4 finished false: y=0
+modify [("a", 111)]
+run_until 6
+  time 6 finished false: y=3
+modify [("a", 148)]
+run_until 8
+  time 8 finished false: y=0
+modify [("a", 185)]
+run_until 10
+  time 10 finished false: y=3
+modify [("a", 222)]
+run_until 12
+  time 12 finished false: y=0
+modify [("a", 1), ("a", 0)]
+run_until 14
+  time 14 finished false: y=0
+steps 12
+  step -> None: 
+  time 14 finished false: y=0
