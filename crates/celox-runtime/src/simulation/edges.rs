@@ -11,7 +11,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();
-        for (signal, id, _) in &self.topo_signals {
+        for (signal, id) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
@@ -81,14 +81,14 @@ impl<B: SimBackend> SimulationState<B> {
         values.extend(
             self.topo_signals
                 .iter()
-                .map(|(signal, _, _)| event_level(backend, *signal)),
+                .map(|(signal, _)| event_level(backend, *signal)),
         );
     }
 
     /// Record the event signals that changed since `round.before`.
     pub(super) fn record_transitions(&self, backend: &B, round: &mut Round) {
         self.event_values(backend, &mut round.after);
-        for (((_, id, _), &old), &new) in self
+        for (((_, id), &old), &new) in self
             .topo_signals
             .iter()
             .zip(&round.before)

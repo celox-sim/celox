@@ -219,7 +219,7 @@ impl Simulation {
 
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
     let num_events = simulator.backend.num_events();
-    let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
+    let topo_signals: Vec<(SignalRef, usize)> = simulator
         .program
         .design
         .events
@@ -232,19 +232,13 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
                 .resolve_event_opt(addr)
                 .map(|ev| ev.id())
                 .unwrap_or(usize::MAX);
-            let canonical = simulator.program.design.events.canonical(*addr);
-            let canonical_id = simulator
-                .backend
-                .resolve_event_opt(&canonical)
-                .map(|ev| ev.id())
-                .unwrap_or(usize::MAX);
-            (signal, id, canonical_id)
+            (signal, id)
         })
         .collect();
 
     let mut domain_kinds = vec![None; num_events];
     let kinds = simulator.program.design.event_kinds();
-    for (_, id, _) in topo_signals.iter().copied() {
+    for (_, id) in topo_signals.iter().copied() {
         if id != usize::MAX {
             let addr = simulator.backend.id_to_addr_slice()[id];
             domain_kinds[id] = kinds.get(&addr).copied();

@@ -78,7 +78,7 @@ pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
     periodic_events: FxHashMap<PeriodicEventKey, usize>,
     last_clock_values: BitSet,
-    topo_signals: Vec<(SignalRef, usize, usize)>,
+    topo_signals: Vec<(SignalRef, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
     signal_to_id: FxHashMap<SignalRef, usize>,
@@ -136,7 +136,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// Every process in `processes` starts at time zero, in list order.
     pub fn new(
         backend: &B,
-        topo_signals: Vec<(SignalRef, usize, usize)>,
+        topo_signals: Vec<(SignalRef, usize)>,
         domain_kinds: Vec<Option<DomainKind>>,
         event_info: Vec<EventInfo<B>>,
         processes: Vec<ProcessRefs>,
@@ -144,7 +144,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
         let mut signal_to_id = FxHashMap::default();
         let mut signal_index_by_id = vec![usize::MAX; backend.num_events()];
-        for (index, (signal, id, _)) in topo_signals.iter().copied().enumerate() {
+        for (index, (signal, id)) in topo_signals.iter().copied().enumerate() {
             if id == usize::MAX {
                 continue;
             }
@@ -295,7 +295,7 @@ impl<B: SimBackend> SimulationState<B> {
             return;
         }
         // Otherwise only an event signal's change needs the current time.
-        for (signal, id, _) in &self.topo_signals {
+        for (signal, id) in &self.topo_signals {
             if *id != usize::MAX
                 && (event_level(backend, *signal) != 0) != self.last_clock_values.contains(*id)
             {

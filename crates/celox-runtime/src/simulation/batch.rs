@@ -38,7 +38,7 @@ pub(crate) fn stable_edge(kind: Option<DomainKind>, was: bool, is: bool) -> bool
 
 impl<B: SimBackend> SimulationState<B> {
     pub(super) fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
-        let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
+        let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
             return true;
         };
         let was_nonzero = self.last_clock_values.contains(id);
@@ -48,7 +48,7 @@ impl<B: SimBackend> SimulationState<B> {
 
     pub(super) fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
         backend.clear_triggered_bits();
-        for (signal, id, _) in &self.topo_signals {
+        for (signal, id) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
@@ -183,8 +183,7 @@ impl<B: SimBackend> SimulationState<B> {
                         .get_or_insert_with(|| BitSet::with_capacity(num_events))
                         .insert(id);
                 }
-                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
-                else {
+                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
                     continue;
                 };
                 if event_level(executor.backend(), *signal) != 0 {
@@ -297,7 +296,7 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
 
-        for (signal, id, _) in &self.topo_signals {
+        for (signal, id) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }

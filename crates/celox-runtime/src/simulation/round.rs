@@ -165,8 +165,7 @@ impl<B: SimBackend> SimulationState<B> {
                     backend.mark_triggered_bit(id);
                     round.edge_approved.insert(id);
                 }
-                let Some((signal, _, _)) = self.topo_signals.get(self.signal_index_by_id[id])
-                else {
+                let Some((signal, _)) = self.topo_signals.get(self.signal_index_by_id[id]) else {
                     continue;
                 };
                 if event_level(backend, *signal) != 0 {
@@ -375,22 +374,15 @@ impl<B: SimBackend> SimulationState<B> {
             "periodic event sidecar fell behind the scheduler"
         );
 
-        let timed = self.timed;
-        if timed {
-            // Host writes the waits must see one at a time.
-            for (signal, value) in executor.take_host_writes() {
-                self.observe_host_write(signal, &value);
-            }
+        // Host writes the waits must see one at a time.
+        for (signal, value) in executor.take_host_writes() {
+            self.observe_host_write(signal, &value);
         }
 
         let num_events = executor.backend().num_events();
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
-            if !timed {
-                executor.backend_mut().set(signal, value);
-                continue;
-            }
             if let Some(&counted) = self.counted_by_offset.get(&signal.offset) {
                 let backend = executor.backend_mut();
                 let old = read(backend, signal);
@@ -410,7 +402,7 @@ impl<B: SimBackend> SimulationState<B> {
                 self.observe(executor.backend(), Some(signal));
             }
         }
-        if timed && !self.process_state.waiters.is_empty() && !events_to_process.is_empty() {
+        if !self.process_state.waiters.is_empty() && !events_to_process.is_empty() {
             // The scheduled values wake their processes before the process
             // phase runs.
             self.observe(executor.backend(), None);
@@ -419,9 +411,7 @@ impl<B: SimBackend> SimulationState<B> {
         let mut round = self.scratch.take().unwrap_or_default();
         round.reset(events_to_process.is_empty());
         round.begin_scan(self.domain_kinds.len());
-        if timed {
-            self.process_state.ready.extend(ready_processes);
-        }
+        self.process_state.ready.extend(ready_processes);
         executor.backend_mut().clear_triggered_bits();
         // An external drive may already have been combinationally evaluated
         // by a testbench read. Compare against our saved baseline even if that
@@ -434,16 +424,9 @@ impl<B: SimBackend> SimulationState<B> {
                     .map(|&id| (id, event.next_val != 0))
             }));
 
-        if timed {
-            // The check after the batch already saw every signal.
-            let entry = entry && events_to_process.is_empty();
-            self.process_phase(executor, current_time, &mut round, entry)?;
-        } else {
-            let transitions = std::mem::take(&mut round.transitions);
-            self.mark_scheduled_edges(executor.backend_mut(), &mut round, &transitions);
-            round.transitions = transitions;
-            self.settle_marked(executor, &mut round)?;
-        }
+        // The check after the batch already saw every signal.
+        let entry = entry && events_to_process.is_empty();
+        self.process_phase(executor, current_time, &mut round, entry)?;
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
@@ -472,9 +455,7 @@ impl<B: SimBackend> SimulationState<B> {
                             executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
                             executor.fire_external_event(event, current_time)?;
-                            if timed {
-                                self.publish_nba(executor, &mut round);
-                            }
+                            self.publish_nba(executor, &mut round);
                             executor.eval_comb()?;
                             if round.track_stable_edges {
                                 self.replace_triggers_with_stable_edges(executor.backend_mut());
@@ -487,11 +468,9 @@ impl<B: SimBackend> SimulationState<B> {
                             if !self.counted.is_empty() {
                                 self.mark_counted_domains(executor.backend_mut(), &mut round);
                             }
-                            if timed {
-                                // Each update is seen by the waits on it
-                                // (IEEE 1800-2023 4.5).
-                                self.observe_driven(executor.backend());
-                            }
+                            // Each update is seen by the waits on it
+                            // (IEEE 1800-2023 4.5).
+                            self.observe_driven(executor.backend());
                             comb_already_done = true;
                             break;
                         }
@@ -568,7 +547,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 // The NBA region still publishes the processes' assignments,
                 // which may trigger further domains.
-                if (timed && self.publish_nba(executor, &mut round)) || published {
+                if self.publish_nba(executor, &mut round) || published {
                     self.settle_marked(executor, &mut round)?;
                     continue;
                 }
@@ -589,9 +568,7 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.fire_external_event(event, current_time)?;
                 }
             }
-            if timed {
-                self.publish_nba(executor, &mut round);
-            }
+            self.publish_nba(executor, &mut round);
 
             if comb_already_done {
                 comb_already_done = false;
@@ -606,15 +583,13 @@ impl<B: SimBackend> SimulationState<B> {
                 if !self.counted.is_empty() {
                     self.mark_counted_domains(executor.backend_mut(), &mut round);
                 }
-                if timed {
-                    // A combinational value between two waves of domains is
-                    // an update the waits see (IEEE 1800-2023 4.5).
-                    self.observe_driven(executor.backend());
-                }
+                // A combinational value between two waves of domains is
+                // an update the waits see (IEEE 1800-2023 4.5).
+                self.observe_driven(executor.backend());
             }
         }
 
-        for (signal, id, _) in &self.topo_signals {
+        for (signal, id) in &self.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
@@ -626,9 +601,7 @@ impl<B: SimBackend> SimulationState<B> {
         }
 
         // Processes the published values wake run in the next round.
-        if timed {
-            self.observe_driven(executor.backend());
-        }
+        self.observe_driven(executor.backend());
 
         for event in periodic_events_to_process {
             let event_id = event.event_ref.id();
