@@ -1,6 +1,1 @@
-Revision history for #1440:
-
-rev 2 (content) 2026-10-17 22:48 UTC — Address review: block imports of non-types hide outer type aliases; block imports of non-constant functions hide outer constant functions
-rev 1 (initial) 2026-10-17 22:48 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1440,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"99a00bde18c77a6cf95e27ff7a6a5937c992a093","timestamp_iso":"2026-10-17T22:48:26Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"99a00bde18c77a6cf95e27ff7a6a5937c992a093","new_sha":"80ea43a5f37e0b2b5cce01e191a37bef38b68637","timestamp_iso":"2026-10-17T22:48:26Z","reason":"Address review: block imports of non-types hide outer type aliases; block imports of non-constant functions hide outer constant functions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/99a00bde18c77a6cf95e27ff7a6a5937c992a093...80ea43a5f37e0b2b5cce01e191a37bef38b68637"}]} -->
+Address review: a nested block import of the module's declaration hides an enclosing block's binding
