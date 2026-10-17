@@ -838,11 +838,12 @@ fn reject_constant_random_calls(node: RefNode<'_>, tree: &SyntaxTree) -> Convert
                 constant.push(in_constant);
                 if in_constant
                     && let RefNode::SystemTfCall(call) = child
-                    && called_system_function(call, tree) == Some(SystemFunction::Urandom)
+                    && let Some(function) = called_system_function(call, tree)
+                    && function.is_effectful()
                     && !unevaluated.contains(&(call as *const _))
                 {
                     return Err(AnalyzerError::InvalidSystemTfCall {
-                        name: SystemFunction::Urandom.name().into(),
+                        name: function.name().into(),
                         detail: "not permitted in a constant-value expression".into(),
                     });
                 }
