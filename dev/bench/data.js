@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792202349430,
+  "lastUpdate": 1792202717288,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -381408,6 +381408,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-parallel-x86_64/heliodor_suite_smp_linux_boot_2hart_execution",
             "unit": "ms",
             "value": 296613.714973
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "ccf6a1742df62a00078d107f429c292eb0434ffc",
+          "message": "ci: preserve shared Rust caches and avoid unnecessary product builds (#1324)",
+          "timestamp": "2026-10-16T00:35:18Z",
+          "url": "https://github.com/celox-sim/celox/commit/ccf6a1742df62a00078d107f429c292eb0434ffc"
+        },
+        "date": 1792202717288,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_2hart_startup",
+            "unit": "ms",
+            "value": 40204.202463
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_2hart_execution",
+            "unit": "ms",
+            "value": 596693.294297
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_smp_linux_boot_2hart_end_to_end",
+            "unit": "ms",
+            "value": 636933.007414
           }
         ]
       }
