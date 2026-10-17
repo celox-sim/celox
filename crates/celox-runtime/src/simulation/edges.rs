@@ -19,10 +19,17 @@ impl<B: SimBackend> SimulationState<B> {
     #[inline]
     pub(super) fn level(&self, backend: &B, signal: SignalRef) -> u8 {
         if self.four_state {
-            edge_level::<true, _>(backend, signal)
+            self.level_four_state(backend, signal)
         } else {
             edge_level::<false, _>(backend, signal)
         }
+    }
+
+    // The four-state paths stay out of line, so that a two-state design's
+    // callers keep the size and inlining they had before.
+    #[inline(never)]
+    fn level_four_state(&self, backend: &B, signal: SignalRef) -> u8 {
+        edge_level::<true, _>(backend, signal)
     }
 
     /// The level of event `id` when edge detection last sampled it.
@@ -39,10 +46,15 @@ impl<B: SimBackend> SimulationState<B> {
     #[inline]
     pub(super) fn last_level(&self, id: usize) -> u8 {
         if self.four_state {
-            self.last_level_in::<true>(id)
+            self.last_level_four_state(id)
         } else {
             self.last_level_in::<false>(id)
         }
+    }
+
+    #[inline(never)]
+    fn last_level_four_state(&self, id: usize) -> u8 {
+        self.last_level_in::<true>(id)
     }
 
     /// Make `level` the baseline of event `id`'s next edge.
@@ -65,20 +77,30 @@ impl<B: SimBackend> SimulationState<B> {
     #[inline]
     pub(super) fn record_level(&mut self, id: usize, level: u8) {
         if self.four_state {
-            self.record_level_in::<true>(id, level);
+            self.record_level_four_state(id, level);
         } else {
             self.record_level_in::<false>(id, level);
         }
     }
 
+    #[inline(never)]
+    fn record_level_four_state(&mut self, id: usize, level: u8) {
+        self.record_level_in::<true>(id, level);
+    }
+
     /// Make every event's current level the baseline of its next edge.
-    #[inline]
+    #[inline(always)]
     pub(super) fn record_all_levels(&mut self, backend: &B) {
         if self.four_state {
-            self.record_levels::<true>(backend);
+            self.record_levels_four_state(backend);
         } else {
             self.record_levels::<false>(backend);
         }
+    }
+
+    #[inline(never)]
+    fn record_levels_four_state(&mut self, backend: &B) {
+        self.record_levels::<true>(backend);
     }
 
     #[inline(always)]

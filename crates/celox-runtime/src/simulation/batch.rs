@@ -88,10 +88,15 @@ impl<B: SimBackend> SimulationState<B> {
     #[inline(always)]
     pub(super) fn stable_edge_triggered(&self, backend: &B, id: usize) -> bool {
         if self.four_state {
-            self.stable_edge_triggered_in::<true>(backend, id)
+            self.stable_edge_triggered_four_state(backend, id)
         } else {
             self.stable_edge_triggered_in::<false>(backend, id)
         }
+    }
+
+    #[inline(never)]
+    fn stable_edge_triggered_four_state(&self, backend: &B, id: usize) -> bool {
+        self.stable_edge_triggered_in::<true>(backend, id)
     }
 
     #[inline(always)]
