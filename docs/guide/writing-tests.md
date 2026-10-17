@@ -63,6 +63,41 @@ module Reg (
 For purely combinational modules (`always_comb` only), `tick()` is not required. Reading an output automatically evaluates the combinational logic with the current inputs.
 :::
 
+### Clock edges
+
+`tick()` stands for a clock's active edge and leaves the clock signal alone.
+When a design also reacts to the other edge, for example a register on `~clk`
+or on a falling `clk & en`, drive the edges themselves:
+
+```typescript
+const clk = sim.event("clk");
+
+sim.posedge(clk);      // clk = 1: domains sensitive to its rising edge run
+sim.negedge(clk);      // clk = 0: domains sensitive to its falling edge run
+sim.activeEdge(clk);   // the clock's own edge: rising for a posedge clock
+sim.inactiveEdge(clk); // the opposite edge
+sim.cycle(clk);        // activeEdge(), then inactiveEdge()
+
+// Several clocks at one instant: every domain samples the state before them.
+sim.edges([
+  [clk, "posedge"],
+  [sim.event("clk_b"), "posedge"],
+]);
+```
+
+An edge moves the clock signal and leaves it at its new level, so it can be
+read through `sim.dut`. An edge to the level the signal already has does
+nothing. Each edge runs the domains a timed simulation would run at that
+transition: the clock's own domain on its active edge, clocks computed from
+it (`clk & en`, `~clk`) that see their active edge, sampling the state from
+before the edge, and the domains that the resulting updates clock in turn. For
+Veryl's abstract `clock` type, `activeEdge()` follows the build's clock type
+(`clockType: "negedge"` makes it the falling edge). Reset ports work the same
+way: `negedge(rst)` asserts an active-low asynchronous reset.
+
+`cycle()` gives the same results as two timed steps of the clock, a rising
+and a falling one.
+
 ## Time-Based Simulation
 
 `Simulation` manages clock generation for you. This is the natural choice for sequential logic with clocked flip-flops.
