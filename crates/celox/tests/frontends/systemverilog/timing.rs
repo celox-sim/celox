@@ -50,19 +50,15 @@ macro_rules! timed_cases {
 
 timed_cases! {
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
     fn any_change_waits_wake_on_every_value_change = "timing::any_change_waits_wake_on_every_value_change";
     fn wait_statements_block_until_their_condition_holds = "timing::wait_statements_block_until_their_condition_holds";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn level_sensitive_always_runs_as_a_process = "timing::level_sensitive_always_runs_as_a_process";
     fn processes_wake_each_other_at_the_same_time = "timing::processes_wake_each_other_at_the_same_time";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    #[ignore = "the SV frontend does not lower tasks with timing controls yet (#1123)"]
     fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
     fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
     fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
     #[ignore = "flip-flop domains miss edges to and from z on a four-state clock (#1472)"]
@@ -83,7 +79,6 @@ timed_cases! {
     fn inactive_time_directives_do_not_change_scheduler_units = "timing::inactive_time_directives_do_not_change_scheduler_units";
     #[ignore = "the SV frontend lowers only variables as event expressions (#1123)"]
     fn blocking_concatenation_publishes_one_event_update = "timing::blocking_concatenation_publishes_one_event_update";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn finite_active_feedback_preserves_convergence = "timing::finite_active_feedback_preserves_convergence";
     #[ignore = "the SV frontend lowers only variables as event expressions (#1123)"]
     fn pure_function_rhs_preserves_distinct_write_times = "timing::pure_function_rhs_preserves_distinct_write_times";
@@ -114,7 +109,7 @@ timed_cases! {
     fn repeated_active_edges_share_one_nba_batch = "timing::repeated_active_edges_share_one_nba_batch";
     #[ignore = "the SV frontend lowers only variables as event expressions (#1123)"]
     fn false_wait_preserves_separate_hierarchical_write_times = "timing::false_wait_preserves_separate_hierarchical_write_times";
-    #[ignore = "the SV analyzer rejects plain always processes (#431)"]
+    #[ignore = "the SV frontend does not lower tasks with timing controls yet (#1123)"]
     fn always_timed_task_without_inline_timing_executes = "timing::always_timed_task_without_inline_timing_executes";
     fn constant_comb_if_discards_unreachable_pulse_branch = "timing::constant_comb_if_discards_unreachable_pulse_branch";
     fn constant_child_ff_case_discards_unreachable_pulse_arm = "timing::constant_child_ff_case_discards_unreachable_pulse_arm";
