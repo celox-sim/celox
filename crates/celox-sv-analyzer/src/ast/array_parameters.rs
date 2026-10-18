@@ -229,6 +229,7 @@ impl ArrayParameter<'_> {
             }],
             initializer: false,
             synthetic: true,
+            repeats: false,
         })
     }
 }
