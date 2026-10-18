@@ -2384,3 +2384,50 @@ mod sv_traces {
         }
     }
 }
+
+#[test]
+fn four_state_reads_preserve_wide_unknown_masks_and_simulation_time() {
+    for four_state in [false, true] {
+        let mut d = Design::new("FourStateRead", four_state);
+        let y = d.output("y", 137, 0);
+        // Include both X and Z encodings, across machine-word boundaries.
+        let payload = (crate::BigUint::from(1u8) << 136usize) | crate::BigUint::from(0b1010u8);
+        let mask = (crate::BigUint::from(1u8) << 135usize) | crate::BigUint::from(0b1100u8);
+        let mixed = d
+            .module
+            .constant(Constant::new(payload.clone(), mask.clone(), d.ty(137)));
+        let body = vec![
+            d.assign(y, mixed),
+            d.delay(5),
+            d.set(y, 7),
+            d.delay(1),
+            Statement::Finish,
+        ];
+        d.module.process(body).unwrap();
+        let mut sim = Simulation::from_frontend(d.finish())
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let signal = sim.signal("y");
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get_four_state(signal),
+            (
+                payload,
+                if four_state {
+                    mask
+                } else {
+                    crate::BigUint::default()
+                }
+            )
+        );
+        assert_eq!(sim.time(), 0);
+        sim.run_until(5).unwrap();
+        assert_eq!(sim.get_four_state(signal), (7u8.into(), 0u8.into()));
+        assert_eq!(sim.time(), 5);
+        sim.run_until(10).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get_four_state(signal), (7u8.into(), 0u8.into()));
+        assert_eq!(sim.time(), 6);
+    }
+}
