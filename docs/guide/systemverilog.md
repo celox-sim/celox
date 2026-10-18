@@ -90,6 +90,7 @@ synthesis and is tested at the design level.
 | Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range` and `$random` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
+| Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
 | State | two-state and four-state simulation |
 
@@ -152,7 +153,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$time` in an expression or `$fopen`, is
+  `$realtime` in an expression or `$fopen`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -405,3 +406,13 @@ such as Icarus Verilog. `$random(seed)` updates its seed variable. Without an
 argument, each process continues its own seed, which starts at 0, so a design
 whose one process calls `$random` matches simulators that keep one seed for
 the whole design.
+
+A `Simulation` counts time in the design's global time precision (IEEE
+1800-2023 3.14.3), 1 ps by default: `run_until(1000)` runs to 1 ns, and `#10`
+in a module whose time unit is 1 ns waits 10,000 ps (3.14.1). `$time`
+returns the time in the time unit of the scope that calls it, rounded to an
+integer, halves up (20.3.1); a package function uses its package's unit.
+`$stime` returns the low 32 bits of that value (20.3.2). Combinational logic
+reads the time when its inputs change, not when only the time does. A
+`Simulator`, which has no time, returns 0. `$realtime` waits for `real`
+support.

@@ -606,7 +606,14 @@ pub struct RuntimeSchema<A> {
     /// their blocking assignments, in the active region; their apply units
     /// commit only the nonblocking results.
     pub active_commits: Vec<A>,
+    /// Objects through which design code reads the simulation time, at
+    /// most one per module instance. Before each round a timed scheduler
+    /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
+    pub time_slots: Vec<A>,
 }
+
+/// Width of every [`RuntimeSchema::time_slots`] object.
+pub const TIME_SLOT_WIDTH: usize = 64;
 
 impl<A> Default for RuntimeSchema<A> {
     fn default() -> Self {
@@ -626,6 +633,7 @@ impl<A> Default for RuntimeSchema<A> {
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
             active_commits: Vec::new(),
+            time_slots: Vec::new(),
         }
     }
 }

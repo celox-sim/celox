@@ -251,6 +251,37 @@
   (run_until 3)
   (assert_eq seen 3))
 
+; IEEE 1800-2023 20.3: `$time` is the simulation time in the caller's time
+; unit, rounded, and `$stime` its low 32 bits. Combinational logic reads it
+; when its inputs change, not when only the time does: `$time` is no
+; variable of its implicit sensitivity (9.2.2.2.1).
+(case time_functions_report_the_time_in_the_caller_unit
+  (source "time.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           output logic [63:0] y);
+                    initial $display("initial %0d", $time);
+                    always_ff @(posedge clk) $display("edge %0d %0d", $time, $stime);
+                    always_comb y = a + $time;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (expect_output "initial 0\n")
+  (modify (set clk 0) (set a 0))
+  (run_until 3)
+  (assert_eq y 0)
+  (modify (set clk 1))
+  (run_until 3)
+  (expect_output "edge 3 3\n")
+  (modify (set clk 0) (set a 2))
+  (run_until 3)
+  (assert_eq y 5)
+  (run_until 40)
+  (modify (set clk 1) (set a 4))
+  (run_until 40)
+  (expect_output "edge 40 40\n")
+  (assert_eq y 44))
+
 (case finish_in_an_always_process_ends_the_simulation
   (source "finish.sv" #"
                 module Top(output logic [7:0] ticks);
@@ -829,3 +860,63 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (set clk 1)
   (run_until 3)
   (assert_eq q 2))
+
+; Port actuals read the caller's time. $stime truncates before addition.
+(case time_calls_in_child_port_actuals
+  (source "time_ports.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      Child time_child(.x($time + a), .y(t));
+      Child stime_child(.x($stime + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))
+
+(case time_calls_in_child_port_subroutines
+  (source "time_port_functions.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      function automatic logic [63:0] leaf(); return $time; endfunction
+      function automatic logic [63:0] now(input logic [63:0] bias); return leaf() + bias; endfunction
+      function automatic logic [63:0] with_default(input logic [63:0] stamp = $stime);
+        return stamp;
+      endfunction
+      Child time_child(.x(now(a)), .y(t));
+      Child stime_child(.x(with_default() + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))

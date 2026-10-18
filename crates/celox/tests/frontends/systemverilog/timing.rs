@@ -49,6 +49,8 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
+    fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
     fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
     fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
@@ -59,6 +61,7 @@ timed_cases! {
     #[ignore = "the SV frontend does not lower tasks with timing controls yet (#1123)"]
     fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
     fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
+    fn time_functions_report_the_time_in_the_caller_unit = "timing::time_functions_report_the_time_in_the_caller_unit";
     fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
     fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
     fn four_state_edges_count_transitions_through_unknown = "timing::four_state_edges_count_transitions_through_unknown";

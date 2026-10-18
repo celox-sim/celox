@@ -1924,6 +1924,7 @@ pub fn lower_frontend_artifact(
         counter_slots,
         wait_sites,
         nba_sites,
+        time_slot: None,
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

@@ -143,9 +143,10 @@ impl<'a> ProcModule<'a> {
         }
     }
 
-    /// Whether a process calls a random number function, including through
-    /// user subroutines and omitted argument defaults.
-    pub fn uses_random(&self, body: &[sv::ir::Stmt]) -> bool {
+    /// Whether a process calls a system function that reads the state of
+    /// the simulation, such as `$urandom` or `$time`, including through user
+    /// subroutines and omitted argument defaults.
+    pub fn reads_simulation_state(&self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -154,7 +155,7 @@ impl<'a> ProcModule<'a> {
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
-                    if function.is_effectful() {
+                    if function.reads_simulation_state() {
                         return true;
                     }
                     continue;
@@ -497,6 +498,22 @@ impl<'a> ProcModule<'a> {
     ) -> (SourceVarId, String) {
         let name = format!("{purpose}@t{}", self.temp_counter);
         self.temp_counter += 1;
+        let id = self.hidden(name.clone(), width, signed, is_4state);
+        (id, name)
+    }
+
+    /// The hidden variable through which the module's processes read the
+    /// simulation time, which the scheduler stores into it
+    /// (`RuntimeSchema::time_slots`). Its name is no SystemVerilog
+    /// identifier.
+    pub fn time_slot(&mut self) -> String {
+        if !self.name_to_id.contains_key(TIME_SLOT) {
+            self.hidden(TIME_SLOT.to_string(), TIME_SLOT_WIDTH, false, false);
+        }
+        TIME_SLOT.to_string()
+    }
+
+    fn hidden(&mut self, name: String, width: usize, signed: bool, is_4state: bool) -> SourceVarId {
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(
             id,
@@ -518,9 +535,9 @@ impl<'a> ProcModule<'a> {
                 hidden: true,
             },
         );
-        self.name_to_id.insert(name.clone(), id);
+        self.name_to_id.insert(name, id);
         self.created.push(id);
-        (id, name)
+        id
     }
 
     /// A hidden variable with the shape of `id`, two-state when `two_state`.
@@ -587,11 +604,12 @@ impl<'a> ProcModule<'a> {
         self.subroutines.get(name)
     }
 
-    /// Whether a call of `callee` has effects: a user subroutine or a DPI
-    /// import, or an effectful system function such as `$urandom`.
+    /// Whether a call of `callee` has effects or reads the state of the
+    /// simulation: a user subroutine or a DPI import, or a system function
+    /// such as `$urandom` or `$time`.
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
-            sv::ir::Callee::System(function) => function.is_effectful(),
+            sv::ir::Callee::System(function) => function.reads_simulation_state(),
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }

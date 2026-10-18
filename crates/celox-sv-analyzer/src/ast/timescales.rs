@@ -792,6 +792,18 @@ impl Timescales {
             .map(|scope| scope.value())
     }
 
+    /// The time units of the simulation, which counts the global time
+    /// precision (3.14.3), in one time unit of the scope of `node`.
+    fn time_divisor_in_unit(&self, node: RefNode<'_>, unit: &Unit) -> u64 {
+        let at = offset(node).unwrap_or_default();
+        let scale =
+            scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+        let precision = self.precision.unwrap_or(DEFAULT.precision);
+        // A scope's precision is not coarser than its unit, and no unit is
+        // longer than 100 s or precision finer than 1 fs.
+        10u64.pow((scale.unit - precision.min(scale.precision)) as u32)
+    }
+
     fn resolve(
         &self,
         call: &sv_parser::SystemTfCall,
@@ -1003,6 +1015,27 @@ pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Conver
         } else {
             context.design.query(call, tree)
         }
+    })
+}
+
+/// The simulation's time units in one time unit of the scope of `node`: the
+/// divisor that scales the simulation time to `$time` (20.3.1), and the
+/// factor that scales a delay to the simulation time (3.14.1).
+pub(super) fn time_divisor(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<u64> {
+    DESIGN.with(|context| {
+        let context = context.borrow();
+        if let Some(prepared) = &context.prepared
+            && prepared.address == tree as *const SyntaxTree as usize
+        {
+            return Ok(context.design.time_divisor_in_unit(node, &prepared.unit));
+        }
+        let design = &context.design;
+        let source = key(tree);
+        let extended = (!design.units.contains_key(source))
+            .then(|| design.including_tree(tree))
+            .transpose()?;
+        let design = extended.as_ref().unwrap_or(design);
+        Ok(design.time_divisor_in_unit(node, &design.units[source]))
     })
 }
 

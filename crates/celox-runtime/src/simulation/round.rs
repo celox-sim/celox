@@ -367,6 +367,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.publish_time(executor.backend_mut(), current_time);
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }

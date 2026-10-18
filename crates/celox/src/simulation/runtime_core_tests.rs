@@ -1956,7 +1956,7 @@ fn trace<B: SimBackend>(mut sim: Simulation<B>, ops: &[Op], observe: &[&str]) ->
                         }
                     }
                     if !sim.state.is_finished() {
-                        sim.state.set_time(*end_time);
+                        sim.state.set_time(&mut sim.simulator.backend, *end_time);
                         sim.simulator.dump_unless_rewound(*end_time);
                     }
                 }
@@ -2488,5 +2488,35 @@ fn four_state_reads_preserve_wide_unknown_masks_and_simulation_time() {
         assert!(sim.is_finished());
         assert_eq!(sim.get_four_state(signal), (7u8.into(), 0u8.into()));
         assert_eq!(sim.time(), 6);
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn public_time_setter_publishes_time_before_design_evaluation() {
+    let source = r#"
+      module Top(input int a, output logic [63:0] y);
+        timeunit 1ns / 1ps;
+        assign y = a + $time;
+      endmodule
+    "#;
+    for four_state in [false, true] {
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("time.sv"))], "Top")
+                .four_state(four_state)
+                .emit_triggers()
+        };
+        on_every_backend!(build(), "Top", |sim| {
+            let a = sim.signal("a");
+            let y = sim.signal("y");
+            sim.state.set_time(&mut sim.simulator.backend, 5_000);
+            assert_eq!(sim.state.time(), 5_000);
+            sim.simulator.modify(|io| io.set(a, 2u32)).unwrap();
+            assert_eq!(sim.get(y), 7u64.into());
+            sim.state.advance_time(&mut sim.simulator.backend, 9_000);
+            assert_eq!(sim.state.time(), 9_000);
+            sim.simulator.modify(|io| io.set(a, 3u32)).unwrap();
+            assert_eq!(sim.get(y), 12u64.into());
+        });
     }
 }

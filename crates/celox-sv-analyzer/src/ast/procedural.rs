@@ -622,7 +622,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         match control {
             sv_parser::ProceduralTimingControl::DelayControl(delay) => {
                 self.allow_timing("delay control")?;
-                self.delay_control(delay).map(Stmt::Delay)
+                self.delay_control(delay)
             }
             sv_parser::ProceduralTimingControl::EventControl(control) => {
                 self.allow_timing("event control")?;
@@ -632,10 +632,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    /// The amount of a `#` delay control, in time units. Of a
-    /// `min:typ:max` delay the typical value is used, as simulators do by
-    /// default.
-    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
+    /// The amount of a `#` delay control in simulation time, which counts
+    /// the global time precision: the delay is given in time units of its
+    /// scope (IEEE 1800-2023 3.14.1). Of a `min:typ:max` delay the typical
+    /// value is used, as simulators do by default.
+    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Stmt, AnalyzerError> {
+        Ok(Stmt::Delay {
+            amount: self.delay_amount(delay)?,
+            ticks_per_unit: super::timescales::time_divisor(
+                RefNode::DelayControl(delay),
+                self.tree,
+            )?,
+        })
+    }
+
+    /// The amount of a `#` delay control, in time units.
+    fn delay_amount(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
         match delay {
             sv_parser::DelayControl::Delay(delay) => match &delay.nodes.1 {
                 sv_parser::DelayValue::UnsignedNumber(number) => Ok(Expr::Literal(

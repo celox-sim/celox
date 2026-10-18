@@ -1,0 +1,59 @@
+{
+  "standard": "IEEE 1800-2023 9.2.2.2.1 and 20.3.1",
+  "expected": "An always_comb that reads $time evaluates at time zero and when a variable it reads changes. $time is no such variable, so y stays 0 at 3 ns until a changes.",
+  "probes": [
+    {
+      "name": "without_a_clocking_block",
+      "note": "The testbench drives the input with blocking assignments and delays only.",
+      "source": "`timescale 1ns/1ps\nmodule Dut(input logic [7:0] a, output logic [63:0] y);\n  always_comb y = a + $time;\nendmodule\nmodule Top;\n  logic [7:0] a;\n  logic [63:0] y;\n  Dut dut(.a(a), .y(y));\n  initial begin\n    a = 0;\n    #3 $display(\"time=%0d y=%0d\", $time, y);\n    a = 2;\n    #0 $display(\"time=%0d y=%0d\", $time, y);\n    $finish;\n  end\nendmodule\n",
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "time=3 y=0\ntime=3 y=5\n- <repro>/probe.sv:14: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 3ns; walltime 0.000 s; speed 104.087 us/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_compile": {
+        "command": "iverilog -g2012 -s Top -o <repro>/probe.vvp <repro>/probe.sv",
+        "exit_code": 0
+      },
+      "icarus_run": {
+        "command": "vvp <repro>/probe.vvp",
+        "exit_code": 0,
+        "output": "time=3 y=0\ntime=3 y=5\n<repro>/probe.sv:14: $finish called at 3000 (1ps)\n"
+      }
+    },
+    {
+      "name": "with_a_clocking_block",
+      "note": "The testbench synchronizes through a clocking block, as the generated Verilator suite testbench does; Icarus 13.0 does not parse clocking blocks.",
+      "source": "`timescale 1ns/1ps\nmodule Dut(input logic [7:0] a, output logic [63:0] y);\n  always_comb y = a + $time;\nendmodule\nmodule Top;\n  timeunit 1ps; timeprecision 1ps;\n  logic [7:0] a;\n  bit progress = 0;\n  clocking settled @(progress);\n    input #0 seen = progress;\n  endclocking\n  Dut dut(.a(a), .y());\n  initial begin\n    a = 0;\n    progress <= ~progress; @(settled);\n    #3000;\n    progress <= ~progress; @(settled);\n    $display(\"time=%0t y=%0d\", $time, dut.y);\n    $finish;\n  end\nendmodule\n",
+      "verilator_run": {
+        "command": "<repro>/obj/VTop",
+        "exit_code": 0,
+        "output": "time=3000 y=3\n- <repro>/probe.sv:19: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 3ns; walltime 0.000 s; speed 77.234 us/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+      },
+      "verilator_compile": {
+        "command": "verilator --binary --timing -Wno-fatal --top-module Top --Mdir <repro>/obj <repro>/probe.sv",
+        "exit_code": 0
+      }
+    }
+  ],
+  "note": "Without a clocking block both tools print y=0 at 3 ns. With one, Verilator 5.052 evaluates the always_comb again when the clocking event fires, although a has not changed.",
+  "shared_failures": {
+    "verilator": [
+      {
+        "category": "Sequential",
+        "detail": "timing::time_functions_report_the_time_in_the_caller_unit at 272:3: assert_eq y: expected 0x0, got 0x3",
+        "expectation": "Simulation",
+        "name": "timing::time_functions_report_the_time_in_the_caller_unit",
+        "phase": "execute",
+        "status": "mismatch",
+        "stronger_than_sv": false,
+        "tag_reasons": {},
+        "tags": []
+      }
+    ]
+  }
+}

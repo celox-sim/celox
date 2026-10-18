@@ -527,7 +527,7 @@ impl Flow<'_> {
                 }
                 Ok(Exits::next(written))
             }
-            Stmt::Delay(expr) | Stmt::Wait(expr) => {
+            Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => {
                 self.read(expr, written)?;
                 Ok(Exits::next(written))
             }
@@ -615,7 +615,10 @@ impl Flow<'_> {
     /// output or inout argument.
     fn call_writes(&self, expr: &Expr) -> bool {
         let mut writes = false;
-        visit_calls(expr, &mut |name, args| {
+        visit_calls(expr, &mut |callee, args| {
+            let Callee::Subroutine(name) = callee else {
+                return;
+            };
             let directions = self.directions.get(name);
             writes |= args.iter().enumerate().any(|(index, arg)| {
                 arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
@@ -631,7 +634,7 @@ impl Flow<'_> {
 }
 
 /// The expressions of `stmt` itself, not of the statements it contains.
-fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
+pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     match stmt {
         Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => vec![rhs],
         Stmt::If { condition, .. } => vec![condition],
@@ -670,20 +673,18 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             })
             .collect(),
         Stmt::Local { init, .. } => init.iter().collect(),
-        Stmt::Delay(expr) | Stmt::Wait(expr) => vec![expr],
+        Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => vec![expr],
         Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
         Stmt::Break | Stmt::Continue => Vec::new(),
     }
 }
 
-/// Call `f` with the name and arguments of every subroutine call in `expr`.
-fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Option<Expr>])) {
+/// Call `f` with the callee and arguments of every call in `expr`.
+pub(super) fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Callee, &'e [Option<Expr>])) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
         Expr::Call { callee, args, .. } => {
-            if let Callee::Subroutine(name) = callee {
-                f(name, args);
-            }
+            f(callee, args);
             for arg in args.iter().flatten() {
                 visit_calls(arg, f);
             }

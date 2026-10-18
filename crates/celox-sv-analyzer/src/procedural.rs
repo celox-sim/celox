@@ -72,7 +72,11 @@ pub enum StmtBase<E, L> {
     },
     /// `#amount`: suspend the process for `amount` time units (IEEE
     /// 1800-2023 9.4.1).
-    Delay(E),
+    Delay {
+        amount: E,
+        /// Global-precision ticks in one time unit of the declaring scope.
+        ticks_per_unit: u64,
+    },
     /// `@(items)`: suspend the process until one of the events occurs
     /// (9.4.2).
     WaitEvent(Vec<EventItemBase<E>>),
@@ -285,7 +289,13 @@ impl<E, L> StmtBase<E, L> {
                 name,
                 init: init.map(fe),
             },
-            StmtBase::Delay(amount) => StmtBase::Delay(fe(amount)),
+            StmtBase::Delay {
+                amount,
+                ticks_per_unit,
+            } => StmtBase::Delay {
+                amount: fe(amount),
+                ticks_per_unit,
+            },
             StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
                 items
                     .into_iter()
@@ -401,7 +411,7 @@ impl<E, L> StmtBase<E, L> {
                     fe(init);
                 }
             }
-            StmtBase::Delay(amount) => fe(amount),
+            StmtBase::Delay { amount, .. } => fe(amount),
             StmtBase::WaitEvent(items) => {
                 for item in items {
                     fe(&mut item.expr);
