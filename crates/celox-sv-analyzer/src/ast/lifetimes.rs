@@ -527,6 +527,16 @@ impl Flow<'_> {
                 }
                 Ok(Exits::next(written))
             }
+            Stmt::Delay(expr) | Stmt::Wait(expr) => {
+                self.read(expr, written)?;
+                Ok(Exits::next(written))
+            }
+            Stmt::WaitEvent(items) => {
+                for item in items {
+                    self.read(&item.expr, written)?;
+                }
+                Ok(Exits::next(written))
+            }
         }
     }
 
@@ -660,6 +670,8 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             })
             .collect(),
         Stmt::Local { init, .. } => init.iter().collect(),
+        Stmt::Delay(expr) | Stmt::Wait(expr) => vec![expr],
+        Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
         Stmt::Break | Stmt::Continue => Vec::new(),
     }
 }
