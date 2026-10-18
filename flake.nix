@@ -45,10 +45,13 @@
                 "rust-analyzer"
               ]
             );
-            targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [
-              "wasm32-unknown-unknown"
-              "wasm32-wasip1-threads"
-            ]);
+            targets = pkgs.lib.unique (
+              (toolchain.targets or [ ])
+              ++ [
+                "wasm32-unknown-unknown"
+                "wasm32-wasip1-threads"
+              ]
+            );
           };
           mbx = nix-packages.packages.${system}.mbx;
           mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };
@@ -58,7 +61,10 @@
             mkdir -p $out/bin
             ln -s ${mbx}/bin/mbx $out/bin/cargo
           '';
-          python = pkgs.python313.withPackages (ps: [ ps.cocotb ]);
+          python = pkgs.python313.withPackages (ps: [
+            ps.cocotb
+            ps.psutil
+          ]);
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
           # Corepack resolves pnpm from package.json at runtime, independently of nixpkgs.
           tools = [

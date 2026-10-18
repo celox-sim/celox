@@ -1,0 +1,2 @@
+# BaseRunner dependency; matches the repository's locked Nix Python package.
+psutil==7.2.2
