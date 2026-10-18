@@ -35,12 +35,19 @@ function createMockNative(opts?: {
 	resetTypeKind?: string;
 	associatedClock?: string;
 	emptyEventQueue?: boolean;
+	/** Four-state `clk` that starts at x; its mask plane is at offset 7. */
+	unknownClock?: boolean;
 }): {
 	create: NativeCreateSimulationFn;
 	handle: NativeSimulationHandle;
 	buffer: SharedArrayBuffer;
 } {
 	const buffer = new SharedArrayBuffer(64);
+	if (opts?.unknownClock) {
+		const view = new DataView(buffer);
+		view.setUint8(6, 1);
+		view.setUint8(7, 1);
+	}
 	let currentTime = 0;
 	let nextScheduledTime: number | null = opts?.emptyEventQueue ? null : 5;
 	const processNextEvent = (): number | null => {
@@ -49,8 +56,14 @@ function createMockNative(opts?: {
 		nextScheduledTime += 5;
 		const view = new DataView(buffer);
 		view.setUint8(4, view.getUint8(2));
-		// Toggle clock (offset 6) on each step to simulate half-period=5
-		view.setUint8(6, view.getUint8(6) === 0 ? 1 : 0);
+		// Toggle clock (offset 6) on each step to simulate half-period=5. An
+		// unknown clock rises to 1 first.
+		if (opts?.unknownClock && view.getUint8(7) !== 0) {
+			view.setUint8(7, 0);
+			view.setUint8(6, 1);
+		} else {
+			view.setUint8(6, view.getUint8(6) === 0 ? 1 : 0);
+		}
 		return currentTime;
 	};
 
@@ -99,7 +112,7 @@ function createMockNative(opts?: {
 				offset: 6,
 				width: 1,
 				byteSize: 1,
-				is4state: false,
+				is4state: opts?.unknownClock ?? false,
 				direction: "input",
 				typeKind: "clock",
 			},
@@ -579,6 +592,19 @@ describe("Simulation", () => {
 		sim.addClock("clk", { period: 10 });
 		const t = sim.waitForCycles("clk", 3);
 		// clk toggles each step: 0→1→0→1→0→1 (5 steps for 3 rising edges)
+		expect(mock.handle.step).toHaveBeenCalledTimes(5);
+		expect(t).toBe(25);
+	});
+
+	test("waitForCycles: x -> 1 is a rising edge (IEEE 1800-2023 Table 9-2)", () => {
+		const mock = createMockNative({ unknownClock: true });
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.addClock("clk", { period: 10 });
+		const t = sim.waitForCycles("clk", 3);
+		// clk: x→1→0→1→0→1 (5 steps for 3 rising edges)
 		expect(mock.handle.step).toHaveBeenCalledTimes(5);
 		expect(t).toBe(25);
 	});
