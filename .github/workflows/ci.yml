@@ -422,6 +422,7 @@ jobs:
         run: >-
           cargo run --locked --release -p celox --features systemverilog
           --example sv_tests -- "$RUNNER_TEMP/sv-tests/tests"
+          --state-mode both
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 

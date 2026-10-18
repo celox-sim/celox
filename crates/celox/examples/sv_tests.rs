@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! cargo run --release -p celox --features systemverilog --example sv_tests -- \
-//!     <sv-tests>/tests --expected conformance/sv-tests/expected.tsv [--update] [--report report.tsv]
+//!     <sv-tests>/tests --expected conformance/sv-tests/expected.tsv [--update] [--report report.tsv] [--state-mode 2state|4state|both]
 //! ```
 //!
 //! As in sv-tests, a test passes when Celox succeeds, or fails if the test is
@@ -15,7 +15,8 @@
 //! evaluates true (with `python3`, as the sv-tests log parser does). Each test
 //! runs in a child process so that a crash or a hang only fails that test. The
 //! run fails when any result differs from `--expected`; `--update` rewrites that
-//! file instead.
+//! file instead. Both state modes run by default; a single-mode update preserves
+//! the other mode’s expectations.
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
 #![allow(clippy::disallowed_macros)] // Progress and differences intentionally use stderr.
@@ -141,7 +142,7 @@ fn top_module(test: &Test, files: &[PathBuf], texts: &[String]) -> Option<String
 /// Runs one test in this process. The exit status is 0 on success, 1 when the
 /// build fails and 3 when the simulation fails; a simulation prints its
 /// `$display` output to stdout.
-fn run_one(mode: &str, top: &str, files: &[PathBuf]) -> ExitCode {
+fn run_one(mode: &str, state_mode: &str, top: &str, files: &[PathBuf]) -> ExitCode {
     let texts: Vec<String> = match files.iter().map(std::fs::read_to_string).collect() {
         Ok(texts) => texts,
         Err(error) => {
@@ -155,7 +156,10 @@ fn run_one(mode: &str, top: &str, files: &[PathBuf]) -> ExitCode {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     if mode == Mode::Elaboration.name() {
-        return match celox::Simulator::from_sv_sources(sources, top).build() {
+        return match celox::Simulator::from_sv_sources(sources, top)
+            .four_state(state_mode == "4state")
+            .build()
+        {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 println!("{error}");
@@ -163,7 +167,10 @@ fn run_one(mode: &str, top: &str, files: &[PathBuf]) -> ExitCode {
             }
         };
     }
-    let simulation = match celox::Simulation::from_sv_sources(sources, top).build() {
+    let simulation = match celox::Simulation::from_sv_sources(sources, top)
+        .four_state(state_mode == "4state")
+        .build()
+    {
         Ok(simulation) => simulation,
         Err(error) => {
             println!("{error}");
@@ -234,10 +241,11 @@ enum Outcome {
     Timeout,
 }
 
-fn run_child(mode: Mode, files: &[PathBuf], top: &str) -> Outcome {
+fn run_child(mode: Mode, state_mode: &str, files: &[PathBuf], top: &str) -> Outcome {
     let mut child = Command::new(env::current_exe().expect("locate this executable"))
         .arg("--one")
         .arg(mode.name())
+        .arg(state_mode)
         .arg(top)
         .args(files)
         .stdout(Stdio::piped())
@@ -351,6 +359,7 @@ struct Options {
     expected: Option<PathBuf>,
     update: bool,
     report: Option<PathBuf>,
+    state_modes: Vec<&'static str>,
 }
 
 fn parse_options(args: &[String]) -> Option<Options> {
@@ -359,6 +368,7 @@ fn parse_options(args: &[String]) -> Option<Options> {
         expected: None,
         update: false,
         report: None,
+        state_modes: vec!["2state", "4state"],
     };
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -366,6 +376,14 @@ fn parse_options(args: &[String]) -> Option<Options> {
             "--expected" => options.expected = Some(args.next()?.into()),
             "--report" => options.report = Some(args.next()?.into()),
             "--update" => options.update = true,
+            "--state-mode" => {
+                options.state_modes = match args.next()?.as_str() {
+                    "2state" => vec!["2state"],
+                    "4state" => vec!["4state"],
+                    "both" => vec!["2state", "4state"],
+                    _ => return None,
+                }
+            }
             _ if options.tests.as_os_str().is_empty() && !arg.starts_with("--") => {
                 options.tests = arg.into();
             }
@@ -398,16 +416,19 @@ fn test_paths(tests: &Path) -> Vec<PathBuf> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--one") && args.len() >= 4 {
-        let files: Vec<PathBuf> = args[3..].iter().map(PathBuf::from).collect();
-        return run_one(&args[1], &args[2], &files);
+    if args.first().map(String::as_str) == Some("--one") && args.len() >= 5 {
+        let files: Vec<PathBuf> = args[4..].iter().map(PathBuf::from).collect();
+        return run_one(&args[1], &args[2], &args[3], &files);
     }
     let Some(options) = parse_options(&args) else {
-        eprintln!("usage: sv_tests <sv-tests>/tests [--expected FILE [--update]] [--report FILE]");
+        eprintln!(
+            "usage: sv_tests <sv-tests>/tests [--expected FILE [--update]] [--report FILE] [--state-mode 2state|4state|both]"
+        );
         return ExitCode::from(2);
     };
     let mut results = BTreeMap::new();
-    let mut report = String::from("test\ttags\tmode\ttop\tshould_fail\tresult\tdetail\n");
+    let mut report =
+        String::from("test\tstate_mode\ttags\tmode\ttop\tshould_fail\tresult\tdetail\n");
     for path in test_paths(&options.tests) {
         let Some(test) = Test::read(path) else {
             continue;
@@ -428,74 +449,107 @@ fn main() -> ExitCode {
             .collect();
         let should_fail = test.should_fail();
         let top = top_module(&test, &files, &texts);
-        let (result, detail) = match &top {
-            None => ("no_top", String::new()),
-            Some(top) => match run_child(mode, &files, top) {
-                Outcome::Succeeded(_) if should_fail => ("fail", "accepted".to_string()),
-                Outcome::Succeeded(output) => match failed_assertion(&output) {
-                    Some(expression) => ("fail", format!("assert: {expression}")),
-                    None => ("pass", String::new()),
-                },
-                Outcome::Rejected(error) if should_fail => ("pass", summary(&error)),
-                Outcome::Rejected(error) => ("fail", summary(&error)),
-                Outcome::SimulationFailed(output, error) => {
-                    let error = format!("runtime: {}", error.trim()).replace(['\t', '\n'], " ");
-                    match failed_assertion(&output) {
+        for &state_mode in &options.state_modes {
+            let (result, detail) = match &top {
+                None => ("no_top", String::new()),
+                Some(top) => match run_child(mode, state_mode, &files, top) {
+                    Outcome::Succeeded(_) if should_fail => ("fail", "accepted".to_string()),
+                    Outcome::Succeeded(output) => match failed_assertion(&output) {
                         Some(expression) => ("fail", format!("assert: {expression}")),
-                        None if should_fail => ("pass", error),
-                        None => ("fail", error),
+                        None => ("pass", String::new()),
+                    },
+                    Outcome::Rejected(error) if should_fail => ("pass", summary(&error)),
+                    Outcome::Rejected(error) => ("fail", summary(&error)),
+                    Outcome::SimulationFailed(output, error) => {
+                        let error = format!("runtime: {}", error.trim()).replace(['\t', '\n'], " ");
+                        match failed_assertion(&output) {
+                            Some(expression) => ("fail", format!("assert: {expression}")),
+                            None if should_fail => ("pass", error),
+                            None => ("fail", error),
+                        }
                     }
-                }
-                Outcome::Crashed(error) => ("crash", summary(&error)),
-                Outcome::Timeout => ("timeout", String::new()),
-            },
-        };
-        writeln!(
-            report,
-            "{name}\t{}\t{}\t{}\t{should_fail}\t{result}\t{detail}",
-            test.meta.get("tags").map_or("", String::as_str),
-            mode.name(),
-            top.as_deref().unwrap_or(""),
-        )
-        .unwrap();
-        results.insert(name, result);
+                    Outcome::Crashed(error) => ("crash", summary(&error)),
+                    Outcome::Timeout => ("timeout", String::new()),
+                },
+            };
+            writeln!(
+                report,
+                "{name}\t{state_mode}\t{}\t{}\t{}\t{should_fail}\t{result}\t{detail}",
+                test.meta.get("tags").map_or("", String::as_str),
+                mode.name(),
+                top.as_deref().unwrap_or(""),
+            )
+            .unwrap();
+            results.insert((name.clone(), state_mode.to_string()), result);
+        }
     }
     if let Some(path) = &options.report {
         std::fs::write(path, &report).expect("write the report");
     }
-    let mut counts = BTreeMap::<&str, usize>::new();
-    for result in results.values() {
-        *counts.entry(result).or_default() += 1;
+    for &state_mode in &options.state_modes {
+        let mut counts = BTreeMap::<&str, usize>::new();
+        for ((_, mode), result) in &results {
+            if mode == state_mode {
+                *counts.entry(result).or_default() += 1;
+            }
+        }
+        eprintln!("{state_mode}: {counts:?}");
     }
-    eprintln!("{counts:?}");
 
     let Some(expected_path) = &options.expected else {
         return ExitCode::SUCCESS;
     };
-    if options.update {
-        let mut expected = String::from("test\tresult\n");
-        for (name, result) in &results {
-            writeln!(expected, "{name}\t{result}").unwrap();
+    let mut expected = BTreeMap::<(String, String), String>::new();
+    if !options.update || expected_path.exists() {
+        let text = std::fs::read_to_string(expected_path).expect("read the expectations");
+        let mut lines = text.lines();
+        if lines.next() != Some("test\tstate_mode\tresult") {
+            eprintln!("expected TSV header: test\tstate_mode\tresult");
+            return ExitCode::from(2);
         }
-        std::fs::write(expected_path, expected).expect("write the expectations");
+        for line in lines {
+            let fields: Vec<_> = line.split('\t').collect();
+            if fields.len() != 3
+                || !["2state", "4state"].contains(&fields[1])
+                || !["pass", "fail", "no_top", "crash", "timeout"].contains(&fields[2])
+                || expected
+                    .insert(
+                        (fields[0].to_string(), fields[1].to_string()),
+                        fields[2].to_string(),
+                    )
+                    .is_some()
+            {
+                eprintln!("invalid or duplicate expectation: {line}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if options.update {
+        expected.retain(|(_, state_mode), _| !options.state_modes.contains(&state_mode.as_str()));
+        expected.extend(
+            results
+                .iter()
+                .map(|(key, result)| (key.clone(), result.to_string())),
+        );
+        let mut text = String::from("test\tstate_mode\tresult\n");
+        for ((name, state_mode), result) in &expected {
+            writeln!(text, "{name}\t{state_mode}\t{result}").unwrap();
+        }
+        std::fs::write(expected_path, text).expect("write the expectations");
         return ExitCode::SUCCESS;
     }
-    let text = std::fs::read_to_string(expected_path).expect("read the expectations");
-    let expected: BTreeMap<&str, &str> = text
-        .lines()
-        .skip(1)
-        .filter_map(|line| line.split_once('\t'))
-        .collect();
+    expected.retain(|(_, state_mode), _| options.state_modes.contains(&state_mode.as_str()));
     let mut changes = Vec::new();
-    for (name, result) in &results {
-        match expected.get(name.as_str()) {
+    for (key, result) in &results {
+        let (name, state_mode) = key;
+        match expected.get(key) {
             Some(before) if before == result => {}
-            Some(before) => changes.push(format!("{name}: {before} -> {result}")),
-            None => changes.push(format!("{name}: new test, {result}")),
+            Some(before) => changes.push(format!("{name} [{state_mode}]: {before} -> {result}")),
+            None => changes.push(format!("{name} [{state_mode}]: new test, {result}")),
         }
     }
-    for name in expected.keys().filter(|name| !results.contains_key(**name)) {
-        changes.push(format!("{name}: missing"));
+    for (name, state_mode) in expected.keys().filter(|key| !results.contains_key(*key)) {
+        changes.push(format!("{name} [{state_mode}]: missing"));
     }
     if changes.is_empty() {
         return ExitCode::SUCCESS;
@@ -506,4 +560,38 @@ fn main() -> ExitCode {
     }
     eprintln!("rerun with --update to accept them after review");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(args: &[&str]) -> Option<Options> {
+        parse_options(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn state_mode_selection() {
+        assert_eq!(
+            options(&["tests"]).unwrap().state_modes,
+            ["2state", "4state"]
+        );
+        for mode in ["2state", "4state"] {
+            assert_eq!(
+                options(&["tests", "--state-mode", mode])
+                    .unwrap()
+                    .state_modes,
+                [mode]
+            );
+        }
+        assert_eq!(
+            options(&["tests", "--state-mode", "both"])
+                .unwrap()
+                .state_modes,
+            ["2state", "4state"]
+        );
+        assert!(options(&["tests", "--state-mode", "unknown"]).is_none());
+        assert!(options(&["tests", "--state-mode"]).is_none());
+        assert!(options(&["tests", "--update"]).is_none());
+    }
 }
