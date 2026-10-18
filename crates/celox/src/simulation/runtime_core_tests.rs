@@ -2298,6 +2298,42 @@ mod sv_traces {
     /// that Celox runs.
     const DESIGNS: &[(&str, &str, &[&str], &[&str])] = &[
         (
+            // A domain whose blocking result a process reads after `#0`
+            // commits it in the active region and its nonblocking update in
+            // the NBA region (#1470).
+            "sv_active_commits",
+            "module Top(input logic clk, output logic [7:0] q, output logic [7:0] observed,
+                        output logic [7:0] derived_seen);
+               wire [7:0] derived = q + 8'd1;
+               always @(posedge clk) begin q <= q + 8'd7; q = 8'd2; end
+               initial forever begin
+                 @(posedge clk);
+                 #0;
+                 observed = q;
+                 derived_seen = derived;
+               end
+             endmodule",
+            &["clk"],
+            &["q", "observed", "derived_seen"],
+        ),
+        (
+            // A blocking store of a domain committed in the active region
+            // clocks other domains, directly and through combinational
+            // logic, before the inactive region.
+            "sv_active_commit_edges",
+            "module Top(input logic clk, output logic [7:0] cnt, output logic [7:0] cnt_gated,
+                        output logic [7:0] seen);
+               logic clk2 = 1'b0, en = 1'b1;
+               wire gated = clk2 & en;
+               always @(posedge clk) clk2 = ~clk2;
+               always_ff @(posedge clk2) cnt <= cnt + 8'd1;
+               always_ff @(posedge gated) cnt_gated <= cnt_gated + 8'd1;
+               initial forever begin @(posedge clk); #0; seen = seen + 8'd1; end
+             endmodule",
+            &["clk"],
+            &["cnt", "cnt_gated", "seen"],
+        ),
+        (
             "sv_buffered_clock",
             "module Top(input logic clk, output logic [31:0] up, output logic [31:0] down);
                logic g1;

@@ -523,6 +523,31 @@ impl<'a> ProcModule<'a> {
         (id, name)
     }
 
+    /// A hidden variable with the shape of `id`, two-state when `two_state`.
+    pub fn shadow(
+        &mut self,
+        id: SourceVarId,
+        purpose: &str,
+        two_state: bool,
+    ) -> (SourceVarId, String) {
+        let name = format!("{purpose}@t{}", self.temp_counter);
+        self.temp_counter += 1;
+        let mut variable = self.variables[&id].clone();
+        variable.path = vec![name.clone()];
+        variable.source = None;
+        variable.hidden = true;
+        variable.domain_kind = DomainKind::Other;
+        if two_state {
+            variable.is_4state = false;
+            variable.type_kind = PortTypeKind::Bit;
+        }
+        let shadow = next_var_id(&mut self.next_id);
+        self.variables.insert(shadow, variable);
+        self.name_to_id.insert(name.clone(), shadow);
+        self.created.push(shadow);
+        (shadow, name)
+    }
+
     /// A hidden one-bit copy of the event signal `signal`, sensed as `kind`.
     /// It has no name a SystemVerilog identifier can denote, and is not
     /// addressable by path.

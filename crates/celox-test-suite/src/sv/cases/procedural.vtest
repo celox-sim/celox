@@ -46,6 +46,30 @@
     (assert_eq shifted (trunc 8 (<< data count)))
     (assert_eq q data)))
 
+(case mixed_blocking_and_nonblocking_writes_keep_their_regions
+  (source "mixed_writes.sv" #"
+                module Top(input logic clk, input logic [7:0] d,
+                           output logic [7:0] q, output logic [7:0] x, output logic [7:0] r);
+                    always @(posedge clk) begin
+                        q <= d;
+                        x = q;
+                        q = 8'd2;
+                        r = q;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (modify (set d 7))
+  (tick clk)
+  (assert_eq q 7 "the nonblocking update lands after the blocking one")
+  (assert_eq x 0 "a read after a nonblocking assignment sees the old value")
+  (assert_eq r 2)
+  (modify (set d 9))
+  (tick clk)
+  (assert_eq q 9)
+  (assert_eq x 7)
+  (assert_eq r 2))
+
 (case constant_functions_size_parameters_and_ports
   (source "constant_functions.sv" #"
                 module Child #(parameter int unsigned ENTRIES = 2,

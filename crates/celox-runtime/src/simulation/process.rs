@@ -182,7 +182,17 @@ impl<B: SimBackend> SimulationState<B> {
             }
             // The active region is empty: the domains it triggered evaluate
             // before the inactive region's processes resume.
-            self.evaluate_before_inactive(executor, current_time, round)?;
+            if self.evaluate_before_inactive(executor, current_time, round)? {
+                // Their blocking results are updates of the active region:
+                // the waits they wake and the domains their edges trigger run
+                // before the inactive region (IEEE 1800-2023 4.5).
+                self.observe_driven(executor.backend());
+                if !self.process_state.ready.is_empty()
+                    || !executor.backend().get_triggered_bits().is_empty()
+                {
+                    continue;
+                }
+            }
             let inactive = std::mem::take(&mut self.process_state.inactive);
             self.process_state.ready.extend(inactive);
         }
