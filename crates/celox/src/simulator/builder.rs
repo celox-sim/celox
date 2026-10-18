@@ -1487,7 +1487,7 @@ mod host {
     ///
     /// Use [`Simulator::builder()`] or [`Simulation::builder()`](crate::Simulation::builder)
     /// to obtain the appropriate variant. Both share the same configuration methods;
-    /// only `.build()` differs in return type.
+    /// their build methods return the corresponding simulator or timed simulation.
     pub struct SimulatorBuilder<'a, Target = Simulator> {
         sources: Vec<(&'a str, &'a Path)>,
         sv_sources: Vec<(&'a str, &'a Path)>,
@@ -2124,7 +2124,9 @@ mod host {
                 _marker: std::marker::PhantomData,
             }
         }
+    }
 
+    impl<'a, Target> SimulatorBuilder<'a, Target> {
         /// Compile SIR, finalize its state layout, and return the typed artifact
         /// along with the remaining builder state.
         /// Consumes self.
@@ -2265,7 +2267,9 @@ mod host {
                 self.injected_components,
             ))
         }
+    }
 
+    impl<'a> SimulatorBuilder<'a, Simulator> {
         /// Compiles the Veryl source and constructs the simulator.
         /// Uses a custom native backend when its generated code matches the
         /// compilation target, and Cranelift for host-side cross-codegen builds.
@@ -2927,88 +2931,102 @@ mod host {
             }
         }
 
-        /// Compiles the Veryl source and constructs the timed simulation wrapper.
-        pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
+        /// Compiles the design using the host's default backend.
+        pub fn build(self) -> Result<crate::Simulation, SimulatorError> {
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                self.build_native()
+            }
+            #[cfg(not(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            )))]
+            {
+                self.build_cranelift()
+            }
+        }
+
+        /// Compiles a timed simulation using the Cranelift JIT backend.
+        pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                |program, options| {
+                    let mut trace = crate::debug::CompilationTrace::default();
+                    let wants_trace = options.trace.pre_optimized_clif
+                        || options.trace.post_optimized_clif
+                        || options.trace.native;
+                    let backend =
+                        JitBackend::new(program, options, wants_trace.then_some(&mut trace))?;
+                    if options.trace.output_to_stdout {
+                        trace.print();
+                    }
+                    Ok(backend)
+                },
+            )
+        }
+
+        /// Compiles a timed simulation using the host's native backend.
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        pub fn build_native(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                crate::backend::native::NativeBackend::new,
+            )
+        }
+
+        /// Compiles a timed simulation using the Wasmtime WASM backend.
+        pub fn build_wasm(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>
+        {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::wasm_runtime::WasmBackend::new,
+            )
+        }
+
+        /// Builds a timed simulation using the interpreter backend.
+        pub fn build_interpreter(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::InterpBackend::new,
+            )
+        }
+
+        fn build_with_backend<B: crate::SimBackend>(
+            mut self,
+            layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            compile: impl FnOnce(
+                &crate::ir::LaidOutProgram,
+                &SimulatorOptions,
+            ) -> Result<B, SimulatorError>,
+        ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
-            self.enforce_native_force_optimizer();
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            )))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-            let layout_mode = if self.vcd_path.is_some() {
-                crate::backend::memory_layout::MemoryLayoutMode::Packed
-            } else {
-                layout_mode
-            };
-            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
-                compile_frontend_to_sir_with_layout_mode(
-                    artifact,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    None,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    layout_mode,
-                )?
-            } else {
-                compile_hdl_to_sir_with_layout_mode(
-                    &self.sources,
-                    &self.sv_sources,
-                    self.top,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    None,
-                    self.metadata,
-                    self.clock_type,
-                    self.reset_type,
-                    &self.param_overrides,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    &self.injected_components.manifests(),
-                    layout_mode,
-                    !self.options.native_force_support,
-                    self.options.allow_always_ff_function_effects,
-                )?
-            };
-            let mut laid_out =
-                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-            if self.vcd_path.is_some() {
-                laid_out.enable_vcd_tracking();
-            }
-
-            if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
-            }
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            )))]
-            let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
-
+            let (laid_out, warnings, options, vcd_path, injected_components) =
+                self.into_laid_out_program(layout_mode)?;
+            let backend = compile(&laid_out, &options)?;
+            // Initial kernels must keep their time-zero gates until the timed
+            // scheduler starts them; ordinary Simulator builders release them.
             let mut sim = Simulator::with_backend_and_program_for_simulation(
                 backend,
                 laid_out.into_runtime(),
                 warnings,
             );
-            sim.components.set_injected(self.injected_components);
-            sim.diagnostics = self.options.diagnostics.clone();
-            if let Some(path) = self.vcd_path {
-                let descs = sim.build_vcd_descs(self.options.four_state);
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new(path, &descs)
                     .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
