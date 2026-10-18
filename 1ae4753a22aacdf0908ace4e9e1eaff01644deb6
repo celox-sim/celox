@@ -1,0 +1,1 @@
+Address PR #1506 CI failure after #1462 merged: synchronize with master and give delayed host API regressions an explicit equal time unit and precision so #5 and scheduler tick 5 agree.
