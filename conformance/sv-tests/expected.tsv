@@ -349,8 +349,8 @@ chapter-20/20.2--exit.sv	pass
 chapter-20/20.2--finish.sv	pass
 chapter-20/20.2--stop.sv	pass
 chapter-20/20.3--realtime.sv	fail
-chapter-20/20.3--stime.sv	fail
-chapter-20/20.3--time.sv	fail
+chapter-20/20.3--stime.sv	pass
+chapter-20/20.3--time.sv	pass
 chapter-20/20.4--printtimescale-hier.sv	fail
 chapter-20/20.4--printtimescale.sv	pass
 chapter-20/20.4--timeformat.sv	fail
