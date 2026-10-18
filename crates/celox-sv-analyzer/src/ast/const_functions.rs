@@ -969,6 +969,8 @@ impl Frame<'_> {
             // Messages have no effect on the value. Unknown and unsupported
             // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
+            // A function has no timing controls (IEEE 1800-2023 13.4).
+            Stmt::Delay(_) | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)
