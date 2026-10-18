@@ -1315,7 +1315,9 @@ fn process_runtime_events() {
                 let _ = output.write_all(b"\n");
                 callbacks::fail(celox_message_diagnostic(&message));
             }
-            RuntimeEvent::Finish => callbacks::request_finish(),
+            // Like `vpiStop` in `vpi_control`, `$stop` ends a run that has
+            // no interactive mode.
+            RuntimeEvent::Finish | RuntimeEvent::Stop => callbacks::request_finish(),
             RuntimeEvent::Missed { count } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),

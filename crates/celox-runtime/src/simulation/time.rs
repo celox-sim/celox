@@ -89,6 +89,19 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // A suspended time slot continues where the `$stop` left it.
+        if let Some(suspended) = self.suspended.take() {
+            let current_time = self.scheduler.time;
+            self.continue_round(
+                executor,
+                current_time,
+                suspended.round,
+                suspended.events,
+                false,
+            )?;
+            self.end_time(executor, current_time)?;
+            return Ok(Some(current_time));
+        }
         let mut settled = None;
         loop {
             let Some(current_time) = self.next_event_time() else {
@@ -100,7 +113,7 @@ impl<B: SimBackend> SimulationState<B> {
             // Host writes alone: settle them, then go on to the next time.
             let host_only = self.host_pending && self.next_work_time() != Some(current_time);
             self.run_time(executor, current_time)?;
-            if !host_only {
+            if !host_only || self.stopped {
                 return Ok(Some(current_time));
             }
             settled = Some(current_time);
@@ -125,6 +138,14 @@ impl<B: SimBackend> SimulationState<B> {
         };
         let ready = self.take_ready_processes(current_time);
         self.step_round(executor, current_time, events_to_process, ready, true)?;
+        self.end_time(executor, current_time)
+    }
+
+    /// The rounds of time slot `current_time` after its first.
+    fn end_time<E>(&mut self, executor: &mut E, current_time: u64) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
         // A process that waited for zero time, or that the round woke,
         // resumes in a later round of this time, after the previous round's
         // edges have been handled.

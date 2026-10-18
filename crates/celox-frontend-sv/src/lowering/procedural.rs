@@ -790,8 +790,8 @@ pub(super) enum SystemTaskKind {
     /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
     /// variants (`d` otherwise).
     Print(RuntimeEventKind, char),
-    /// `$finish`.
-    Finish,
+    /// `$finish` and `$stop`, with their event kind.
+    Control(RuntimeEventKind),
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
     Message,
     /// `$fatal`: a message, then the simulation ends with an error.
@@ -811,8 +811,8 @@ impl SystemTaskKind {
 }
 
 /// How a task reports, for the tasks that report: `$readmemh`/`$readmemb`
-/// load memory instead, and the analyzer rewrites `$printtimescale` into a
-/// `$display`.
+/// load memory instead, the analyzer rewrites `$printtimescale` into a
+/// `$display`, and `$exit` outside a program block does nothing.
 pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKind> {
     use sv::ir::SystemTask;
     Some(match task {
@@ -820,12 +820,13 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
             SystemTaskKind::Print(RuntimeEventKind::Display, radix.letter())
         }
         SystemTask::Write(radix) => SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter()),
-        SystemTask::Finish => SystemTaskKind::Finish,
+        SystemTask::Finish => SystemTaskKind::Control(RuntimeEventKind::Finish),
+        SystemTask::Stop => SystemTaskKind::Control(RuntimeEventKind::Stop),
         SystemTask::Severity(_) => SystemTaskKind::Message,
         SystemTask::Fatal => SystemTaskKind::Fatal,
         SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
         SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
-        SystemTask::Readmem(_) | SystemTask::Printtimescale => return None,
+        SystemTask::Readmem(_) | SystemTask::Printtimescale | SystemTask::Exit => return None,
     })
 }
 
@@ -863,7 +864,7 @@ pub(super) fn system_task_template(
             &args[1..]
         }
         SystemTaskKind::Assertion(_) => &args[1..],
-        SystemTaskKind::Finish => &[][..],
+        SystemTaskKind::Control(_) => &[][..],
         _ => args,
     };
     let (mut template, values) = match args.first() {
