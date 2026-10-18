@@ -95,8 +95,12 @@ export function rustTestScope(files, packages) {
   const byName = new Map(packages.map((pkg) => [pkg.name, pkg]));
   const owners = [...packages].sort((a, b) => b.dir.length - a.dir.length);
   const dependents = new Map(packages.map((pkg) => [pkg.name, new Set()]));
+  const libraryDependents = new Map(packages.map((pkg) => [pkg.name, new Set()]));
   for (const pkg of packages) {
     for (const dep of pkg.dependencies) dependents.get(dep)?.add(pkg.name);
+    for (const dep of pkg.libraryDependencies ?? pkg.dependencies) {
+      libraryDependents.get(dep)?.add(pkg.name);
+    }
   }
 
   const sources = new Set();
@@ -110,6 +114,7 @@ export function rustTestScope(files, packages) {
   for (const raw of files) {
     const path = raw.replace(/^\.\//, "");
     if (!classifyFiles([path]).rust) continue;
+    if (/(?:^|\/)Cargo\.(?:toml|lock)$/.test(path)) return { full: true };
     // lydite's tests read its examples and audits from the top-level folder.
     if (path.startsWith("lydite/")) {
       for (const pkg of packages) {
@@ -121,8 +126,12 @@ export function rustTestScope(files, packages) {
     if (!owner) return { full: true };
     const inner = path.slice(owner.dir.length + 1);
     const test = /^tests\/([^/]+)\.rs$/.exec(inner);
+    // Insta prefixes snapshots with their integration-test binary name.
+    const snapshot = /^tests\/snapshots\/([^/]+?)__[^/]+\.snap(?:\.new)?$/.exec(inner);
     if (test && owner.tests.includes(test[1])) {
       addBinary(owner.name, test[1]);
+    } else if (snapshot && owner.tests.includes(snapshot[1])) {
+      addBinary(owner.name, snapshot[1]);
     } else if (
       owner.name === "celox" &&
       inner.startsWith("tests/frontends/systemverilog/")
@@ -136,6 +145,19 @@ export function rustTestScope(files, packages) {
   }
 
   // Everything each changed library reaches through its dependents.
+  const libraries = new Set();
+  for (const seed of sources) {
+    const queue = [seed];
+    libraries.add(seed);
+    while (queue.length > 0) {
+      for (const next of libraryDependents.get(queue.pop()) ?? []) {
+        if (!libraries.has(next)) {
+          libraries.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  }
   const affected = new Set();
   const celoxSeeds = [];
   for (const seed of sources) {
@@ -201,8 +223,13 @@ export function rustTestScope(files, packages) {
     packages: [...selected].sort(),
     features: features(selected),
     filter: terms.join(" | "),
-    libraries: [...affected].sort(),
-    libraryFeatures: features(affected),
+    // A nextest filter controls execution, not Cargo compilation. When only
+    // specific binaries of one package changed, avoid building all its tests.
+    targets: affected.size === 0 && wholeTests.size === 0 && selected.size === 1
+      ? [...binaries.get([...selected][0])].sort()
+      : [],
+    libraries: [...libraries].sort(),
+    libraryFeatures: features(libraries),
   };
 }
 

@@ -314,20 +314,30 @@ export function celoxRustTestScope(files, packages) {
 
 // Queue drafts, merge groups, releases and daily runs keep the Celox
 // workspace. Lydite tests run independently in lydite-checks.yml.
-function rustScopeOutputs(files) {
+export function rustScopeOutputs(files) {
   let scope = { full: true };
+  let checks;
   if (files !== null) {
     try {
       const root = fileURLToPath(new URL("../", import.meta.url));
-      scope = celoxRustTestScope(files, readWorkspace(root));
+      const packages = readWorkspace(root);
+      scope = celoxRustTestScope(files, packages);
+      // Lydite owns its tests, but lint and API documentation still live here.
+      checks = rustTestScope(files, packages);
     } catch (error) {
       console.warn(`Unable to scope the Rust tests: ${error.message}`);
     }
   }
-  if (scope.full) {
+  if (scope.full || !checks || checks.full) {
     return {
       rust_full: true,
       rust_packages: "",
+      rust_targets: "",
+      rust_lint_packages: "",
+      rust_lint_features: "",
+      rust_lint_targets: "",
+      rust_doc_libraries: "",
+      rust_sv_tests: true,
       rust_features: "",
       rust_filter: "",
       rust_libraries: "",
@@ -337,6 +347,14 @@ function rustScopeOutputs(files) {
   return {
     rust_full: false,
     rust_packages: scope.packages.join(" "),
+    rust_targets: scope.targets.join(" "),
+    rust_lint_packages: checks.packages.join(" "),
+    rust_lint_features: checks.features.join(","),
+    rust_lint_targets: checks.targets.join(" "),
+    rust_doc_libraries: checks.libraries.join(" "),
+    // Test-only and consumer changes cannot change sv-tests results.
+    rust_sv_tests: scope.libraries.includes("celox") || files.some((path) =>
+      /^(?:\.\/)?(?:conformance\/sv-tests\/|crates\/celox\/examples\/sv_tests\.rs$)/.test(path)),
     rust_features: scope.features.join(","),
     rust_filter: scope.filter,
     rust_libraries: scope.libraries.join(" "),
