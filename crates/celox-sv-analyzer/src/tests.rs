@@ -3513,10 +3513,7 @@ fn rejects_unimplemented_timing_constructs() {
             "logic a; initial @* a = 1;",
             "`@*` event control in a process",
         ),
-        (
-            "logic clk; always @(posedge clk) #1;",
-            "always and always_latch processes",
-        ),
+        ("logic a, y; always_latch y = a;", "always_latch process"),
         (
             "task automatic t; #1; endtask",
             "delay control in a subroutine",
@@ -3534,6 +3531,49 @@ fn rejects_unimplemented_timing_constructs() {
         AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
         1444
     );
+}
+
+/// `always_comb` and `always_ff` bodies may not suspend (IEEE 1800-2023
+/// 9.2.2.2, 9.2.2.4).
+#[test]
+fn rejects_timing_controls_in_always_comb_and_always_ff() {
+    for body in [
+        "logic a; always_comb begin #1 a = 1; end",
+        "logic clk, a; always_ff @(posedge clk) begin @(a); end",
+        "logic clk, a; always_ff @(posedge clk) wait (a);",
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let error = analyze_source(&code, Path::new("timing.sv"))
+            .expect_err(&format!("`{body}` must be rejected"));
+        assert!(
+            matches!(error, AnalyzerError::TimingControlOutsideProcess { .. }),
+            "`{body}`: {error:?}"
+        );
+    }
+}
+
+/// An `always` that is neither combinational nor edge-triggered RTL is a
+/// process that repeats its statement.
+#[test]
+fn analyzes_always_processes() {
+    for body in [
+        "logic clk; always #5 clk = ~clk;",
+        "logic a, b, y; always @(a or b) y = a & b;",
+        "logic clk, q; always @(posedge clk) begin #1 q = ~q; end",
+        "logic x; always x = ~x;",
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let ir = analyze_source(&code, Path::new("process.sv"))
+            .unwrap_or_else(|error| panic!("`{body}`: {error}"));
+        let module = &ir.modules()[0];
+        assert!(
+            module
+                .initial_processes()
+                .iter()
+                .any(|process| process.repeats()),
+            "`{body}` must be an always process"
+        );
+    }
 }
 
 /// Delays, event controls and waits in an `initial` block keep their

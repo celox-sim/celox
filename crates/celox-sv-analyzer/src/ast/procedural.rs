@@ -596,15 +596,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    /// Timing controls suspend the process that executes them. An `initial`
-    /// body runs as a process; `always` bodies with timing controls and
-    /// subroutines with them are not lowered yet.
-    fn allow_timing(&self, construct: &str) -> Result<(), AnalyzerError> {
+    /// Timing controls suspend the process that executes them: an
+    /// `initial` or `always` process. An `always_comb` or `always_ff` body
+    /// and a function may not suspend; subroutines with timing controls are
+    /// not lowered yet.
+    fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
         match self.body {
             system_functions::Body::Initial => Ok(()),
-            system_functions::Body::Always => Err(unsupported(format!(
-                "always and always_latch processes with a {construct}"
-            ))),
+            system_functions::Body::Always => Err(AnalyzerError::TimingControlOutsideProcess {
+                construct,
+                context: "an always_comb or always_ff body",
+            }),
             system_functions::Body::Subroutine => {
                 Err(unsupported(format!("{construct} in a subroutine")))
             }
@@ -2210,6 +2212,7 @@ pub(super) fn initial_processes_from_module_node(
                     body,
                     initializer: true,
                     synthetic: false,
+                    repeats: false,
                 });
             }
             continue;
@@ -2218,17 +2221,40 @@ pub(super) fn initial_processes_from_module_node(
         else {
             continue;
         };
-        let sv_parser::ModuleCommonItem::InitialConstruct(initial) = &module_item.nodes.1 else {
-            continue;
+        let (statement, repeats) = match &module_item.nodes.1 {
+            sv_parser::ModuleCommonItem::InitialConstruct(initial) => {
+                (Some(&initial.nodes.1), false)
+            }
+            sv_parser::ModuleCommonItem::AlwaysConstruct(always)
+                if validation::always_kind(always) == validation::AlwaysKind::Process =>
+            {
+                (None, true)
+            }
+            _ => continue,
         };
         let (item_dimensions, literals) = views.get(item);
+        // A process statement runs in the body kind of an `initial` block:
+        // it may suspend and call any task.
         let mut builder = BodyBuilder::new(
             tree,
             item_dimensions,
             state,
             system_functions::Body::Initial,
         );
-        let mut body = builder.statement_or_null(&initial.nodes.1)?;
+        let mut body = match (statement, &module_item.nodes.1) {
+            (Some(statement), _) => builder.statement_or_null(statement)?,
+            (None, sv_parser::ModuleCommonItem::AlwaysConstruct(always)) => {
+                // `always statement` repeats the statement forever.
+                vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body: builder.statement(&always.nodes.1)?,
+                }]
+            }
+            _ => unreachable!("only initial and always constructs are collected"),
+        };
         for stmt in &mut body {
             substitute_stmt_constants(stmt, &item.env, literals);
             qualify_stmt(item, stmt);
@@ -2240,6 +2266,7 @@ pub(super) fn initial_processes_from_module_node(
             body,
             initializer: false,
             synthetic: false,
+            repeats,
         });
     }
     initializers.extend(processes);

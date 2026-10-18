@@ -2779,6 +2779,12 @@ fn lower_initial_processes(
             .get(&(1, index))
             .copied()
             .unwrap_or(0x4d59_5df4);
+        // An `always` process never finishes, so it is never folded into
+        // initial state.
+        if process.repeats() {
+            runtime.push((process, random_seed));
+            continue;
+        }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {

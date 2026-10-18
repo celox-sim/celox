@@ -38,12 +38,16 @@ pub(super) fn reject_unsupported_multidimensional_packed_bounds(
 pub(super) enum AlwaysKind {
     Comb,
     Ff,
+    /// A process that runs its statement forever, suspending at its timing
+    /// controls (IEEE 1800-2023 9.2.2.1).
+    Process,
     Unsupported,
 }
 
 /// `always_comb` and `always @*` are combinational; `always_ff` and an
-/// `always` sensitive to clock edges are sequential. Other sensitivity lists
-/// (incomplete level-sensitive lists, `always_latch`) are not supported.
+/// `always` sensitive to clock edges are sequential, as long as their body
+/// has no timing control of its own. Every other `always` is a process.
+/// `always_latch` is not supported.
 pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
     match always.nodes.0 {
         sv_parser::AlwaysKeyword::AlwaysComb(_) => AlwaysKind::Comb,
@@ -53,11 +57,14 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
             let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) =
                 &always.nodes.1.nodes.2
             else {
-                return AlwaysKind::Unsupported;
+                return AlwaysKind::Process;
             };
             let sv_parser::ProceduralTimingControl::EventControl(control) = &timing.nodes.0 else {
-                return AlwaysKind::Unsupported;
+                return AlwaysKind::Process;
             };
+            if has_timing_control(RefNode::StatementOrNull(&timing.nodes.1)) {
+                return AlwaysKind::Process;
+            }
             match &**control {
                 sv_parser::EventControl::Asterisk(_)
                 | sv_parser::EventControl::ParenAsterisk(_) => AlwaysKind::Comb,
@@ -68,10 +75,20 @@ pub(super) fn always_kind(always: &sv_parser::AlwaysConstruct) -> AlwaysKind {
                 {
                     AlwaysKind::Ff
                 }
-                _ => AlwaysKind::Unsupported,
+                _ => AlwaysKind::Process,
             }
         }
     }
+}
+
+/// Whether a statement contains a delay, an event control or a `wait`.
+fn has_timing_control(node: RefNode<'_>) -> bool {
+    node.into_iter().any(|node| {
+        matches!(
+            node,
+            RefNode::ProceduralTimingControlStatement(_) | RefNode::WaitStatement(_)
+        )
+    })
 }
 
 /// The statement an combinational `always` evaluates, without its event control.
@@ -551,9 +568,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
             }
             RefNode::AlwaysConstruct(always) => {
                 if always_kind(always) == AlwaysKind::Unsupported {
-                    return Err(AnalyzerError::Unsupported(
-                        "always and always_latch processes".to_string(),
-                    ));
+                    return Err(AnalyzerError::Unsupported("always_latch process".to_string()));
                 }
                 let body = RefNode::Statement(&always.nodes.1);
                 if always_kind(always) == AlwaysKind::Comb

@@ -991,6 +991,7 @@ impl Module {
                     body: static_initializers,
                     initializer: true,
                     synthetic: false,
+                    repeats: false,
                 },
             );
         }
@@ -2052,6 +2053,8 @@ pub struct InitialProcess {
     body: Vec<Stmt>,
     initializer: bool,
     synthetic: bool,
+    /// An `always` process: its body runs forever.
+    repeats: bool,
 }
 
 impl InitialProcess {
@@ -2072,6 +2075,12 @@ impl InitialProcess {
     /// Whether this process holds variable declaration initializers.
     pub fn is_initializer(&self) -> bool {
         self.initializer
+    }
+
+    /// Whether this is an `always` process, which runs its body forever and
+    /// never finishes on its own.
+    pub fn repeats(&self) -> bool {
+        self.repeats
     }
 
     pub fn body(&self) -> &[Stmt] {
