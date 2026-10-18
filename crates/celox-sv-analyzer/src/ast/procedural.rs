@@ -2000,23 +2000,42 @@ pub(super) fn initial_processes_from_module_node(
         if item.is_parameter_declaration() {
             continue;
         }
-        if let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
-            item.node.declaration()
-            && let sv_parser::DataDeclaration::Variable(variable) = &**data
-        {
-            if !variable.nodes.4.nodes.0.contents().into_iter().any(|assignment| matches!(assignment, sv_parser::VariableDeclAssignment::Variable(assignment) if assignment.nodes.2.is_some())) {
-                continue;
+        let mut assignments = Vec::new();
+        match item.node.declaration() {
+            Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) => {
+                if let sv_parser::DataDeclaration::Variable(variable) = &**data {
+                    for assignment in variable.nodes.4.nodes.0.contents() {
+                        if let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment
+                            && let Some((_, expr)) = &assignment.nodes.2
+                        {
+                            assignments
+                                .push((RefNode::VariableIdentifier(&assignment.nodes.0), expr));
+                        }
+                    }
+                }
             }
+            Some(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net)) => {
+                // sv-parser also parses `t n = expr` this way when `t` is
+                // a typedef. It declares a variable (6.8), so its assignment
+                // is an initialization (10.5), rather than a net driver.
+                if let sv_parser::NetDeclaration::NetTypeIdentifier(net) = &**net
+                    && identifier_text(RefNode::NetTypeIdentifier(&net.nodes.0), tree)
+                        .is_some_and(|name| views.dimensions(item).type_aliases.contains_key(&name))
+                {
+                    for assignment in net.nodes.2.nodes.0.contents() {
+                        if let Some((_, expr)) = &assignment.nodes.2 {
+                            assignments.push((RefNode::NetIdentifier(&assignment.nodes.0), expr));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
-            for assignment in variable.nodes.4.nodes.0.contents() {
-                let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
-                    continue;
-                };
-                let Some((_, expr)) = &assignment.nodes.2 else {
-                    continue;
-                };
-                let name = identifier_text(RefNode::VariableIdentifier(&assignment.nodes.0), tree)
+            for (identifier, expr) in assignments {
+                let name = identifier_text(identifier, tree)
                     .ok_or_else(|| unsupported("variable declaration initializer"))?;
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     check_unpacked_array_assignment(
