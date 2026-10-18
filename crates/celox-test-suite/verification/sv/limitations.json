@@ -96,6 +96,7 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/pattern-bindings-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -111,7 +112,8 @@
         "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
         "hierarchy::parameter_patterns_transfer_packed_values",
         "hierarchy::parameter_patterns_override_scalar_defaults",
-        "hierarchy::parameter_patterns_preserve_packed_member_states"
+        "hierarchy::parameter_patterns_preserve_packed_member_states",
+        "hierarchy::parameter_patterns_preserve_enclosing_expressions"
       ]
     }
   },
@@ -145,6 +147,7 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/pattern-bindings-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -158,6 +161,7 @@
         "system_functions::isunbounded_reports_bounded_array_parameters",
         "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
         "hierarchy::parameter_patterns_override_body_declarations",
+        "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings",
         "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
         "system_functions::unpacked_dimensions_resolves_package_array_constants",
         "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
