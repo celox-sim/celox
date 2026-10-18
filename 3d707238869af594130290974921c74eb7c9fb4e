@@ -1,0 +1,1 @@
+Adapt the timed warning regression to master simulation-time semantics by declaring its 1 ps time unit and precision explicitly.
