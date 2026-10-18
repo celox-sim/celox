@@ -494,6 +494,7 @@ pub(crate) fn project_module_with_ids(
             eval_only_ff_blocks: map_units(&module.eval_only_ff_blocks),
             apply_ff_blocks: map_units(&module.apply_ff_blocks),
             eval_apply_ff_blocks: map_units(&module.eval_apply_ff_blocks),
+            split_commit_ff_blocks: HashMap::default(),
             parallel_ff_parts: module
                 .parallel_ff_parts
                 .iter()

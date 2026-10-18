@@ -175,19 +175,20 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Evaluate the triggered domains before an inactive region runs. Their
     /// nonblocking assignments stay in the working state until the NBA
-    /// region.
+    /// region. Returns whether a domain committed its blocking results.
     pub(super) fn evaluate_before_inactive<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         round: &mut Round,
-    ) -> Result<(), Halt>
+    ) -> Result<bool, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
         let marked = executor.backend().get_triggered_bits();
         executor.backend_mut().clear_triggered_bits();
         let mut evaluated = BitSet::new();
+        let mut committed = false;
         let mut unsplit = Vec::new();
         for id in marked.iter() {
             let info = self.model.event_info[id];
@@ -209,6 +210,7 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             round.edge_approved.remove(id);
+            committed |= self.model.active_commits.contains(info.canonical_id);
             self.evaluate_deferred(executor, current_time, round, info)?;
         }
         // The edges are consumed: later rounds compare against the values
@@ -223,7 +225,7 @@ impl<B: SimBackend> SimulationState<B> {
             round.scheduled_trigger_ids.insert(id);
             round.edge_approved.insert(id);
         }
-        Ok(())
+        Ok(committed)
     }
 
     fn evaluate_deferred<E>(

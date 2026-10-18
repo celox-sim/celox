@@ -2298,6 +2298,25 @@ mod sv_traces {
     /// that Celox runs.
     const DESIGNS: &[(&str, &str, &[&str], &[&str])] = &[
         (
+            // A domain whose blocking result a process reads after `#0`
+            // commits it in the active region and its nonblocking update in
+            // the NBA region (#1470).
+            "sv_active_commits",
+            "module Top(input logic clk, output logic [7:0] q, output logic [7:0] observed,
+                        output logic [7:0] derived_seen);
+               wire [7:0] derived = q + 8'd1;
+               always @(posedge clk) begin q <= q + 8'd7; q = 8'd2; end
+               initial forever begin
+                 @(posedge clk);
+                 #0;
+                 observed = q;
+                 derived_seen = derived;
+               end
+             endmodule",
+            &["clk"],
+            &["q", "observed", "derived_seen"],
+        ),
+        (
             "sv_buffered_clock",
             "module Top(input logic clk, output logic [31:0] up, output logic [31:0] down);
                logic g1;

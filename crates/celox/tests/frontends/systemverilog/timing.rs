@@ -68,10 +68,8 @@ timed_cases! {
     fn run_until_drains_target_time_before_later_writes = "timing::run_until_drains_target_time_before_later_writes";
     fn repeated_settles_do_not_advance_design_time = "timing::repeated_settles_do_not_advance_design_time";
     fn run_to_finish_has_no_simulated_time_deadline = "timing::run_to_finish_has_no_simulated_time_deadline";
-    #[ignore = "blocking stores of an edge-triggered always are committed with its nonblocking ones, not in the active region (#1470)"]
     fn blocking_ff_stores_are_visible_before_inactive_work = "timing::blocking_ff_stores_are_visible_before_inactive_work";
     fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
-    #[ignore = "blocking stores of an edge-triggered always are committed with its nonblocking ones, not in the active region (#1470)"]
     fn mixed_ff_stores_keep_their_active_and_nba_values = "timing::mixed_ff_stores_keep_their_active_and_nba_values";
     fn printed_finish_notice_is_design_output = "timing::printed_finish_notice_is_design_output";
     fn combinational_finish_ends_timed_execution = "timing::combinational_finish_ends_timed_execution";
