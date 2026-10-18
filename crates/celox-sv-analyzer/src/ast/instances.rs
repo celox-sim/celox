@@ -107,6 +107,7 @@ fn instances_from_module_instantiation(
         syntax_tree,
         interface,
         packed_dimensions,
+        false,
     )?;
     for override_ in &mut parameter_overrides {
         if let Some(value) = override_.value.take() {
@@ -223,6 +224,7 @@ pub(super) fn parameter_overrides_from_value_assignment(
     syntax_tree: &SyntaxTree,
     interface: Option<&ModuleInterface>,
     packed_dimensions: &PackedDimensions,
+    bind_values: bool,
 ) -> Result<Vec<ParameterOverride>, AnalyzerError> {
     let Some(assignment) = assignment else {
         return Ok(Vec::new());
@@ -250,6 +252,7 @@ pub(super) fn parameter_overrides_from_value_assignment(
                     &assignment.nodes.0,
                     syntax_tree,
                     packed_dimensions,
+                    bind_values,
                 )?);
             }
             return Ok(overrides);
@@ -278,6 +281,7 @@ pub(super) fn parameter_overrides_from_value_assignment(
             expr,
             syntax_tree,
             packed_dimensions,
+            bind_values,
         )?);
     }
     Ok(overrides)
@@ -526,6 +530,7 @@ fn parameter_override(
     expr: &sv_parser::ParamExpression,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
+    bind_values: bool,
 ) -> Result<ParameterOverride, AnalyzerError> {
     if let sv_parser::ParamExpression::DataType(data_type) = expr {
         let ty = type_from_ref_node_with_env(
@@ -613,5 +618,20 @@ fn parameter_override(
             })?;
         return Ok(ParameterOverride::type_override(name, ty));
     }
+    // Native interface instances are analyzed immediately in another scope.
+    // Resolve caller type queries before entering the receiving interface.
+    let value = if bind_values
+        && let sv_parser::ParamExpression::MintypmaxExpression(expression) = expr
+        && let sv_parser::MintypmaxExpression::Expression(expression) = expression.as_ref()
+    {
+        expr_to_const(expr_from_expression_with_types(
+            expression,
+            syntax_tree,
+            packed_dimensions,
+        )?)
+        .ok_or_else(|| unsupported("constant interface parameter override"))?
+    } else {
+        value
+    };
     Ok(ParameterOverride::new(name, Some(value)))
 }

@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "5c08cf45119552565bbbabfef31ebce18327f04e167d06c716d80a20db91a98c",
+      "category": "Hierarchy",
+      "detail": "interfaces::keeps_lexical_names_in_interface_scopes at 588:3: assert_eq function_shape: expected 0x69, got 0x5",
+      "expectation": "Simulation",
+      "name": "interfaces::keeps_lexical_names_in_interface_scopes",
+      "phase": "execute",
+      "reused": false,
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792292723
+    }
+  ],
+  "context_fingerprint": "8e9fa23e8d41769ae15bf37949352b40cf4313345eadf65d51d41004239d3fd1",
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 1,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 1,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

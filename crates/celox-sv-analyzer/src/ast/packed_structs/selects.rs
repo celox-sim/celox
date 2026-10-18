@@ -52,7 +52,15 @@ pub(in crate::ast) fn has_member_access(node: RefNode<'_>, select: RefNode<'_>) 
 
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
-fn bind_interface_path(path: &mut Vec<String>) -> bool {
+fn bind_interface_path(path: &mut Vec<String>, dimensions: &PackedDimensions) -> bool {
+    // A lexical variable wins over an enclosing interface handle, even if its
+    // member path is invalid. Never fall back to the interface in that case.
+    if path
+        .first()
+        .is_some_and(|root| dimensions.get(root).is_some())
+    {
+        return false;
+    }
     let imported = scope::imported();
     for length in (2..=path.len()).rev() {
         if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
@@ -167,7 +175,8 @@ pub(in crate::ast) fn member_first_dimension_width(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree, dimensions)?;
+    let mut path = variable_path(node, select, syntax_tree, dimensions)?;
+    bind_interface_path(&mut path, dimensions);
     let (_, r#type) = selected_member(&path, dimensions)?;
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
@@ -204,7 +213,8 @@ pub(in crate::ast) fn member_dimension_count(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree, dimensions)?;
+    let mut path = variable_path(node, select, syntax_tree, dimensions)?;
+    bind_interface_path(&mut path, dimensions);
     let (_, ty) = selected_member(&path, dimensions)?;
     let remaining = ty
         .packed_ranges
@@ -227,7 +237,7 @@ pub(in crate::ast) fn variable_member(
 ) -> Converted<LValue> {
     let mut path = variable_path(node, select, syntax_tree, dimensions)
         .ok_or_else(|| unsupported("member access through an indexed structure"))?;
-    let bound_interface = bind_interface_path(&mut path);
+    let bound_interface = bind_interface_path(&mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
@@ -282,7 +292,7 @@ pub(in crate::ast) fn net_member(
                 .ok_or_else(|| unsupported("structure member name"))?,
         );
     }
-    let bound_interface = bind_interface_path(&mut path);
+    let bound_interface = bind_interface_path(&mut path, dimensions);
     let mut leaf_select = select.clone();
     leaf_select.nodes.0 = None;
     if bound_interface && path.len() == 1 {
