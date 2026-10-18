@@ -5470,14 +5470,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "non-zero-based multidimensional packed range",
-            r#"
-            module Top(input logic [2:1][7:0] a, output logic [7:0] y);
-                assign y = a[1];
-            endmodule
-        "#,
-        ),
-        (
             "unpacked struct, union, or unsupported packed struct member",
             r#"
             module Top(output logic [7:0] y);

@@ -1169,8 +1169,8 @@ chapter-7/arrays/dynamic/op-new.sv	2state	fail
 chapter-7/arrays/dynamic/op-new.sv	4state	fail
 chapter-7/arrays/dynamic/op-size.sv	2state	fail
 chapter-7/arrays/dynamic/op-size.sv	4state	fail
-chapter-7/arrays/multidimensional/basic.sv	2state	fail
-chapter-7/arrays/multidimensional/basic.sv	4state	fail
+chapter-7/arrays/multidimensional/basic.sv	2state	pass
+chapter-7/arrays/multidimensional/basic.sv	4state	pass
 chapter-7/arrays/multidimensional/copy.sv	2state	pass
 chapter-7/arrays/multidimensional/copy.sv	4state	pass
 chapter-7/arrays/multidimensional/multi.sv	2state	pass
