@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792348698437,
+  "lastUpdate": 1792348867212,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -386595,6 +386595,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_66_linux_boot_execution",
             "unit": "ms",
             "value": 134738.435792
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "5a6459887e87768967097e21cb50af405c531dfa",
+          "message": "feat(sv)!: run always blocks with timing controls as processes (#1475)",
+          "timestamp": "2026-10-18T05:16:48Z",
+          "url": "https://github.com/celox-sim/celox/commit/5a6459887e87768967097e21cb50af405c531dfa"
+        },
+        "date": 1792348867212,
+        "cpu": "AMD EPYC 9V45",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_startup",
+            "unit": "ms",
+            "value": 12959.64582
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_execution",
+            "unit": "ms",
+            "value": 146776.458918
+          },
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 159752.13229
           }
         ]
       }
