@@ -1,0 +1,1 @@
+Reject EOF with unmatched raw-statement delimiters so malformed native source terminates. Fold focused regression into the introducing procedural grammar commit before publication.
