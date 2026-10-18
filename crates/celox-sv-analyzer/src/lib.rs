@@ -44,6 +44,14 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A delay, event control or wait statement in a function, an
+    /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
+    /// 9.2.2.4, 13.4).
+    #[error("{construct} in {context}: only `initial` and `always` processes may suspend")]
+    TimingControlOutsideProcess {
+        construct: &'static str,
+        context: &'static str,
+    },
     /// A memory file read by `$readmemh` or `$readmemb` is missing or invalid.
     #[error("Invalid memory file input: {0}")]
     MemoryFile(String),
@@ -130,7 +138,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-ANSI module port declarations", 426),
     ("ref port direction", 427),
-    ("always and always_latch processes", 431),
+    ("always_latch process", 431),
     ("non-zero-based multidimensional packed range", 438),
     (
         "unpacked struct, union, or unsupported packed struct member",

@@ -5406,7 +5406,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always and always_latch processes",
+            "always_latch process",
             r#"
             module Top(input logic a, output logic y); always_latch y = a; endmodule
         "#,
