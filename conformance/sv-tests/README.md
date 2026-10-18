@@ -3,7 +3,10 @@
 CI runs the elaboration and simulation tests of
 [sv-tests](https://github.com/chipsalliance/sv-tests) at the commit in
 [`revision`](revision) against the SystemVerilog frontend, and fails when any
-result differs from [`expected.tsv`](expected.tsv).
+result differs from [`expected.tsv`](expected.tsv). Each test has separate
+`2state` and `4state` rows (`test`, `state_mode`, `result`); both state modes
+run by default, including elaboration tests. The state mode explicitly selects
+Celox’s `four_state` builder option.
 
 Each test runs in the mode sv-tests picks for a simulator: simulation when its
 `:type:` includes `simulation`, else elaboration. Preprocessing- and
@@ -50,7 +53,13 @@ cargo run --release -p celox --features systemverilog --example sv_tests -- \
     ../sv-tests/tests --expected conformance/sv-tests/expected.tsv --report report.tsv
 ```
 
-`report.tsv` lists each test's tags, mode, top module and the first diagnostic,
-runtime error or false assertion.
+`report.tsv` lists each test’s state mode, tags, execution mode, top module and
+the first diagnostic, runtime error or false assertion.
 After reviewing a change in the results, add `--update` to rewrite
 `expected.tsv`. Update `revision` and `expected.tsv` together.
+
+Use `--state-mode 2state` or `--state-mode 4state` to run and compare only one
+state mode; `--state-mode both` explicitly selects the default. A single-mode
+`--update` replaces that mode’s rows and preserves the other mode’s expectations.
+Missing cases and changed results are checked independently for each selected
+mode. Both modes use the same pinned sv-tests revision.
