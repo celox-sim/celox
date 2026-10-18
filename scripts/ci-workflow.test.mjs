@@ -37,6 +37,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     CHANGES_RESULT: "success",
     RUST_REQUIRED: "true",
     RUST_RESULT: "success",
+    SV_TESTS_REQUIRED: "true",
     SV_TESTS_RESULT: "success",
     ARM64_REQUIRED: "true",
     ARM64_RESULT: "success",
@@ -57,6 +58,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
         ...success,
         RUST_REQUIRED: "false",
         RUST_RESULT: "skipped",
+        SV_TESTS_REQUIRED: "false",
         SV_TESTS_RESULT: "skipped",
       },
       passes: true,
@@ -86,6 +88,19 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
+  // A scoped Rust PR may skip conformance only when explicitly unneeded.
+  for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
+    cases.push({
+      env: { ...success, SV_TESTS_REQUIRED: "false", SV_TESTS_RESULT: status },
+      passes: status === "success" || status === "skipped",
+    });
+  }
+  cases.push({
+    env: { ...success, SV_TESTS_REQUIRED: "", SV_TESTS_RESULT: "skipped" },
+    passes: false,
+  });
+  assert.match(gate, /SV_TESTS_REQUIRED: .*outputs\.rust != 'false' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
+  assert.match(job("sv-tests"), /outputs\.rust == 'true' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
   // Only non-Rust changes may skip ARM64; other results fail closed.
   for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
     cases.push({
@@ -372,4 +387,51 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.ok(warm.includes(`--features ${features}`));
   const nextest = job("rust-tests").match(/tool: (cargo-nextest@\S+)/)[1];
   assert.ok(warm.includes(`tool: ${nextest}`));
+});
+
+// Execute the workflow's actual shell with a recording Cargo function, so a
+// correct classifier cannot accidentally turn into an unscoped Cargo build.
+function cargoArguments(jobName, stepName, env) {
+  const step = job(jobName).split(`      - name: ${stepName}\n`)[1];
+  assert.ok(step, stepName);
+  const script = step.match(/        run: \|\n((?:          [^\n]*\n|\n)*)/)[1];
+  const result = spawnSync("bash", ["-e", "-c", `cargo() { printf '\\036%s' "$@"; };\n${script}`], {
+    env: { ...process.env, ...env }, encoding: "utf8",
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.split("\x1e").slice(1);
+}
+
+test("scoped Cargo commands build only the selected integration targets", () => {
+  const env = {
+    PACKAGES: "celox", FEATURES: "celox/systemverilog",
+    TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
+  };
+  assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
+    "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "-p", "celox", "--features", "celox/systemverilog",
+    "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
+  ]);
+  assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", env), [
+    "clippy", "--locked", "-p", "celox", "--features", "celox/systemverilog",
+    "--test", "flip_flop", "--test", "systemverilog", "--no-deps",
+  ]);
+  assert.deepEqual(cargoArguments("lint", "Lint the crates this pull request can affect", {
+    PACKAGES: "celox-runtime celox", FEATURES: "", TARGETS: "",
+  }), ["clippy", "--locked", "-p", "celox-runtime", "-p", "celox", "--all-targets", "--no-deps"]);
+  assert.deepEqual(cargoArguments("lint", "Build the API documentation this pull request can affect", {
+    LIBRARIES: "celox-runtime celox",
+  }), ["doc", "--locked", "--no-deps", "-p", "celox-runtime", "-p", "celox"]);
+});
+
+test("scoped checks preserve full-run fallbacks and use their own package scopes", () => {
+  const lint = job("lint");
+  assert.match(lint, /name: cargo clippy\n        if: .*outputs\.rust_full != 'false'/);
+  assert.match(lint, /name: Build Rust API documentation\n        if: .*outputs\.rust_full != 'false'/);
+  assert.match(lint, /name: Lint the crates this pull request can affect\n        if: .*outputs\.rust_lint_packages != ''/);
+  assert.match(lint, /PACKAGES: \$\{\{ needs\.changes\.outputs\.rust_lint_packages \}\}/);
+  assert.match(lint, /FEATURES: \$\{\{ needs\.changes\.outputs\.rust_lint_features \}\}/);
+  assert.match(lint, /TARGETS: \$\{\{ needs\.changes\.outputs\.rust_lint_targets \}\}/);
+  assert.match(lint, /name: Build the API documentation this pull request can affect\n        if: .*outputs\.rust_doc_libraries != ''/);
 });

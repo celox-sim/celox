@@ -94,6 +94,7 @@ test("a test file change runs only that binary and nothing downstream", () => {
     packages: ["celox"],
     features: ["celox/systemverilog"],
     filter: "binary_id(celox::flip_flop)",
+    targets: ["flip_flop"],
     libraries: [],
     libraryFeatures: [],
   });
@@ -127,6 +128,8 @@ test("lydite's shared folder runs every lydite package", () => {
 test("changes outside the workspace graph run every test", () => {
   for (const path of [
     "Cargo.lock",
+    "crates/celox/Cargo.toml",
+    "crates/celox/tests/fixtures/custom/Cargo.lock",
     "Cargo.toml",
     "testdata/verilator/adder.sv",
     "rust-toolchain.toml",
@@ -180,4 +183,40 @@ test("variant crates reach celox only through crates of the same variant", () =>
       assert.deepEqual(VARIANT_CRATES.get(pkg.name)?.variants, scope.variants, `${pkg.name} -> ${name}`);
     }
   }
+});
+
+
+test("test-only changes narrow Cargo compilation as well as nextest execution", () => {
+  const scope = rustTestScope([
+    "crates/celox/tests/flip_flop.rs",
+    "crates/celox/tests/snapshots/flip_flop__optimized.snap",
+    "crates/celox/tests/frontends/systemverilog/operators.rs",
+  ], workspace);
+  assert.deepEqual(scope.targets, ["flip_flop", "systemverilog"]);
+  assert.deepEqual(scope.libraries, []);
+  assert.deepEqual(rustTestScope([
+    "crates/celox/tests/flip_flop.rs", "crates/lib/src/lib.rs",
+  ], workspace).targets, []);
+  assert.deepEqual(rustTestScope([
+    "crates/celox/tests/flip_flop.rs", "crates/consumer/tests/e2e.rs",
+  ], workspace).targets, []);
+  for (const path of [
+    "crates/celox/tests/test_utils/mod.rs",
+    "crates/celox/tests/snapshots/unknown__result.snap",
+    "crates/celox/tests/fixtures/design.veryl",
+  ]) {
+    const shared = rustTestScope([path], workspace);
+    assert.deepEqual(shared.targets, [], path);
+    assert.equal(shared.filter, "package(celox)", path);
+  }
+});
+
+test("a dev dependency affects consumer tests but not consumer documentation", () => {
+  const packages = workspace.map((pkg) => ({
+    ...pkg,
+    libraryDependencies: pkg.dependencies.filter((name) => name !== "lib"),
+  }));
+  const scope = rustTestScope(["crates/lib/src/lib.rs"], packages);
+  assert.ok(scope.packages.includes("celox"));
+  assert.deepEqual(scope.libraries, ["lib"]);
 });
