@@ -418,7 +418,7 @@ pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
     bound_type: Option<crate::ast::Type>,
-    pattern_text: Option<String>,
+    bound_pattern: Option<crate::ast::BoundPattern>,
 }
 
 impl ParameterOverride {
@@ -426,19 +426,19 @@ impl ParameterOverride {
         name: String,
         value: Option<ConstExpr>,
         bound_type: Option<crate::ast::Type>,
-        pattern_text: Option<String>,
+        bound_pattern: Option<crate::ast::BoundPattern>,
     ) -> Self {
         Self {
             name,
             value,
             bound_type,
-            pattern_text,
+            bound_pattern,
         }
     }
 
     /// A constant assignment pattern, evaluated in the caller scope.
-    pub fn pattern_text(&self) -> Option<&str> {
-        self.pattern_text.as_deref()
+    pub fn bound_pattern(&self) -> Option<&crate::ast::BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn name(&self) -> &str {

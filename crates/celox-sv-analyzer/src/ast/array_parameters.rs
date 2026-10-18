@@ -10,13 +10,20 @@ use super::*;
 /// A parameter of unpacked array type, as the variable that holds it.
 pub(super) struct ArrayParameter<'a> {
     pub signal: Signal,
-    pattern: &'a sv_parser::AssignmentPatternExpression,
+    pattern: Option<&'a sv_parser::AssignmentPatternExpression>,
+    bound: Option<BoundPattern>,
 }
 
 /// Whether a parameter assignment declares an unpacked array, or a value
 /// given by an assignment pattern (a packed structure or array).
 pub(super) fn is_array_parameter(param: &sv_parser::ParamAssignment) -> bool {
-    !param.nodes.1.is_empty() || value_pattern(param).is_some()
+    !param.nodes.1.is_empty()
+        || value_pattern(param).is_some()
+        || identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).is_some_and(|loc| {
+            scope::imported()
+                .pattern_parameter_bindings
+                .contains_key(&loc.offset)
+        })
 }
 
 fn declared_type(
@@ -152,7 +159,14 @@ pub(super) fn array_parameters_from_declaration<'a>(
         let RefNode::ParamAssignment(param) = child else {
             continue;
         };
-        if !is_array_parameter(param) {
+        let bound =
+            identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).and_then(|loc| {
+                scope::imported()
+                    .pattern_parameter_bindings
+                    .get(&loc.offset)
+                    .cloned()
+            });
+        if !is_array_parameter(param) && bound.is_none() {
             continue;
         }
         let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
@@ -166,12 +180,16 @@ pub(super) fn array_parameters_from_declaration<'a>(
             const_env,
             type_aliases,
         )?;
-        let pattern = value_pattern(param).ok_or_else(|| {
-            AnalyzerError::Unsupported(format!("value of array parameter `{name}`"))
-        })?;
+        let pattern = value_pattern(param);
+        if pattern.is_none() && bound.is_none() {
+            return Err(AnalyzerError::Unsupported(format!(
+                "value of array parameter `{name}`"
+            )));
+        }
         let parameter = ArrayParameter {
             signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
             pattern,
+            bound,
         };
         // Publish before the next declarator can query this array's shape.
         publish(&parameter);
@@ -189,11 +207,18 @@ impl ArrayParameter<'_> {
     ) -> Result<InitialProcess, AnalyzerError> {
         let name = self.signal.name().to_string();
         let shape = procedural::dimensions_from_type(self.signal.r#type());
-        let value = if self.pattern.nodes.0.is_some() {
-            patterns::typed_pattern(self.pattern, tree, dims)
+        let value = if let Some(bound) = &self.bound {
+            bound.lower(&shape, dims)?
         } else {
-            patterns::expr_from_pattern(&self.pattern.nodes.1, &shape, tree, dims)
-        }?;
+            let pattern = self
+                .pattern
+                .ok_or_else(|| unsupported("array parameter value"))?;
+            if pattern.nodes.0.is_some() {
+                patterns::typed_pattern(pattern, tree, dims)?
+            } else {
+                patterns::expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)?
+            }
+        };
         Ok(InitialProcess {
             creation_order: 0,
             condition: None,

@@ -1,4 +1,4 @@
-//! Type parameter bindings and the remaining value-pattern source edits.
+//! Declaration-scoped parameter bindings.
 
 use super::*;
 
@@ -100,13 +100,6 @@ pub(super) fn resolve(mut ty: Type, env: &HashMap<String, i128>) -> Option<Type>
     Some(ty)
 }
 
-/// A source text edit: replace `start..end` with `replacement`.
-struct Edit {
-    start: usize,
-    end: usize,
-    replacement: String,
-}
-
 /// The span of `node` in the original source text. Token offsets refer to
 /// the preprocessed text, which can differ from the source (the preprocessor
 /// widens the space after `"DPI-C"`), so each token is mapped back and text
@@ -136,54 +129,20 @@ pub(super) fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(
     range
 }
 
-/// Apply the edits that fall inside `text[range]`, dropping any edit nested in
-/// an earlier (outer) one.
-fn apply_edits(text: &str, range: (usize, usize), mut edits: Vec<Edit>) -> String {
-    edits.retain(|edit| edit.start >= range.0 && edit.end <= range.1);
-    edits.sort_by_key(|edit| (edit.start, std::cmp::Reverse(edit.end)));
-    let mut result = String::new();
-    let mut cursor = range.0;
-    for edit in edits {
-        if edit.start < cursor {
-            continue;
-        }
-        result.push_str(&text[cursor..edit.start]);
-        result.push_str(&edit.replacement);
-        cursor = edit.end;
-    }
-    result.push_str(&text[cursor..range.1]);
-    result
-}
-
-/// Override array/structure value parameters before their target shapes are
-/// lowered. Only overridable module parameters may be rebound, never locals.
-pub(crate) fn apply_pattern_parameter_overrides(
-    code: &str,
+/// Locate value-pattern bindings by declaration, so nested names stay local.
+pub(super) fn bind_patterns(
+    node: RefNode<'_>,
     tree: &SyntaxTree,
-    module_name: &str,
-    overrides: &[(String, String)],
-) -> Result<Option<String>, AnalyzerError> {
-    if overrides.is_empty() {
-        return Ok(None);
-    }
-    for node in tree {
-        if !matches!(
-            node,
-            RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-        ) {
-            continue;
-        }
-        if module_name_from_node(node.clone(), tree)? != module_name {
-            continue;
-        }
-        let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
-        let mut edits = Vec::new();
-        let mut found = HashSet::default();
-        let mut declarations = module_parameter_port_list(node.clone())
+    overrides: &[(String, BoundPattern)],
+) -> Converted<HashMap<usize, BoundPattern>> {
+    let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
+    let mut declarations = module_parameter_port_list(node.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    declarations.extend(
+        scope_declarations(node)
             .into_iter()
-            .collect::<Vec<_>>();
-        declarations.extend(scope_declarations(node.clone()).into_iter().filter_map(
-            |declaration| {
+            .filter_map(|declaration| {
                 if let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(
                     declaration,
                 ) = declaration
@@ -192,42 +151,39 @@ pub(crate) fn apply_pattern_parameter_overrides(
                 } else {
                     None
                 }
-            },
-        ));
-        for child in declarations.into_iter().flat_map(|node| node.into_iter()) {
-            let RefNode::ParamAssignment(param) = child else {
-                continue;
-            };
-            let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
-            let Some((_, bound)) = overrides.iter().find(|(candidate, _)| *candidate == name)
-            else {
-                continue;
-            };
-            if !allowed.contains(&name) {
-                return Err(unsupported(format!(
-                    "pattern override of non-overridable parameter `{name}`"
-                )));
-            }
-            let Some((_, value)) = &param.nodes.2 else {
-                return Err(unsupported(format!(
-                    "array parameter `{name}` without a default"
-                )));
-            };
-            let (start, end) = node_span(RefNode::ConstantParamExpression(value), tree)
-                .ok_or_else(|| unsupported("array parameter source span"))?;
-            edits.push(Edit {
-                start,
-                end,
-                replacement: bound.clone(),
-            });
-            found.insert(name);
+            }),
+    );
+    let mut bindings = HashMap::default();
+    for (name, value) in overrides {
+        if !allowed.contains(name) {
+            return Err(unsupported(format!(
+                "pattern override of non-overridable parameter `{name}`"
+            )));
         }
-        for (name, _) in overrides {
-            if !found.contains(name) {
-                return Err(unsupported(format!("unknown array parameter `{name}`")));
-            }
+        let param = declarations
+            .iter()
+            .flat_map(|node| node.clone().into_iter())
+            .find_map(|child| {
+                if let RefNode::ParamAssignment(param) = child
+                    && parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)
+                        .ok()
+                        .as_ref()
+                        == Some(name)
+                {
+                    Some(param)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| unsupported(format!("unknown array parameter `{name}`")))?;
+        let offset = identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0))
+            .ok_or_else(|| unsupported("parameter location"))?
+            .offset;
+        if bindings.insert(offset, value.clone()).is_some() {
+            return Err(unsupported(format!(
+                "duplicate parameter override `{name}`"
+            )));
         }
-        return Ok(Some(apply_edits(code, (0, code.len()), edits)));
     }
-    Err(unsupported(format!("module `{module_name}`")))
+    Ok(bindings)
 }

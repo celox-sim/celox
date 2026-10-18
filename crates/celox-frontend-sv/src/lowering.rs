@@ -141,7 +141,7 @@ pub(crate) struct LoweredSvParameterOverride {
     pub value: Option<sv::ir::ConstExpr>,
     /// The data type resolved in the instantiating scope.
     pub bound_type: Option<sv::ast::Type>,
-    pub pattern_text: Option<String>,
+    pub bound_pattern: Option<sv::ast::BoundPattern>,
 }
 
 #[derive(Clone)]
@@ -1208,6 +1208,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         "__celox_foreign",
         &HashMap::default(),
         &[],
+        &[],
         &sv::ModuleInterfaces::default(),
         &sv::Packages::default(),
     )?;
@@ -1295,7 +1296,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                     name: name.clone(),
                     value: Some(value.expression()),
                     bound_type: None,
-                    pattern_text: None,
+                    bound_pattern: None,
                 })
                 .collect();
             requested_roots.insert(name.clone(), key.clone());
@@ -1310,7 +1311,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                     name: name.clone(),
                     value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
                     bound_type: None,
-                    pattern_text: None,
+                    bound_pattern: None,
                 })
                 .collect();
         }
@@ -1371,7 +1372,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                             name: name.clone(),
                             value: Some(value.expression()),
                             bound_type: None,
-                            pattern_text: None,
+                            bound_pattern: None,
                         })
                         .collect();
                     requested_roots.insert(name.clone(), dependency.clone());
@@ -1580,7 +1581,7 @@ pub fn schedule_sources(
                 name: name.clone(),
                 value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
                 bound_type: None,
-                pattern_text: None,
+                bound_pattern: None,
             })
             .collect(),
     };
@@ -1773,16 +1774,13 @@ fn specialize_module(
     let pattern_overrides: Vec<_> = key
         .parameter_overrides
         .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.pattern_text.clone()?)))
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_pattern.clone()?)))
         .collect();
-    let pattern_source = module
-        .source
-        .with_pattern_parameter_overrides(&module.name, &pattern_overrides)?;
-    let source = pattern_source.as_ref().unwrap_or(&module.source);
-    let ir = source.analyze_module(
+    let ir = module.source.analyze_module(
         &module.name,
         &overrides,
         &type_overrides,
+        &pattern_overrides,
         &module.interfaces,
         &module.packages,
     )?;
@@ -2158,7 +2156,7 @@ fn lower_parameter_overrides(
                 name: parameter.name().to_string(),
                 value,
                 bound_type: parameter.bound_type().cloned(),
-                pattern_text: parameter.pattern_text().map(str::to_string),
+                bound_pattern: parameter.bound_pattern().cloned(),
             }
         })
         .collect()

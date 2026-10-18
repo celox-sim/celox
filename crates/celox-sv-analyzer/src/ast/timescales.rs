@@ -1222,6 +1222,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &[],
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -1468,6 +1469,7 @@ mod tests {
                 "Child",
                 &HashMap::default(),
                 &[],
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -1494,6 +1496,7 @@ mod tests {
                     .analyze_module(
                         "Child",
                         &HashMap::default(),
+                        &[],
                         &[],
                         &ModuleInterfaces::default(),
                         &packages
@@ -1643,6 +1646,7 @@ mod tests {
                     "Child",
                     &HashMap::default(),
                     &[("T".into(), ty)],
+                    &[],
                     &ModuleInterfaces::default(),
                     &packages,
                 )

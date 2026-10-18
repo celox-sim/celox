@@ -1406,6 +1406,7 @@ fn resolves_imported_constant_parameter_part_selects() {
             "Top",
             &HashMap::default(),
             &[],
+            &[],
             &ModuleInterfaces::default(),
             &packages,
         )

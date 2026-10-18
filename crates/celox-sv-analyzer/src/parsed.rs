@@ -14,7 +14,6 @@ use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, syn
 /// remain local to each analysis. Like `sv-parser`'s tree, this value is confined
 /// to the parsing thread; consumers can share it there with [`std::rc::Rc`].
 pub struct ParsedSource {
-    code: String,
     path: PathBuf,
     tree: sv_parser::SyntaxTree,
     index: ast::module_index::ModuleIndex,
@@ -25,28 +24,10 @@ impl ParsedSource {
         let tree = syntax::parse_source(code, path)?;
         let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))?;
         Ok(Self {
-            code: code.to_string(),
             path: path.to_path_buf(),
             tree,
             index,
         })
-    }
-
-    /// Bind assignment-pattern parameters with values frozen in the caller.
-    pub fn with_pattern_parameter_overrides(
-        &self,
-        module_name: &str,
-        overrides: &[(String, String)],
-    ) -> Result<Option<Self>, AnalyzerError> {
-        ast::type_parameters::apply_pattern_parameter_overrides(
-            &self.code,
-            &self.tree,
-            module_name,
-            overrides,
-        )?
-        .as_deref()
-        .map(|code| Self::parse(code, &self.path))
-        .transpose()
     }
 
     pub fn module_names(&self) -> &[String] {
@@ -119,6 +100,7 @@ impl ParsedSource {
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
         type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
@@ -126,6 +108,7 @@ impl ParsedSource {
             module_name,
             overrides,
             type_overrides,
+            pattern_overrides,
             interfaces,
             packages,
         )
@@ -140,7 +123,7 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
     ) -> Result<Ir, AnalyzerError> {
         let packages = Self::analyze_packages(&[self])?;
-        self.analyze_module_with_packages(module_name, overrides, &[], interfaces, &packages)
+        self.analyze_module_with_packages(module_name, overrides, &[], &[], interfaces, &packages)
     }
 
     fn analyze_module_with_packages(
@@ -148,6 +131,7 @@ impl ParsedSource {
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
         type_overrides: &[(String, ast::Type)],
+        pattern_overrides: &[(String, ast::BoundPattern)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
@@ -164,6 +148,7 @@ impl ParsedSource {
                 ast::ModuleParameterBindings {
                     values: &overrides,
                     types: type_overrides,
+                    patterns: pattern_overrides,
                 },
                 interfaces,
                 packages,
@@ -316,6 +301,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &types,
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -361,6 +347,7 @@ mod tests {
                     "Child",
                     &HashMap::default(),
                     &bindings,
+                    &[],
                     &ModuleInterfaces::default(),
                     &packages,
                 )
@@ -392,6 +379,7 @@ mod tests {
                 "Child",
                 &HashMap::default(),
                 &[("T".into(), type_binding("bit signed [7:0]"))],
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -426,6 +414,7 @@ mod tests {
                         "Child",
                         &HashMap::default(),
                         &bindings,
+                        &[],
                         &ModuleInterfaces::default(),
                         &packages
                     )
@@ -436,6 +425,7 @@ mod tests {
             .analyze_module(
                 "Child",
                 &HashMap::default(),
+                &[],
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
@@ -531,16 +521,24 @@ mod pattern_override_tests {
             Path::new("pattern_scope.sv"),
         )
         .unwrap();
-        let rebound = source
-            .with_pattern_parameter_overrides("Top", &[("Q".into(), "'{-3, -5}".into())])
+        let caller = crate::analyze_source(
+            "module Caller; Top #(.Q('{-3, -5})) t(); endmodule",
+            Path::new("caller.sv"),
+        )
+        .unwrap();
+        let bound = caller.modules()[0].instances()[0].parameter_overrides()[0]
+            .bound_pattern()
             .unwrap()
-            .unwrap();
-        assert!(rebound.code.contains("localparam int Q = 9;"));
-        let ir = rebound
-            .analyze_module_with_parameter_expr_overrides(
+            .clone();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let ir = source
+            .analyze_module(
                 "Top",
                 &HashMap::default(),
+                &[],
+                &[("Q".into(), bound)],
                 &ModuleInterfaces::default(),
+                &packages,
             )
             .unwrap();
         assert_eq!(ir.modules()[0].initial_processes().len(), 1);
@@ -570,22 +568,21 @@ mod pattern_override_tests {
             .find(|module| module.name() == "Top")
             .unwrap();
         for instance in top.instances() {
-            let pattern = instance.parameter_overrides()[0].pattern_text().unwrap();
-            assert!(!pattern.contains('N'), "{pattern}");
+            let pattern = instance.parameter_overrides()[0].bound_pattern().unwrap();
             let child = ParsedSource::parse(
                 "module Child #(parameter int N = 1, parameter byte Q [2] = '{1, 2}); endmodule",
                 Path::new("child.sv"),
             )
             .unwrap();
-            let rebound = child
-                .with_pattern_parameter_overrides("Child", &[("Q".into(), pattern.into())])
-                .unwrap()
-                .unwrap();
-            rebound
-                .analyze_module_with_parameter_expr_overrides(
+            let packages = ParsedSource::analyze_packages(&[&child]).unwrap();
+            child
+                .analyze_module(
                     "Child",
                     &HashMap::default(),
+                    &[],
+                    &[("Q".into(), pattern.clone())],
                     &ModuleInterfaces::default(),
+                    &packages,
                 )
                 .unwrap();
         }
