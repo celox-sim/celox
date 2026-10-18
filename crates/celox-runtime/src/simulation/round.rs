@@ -3,6 +3,7 @@
 //! their publication.
 
 use bit_set::BitSet;
+use celox_design::edges::settled_edge;
 
 use super::host::SimulationExecutor;
 use super::nba::{restore_working_image, working_image};
@@ -17,6 +18,8 @@ use crate::{
 /// Bookkeeping of one round of a time slot.
 #[derive(Default)]
 pub(super) struct Round {
+    /// The stopped process resumes before any newly woken ready processes.
+    pub(super) resume_process: Option<usize>,
     /// Event ids whose trigger survives the settling filter.
     pub(super) scheduled_trigger_ids: BitSet,
     pub(super) track_stable_edges: bool,
@@ -87,6 +90,7 @@ impl Round {
 impl Round {
     /// Start a round, keeping the buffers of earlier ones.
     fn reset(&mut self, track_stable_edges: bool) {
+        self.resume_process = None;
         self.scheduled_trigger_ids.make_empty();
         self.track_stable_edges = track_stable_edges;
         self.counted_triggered.make_empty();
@@ -140,6 +144,50 @@ impl<B: SimBackend> SimulationState<B> {
         }
         if !self.model.counted.is_empty() {
             self.mark_counted_domains(executor.backend_mut(), round);
+        }
+        Ok(())
+    }
+
+    /// Host-created edges are valid independently of the suspended round's
+    /// pending source edges. Keep them through subsequent process settles,
+    /// including when an inactive region advances the edge baselines.
+    pub(super) fn settle_host_resume<E>(
+        &mut self,
+        executor: &mut E,
+        round: &mut Round,
+        before_host: &[u8],
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.settle_marked(executor, round)?;
+        for (index, &was) in before_host.iter().enumerate() {
+            let (signal, id) = self.model.topo_signals[index];
+            if id == usize::MAX {
+                continue;
+            }
+            let is = self.level(executor.backend(), signal);
+            // The global baseline may precede a pre-stop transition, including
+            // one deliberately filtered until its scheduled source commits.
+            // Only changes from the stopped state belong to this host settle.
+            round.previous(id, is, || was);
+            if was == is {
+                continue;
+            }
+            let kind = self.model.domain_kinds[id];
+            let triggered = if self.four_state {
+                settled_edge::<true>(kind, was, is)
+            } else {
+                settled_edge::<false>(kind, was, is)
+            };
+            if triggered {
+                round.edge_approved.insert(id);
+                executor.backend_mut().mark_triggered_bit(id);
+            }
+            // Opposite-edge aliases also need the intermediate level for a
+            // reversal by the continuation. Unchanged pre-stop levels retain
+            // their baseline until the pending source domains commit.
+            self.record_level(id, is);
         }
         Ok(())
     }
@@ -444,9 +492,17 @@ impl<B: SimBackend> SimulationState<B> {
         match self.process_phase(executor, current_time, &mut round, entry) {
             Ok(()) => {}
             Err(Halt::Stop) => {
+                // Preserve the settle's accepted triggers, not its filtered
+                // transient levels, if host writes require another settle.
+                round
+                    .edge_approved
+                    .union_with(&executor.backend().get_triggered_bits());
+                let mut levels = Vec::new();
+                self.event_values(executor.backend(), &mut levels);
                 self.suspended = Some(Suspended {
                     round,
                     events: events_to_process,
+                    levels,
                 });
                 return Err(Halt::Stop);
             }

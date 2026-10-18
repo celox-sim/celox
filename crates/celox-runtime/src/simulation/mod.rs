@@ -78,6 +78,8 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
 struct Suspended<B: SimBackend> {
     round: Box<Round>,
     events: Vec<SimEvent<B>>,
+    /// Settled event levels before the host can write the suspended state.
+    levels: Vec<u8>,
 }
 
 /// Backend-independent state and execution rules for timed simulation.
@@ -97,7 +99,7 @@ pub struct SimulationState<B: SimBackend> {
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
     /// The host changed state that the next step must settle at the
-    /// current time: an event signal, or a signal a wait watches.
+    /// current time, including before a suspended process resumes.
     host_pending: bool,
     /// A process requested the end of the simulation.
     finished: bool,
@@ -263,7 +265,13 @@ impl<B: SimBackend> SimulationState<B> {
         // waited or counted signal through combinational logic that has not
         // settled yet; only settling the current time tells. Processes that
         // finished or wait for a time do not see it.
-        if logged || !self.process_state.waiters.is_empty() || !self.model.counted.is_empty() {
+        // A suspended process must also see ordinary raw input writes settled
+        // before its continuation reads combinational results.
+        if self.suspended.is_some()
+            || logged
+            || !self.process_state.waiters.is_empty()
+            || !self.model.counted.is_empty()
+        {
             self.host_pending = true;
             return;
         }
