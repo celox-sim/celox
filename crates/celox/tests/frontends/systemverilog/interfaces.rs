@@ -1,4 +1,20 @@
 sv_backends! {
+    fn propagates_interface_dependent_ports(sim) {
+        @case "interfaces::propagates_interface_dependent_ports";
+    }
+    fn keeps_lexical_names_in_interface_scopes(sim) {
+        @case "interfaces::keeps_lexical_names_in_interface_scopes";
+    }
+    fn binds_interfaces_without_declaration_name_dependencies(sim) {
+        @case "interfaces::binds_interfaces_without_declaration_name_dependencies";
+    }
+    fn binds_local_interfaces_before_dependent_declarations(sim) {
+        @case "interfaces::binds_local_interfaces_before_dependent_declarations";
+    }
+    fn queries_interface_packed_struct_member_dimensions(sim) {
+        @case "interfaces::queries_interface_packed_struct_member_dimensions";
+    }
+
     fn binds_interface_array_ports_in_declaration_order(sim) {
         @case "interfaces::binds_interface_array_ports_in_declaration_order";
     }
@@ -56,4 +72,8 @@ sv_backends! {
     fn initializes_interface_array_members_from_their_declarations(sim) {
         @case "interfaces::initializes_interface_array_members_from_their_declarations";
     }
+    fn distinguishes_interface_dependency_bindings(sim) {
+        @case "interfaces::distinguishes_interface_dependency_bindings";
+    }
+
 }
