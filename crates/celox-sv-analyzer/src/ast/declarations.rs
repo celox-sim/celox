@@ -395,8 +395,31 @@ pub(super) fn signals_from_module_node(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
+    signals_from_module_node_with_declaration_ranges(
+        node,
+        syntax_tree,
+        const_env,
+        type_aliases,
+        false,
+    )
+}
+
+pub(super) fn signals_from_module_node_with_declaration_ranges(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    preserve_parameters: bool,
+) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    for item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+    for mut item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+        let _interface_scope = item.interface_scope();
+        if preserve_parameters {
+            let names = item.env.keys().cloned().collect::<Vec<_>>();
+            for name in names {
+                item.env.remove(&local_parameter_marker(&name));
+            }
+        }
         let node = match item.node {
             ScopeItem::Module(node) => node,
             // The variables of a package are its constant variables; the

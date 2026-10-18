@@ -603,11 +603,13 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/interface-array-ports-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
       "icarus": [
         "interfaces::binds_generic_interface_ports_per_interface",
+        "interfaces::binds_interface_array_ports_in_declaration_order",
         "interfaces::binds_positional_connections_and_parameter_values",
         "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
         "interfaces::clocks_interface_processes_from_member_clocks",

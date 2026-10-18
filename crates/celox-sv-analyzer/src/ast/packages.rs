@@ -21,6 +21,9 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
+    pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
+    /// Original syntax shared with interface instances; never generated source.
+    pub(crate) interface_sources: HashMap<String, (std::rc::Rc<SyntaxTree>, PathBuf)>,
     pub(super) timescales: Arc<timescales::Timescales>,
     packages: HashMap<String, Arc<Package>>,
     /// The compilation unit of each source file that declares items outside
@@ -110,6 +113,11 @@ impl Packages {
     /// Resolved local time unit and precision of a module or package.
     pub fn scope_time_scale(&self, name: &str) -> Option<(i32, i32)> {
         self.timescales.scope_scale(name)
+    }
+
+    /// Use interface bindings supplied by the hierarchy's selected roots.
+    pub fn set_interface_plan(&mut self, plan: interfaces::NativeInterfacePlan) {
+        self.interface_plan = Arc::new(plan);
     }
 
     pub fn is_empty(&self) -> bool {

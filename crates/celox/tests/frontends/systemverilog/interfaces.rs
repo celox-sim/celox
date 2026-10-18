@@ -1,4 +1,7 @@
 sv_backends! {
+    fn binds_interface_array_ports_in_declaration_order(sim) {
+        @case "interfaces::binds_interface_array_ports_in_declaration_order";
+    }
     fn infers_directions_of_ports_without_modport(sim) {
         @case "interfaces::infers_directions_of_ports_without_modport";
     }
@@ -49,5 +52,8 @@ sv_backends! {
 
     fn initializes_interface_members_from_their_declarations(sim) {
         @case "interfaces::initializes_interface_members_from_their_declarations";
+    }
+    fn initializes_interface_array_members_from_their_declarations(sim) {
+        @case "interfaces::initializes_interface_array_members_from_their_declarations";
     }
 }

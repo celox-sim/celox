@@ -19,6 +19,7 @@ pub(super) fn comb_processes_from_module_node(
     )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
+        let _interface_scope = item.interface_scope();
         let ScopeItem::Module(node) = item.node else {
             continue;
         };
