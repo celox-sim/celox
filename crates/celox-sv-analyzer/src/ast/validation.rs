@@ -789,6 +789,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
         let active = generate::items(node, syntax_tree, const_env, type_aliases)?;
         let mut views = generate::ScopeViews::new(indexed_dimensions);
         for item in &active {
+            let _constant_functions = item.enter();
             let dimensions = views.dimensions(item);
             reject_silently_ignored_constructs_with_dimensions(
                 item.node.node(),

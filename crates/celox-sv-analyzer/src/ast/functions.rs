@@ -9,14 +9,16 @@ pub(super) fn functions_from_module_node(
     packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::default();
-    let type_aliases =
+    let module_type_aliases =
         type_aliases_from_module_node_with_env(node.clone(), syntax_tree, const_env)?;
-    let active = generate::items(node.clone(), syntax_tree, const_env, &type_aliases)?;
+    let active = generate::items(node.clone(), syntax_tree, const_env, &module_type_aliases)?;
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for (item, child) in active
         .iter()
         .flat_map(|item| item.node.node().into_iter().map(move |child| (item, child)))
     {
+        let _constant_functions = item.enter();
+        let type_aliases = item.type_aliases(&module_type_aliases);
         if let RefNode::TaskDeclaration(declaration) = child {
             let task_dimensions = views.dimensions(item);
             let const_env = &item.env;

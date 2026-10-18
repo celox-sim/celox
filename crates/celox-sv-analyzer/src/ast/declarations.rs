@@ -430,11 +430,12 @@ pub(super) fn signals_from_module_node(
             }
             ScopeItem::Package(_) => continue,
         };
+        let _constant_functions = item.enter();
         let start = signals.len();
         signals_from_module_or_generate_item(
             node,
             syntax_tree,
-            type_aliases,
+            &item.type_aliases(type_aliases),
             &item.env,
             None,
             &mut signals,

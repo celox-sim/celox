@@ -1271,9 +1271,9 @@ pub(super) fn resolve_imports(
     }
     // A name the generate blocks import is a name of the whole module when
     // nothing else gives it a meaning; otherwise each block that imports
-    // another declaration names it there.
+    // another declaration than the one visible around it names it there.
     let mut generate_imports: HashMap<usize, HashMap<String, String>> = HashMap::default();
-    for (name, uses) in scoped {
+    for (name, mut uses) in scoped {
         let outside = bindings
             .iter()
             .find(|binding| binding.name == name)
@@ -1296,34 +1296,30 @@ pub(super) fn resolve_imports(
             });
             continue;
         }
-        for (block, target) in uses {
-            if outside.as_ref() == Some(&target) {
+        uses.sort_unstable();
+        uses.dedup();
+        // A block around `block` that imports another declaration, or
+        // declares the name, hides the module's binding there.
+        let encloses =
+            |scope: &GenerateScope, block: usize| scope.start < block && scope.contains(block);
+        let hidden = |block: usize, target: &String| {
+            uses.iter().any(|(outer, other)| {
+                other != target
+                    && all_scopes
+                        .iter()
+                        .any(|scope| scope.start == *outer && encloses(scope, block))
+            }) || all_scopes
+                .iter()
+                .any(|scope| scope.declared.contains(&name) && encloses(scope, block))
+        };
+        for (block, target) in &uses {
+            if outside.as_ref() == Some(target) && !hidden(*block, target) {
                 continue;
             }
-            // Types, and the formal names and shapes of subroutines, are
-            // looked up module-wide.
-            if symbols.type_aliases.contains_key(&target) {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "type `{name}` that a generate block imports as another declaration than \
-                     its module"
-                )));
-            }
-            if symbols.subroutine_params.contains_key(&target)
-                || symbols.functions.contains_key(&target)
-                || symbols
-                    .dpi_imports
-                    .iter()
-                    .any(|import| import.name() == target.as_str())
-            {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "subroutine `{name}` that a generate block imports as another declaration \
-                     than its module"
-                )));
-            }
             generate_imports
-                .entry(block)
+                .entry(*block)
                 .or_default()
-                .insert(name.clone(), target);
+                .insert(name.clone(), target.clone());
         }
     }
     symbols.generate_imports = generate_imports;

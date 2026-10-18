@@ -170,6 +170,10 @@ impl ConstantFunctions {
             .retain(|name, _| keep(name));
     }
 
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.functions.contains_key(name) || self.errors.by_name.contains_key(name)
+    }
+
     /// Make the function `target` callable as `name` too.
     pub(super) fn alias(&mut self, name: &str, target: &str) {
         if let Some(function) = self.functions.get(target).cloned() {

@@ -28,6 +28,7 @@ pub(super) fn ff_processes_from_module_node(
         ) {
             continue;
         }
+        let _constant_functions = item.enter();
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         ff_processes_from_module_or_generate_item(
