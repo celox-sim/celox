@@ -1,1 +1,6 @@
-Address PR #1490 review: normalize native step budgets and preserve pending input evaluation across interrupted resumptions.
+Revision history for #1490:
+
+rev 2 (content) 2026-10-18 09:57 UTC — Address PR #1490 review: normalize native step budgets and preserve pending input evaluation across interrupted resumptions.
+rev 1 (initial) 2026-10-18 09:57 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1490,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"142d77198f3b1fd36d71565b56e67cf1deb5fc69","timestamp_iso":"2026-10-18T09:57:35Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"142d77198f3b1fd36d71565b56e67cf1deb5fc69","new_sha":"85a97536ab347525239f3d4125f868ea032efcaa","timestamp_iso":"2026-10-18T09:57:35Z","reason":"Address PR #1490 review: normalize native step budgets and preserve pending input evaluation across interrupted resumptions.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/142d77198f3b1fd36d71565b56e67cf1deb5fc69...85a97536ab347525239f3d4125f868ea032efcaa"}]} -->
