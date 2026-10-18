@@ -1,1 +1,1 @@
-Preserve analyzer and interface-probe warnings across failed builds, deduplicate nested warning collection, and retain warnings through DPI linking and simulator initialization; add focused regressions.
+Rebase PR #1432 onto current master to resolve conflicts with simulation-time changes, preserving warning diagnostics and both sets of regression tests.
