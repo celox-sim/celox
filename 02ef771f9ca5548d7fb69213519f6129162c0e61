@@ -1,1 +1,6 @@
-Address PR #1471 review: preserve per-module VPI time units and precisions in reflected scopes instead of returning global precision for every handle.
+Revision history for #1471:
+
+rev 2 (content) 2026-10-18 01:58 UTC — Address PR #1471 review: preserve per-module VPI time units and precisions in reflected scopes instead of returning global precision for every handle.
+rev 1 (initial) 2026-10-18 01:58 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1471,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"78c3310e70f5aae9c40595a19a0f9454973e00a7","timestamp_iso":"2026-10-18T01:58:59Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"78c3310e70f5aae9c40595a19a0f9454973e00a7","new_sha":"02ef771f9ca5548d7fb69213519f6129162c0e61","timestamp_iso":"2026-10-18T01:58:59Z","reason":"Address PR #1471 review: preserve per-module VPI time units and precisions in reflected scopes instead of returning global precision for every handle.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/78c3310e70f5aae9c40595a19a0f9454973e00a7...02ef771f9ca5548d7fb69213519f6129162c0e61"}]} -->
