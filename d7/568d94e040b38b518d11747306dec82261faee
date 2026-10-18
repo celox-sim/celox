@@ -1,0 +1,1 @@
+Address review: preserve compilation warnings in test-runner errors and deduplicate parameterized readmem diagnostics by source site; add regressions and track probe-warning provenance investigation in #1512.
