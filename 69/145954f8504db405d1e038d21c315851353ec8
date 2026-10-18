@@ -1,0 +1,1 @@
+Fix queue-only unused-mut compilation failure in foreign-codegen configurations by transferring immutable warnings only in the image-loader error branch; validate mirrored cross-codegen and native image integration.
