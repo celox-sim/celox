@@ -1,6 +1,1 @@
-Revision history for #1474:
-
-rev 2 (content) 2026-10-18 02:10 UTC — Register the two reviewed Icarus exclusions in retained report shards so the follow-up independently passes the CI evidence check.
-rev 1 (initial) 2026-10-18 02:10 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1474,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"013def054850313dc4c452c2e07ef636ce3a297d","timestamp_iso":"2026-10-18T02:10:48Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"013def054850313dc4c452c2e07ef636ce3a297d","new_sha":"39b29ddb0069d6a480a9015c064574559d224888","timestamp_iso":"2026-10-18T02:10:48Z","reason":"Register the two reviewed Icarus exclusions in retained report shards so the follow-up independently passes the CI evidence check.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/013def054850313dc4c452c2e07ef636ce3a297d...39b29ddb0069d6a480a9015c064574559d224888"}]} -->
+Address all five PR #1474 review findings: declaration/reference separation, enum and lexical collision scopes, lexical structure queries, caller type queries, and transitive/inherited port dependencies; add shared regressions and consistent Icarus evidence.
