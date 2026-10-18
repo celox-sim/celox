@@ -2,8 +2,7 @@
 //! processes, driven through the timed `Simulation`.
 //!
 //! Every exclusion names what Celox lacks for the case, so the change that
-//! adds it removes the exclusion. `Simulation` builds only the default
-//! (native) backend, so the other backends are excluded for every case.
+//! adds it removes the exclusion. Supported cases run on every backend.
 
 macro_rules! timed_cases {
     () => {};
@@ -21,26 +20,26 @@ macro_rules! timed_cases {
             }
 
             #[test]
-            #[ignore = "a timed Simulation builds only the default backend"]
+            $(#[$attr])*
             fn cranelift() {
                 crate::suite::run_case($case, "cranelift");
             }
 
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             #[test]
-            #[ignore = "a timed Simulation builds only the default backend"]
+            $(#[$attr])*
             fn native_parallel() {
                 crate::suite::run_case($case, "native-parallel");
             }
 
             #[test]
-            #[ignore = "a timed Simulation builds only the default backend"]
+            $(#[$attr])*
             fn cranelift_parallel() {
                 crate::suite::run_case($case, "cranelift-parallel");
             }
 
             #[test]
-            #[ignore = "a timed Simulation builds only the default backend"]
+            $(#[$attr])*
             fn wasm() {
                 crate::suite::run_case($case, "wasm");
             }
