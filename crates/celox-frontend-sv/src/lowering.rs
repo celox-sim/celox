@@ -226,7 +226,9 @@ pub fn interface_signatures_for(
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let mut found = Vec::new();
-    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    let (signatures, analyzer_warnings) =
+        sv::collect_warnings(|| interface_signatures_collecting(sources, names, &mut found));
+    found.extend(crate::warning::analyzer_warnings(&analyzer_warnings));
     crate::warning::append_unique_warnings(sources, warnings, found);
     signatures
 }
@@ -714,6 +716,19 @@ fn validate_net_driver_ranges(
     Ok(())
 }
 
+/// Report the warnings of analyzing the packages the modules share, before
+/// lowering a module can fail.
+fn package_warnings(
+    analyzed: &HashMap<String, AnalyzedSvModule>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    if let Some(module) = analyzed.values().next() {
+        warnings.extend(crate::warning::analyzer_warnings(
+            module.packages.warnings(),
+        ));
+    }
+}
+
 /// The packages that declare variables, lowered as the modules of their one
 /// instance each, numbered from `first`.
 fn lower_package_states(
@@ -723,7 +738,6 @@ fn lower_package_states(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    warnings.extend(crate::warning::analyzer_warnings(packages.warnings()));
     let mut states = packages.state_modules().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
@@ -1213,17 +1227,20 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let mut found = Vec::new();
-    let hierarchy = prepare_external_hierarchy_collecting(
-        sources,
-        root_names,
-        foreign,
-        declarations,
-        four_state,
-        resolver,
-        top_parameters,
-        requests,
-        &mut found,
-    );
+    let (hierarchy, analyzer_warnings) = sv::collect_warnings(|| {
+        prepare_external_hierarchy_collecting(
+            sources,
+            root_names,
+            foreign,
+            declarations,
+            four_state,
+            resolver,
+            top_parameters,
+            requests,
+            &mut found,
+        )
+    });
+    found.extend(crate::warning::analyzer_warnings(&analyzer_warnings));
     crate::warning::append_unique_warnings(sources, warnings, found);
     hierarchy
 }
@@ -1247,6 +1264,7 @@ fn prepare_external_hierarchy_collecting(
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
     )?;
+    package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -1629,18 +1647,21 @@ pub fn schedule_sources(
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let mut found = Vec::new();
-    let scheduled = schedule_sources_collecting(
-        sources,
-        top,
-        parameter_overrides,
-        ignored_loops,
-        true_loops,
-        four_state,
-        parallel,
-        trace_options,
-        trace,
-        &mut found,
-    );
+    let (scheduled, analyzer_warnings) = sv::collect_warnings(|| {
+        schedule_sources_collecting(
+            sources,
+            top,
+            parameter_overrides,
+            ignored_loops,
+            true_loops,
+            four_state,
+            parallel,
+            trace_options,
+            trace,
+            &mut found,
+        )
+    });
+    found.extend(crate::warning::analyzer_warnings(&analyzer_warnings));
     crate::warning::append_unique_warnings(sources, warnings, found);
     scheduled
 }
@@ -1666,6 +1687,7 @@ fn schedule_sources_collecting(
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources, &[top])?;
+    package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),

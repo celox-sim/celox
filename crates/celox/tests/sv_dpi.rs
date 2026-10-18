@@ -517,6 +517,7 @@ fn registering_a_name_again_replaces_the_function() {
 fn unresolved_function_is_a_build_error() {
     let source = r#"
         module Top(input logic clk, input int a, output int y);
+            initial $exit;
             import "DPI-C" function int missing_dpi_function(input int x);
             always_ff @(posedge clk) y <= missing_dpi_function(a);
         endmodule
@@ -533,6 +534,21 @@ fn unresolved_function_is_a_build_error() {
         error.to_string().contains("missing_dpi_function"),
         "{error}"
     );
+    let warnings: Vec<_> = error
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].kind,
+        celox::SvFrontendWarningKind::ExitOutsideProgram
+    );
+    let location = warnings[0].location.as_ref().unwrap();
+    assert_eq!((location.path.as_str(), location.line), ("dpi.sv", 3));
 }
 
 extern "C" fn dpi_twice(x: i32) -> i32 {

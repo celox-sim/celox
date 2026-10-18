@@ -32,8 +32,13 @@ impl Ir {
         }
     }
 
+    /// Merge warnings from nested analyses, reporting each source call once.
     pub(crate) fn with_warnings(mut self, warnings: Vec<AnalyzerWarning>) -> Self {
-        self.warnings = warnings;
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
         self
     }
 

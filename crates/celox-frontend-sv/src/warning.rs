@@ -14,16 +14,19 @@ pub struct FrontendWarning {
     pub location: Option<WarningLocation>,
 }
 
-/// Warnings are the same when they report the same thing at the same place.
+/// Located warnings identify the warning category and source call, independent
+/// of the parameter-dependent payload produced by an individual specialization.
 impl PartialEq for FrontendWarning {
     fn eq(&self, other: &Self) -> bool {
-        let place = |warning: &Self| {
-            warning
-                .location
-                .as_ref()
-                .map(|location| (location.path.clone(), location.line, location.column))
-        };
-        self.kind == other.kind && place(self) == place(other)
+        match (&self.location, &other.location) {
+            (Some(left), Some(right)) => {
+                std::mem::discriminant(&self.kind) == std::mem::discriminant(&other.kind)
+                    && (&left.path, left.line, left.column)
+                        == (&right.path, right.line, right.column)
+            }
+            (None, None) => self.kind == other.kind,
+            _ => false,
+        }
     }
 }
 
@@ -100,7 +103,15 @@ pub(crate) fn append_unique_warnings(
     found.sort_by(|(left_kind, left), (right_kind, right)| {
         (left, left_kind).cmp(&(right, right_kind))
     });
-    found.dedup();
+    found.dedup_by(|(left_kind, left), (right_kind, right)| {
+        match (left.as_ref(), right.as_ref()) {
+            (Some(left), Some(right)) => {
+                left == right
+                    && std::mem::discriminant(left_kind) == std::mem::discriminant(right_kind)
+            }
+            _ => left == right && left_kind == right_kind,
+        }
+    });
     let mut texts = fxhash::FxHashMap::<std::path::PathBuf, Option<Arc<str>>>::default();
     for (kind, span) in found {
         let location = span.and_then(|span| {
