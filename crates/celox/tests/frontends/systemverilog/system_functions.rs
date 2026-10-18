@@ -2423,6 +2423,47 @@ fn time_is_not_a_constant_expression() {
 }
 
 #[test]
+fn functions_that_read_the_simulation_state_are_no_constant_functions() {
+    // IEEE 1800-2023 13.4.3: whether or not the call is reached, and in the
+    // functions that call such a function.
+    for (function, call) in [
+        (
+            "function automatic int f(input int x);
+                if (x > 0) return x; else return int'($time);
+            endfunction",
+            "f(1)",
+        ),
+        (
+            "function automatic int f(input int x);
+                if (x > 0) return x; else return int'($stime);
+            endfunction
+            function automatic int g(input int x);
+                return x > 0 ? x : f(x);
+            endfunction",
+            "g(1)",
+        ),
+        (
+            "function automatic int f(input int x, input int seed = $urandom);
+                return x;
+            endfunction",
+            "f(1, 2)",
+        ),
+    ] {
+        let error = build_error(&format!(
+            "module Top(output logic [7:0] y);
+                {function}
+                localparam int P = {call};
+                assign y = P;
+            endmodule"
+        ));
+        assert!(
+            error.contains("not permitted in constant function"),
+            "{call}: {error}"
+        );
+    }
+}
+
+#[test]
 fn state_files_keep_the_time_in_their_schedule() {
     let source = r#"
         module Top(input logic clk);
@@ -2450,6 +2491,27 @@ fn state_files_keep_the_time_in_their_schedule() {
     let mut timed = build();
     timed.load_state(&file).unwrap();
     assert_eq!(rising_edge_at(&mut timed, 5_000), displays(&["5"]));
+}
+
+#[test]
+fn constant_functions_ignore_the_arguments_of_their_system_tasks() {
+    // IEEE 1800-2023 13.4.3: a constant function ignores its system task
+    // calls, so the `$time` of a message does not make it nonconstant.
+    let source = r#"
+        module Top(output logic [7:0] y);
+            function automatic int f(input int x);
+                $display("%0d", $time);
+                return x + 1;
+            endfunction
+            localparam int P = f(4);
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+        .build()
+        .unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), 5u8.into());
 }
 
 #[test]

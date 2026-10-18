@@ -453,6 +453,11 @@ fn collect_module_constant_functions(
             ))
         })
         .collect();
+    let mut functions = functions;
+    for (name, error) in simulation_state_readers(&functions) {
+        functions.remove(&name);
+        rejected.entry(name).or_insert(error);
+    }
     ConstantFunctions {
         errors: Arc::new(FunctionErrors {
             all: None,
@@ -465,6 +470,64 @@ fn collect_module_constant_functions(
                 .map(|local| (local.name, local.r#type))
                 .collect(),
         ),
+    }
+}
+
+/// The functions among `functions` that are no constant functions because
+/// they call a system function that reads the state of the simulation, such
+/// as `$time`, in their bodies or argument defaults, or call a function that
+/// does (IEEE 1800-2023 13.4.3), whether the call is reached or not. Each
+/// comes with the error a constant call of it reports.
+fn simulation_state_readers(functions: &ConstantFunctionTable) -> HashMap<String, AnalyzerError> {
+    let mut readers: HashMap<String, AnalyzerError> = HashMap::default();
+    let mut callees: HashMap<&str, Vec<&str>> = HashMap::default();
+    for (name, function) in functions {
+        let mut exprs: Vec<&Expr> = function.argument_defaults.iter().flatten().collect();
+        for stmt in &function.body {
+            // A constant function ignores its system task calls (13.4.3), so
+            // their arguments call nothing.
+            stmt.walk(&mut |stmt| {
+                if !matches!(stmt, Stmt::SystemTask { .. }) {
+                    exprs.extend(lifetimes::stmt_exprs(stmt));
+                }
+            });
+        }
+        let mut reads = None;
+        let mut calls = Vec::new();
+        for expr in exprs {
+            lifetimes::visit_calls(expr, &mut |callee, _| match callee {
+                Callee::System(system) if system.reads_simulation_state() => {
+                    reads.get_or_insert(*system);
+                }
+                Callee::System(_) => {}
+                Callee::Subroutine(callee) => calls.push(callee.as_str()),
+            });
+        }
+        if let Some(system) = reads {
+            readers.insert(
+                name.clone(),
+                AnalyzerError::InvalidSystemTfCall {
+                    name: system.name().into(),
+                    detail: format!("not permitted in constant function `{name}`"),
+                },
+            );
+        }
+        callees.insert(name, calls);
+    }
+    // The callers of a reader read the state too.
+    loop {
+        let found: Vec<(String, AnalyzerError)> = callees
+            .iter()
+            .filter(|(name, _)| !readers.contains_key(**name))
+            .filter_map(|(name, calls)| {
+                let error = calls.iter().find_map(|callee| readers.get(*callee))?;
+                Some((name.to_string(), error.clone()))
+            })
+            .collect();
+        if found.is_empty() {
+            return readers;
+        }
+        readers.extend(found);
     }
 }
 
