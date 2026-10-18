@@ -793,9 +793,9 @@ impl Timescales {
     }
 
     /// The time units of the simulation, which counts the global time
-    /// precision (3.14.3), in one time unit of the scope of `call`.
-    fn time_divisor_in_unit(&self, call: &sv_parser::SystemTfCall, unit: &Unit) -> u64 {
-        let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
+    /// precision (3.14.3), in one time unit of the scope of `node`.
+    fn time_divisor_in_unit(&self, node: RefNode<'_>, unit: &Unit) -> u64 {
+        let at = offset(node).unwrap_or_default();
         let scale =
             scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
         let precision = self.precision.unwrap_or(DEFAULT.precision);
@@ -1018,15 +1018,16 @@ pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Conver
     })
 }
 
-/// The simulation's time units in one time unit of the scope of `call`, the
-/// divisor that scales the simulation time to `$time` (20.3.1).
-pub(super) fn time_divisor(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Converted<u64> {
+/// The simulation's time units in one time unit of the scope of `node`: the
+/// divisor that scales the simulation time to `$time` (20.3.1), and the
+/// factor that scales a delay to the simulation time (3.14.1).
+pub(super) fn time_divisor(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<u64> {
     DESIGN.with(|context| {
         let context = context.borrow();
         if let Some(prepared) = &context.prepared
             && prepared.address == tree as *const SyntaxTree as usize
         {
-            return Ok(context.design.time_divisor_in_unit(call, &prepared.unit));
+            return Ok(context.design.time_divisor_in_unit(node, &prepared.unit));
         }
         let design = &context.design;
         let source = key(tree);
@@ -1034,7 +1035,7 @@ pub(super) fn time_divisor(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) ->
             .then(|| design.including_tree(tree))
             .transpose()?;
         let design = extended.as_ref().unwrap_or(design);
-        Ok(design.time_divisor_in_unit(call, &design.units[source]))
+        Ok(design.time_divisor_in_unit(node, &design.units[source]))
     })
 }
 

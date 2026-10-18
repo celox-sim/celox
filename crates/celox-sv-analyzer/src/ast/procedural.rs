@@ -632,10 +632,26 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    /// The amount of a `#` delay control, in time units. Of a
-    /// `min:typ:max` delay the typical value is used, as simulators do by
-    /// default.
+    /// The amount of a `#` delay control in simulation time, which counts
+    /// the global time precision: the delay is given in time units of its
+    /// scope (IEEE 1800-2023 3.14.1). Of a `min:typ:max` delay the typical
+    /// value is used, as simulators do by default.
     fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
+        let amount = self.delay_amount(delay)?;
+        let factor = super::timescales::time_divisor(RefNode::DelayControl(delay), self.tree)?;
+        Ok(if factor == 1 {
+            amount
+        } else {
+            Expr::Binary {
+                left: Box::new(amount),
+                op: BinaryOp::Mul,
+                right: Box::new(Expr::Literal(format!("64'd{factor}"))),
+            }
+        })
+    }
+
+    /// The amount of a `#` delay control, in time units.
+    fn delay_amount(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
         match delay {
             sv_parser::DelayControl::Delay(delay) => match &delay.nodes.1 {
                 sv_parser::DelayValue::UnsignedNumber(number) => Ok(Expr::Literal(

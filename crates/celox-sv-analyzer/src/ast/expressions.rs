@@ -645,7 +645,10 @@ fn expr_from_system_function_call(
         SystemFunction::Time | SystemFunction::Stime => Ok(Expr::Call {
             callee: Callee::System(function),
             args: vec![Some(Expr::Literal(format_typed_parameter_literal(
-                i128::from(timescales::time_divisor(call, syntax_tree)?),
+                i128::from(timescales::time_divisor(
+                    RefNode::SystemTfCall(call),
+                    syntax_tree,
+                )?),
                 64,
                 false,
             )))],

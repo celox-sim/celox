@@ -408,7 +408,8 @@ whose one process calls `$random` matches simulators that keep one seed for
 the whole design.
 
 A `Simulation` counts time in the design's global time precision (IEEE
-1800-2023 3.14.3), 1 ps by default: `run_until(1000)` runs to 1 ns. `$time`
+1800-2023 3.14.3), 1 ps by default: `run_until(1000)` runs to 1 ns, and `#10`
+in a module whose time unit is 1 ns waits 10,000 ps (3.14.1). `$time`
 returns the time in the time unit of the scope that calls it, rounded to an
 integer, halves up (20.3.1); a package function uses its package's unit.
 `$stime` returns the low 32 bits of that value (20.3.2). Combinational logic

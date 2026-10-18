@@ -2409,6 +2409,35 @@ fn time_reaches_a_module_that_reads_it_only_combinationally() {
 }
 
 #[test]
+fn delays_count_the_time_unit_of_their_scope() {
+    // IEEE 1800-2023 3.14.1: `#3` waits three time units of its module, here
+    // 3 ns and 30 ps, which a Simulation counts in 1 ps.
+    let source = r#"
+        module Top;
+            timeunit 1ns / 1ps;
+            Child child();
+            initial begin
+                #3 $display("top %0d", $time);
+            end
+        endmodule
+        module Child;
+            timeunit 10ps / 1ps;
+            initial begin
+                #3 $display("child %0d", $time);
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("delay.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.step().unwrap(), Some(30));
+    assert_eq!(sim.drain_runtime_events(), displays(&["child 3"]));
+    assert_eq!(sim.step().unwrap(), Some(3_000));
+    assert_eq!(sim.drain_runtime_events(), displays(&["top 3"]));
+}
+
+#[test]
 fn time_is_not_a_constant_expression() {
     let error = build_error(
         "module Top(output logic [63:0] y);

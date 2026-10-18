@@ -724,8 +724,8 @@ chapter-9/9.3.4--block_names_par.sv	fail
 chapter-9/9.3.4--block_names_seq.sv	pass
 chapter-9/9.3.5--statement_labels_par.sv	fail
 chapter-9/9.3.5--statement_labels_seq.sv	pass
-chapter-9/9.4.1--delay_control-sim.sv	fail
-chapter-9/9.4.1--delay_control-two-blocks-sim.sv	fail
+chapter-9/9.4.1--delay_control-sim.sv	pass
+chapter-9/9.4.1--delay_control-two-blocks-sim.sv	pass
 chapter-9/9.4.1--delay_control.sv	pass
 chapter-9/9.4.2--event_control_edge.sv	fail
 chapter-9/9.4.2--event_control_negedge.sv	pass
