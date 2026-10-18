@@ -1,1 +1,6 @@
-Address PR #1506 review: retain host-created stable derived-clock edges alongside saved pending edges through inactive-region processing.
+Revision history for #1506:
+
+rev 2 (content) 2026-10-18 12:34 UTC — Address PR #1506 review: retain host-created stable derived-clock edges alongside saved pending edges through inactive-region processing.
+rev 1 (initial) 2026-10-18 12:34 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1506,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4199d321799aeb3649e5e3793bb3dd58c34c1add","timestamp_iso":"2026-10-18T12:34:31Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4199d321799aeb3649e5e3793bb3dd58c34c1add","new_sha":"0ccb001dadd40d10939f0059f6310372af0059a1","timestamp_iso":"2026-10-18T12:34:31Z","reason":"Address PR #1506 review: retain host-created stable derived-clock edges alongside saved pending edges through inactive-region processing.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4199d321799aeb3649e5e3793bb3dd58c34c1add...0ccb001dadd40d10939f0059f6310372af0059a1"}]} -->
