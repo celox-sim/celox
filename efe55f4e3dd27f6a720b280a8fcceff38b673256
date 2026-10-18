@@ -1,0 +1,1 @@
+Fix CI: replace obsolete interface rejection assertions with lifetime and defining-unit behavior checks; register the reviewed interface-array exclusion.
