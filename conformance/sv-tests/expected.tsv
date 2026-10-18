@@ -16,7 +16,7 @@ chapter-11/11.10.1--string_concat.sv	fail
 chapter-11/11.10.1--string_copy.sv	fail
 chapter-11/11.10.3--empty_string-sim.sv	fail
 chapter-11/11.10.3--empty_string.sv	fail
-chapter-11/11.11--min_max_avg_delay.sv	fail
+chapter-11/11.11--min_max_avg_delay.sv	pass
 chapter-11/11.12--let_construct.sv	fail
 chapter-11/11.3.5--expr_short_circuit.sv	pass
 chapter-11/11.3.6--assign_in_exp-sim.sv	fail
@@ -726,7 +726,7 @@ chapter-9/9.3.5--statement_labels_par.sv	fail
 chapter-9/9.3.5--statement_labels_seq.sv	pass
 chapter-9/9.4.1--delay_control-sim.sv	fail
 chapter-9/9.4.1--delay_control-two-blocks-sim.sv	fail
-chapter-9/9.4.1--delay_control.sv	fail
+chapter-9/9.4.1--delay_control.sv	pass
 chapter-9/9.4.2--event_control_edge.sv	fail
 chapter-9/9.4.2--event_control_negedge.sv	pass
 chapter-9/9.4.2--event_control_posedge.sv	pass
@@ -737,7 +737,7 @@ chapter-9/9.4.2.1--event_or_op.sv	fail
 chapter-9/9.4.2.2--event_implicit.sv	pass
 chapter-9/9.4.2.3--event_conditional.sv	fail
 chapter-9/9.4.2.4--event_sequence.sv	fail
-chapter-9/9.4.3--event_sequence_controls.sv	fail
+chapter-9/9.4.3--event_sequence_controls.sv	pass
 chapter-9/9.4.5--event_blocking_assignment_delay.sv	fail
 chapter-9/9.4.5--event_nonblocking_assignment_delay.sv	fail
 chapter-9/9.4.5--event_nonblocking_assignment_event.sv	fail
