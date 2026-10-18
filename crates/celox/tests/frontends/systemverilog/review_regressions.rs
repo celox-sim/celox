@@ -8544,3 +8544,32 @@ fn rejects_interface_array_port_shape_mismatches() {
         "{error}"
     );
 }
+
+#[test]
+fn rejects_invalid_implicit_named_interface_connections() {
+    for (source, expected) in [
+        (
+            "interface I; logic x; endinterface module C(I iface); endmodule module Top; C c(.iface); endmodule",
+            "unknown interface handle",
+        ),
+        (
+            "interface I; logic x; endinterface interface J; logic x; endinterface module C(I iface); endmodule module Top; J iface(); C c(.iface); endmodule",
+            "interface type mismatch",
+        ),
+        (
+            "interface I; logic x; endinterface module C(I iface); endmodule module Top; I iface[2](); C c(.iface); endmodule",
+            "whole interface array",
+        ),
+        (
+            "interface I; logic x; endinterface module C(I iface[3]); endmodule module Top; I iface[2](); C c(.iface); endmodule",
+            "interface array dimension mismatch",
+        ),
+        (
+            "interface I; logic x; modport r(input x); modport w(output x); endinterface module C(I.w iface); assign iface.x = 1'b1; endmodule module Relay(I.r iface); C c(.iface); endmodule module Top; I iface(); Relay r(.iface); endmodule",
+            "an input of port",
+        ),
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains(expected), "expected {expected}: {error}");
+    }
+}
