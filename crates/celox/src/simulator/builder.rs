@@ -1343,8 +1343,12 @@ mod host {
                 )));
             }
             let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                path,
+                &descs,
+                sim.program.design.time_precision,
+            )
+            .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
             sim.vcd_writer = Some(vcd_writer);
         }
         let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
@@ -2328,8 +2332,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
@@ -2370,8 +2378,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
@@ -2416,8 +2428,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
@@ -2476,8 +2492,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
@@ -2671,8 +2691,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
@@ -3027,8 +3051,12 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();

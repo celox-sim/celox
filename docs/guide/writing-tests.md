@@ -100,6 +100,15 @@ and a falling one.
 
 ## Time-Based Simulation
 
+Simulation timestamps and clock periods count global-precision ticks. Veryl
+uses 1ps per tick. SystemVerilog uses the design's global time precision
+(default 1ps). VCD headers and VPI time properties queried with a NULL handle
+use that global precision. VPI queries on a module or its signals return the
+module's own time unit and precision.
+Existing Veryl VCD exports now declare 1ps instead of 1ns; their numeric
+timestamps are unchanged. Native images compiled before this change must be
+recompiled for the updated container format.
+
 `Simulation` manages clock generation for you. This is the natural choice for sequential logic with clocked flip-flops.
 
 ```typescript

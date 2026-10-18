@@ -572,6 +572,11 @@ pub fn schedule_symbolic_rtl(
         root_id,
         packages,
     } = symbolic;
+    let time_precision = modules
+        .values()
+        .filter_map(|module| module.time_precision)
+        .min()
+        .unwrap_or_default();
     let flatten_timing = trace_opts.phase_timing;
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
@@ -603,6 +608,10 @@ pub fn schedule_symbolic_rtl(
         instance_modules.insert(id, *module_id);
         package_instances.insert(*module_id, id);
     }
+    let instance_time_scales = instance_modules
+        .iter()
+        .map(|(&instance, module)| (instance, modules[module].time_scale))
+        .collect::<HashMap<_, _>>();
     let bindings = &PackageBindings::new(&instance_modules, &modules, &package_instances)?;
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
@@ -1479,6 +1488,8 @@ pub fn schedule_symbolic_rtl(
         .collect();
     let watches: Vec<EventWatch<StateAddr>> = {
         let event_kinds = ElaboratedDesign {
+            time_precision,
+            instance_time_scales: HashMap::default(),
             state_objects: state_objects.clone(),
             events: events.clone(),
             initial_state: Vec::new(),
@@ -1546,6 +1557,8 @@ pub fn schedule_symbolic_rtl(
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
+            time_precision,
+            instance_time_scales,
             state_objects,
             events,
             initial_state,

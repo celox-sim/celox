@@ -514,6 +514,49 @@ pub enum DeadStorePolicy {
     PreserveAllPorts,
 }
 
+/// One simulation tick, expressed as a power of ten seconds.
+/// Valid SystemVerilog/VCD scales range from 1 fs (-15) to 100 s (2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub struct TimePrecision(i32);
+
+impl TimePrecision {
+    pub fn exponent(self) -> i32 {
+        self.0
+    }
+
+    /// The magnitude and physical unit used by a VCD `$timescale` header.
+    pub fn vcd_timescale(self) -> (u8, &'static str) {
+        let magnitude = 10u8.pow(self.0.rem_euclid(3) as u32);
+        let unit = ["s", "ms", "us", "ns", "ps", "fs"][(-self.0.div_euclid(3)) as usize];
+        (magnitude, unit)
+    }
+}
+
+impl Default for TimePrecision {
+    /// Scale-free frontends use the same 1ps tick as the SV implementation default.
+    fn default() -> Self {
+        Self(-12)
+    }
+}
+
+impl TryFrom<i32> for TimePrecision {
+    type Error = &'static str;
+    fn try_from(exponent: i32) -> Result<Self, Self::Error> {
+        if (-15..=2).contains(&exponent) {
+            Ok(Self(exponent))
+        } else {
+            Err("time precision must be between 1fs and 100s")
+        }
+    }
+}
+
+impl From<TimePrecision> for i32 {
+    fn from(precision: TimePrecision) -> Self {
+        precision.0
+    }
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -732,6 +775,13 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
     }
 }
 
+/// Time unit and rounding precision of one source scope, in powers of ten seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeScale {
+    pub unit: TimePrecision,
+    pub precision: TimePrecision,
+}
+
 /// Backend-neutral semantic design data after hierarchy flattening.
 ///
 /// This is intentionally not a frontend lookup table: every state object is
@@ -743,6 +793,11 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
     deserialize = "A: Deserialize<'de> + Eq + std::hash::Hash + Ord"
 ))]
 pub struct ElaboratedDesign<A> {
+    /// Physical duration of one global simulation tick.
+    #[serde(default)]
+    pub time_precision: TimePrecision,
+    /// Local time units and precisions retained for reflected instance queries.
+    pub instance_time_scales: HashMap<InstanceId, TimeScale>,
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,
     pub initial_state: Vec<InitialStateValue<A>>,
@@ -751,6 +806,8 @@ pub struct ElaboratedDesign<A> {
 impl<A> Default for ElaboratedDesign<A> {
     fn default() -> Self {
         Self {
+            time_precision: TimePrecision::default(),
+            instance_time_scales: HashMap::default(),
             state_objects: HashMap::default(),
             events: EventTopology::default(),
             initial_state: Vec::new(),

@@ -609,8 +609,9 @@ fn object_type(object: ObjectRef) -> i32 {
 ///
 /// `reference` must be a live handle returned by this library.
 pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
-    if matches!(property, VPI_TIME_UNIT | VPI_TIME_PRECISION) {
-        return -12;
+    if reference.is_null() && matches!(property, VPI_TIME_UNIT | VPI_TIME_PRECISION) {
+        return with_runtime(|runtime| runtime.time_precision().exponent())
+            .unwrap_or_else(|| celox_design::TimePrecision::default().exponent());
     }
     if reference.is_null() {
         return 0;
@@ -631,6 +632,23 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
         return 0;
     };
     match property {
+        VPI_TIME_UNIT | VPI_TIME_PRECISION => with_runtime(|runtime| {
+            let reflection = runtime.reflection();
+            let scope = match object {
+                ObjectRef::Scope(id) => reflection.scope(id),
+                ObjectRef::Signal(id) => reflection
+                    .signal(id)
+                    .and_then(|signal| reflection.scope(signal.parent)),
+            };
+            scope.map_or(0, |scope| {
+                if property == VPI_TIME_UNIT {
+                    scope.time_scale.unit.exponent()
+                } else {
+                    scope.time_scale.precision.exponent()
+                }
+            })
+        })
+        .unwrap_or(0),
         VPI_TYPE => object_type(object),
         VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
         VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {

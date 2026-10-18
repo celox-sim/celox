@@ -446,6 +446,8 @@ pub(crate) fn project_module_with_ids(
 
     Ok((
         crate::symbolic::artifact::SimModule {
+            time_precision: None,
+            time_scale: celox_design::TimeScale::default(),
             name: veryl_parser::resource_table::get_str_value(module.name).unwrap_or_default(),
             variables,
             ff_access_summaries: module

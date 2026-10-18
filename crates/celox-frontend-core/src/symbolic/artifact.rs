@@ -56,6 +56,10 @@ pub struct SymbolicProcess {
 
 #[derive(Clone)]
 pub struct SimModule {
+    /// A frontend's global tick precision; absent for scale-free frontends.
+    pub time_precision: Option<celox_design::TimePrecision>,
+    /// Local unit and precision; scale-free frontends use the 1ps default.
+    pub time_scale: celox_design::TimeScale,
     pub name: String,
     pub variables: HashMap<SourceVarId, SymbolicVariable>,
     pub ff_access_summaries:
