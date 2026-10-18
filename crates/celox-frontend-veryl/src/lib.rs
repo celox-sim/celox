@@ -26,8 +26,8 @@ pub(crate) mod symbolic {
 }
 
 use crate::symbolic::artifact::ExternalModule;
-pub use artifact::external_signatures;
 pub use artifact::{VerylSimModule as SimModule, VerylSymbolicRtl};
+pub use artifact::{external_signatures, external_signatures_named};
 pub(crate) use celox_frontend_core::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, InstancePath,
     ScheduledRtl, ScheduledRtlOutput, SourceAddr, SourceVarId, VariableInfo, VariableKind,

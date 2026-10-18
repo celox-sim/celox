@@ -1597,9 +1597,12 @@ pub(crate) fn specialize_sv_instances(
     Ok(requests)
 }
 
+/// Specialize the native module at `index` of `base.components`, which SV
+/// instantiates as `name`.
 pub(crate) fn specialize_foreign_module(
     base: &veryl_analyzer::ir::Ir,
     context: &mut veryl_analyzer::Context,
+    index: usize,
     name: &str,
     parameters: &[(String, celox_frontend_sv::SvParameterValue)],
     used_names: &mut fxhash::FxHashSet<String>,
@@ -1618,16 +1621,11 @@ pub(crate) fn specialize_foreign_module(
         })
         .collect::<Vec<_>>();
     if !ordinary.is_empty() {
-        super::builder::elaborate_parameterized_top_values(&mut ir, context, name, &ordinary)?;
+        super::builder::elaborate_parameterized_module(&mut ir, context, index, name, &ordinary)?;
     }
-    let module = ir
-        .components
-        .iter()
-        .find_map(|component| match component {
-            Component::Module(module) if module.name.to_string() == name => Some(module),
-            _ => None,
-        })
-        .ok_or_else(|| unsupported(format!("missing native module `{name}`")))?;
+    let Some(Component::Module(module)) = ir.components.get(index) else {
+        return Err(unsupported(format!("missing native module `{name}`")));
+    };
     let mut signature = module.signature.clone();
     let mut modports: fxhash::FxHashMap<_, Signature> = fxhash::FxHashMap::default();
     let mut interface_values = fxhash::FxHashMap::default();
@@ -1799,7 +1797,7 @@ pub(crate) fn specialize_foreign_module(
     };
     specialized.eval_assign(context);
     specialized.name = resource_table::insert_str(&fresh_name(
-        &format!("__celox_foreign_{name}"),
+        &format!("__celox_foreign_{}", specialized.name),
         used_names,
         &mut 0,
     ));

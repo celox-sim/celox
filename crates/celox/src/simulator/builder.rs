@@ -127,15 +127,6 @@ pub(super) fn elaborate_parameterized_top(
         .iter()
         .map(|(name, value)| (name.clone(), Value::new(*value, 64, false)))
         .collect::<Vec<_>>();
-    elaborate_parameterized_top_values(ir, context, top, &values)
-}
-
-pub(super) fn elaborate_parameterized_top_values(
-    ir: &mut Ir,
-    context: &mut Context,
-    top: &str,
-    param_overrides: &[(String, Value)],
-) -> Result<(), ParserError> {
     let top_name = resource_table::insert_str(top);
     let Some(top_index) = ir.components.iter().rposition(
         |component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name == top_name),
@@ -143,6 +134,18 @@ pub(super) fn elaborate_parameterized_top_values(
         // Preserve the existing TopNotFound diagnostic from the frontend.
         return Ok(());
     };
+    elaborate_parameterized_module(ir, context, top_index, top, &values)
+}
+
+/// Re-elaborate the module at `top_index` of `ir.components` with parameter
+/// overrides. `top` names it in diagnostics.
+pub(super) fn elaborate_parameterized_module(
+    ir: &mut Ir,
+    context: &mut Context,
+    top_index: usize,
+    top: &str,
+    param_overrides: &[(String, Value)],
+) -> Result<(), ParserError> {
     let top_token = match &ir.components[top_index] {
         veryl_analyzer::ir::Component::Module(module) => module.token,
         _ => unreachable!(),
