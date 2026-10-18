@@ -35,8 +35,44 @@ pub fn external_signatures(
     ir: &veryl_analyzer::ir::Ir,
     config: &BuildConfig,
 ) -> Result<crate::symbolic::artifact::ExternalHierarchy, ParserError> {
+    external_signatures_named(ir, config, |module| module.name.to_string())
+}
+
+/// Like [`external_signatures`], but registers each module under `name`, so
+/// modules that share a source name stay distinct.
+pub fn external_signatures_named(
+    ir: &veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+    name: impl Fn(&veryl_analyzer::ir::Module) -> String,
+) -> Result<crate::symbolic::artifact::ExternalHierarchy, ParserError> {
     use crate::symbolic::artifact::{ExternalHierarchy, ExternalModule};
     use veryl_analyzer::ir::Component;
+
+    // Veryl children link through the IR, but the SV modules beneath them
+    // still have to be prepared by the SV frontend.
+    fn sv_descendants(
+        module: &veryl_analyzer::ir::Module,
+        names: &mut Vec<String>,
+        seen: &mut crate::HashSet<StrId>,
+    ) {
+        for declaration in &module.declarations {
+            let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
+                continue;
+            };
+            match instance.component.as_ref() {
+                Component::SystemVerilog(child) => {
+                    if seen.insert(child.name) {
+                        names.push(
+                            veryl_parser::resource_table::get_str_value(child.name)
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+                Component::Module(child) => sv_descendants(child, names, seen),
+                Component::Interface(_) => {}
+            }
+        }
+    }
 
     let mut external = ExternalHierarchy::default();
     for component in &ir.components {
@@ -74,8 +110,15 @@ pub fn external_signatures(
         let mut port_ids = module.ports.values().copied().collect::<Vec<_>>();
         port_ids.sort();
         let port_order = port_ids.iter().map(|id| ids[id]).collect();
-        let (sim_module, _) =
+        let (mut sim_module, _) =
             project_module_with_ids(&empty, module, config, ids, &HashMap::default())?;
+        sim_module.name = name(module);
+        let mut unresolved_instances = Vec::new();
+        sv_descendants(
+            module,
+            &mut unresolved_instances,
+            &mut crate::HashSet::default(),
+        );
         let id = celox_design::ModuleId(external.modules.len());
         external.roots.insert(sim_module.name.clone(), id);
         external.modules.insert(
@@ -83,24 +126,7 @@ pub fn external_signatures(
             ExternalModule {
                 sim_module,
                 port_order,
-                // Veryl children link through the IR; only SV children are
-                // left for the SV frontend to resolve by name.
-                unresolved_instances: module
-                    .declarations
-                    .iter()
-                    .filter_map(|declaration| {
-                        let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
-                            return None;
-                        };
-                        let Component::SystemVerilog(module) = instance.component.as_ref() else {
-                            return None;
-                        };
-                        Some(
-                            veryl_parser::resource_table::get_str_value(module.name)
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
+                unresolved_instances,
             },
         );
     }

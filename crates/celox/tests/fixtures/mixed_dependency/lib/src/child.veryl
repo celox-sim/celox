@@ -1,0 +1,8 @@
+module Child #(
+    param K: u32 = 0,
+) (
+    a: input  logic<8>,
+    y: output logic<8>,
+) {
+    assign y = a + 8'd2 + K;
+}
