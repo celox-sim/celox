@@ -36,6 +36,13 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 /// Errors reported by the SystemVerilog analyzer.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalyzerError {
+    /// Diagnostics discovered before a later analysis failure.
+    #[error("{error}")]
+    WithWarnings {
+        #[source]
+        error: Box<AnalyzerError>,
+        warnings: Vec<ir::AnalyzerWarning>,
+    },
     #[error("SystemVerilog parse error: {0}")]
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
@@ -158,8 +165,46 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
 ];
 
 impl AnalyzerError {
+    pub(crate) fn with_warnings(self, found: Vec<ir::AnalyzerWarning>) -> Self {
+        if found.is_empty() {
+            return self;
+        }
+        match self {
+            Self::WithWarnings {
+                error,
+                mut warnings,
+            } => {
+                ast::warnings::append(&mut warnings, found);
+                Self::WithWarnings { error, warnings }
+            }
+            error => Self::WithWarnings {
+                error: Box::new(error),
+                warnings: found,
+            },
+        }
+    }
+
+    /// Diagnostics retained when semantic analysis failed.
+    pub fn warnings(&self) -> &[ir::AnalyzerWarning] {
+        match self {
+            Self::WithWarnings { warnings, .. } => warnings,
+            _ => &[],
+        }
+    }
+
+    /// The underlying source error, without its separately reported diagnostics.
+    pub fn into_error(self) -> Self {
+        match self {
+            Self::WithWarnings { error, .. } => error.into_error(),
+            error => error,
+        }
+    }
+
     /// GitHub issue that tracks support for the construct this error rejects.
     pub fn tracking_issue(&self) -> u32 {
+        if let Self::WithWarnings { error, .. } = self {
+            return error.tracking_issue();
+        }
         let Self::Unsupported(construct) = self else {
             return SV_FRONTEND_TRACKING_ISSUE;
         };
@@ -181,8 +226,9 @@ pub fn generated_time_declarations(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = syntax::parse_source(code, path)?;
+    let warnings = ast::warnings::functions(&syntax_tree, &syntax_tree);
+    collecting_warnings(warnings, || {
         if syntax_tree
             .into_iter()
             .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
@@ -202,8 +248,9 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = syntax::parse_source(code, path)?;
+    let warnings = ast::warnings::functions(&syntax_tree, &syntax_tree);
+    collecting_warnings(warnings, || {
         if syntax_tree
             .into_iter()
             .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
@@ -247,6 +294,7 @@ fn analyze_interface_source(
             .cloned(),
     );
     let mut modules = Vec::new();
+    let mut warnings = packages.warnings().to_vec();
     for name in names {
         let values = if name == override_module
             || plan
@@ -284,8 +332,27 @@ fn analyze_interface_source(
             &packages,
         )?;
         modules.extend(ir.modules().iter().cloned());
+        warnings.extend(ir.warnings().iter().cloned());
     }
-    Ok(Ir::new(modules))
+    Ok(Ir::new(modules).with_warnings(warnings))
+}
+
+/// Publish diagnostics as owned result data, on either exit path.
+fn collecting_warnings(
+    warnings: Vec<ir::AnalyzerWarning>,
+    analysis: impl FnOnce() -> Result<Ir, AnalyzerError>,
+) -> Result<Ir, AnalyzerError> {
+    finish_analysis(ast::with_call_sites(analysis), warnings)
+}
+
+pub(crate) fn finish_analysis(
+    result: Result<Ir, AnalyzerError>,
+    warnings: Vec<ir::AnalyzerWarning>,
+) -> Result<Ir, AnalyzerError> {
+    match result {
+        Ok(ir) => Ok(ir.with_warnings(warnings)),
+        Err(error) => Err(error.with_warnings(warnings)),
+    }
 }
 
 /// Return the module names declared in a SystemVerilog source without
@@ -312,8 +379,11 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = syntax::parse_source(code, path)?;
+    let warnings = ast::warnings::components(&syntax_tree)
+        .remove(module_name)
+        .unwrap_or_default();
+    collecting_warnings(warnings, || {
         let source = ast::Source::from_syntax_module_with_parameter_overrides(
             &syntax_tree,
             module_name,

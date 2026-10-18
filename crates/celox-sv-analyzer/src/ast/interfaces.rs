@@ -47,7 +47,20 @@ pub fn interface_prototypes_for(
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Result<Vec<_>, _>>()?;
-    let design = Design::collect_selected(&files, selected)?;
+    let declaration_warnings: Vec<_> = files
+        .iter()
+        .map(|file| super::warnings::components(&file.syntax_tree))
+        .collect();
+    let mut source_warnings = Vec::new();
+    for declarations in &declaration_warnings {
+        for (name, warnings) in declarations {
+            if selected.is_none_or(|names| names.contains(name)) {
+                super::warnings::append(&mut source_warnings, warnings.iter().cloned());
+            }
+        }
+    }
+    let design = Design::collect_selected(&files, selected)
+        .map_err(|error| error.with_warnings(source_warnings.clone()))?;
     let mut declarations = design
         .interfaces
         .values()
@@ -70,145 +83,153 @@ pub fn interface_prototypes_for(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = packages::Packages::analyze(&trees)?;
+    let packages = packages::Packages::analyze(&trees)
+        .map_err(|error| error.with_warnings(source_warnings))?;
+    let package_warnings = packages.warnings().to_vec();
     let mut used_names = design
         .modules
         .keys()
         .chain(design.interfaces.keys())
         .cloned()
         .collect::<HashSet<_>>();
+    let mut found = package_warnings.clone();
     declarations
         .into_iter()
         .map(|interface| {
-            // Analyzing the signature evaluates constant functions, which can
-            // warn.
-            let (prototype, warnings) =
-                super::warnings::analyzing(|| -> Result<InterfacePrototype, AnalyzerError> {
-                    let prefix = format!("__celox_interface_{}", interface.name);
-                    let mut probe_name = prefix.clone();
-                    let mut index = 0;
-                    while !used_names.insert(probe_name.clone()) {
-                        probe_name = format!("{prefix}_{index}");
-                        index += 1;
-                    }
-                    let time_declarations = timescales
-                        .as_ref()
-                        .unwrap()
-                        .declaration_statements(&interface.name)?;
-                    let behavior_functions = interface
-                        .items
-                        .iter()
-                        .filter_map(|item| match item {
-                            Item::Process(span) => Some(*span),
-                            Item::Member(index) => interface.members[*index].initializer,
-                            _ => None,
-                        })
-                        .flat_map(|span| interface.referenced(span))
-                        .filter(|name| interface.function(name).is_some())
-                        .map(str::to_string)
-                        .collect::<HashSet<_>>();
-                    let behavior_captures = interface
-                        .captured_members(&interface.function_closure(&behavior_functions));
-                    Ok(InterfacePrototype {
-                        name: interface.name.clone(),
-                        warnings: Vec::new(),
-                        header_dependent_cast: interface
-                            .header_dependent_cast(&files[interface.file])?,
-                        module: {
-                            let file = &files[interface.file];
-                            let declaration = file
-                                .syntax_tree
-                                .into_iter()
-                                .find_map(|node| {
-                                    if let RefNode::InterfaceDeclarationAnsi(declaration) = node
-                                        && name(
-                                            RefNode::InterfaceIdentifier(
-                                                &declaration.nodes.0.nodes.3,
-                                            ),
-                                            &file.syntax_tree,
-                                        )
-                                        .ok()
-                                        .as_ref()
-                                            == Some(&interface.name)
-                                    {
-                                        Some(declaration)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .ok_or_else(|| unsupported("non-ANSI interface signature"))?;
-                            interface_ast::signature(
-                                declaration,
-                                &file.syntax_tree,
-                                sources[interface.file].1,
-                                &packages,
-                                probe_name.clone(),
-                                &interface
-                                    .members
-                                    .iter()
-                                    .map(|m| m.name.clone())
-                                    .collect::<Vec<_>>(),
-                                &interface.names,
-                            )?
-                        },
-                        time_declarations,
-                        parameters: interface
-                            .parameters
-                            .iter()
-                            .map(|parameter| parameter.name.clone())
-                            .collect(),
-                        driven: interface
-                            .members
-                            .iter()
-                            .filter(|member| {
-                                member.initializer.is_some()
-                                    || behavior_captures.get(&member.name)
-                                        == Some(&Direction::Output)
-                                    || interface.references.iter().any(|(span, name)| {
-                                        name == &member.name
-                                            && interface.lvalues.contains(&span.0)
-                                            && !interface.functions.iter().any(|function| {
-                                                function.span.0 <= span.0
-                                                    && span.1 <= function.span.1
-                                            })
-                                    })
+            let warnings = declaration_warnings[interface.file]
+                .get(&interface.name)
+                .cloned()
+                .unwrap_or_default();
+            super::warnings::append(&mut found, warnings.iter().cloned());
+            let prototype = (|| -> Result<InterfacePrototype, AnalyzerError> {
+                let prefix = format!("__celox_interface_{}", interface.name);
+                let mut probe_name = prefix.clone();
+                let mut index = 0;
+                while !used_names.insert(probe_name.clone()) {
+                    probe_name = format!("{prefix}_{index}");
+                    index += 1;
+                }
+                let time_declarations = timescales
+                    .as_ref()
+                    .unwrap()
+                    .declaration_statements(&interface.name)?;
+                let behavior_functions = interface
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Item::Process(span) => Some(*span),
+                        Item::Member(index) => interface.members[*index].initializer,
+                        _ => None,
+                    })
+                    .flat_map(|span| interface.referenced(span))
+                    .filter(|name| interface.function(name).is_some())
+                    .map(str::to_string)
+                    .collect::<HashSet<_>>();
+                let behavior_captures =
+                    interface.captured_members(&interface.function_closure(&behavior_functions));
+                Ok(InterfacePrototype {
+                    name: interface.name.clone(),
+                    warnings: Vec::new(),
+                    header_dependent_cast: interface
+                        .header_dependent_cast(&files[interface.file])?,
+                    module: {
+                        let file = &files[interface.file];
+                        let declaration = file
+                            .syntax_tree
+                            .into_iter()
+                            .find_map(|node| {
+                                if let RefNode::InterfaceDeclarationAnsi(declaration) = node
+                                    && name(
+                                        RefNode::InterfaceIdentifier(&declaration.nodes.0.nodes.3),
+                                        &file.syntax_tree,
+                                    )
+                                    .ok()
+                                    .as_ref()
+                                        == Some(&interface.name)
+                                {
+                                    Some(declaration)
+                                } else {
+                                    None
+                                }
                             })
-                            .map(|member| member.name.clone())
-                            .collect(),
-                        has_behavior: interface
-                            .items
-                            .iter()
-                            .any(|item| matches!(item, Item::Process(_)))
-                            || interface
+                            .ok_or_else(|| unsupported("non-ANSI interface signature"))?;
+                        interface_ast::signature(
+                            declaration,
+                            &file.syntax_tree,
+                            sources[interface.file].1,
+                            &packages,
+                            probe_name.clone(),
+                            &interface
                                 .members
                                 .iter()
-                                .any(|member| member.initializer.is_some()),
-                        modports: interface
-                            .modports
-                            .iter()
-                            .map(|(name, items)| {
-                                (
-                                    name.clone(),
-                                    items
-                                        .iter()
-                                        .map(|item| match item {
-                                            ModportItem::Member(direction, name) => {
-                                                (name.clone(), direction.keyword().to_string())
-                                            }
-                                            ModportItem::Import(name) => {
-                                                (name.clone(), "import".to_string())
-                                            }
+                                .map(|m| m.name.clone())
+                                .collect::<Vec<_>>(),
+                            &interface.names,
+                        )?
+                    },
+                    time_declarations,
+                    parameters: interface
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                    driven: interface
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member.initializer.is_some()
+                                || behavior_captures.get(&member.name) == Some(&Direction::Output)
+                                || interface.references.iter().any(|(span, name)| {
+                                    name == &member.name
+                                        && interface.lvalues.contains(&span.0)
+                                        && !interface.functions.iter().any(|function| {
+                                            function.span.0 <= span.0 && span.1 <= function.span.1
                                         })
-                                        .collect(),
-                                )
-                            })
-                            .collect(),
-                    })
-                });
-            prototype.map(|prototype| InterfacePrototype {
-                warnings,
-                ..prototype
-            })
+                                })
+                        })
+                        .map(|member| member.name.clone())
+                        .collect(),
+                    has_behavior: interface
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, Item::Process(_)))
+                        || interface
+                            .members
+                            .iter()
+                            .any(|member| member.initializer.is_some()),
+                    modports: interface
+                        .modports
+                        .iter()
+                        .map(|(name, items)| {
+                            (
+                                name.clone(),
+                                items
+                                    .iter()
+                                    .map(|item| match item {
+                                        ModportItem::Member(direction, name) => {
+                                            (name.clone(), direction.keyword().to_string())
+                                        }
+                                        ModportItem::Import(name) => {
+                                            (name.clone(), "import".to_string())
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                })
+            })();
+            prototype
+                .map(|mut prototype| {
+                    prototype.warnings = package_warnings.clone();
+                    for warning in warnings {
+                        if !prototype.warnings.contains(&warning) {
+                            prototype.warnings.push(warning);
+                        }
+                    }
+                    prototype
+                })
+                .map_err(|error| error.with_warnings(found.clone()))
         })
         .collect::<Result<Vec<_>, AnalyzerError>>()
 }

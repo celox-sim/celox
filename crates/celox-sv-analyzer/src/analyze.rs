@@ -8,6 +8,11 @@ use crate::{
 };
 
 pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
+    let warnings = source.warnings();
+    crate::finish_analysis(analyze_source_impl(source), warnings)
+}
+
+fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
     for module in source.modules() {

@@ -423,6 +423,14 @@ impl Source {
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
+
+    pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
+        let mut warnings = Vec::new();
+        for module in &self.modules {
+            warnings::append(&mut warnings, module.constant_functions.warnings());
+        }
+        warnings
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

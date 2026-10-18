@@ -18,17 +18,22 @@ pub struct ParsedSource {
     path: PathBuf,
     tree: std::rc::Rc<sv_parser::SyntaxTree>,
     index: ast::module_index::ModuleIndex,
+    /// Immutable declaration diagnostics, indexed once alongside module syntax.
+    warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
 }
 
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
         let tree = syntax::parse_source(code, path)?;
-        let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))?;
+        let warnings = ast::warnings::components(&tree);
+        let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))
+            .map_err(|error| error.with_warnings(ast::warnings::functions(&tree, &tree)))?;
         Ok(Self {
             code: code.into(),
             path: path.to_path_buf(),
             tree: std::rc::Rc::new(tree),
             index,
+            warnings,
         })
     }
 
@@ -92,42 +97,43 @@ impl ParsedSource {
             .iter()
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
             .collect();
-        let (packages, warnings) = ast::warnings::analyzing(|| {
-            ast::with_call_sites(|| {
-                let mut packages = Packages::analyze_with_roots(&trees, roots)?;
-                for source in sources {
-                    for node in source.tree.as_ref() {
-                        if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
-                            && let Some(name) = ast::component_identifier(
-                                &declaration.nodes.0.nodes.3,
-                                &source.tree,
-                            )
-                            && packages
-                                .interface_sources
-                                .insert(name.clone(), (source.tree.clone(), source.path.clone()))
-                                .is_some()
-                        {
-                            return Err(AnalyzerError::DuplicateModule { name });
-                        }
+        let mut warnings = Vec::new();
+        let packages = ast::with_call_sites(|| {
+            let mut packages = Packages::analyze_with_roots(&trees, roots)?;
+            ast::warnings::append(&mut warnings, packages.warnings().iter().cloned());
+            for source in sources {
+                for node in source.tree.as_ref() {
+                    if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
+                        && let Some(name) =
+                            ast::component_identifier(&declaration.nodes.0.nodes.3, &source.tree)
+                        && packages
+                            .interface_sources
+                            .insert(name.clone(), (source.tree.clone(), source.path.clone()))
+                            .is_some()
+                    {
+                        return Err(AnalyzerError::DuplicateModule { name });
                     }
                 }
-                if !packages.interface_sources.is_empty()
-                    && trees.iter().any(|(tree, _)| {
-                        tree.into_iter()
-                            .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
-                    })
-                {
-                    let sources = sources
-                        .iter()
-                        .map(|source| (source.code.as_ref(), source.path.as_path()))
-                        .collect::<Vec<_>>();
-                    packages.interface_plan =
-                        std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
-                }
-                Ok(packages)
-            })
+            }
+            if !packages.interface_sources.is_empty()
+                && trees.iter().any(|(tree, _)| {
+                    tree.into_iter()
+                        .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
+                })
+            {
+                let sources = sources
+                    .iter()
+                    .map(|source| (source.code.as_ref(), source.path.as_path()))
+                    .collect::<Vec<_>>();
+                packages.interface_plan =
+                    std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
+            }
+            Ok(packages)
         });
-        packages.map(|packages| packages.with_warnings(warnings))
+        match packages {
+            Ok(packages) => Ok(packages.with_warnings(warnings)),
+            Err(error) => Err(error.with_warnings(warnings)),
+        }
     }
 
     /// Analyze an instance using its value and caller-resolved type bindings.
@@ -207,26 +213,30 @@ impl ParsedSource {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        let (ir, warnings) = ast::warnings::analyzing(|| {
-            ast::with_call_sites(|| {
-                let source = ast::Source::from_indexed_syntax_module(
-                    &self.tree,
-                    &self.path,
-                    &self.index,
-                    module_name,
-                    ast::ModuleParameterBindings {
-                        declarations_only: false,
-                        values: &overrides,
-                        types: type_overrides,
-                        patterns: pattern_overrides,
-                    },
-                    interfaces,
-                    packages,
-                )?;
-                analyze::analyze_source(source)
-            })
+        let original = packages
+            .interface_plan
+            .modules
+            .get(module_name)
+            .map_or(module_name, |plan| plan.original.as_str());
+        let warnings = self.warnings.get(original).cloned().unwrap_or_default();
+        let ir = ast::with_call_sites(|| {
+            let source = ast::Source::from_indexed_syntax_module(
+                &self.tree,
+                &self.path,
+                &self.index,
+                module_name,
+                ast::ModuleParameterBindings {
+                    declarations_only: false,
+                    values: &overrides,
+                    types: type_overrides,
+                    patterns: pattern_overrides,
+                },
+                interfaces,
+                packages,
+            )?;
+            analyze::analyze_source(source)
         });
-        ir.map(|ir| ir.with_warnings(warnings))
+        crate::finish_analysis(ir, warnings)
     }
 }
 

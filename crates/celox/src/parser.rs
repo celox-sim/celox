@@ -635,8 +635,8 @@ pub fn parse_sv(
 /// support stays unsupported, and anything else is an error in the source.
 #[cfg(feature = "systemverilog")]
 pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
-    match error {
-        celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
+    match error.into_error() {
+        error @ celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
             error.tracking_issue(),
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",

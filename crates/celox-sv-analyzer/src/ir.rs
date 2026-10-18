@@ -32,8 +32,13 @@ impl Ir {
         }
     }
 
+    /// Merge warnings from nested analyses, reporting each source call once.
     pub(crate) fn with_warnings(mut self, warnings: Vec<AnalyzerWarning>) -> Self {
-        self.warnings = warnings;
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
         self
     }
 
@@ -41,8 +46,8 @@ impl Ir {
         &self.modules
     }
 
-    /// What the analysis warned about, such as constructs evaluated while
-    /// elaborating that no process lowers.
+    /// Source diagnostics of the analyzed declarations, including functions
+    /// whose bodies disappear during constant elaboration.
     pub fn warnings(&self) -> &[AnalyzerWarning] {
         &self.warnings
     }

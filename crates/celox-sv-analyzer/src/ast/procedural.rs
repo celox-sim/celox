@@ -2326,7 +2326,10 @@ pub(super) fn written_names<'s>(stmts: impl IntoIterator<Item = &'s Stmt>) -> Ha
 
 /// The span of `node` in the source text before preprocessing, if all of it
 /// comes from one file.
-fn source_span(node: RefNode<'_>, tree: &SyntaxTree) -> Option<crate::procedural::SourceSpan> {
+pub(super) fn source_span(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+) -> Option<crate::procedural::SourceSpan> {
     let origin = |offset| {
         tree.get_origin(&Locate {
             offset,

@@ -368,9 +368,8 @@ fn analyze(
     }
     #[cfg(feature = "systemverilog")]
     let mut sv_interface_signatures = Vec::new();
-    // Lowering the design reports the warnings of the interface probes
-    // again, for its own parameters. These are reported only when the build
-    // fails before that.
+    // Behaviorless interfaces may never be lowered again. Retain their probe
+    // warnings too, deduplicating calls also encountered during design lowering.
     #[cfg(feature = "systemverilog")]
     let mut sv_probe_warnings = Vec::new();
     #[cfg(feature = "systemverilog")]
@@ -642,13 +641,23 @@ fn analyze(
         .map_err(SimulatorError::from);
     #[cfg(feature = "systemverilog")]
     let elaboration_warnings = {
-        if sir.is_err() || errors.iter().any(AnalyzerError::is_error) {
-            for warning in sv_probe_warnings {
-                if !sv_warnings.contains(&warning) {
-                    sv_warnings.push(warning);
-                }
+        for warning in sv_probe_warnings {
+            if !sv_warnings.contains(&warning) {
+                sv_warnings.push(warning);
             }
         }
+        sv_warnings.sort_by(|left, right| {
+            left.location
+                .as_ref()
+                .map(|location| (&location.path, location.line, location.column))
+                .cmp(
+                    &right
+                        .location
+                        .as_ref()
+                        .map(|location| (&location.path, location.line, location.column)),
+                )
+                .then(left.kind.cmp(&right.kind))
+        });
         sv_compilation_warnings(sv_warnings)
     };
     #[cfg(not(feature = "systemverilog"))]
@@ -1406,7 +1415,8 @@ mod host {
             }) {
                 return Err(SimulatorError::from(crate::CodegenError::message(
                     "VCD requires packed array storage; compile this native image with VCD enabled",
-                )));
+                ))
+                .with_warnings(std::mem::take(&mut sim.warnings)));
             }
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -1414,7 +1424,10 @@ mod host {
                 &descs,
                 sim.program.design.time_precision,
             )
-            .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            .map_err(|_| {
+                SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                    .with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             sim.vcd_writer = Some(vcd_writer);
         }
         let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
@@ -1423,7 +1436,9 @@ mod host {
             tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
         }
         let settle_start = options.diagnostics.phase_timing.then(crate::timing::now);
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        sim.modify(|_| {}).map_err(|error| {
+            SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+        })?;
         if let Some(start) = settle_start {
             tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
         }
@@ -1449,21 +1464,18 @@ mod host {
             all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
         ))]
         {
-            let _ = (
-                image,
-                program,
-                warnings,
-                options,
-                vcd_path,
-                injected_components,
-            );
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+            let _ = (image, program, options, vcd_path, injected_components);
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                .with_warnings(warnings));
         }
 
         // Safety: callers either produced the image in this process or loaded
         // it from an explicitly trusted native-image artifact.
-        let backend = unsafe {
-            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+        let backend = match unsafe {
+            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)
+        } {
+            Ok(backend) => backend,
+            Err(error) => return Err(error.with_warnings(warnings)),
         };
         initialize_native_backend(
             backend,
@@ -2241,7 +2253,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
+            let (program, mut warnings) = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2327,7 +2339,10 @@ mod host {
             // function fails the build early; the backends reuse the result.
             self.options
                 .dpi
-                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)
+                .map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut warnings))
+                })?;
 
             Ok((
                 laid_out,
@@ -2365,7 +2380,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
             if let Some(s) = phase_start {
@@ -2384,7 +2399,8 @@ mod host {
                 &laid_out,
                 &options,
                 wants_codegen_trace.then_some(&mut trace),
-            )?;
+            )
+            .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if options.trace.output_to_stdout {
                 trace.print();
             }
@@ -2403,11 +2419,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2426,7 +2447,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
             if let Some(s) = phase_start {
@@ -2436,7 +2457,8 @@ mod host {
                 );
             }
 
-            let backend = crate::backend::InterpBackend::new(&laid_out, &options)?;
+            let backend = crate::backend::InterpBackend::new(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
@@ -2449,11 +2471,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2499,11 +2526,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2563,11 +2595,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2580,7 +2617,7 @@ mod host {
         pub fn compile_native(self) -> Result<NativeCompilation, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
@@ -2591,7 +2628,8 @@ mod host {
                 );
             }
             let backend_start = phase_timing.then(crate::timing::now);
-            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)?;
+            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if let Some(start) = backend_start {
                 tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
@@ -2621,7 +2659,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
             let mut trace = crate::debug::CompilationTrace::default();
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program_with_trace(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
@@ -2636,7 +2674,8 @@ mod host {
             let (image, native_trace) =
                 crate::backend::native::NativeBackend::compile_image_with_codegen_trace(
                     &laid_out, &options,
-                )?;
+                )
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if let Some(start) = backend_start {
                 tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
@@ -2748,9 +2787,10 @@ mod host {
         pub fn build_wasm(
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
+            let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
@@ -2762,11 +2802,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2799,6 +2844,7 @@ mod host {
                 SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
                     "no initial block found — this module is not a native testbench",
                 )))
+                .with_warnings(std::mem::take(&mut sim.warnings))
             })?;
             Ok(crate::testbench::run_testbench_detailed(
                 &mut sim, &testbench,
@@ -2883,7 +2929,7 @@ mod host {
                 )
             };
 
-            let sim_res = program_res.and_then(|(program, warnings)| {
+            let sim_res = program_res.and_then(|(program, mut warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
                 if self.vcd_path.is_some() {
@@ -2905,20 +2951,23 @@ mod host {
                         crate::backend::native::NativeBackend::new_with_codegen_trace(
                             &laid_out,
                             &self.options,
-                        )?;
+                        )
+                        .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
                     trace.native_optimized_sir = Some(native_trace.optimized_sir);
                     trace.mir = Some(native_trace.mir);
                     trace.reactive_event_graph = Some(native_trace.reactive_graph);
                     trace.native_state_layout = Some(native_trace.state_layout);
                     backend
                 } else {
-                    crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
+                    crate::backend::native::NativeBackend::new(&laid_out, &self.options)
+                        .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?
                 };
                 #[cfg(not(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
                 )))]
-                let backend = JitBackend::new(&laid_out, &self.options, None)?;
+                let backend = JitBackend::new(&laid_out, &self.options, None)
+                    .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
 
                 let mut sim =
                     Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
@@ -2926,7 +2975,9 @@ mod host {
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
                 sim.apply_initial_values();
-                sim.modify(|_| {}).map_err(SimulatorError::from)?;
+                sim.modify(|_| {}).map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 Ok(sim)
             });
 
@@ -2950,6 +3001,7 @@ mod host {
             SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
                 "no initial block found — this module is not a native testbench",
             )))
+            .with_warnings(std::mem::take(&mut sim.warnings))
         })?;
         let result = crate::testbench::run_testbench(&mut sim, &testbench);
         if let Some(start) = testbench_start {
@@ -3103,9 +3155,10 @@ mod host {
             ) -> Result<B, SimulatorError>,
         ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
-            let (laid_out, warnings, options, vcd_path, injected_components) =
+            let (laid_out, mut warnings, options, vcd_path, injected_components) =
                 self.into_laid_out_program(layout_mode)?;
-            let backend = compile(&laid_out, &options)?;
+            let backend = compile(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             // Initial kernels must keep their time-zero gates until the timed
             // scheduler starts them; ordinary Simulator builders release them.
             let mut sim = Simulator::with_backend_and_program_for_simulation(
@@ -3122,11 +3175,16 @@ mod host {
                     &descs,
                     sim.program.design.time_precision,
                 )
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(crate::Simulation::new(sim))
         }
     }
