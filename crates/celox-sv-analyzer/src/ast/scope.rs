@@ -127,8 +127,11 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
             return Some((prefix, name));
         }
     }
-    // `__parameter::dimension::{index}::{bound}::{name}`
-    if let Some(rest) = key.strip_prefix("__parameter::dimension::") {
+    // `__{parameter,variable}::dimension::{index}::{bound}::{name}`
+    if let Some(rest) = key
+        .strip_prefix("__parameter::dimension::")
+        .or_else(|| key.strip_prefix("__variable::dimension::"))
+    {
         let mut parts = rest.splitn(3, "::");
         let (index, bound, name) = (parts.next()?, parts.next()?, parts.next()?);
         let prefix_len = key.len() - name.len();

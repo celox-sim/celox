@@ -812,3 +812,62 @@
   (top Top)
   (eval)
   (assert_eq y 0))
+
+(case bits_of_generate_local_array_elements
+  (source "generate_array_element_bits.sv" #"
+    module Top(output logic [7:0] y, whole, row, element, packed_element,
+               output logic [7:0] nested, outer, direct, size);
+      logic [6:0] n [3];
+      localparam int OUTER = $bits(n[0]);
+      assign outer = OUTER;
+      if (1) begin : g
+        logic [3:0] n [2];
+        localparam int W = $bits(n[0]);
+        localparam int S = $size(n);
+        assign y = W;
+        assign size = S;
+        assign direct = $bits(n[0]);
+        if (1) begin : inner
+          logic [8:0] n [4];
+          localparam int W = $bits(n[0]);
+          assign nested = W;
+        end
+      end
+      for (genvar i = 0; i < 1; i++) begin : lanes
+        logic [1:0][3:0] a [2][3];
+        localparam int WHOLE = $bits(a);
+        localparam int ROW = $bits(a[0]);
+        localparam int ELEMENT = $bits(a[0][0]);
+        localparam int PACKED_ELEMENT = $bits(a[0][0][0]);
+        assign whole = WHOLE;
+        assign row = ROW;
+        assign element = ELEMENT;
+        assign packed_element = PACKED_ELEMENT;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 4)
+  (assert_eq whole 48)
+  (assert_eq row 24)
+  (assert_eq element 8)
+  (assert_eq packed_element 4)
+  (assert_eq nested 9)
+  (assert_eq outer 7)
+  (assert_eq direct 4)
+  (assert_eq size 2))
+
+(case bits_of_generate_local_array_element_localparam
+  (source "generate_array_element_localparam.sv" #"
+    module Top(output logic [7:0] y);
+      if (1) begin : g
+        logic [3:0] n [2];
+        localparam int W = $bits(n[0]);
+        assign y = W;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq y 4))
