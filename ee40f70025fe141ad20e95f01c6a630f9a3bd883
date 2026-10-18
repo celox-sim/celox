@@ -1,0 +1,1 @@
+Address PR #1506 follow-up review: advance all event baselines after the host settle so a resumed process reversing a derived clock retains both edges, including opposite-edge aliases.
