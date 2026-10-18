@@ -66,6 +66,9 @@ export function lyditeScope(files, packages, lock = null) {
   const owners = [...packages].sort((a, b) => b.dir.length - a.dir.length);
   for (const raw of files) {
     const path = raw.replace(/^\.\//, "");
+    // Celox's SystemVerilog corpus is independent of Lydite's gates, whose
+    // fixtures live under lydite/conformance/.
+    if (path.startsWith("conformance/sv-tests/")) continue;
     if (path === "Cargo.lock" && lock !== null) {
       const reaches = (roots) => {
         const seen = closure(roots, (name) => lock.graph.get(name));
