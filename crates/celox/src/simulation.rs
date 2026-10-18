@@ -57,6 +57,8 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 /// Manages simulation time, periodic clocks, and an event queue.
 ///
 /// The default type parameter uses the host's [`crate::DefaultBackend`].
+/// The builder also offers `build_native`, `build_cranelift`, `build_wasm`,
+/// and `build_interpreter`; thread and partition options apply to timed builds.
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
@@ -714,7 +716,10 @@ mod process_tests {
         assert!(sim.is_finished());
         assert_eq!(sim.time(), steps);
         assert_eq!(sim.get(ticks), steps.into());
-        assert_eq!(sim.get(count), ((steps + 5) / 10).into());
+        assert_eq!(
+            sim.get_four_state(count),
+            (((steps + 5) / 10).into(), 0u8.into())
+        );
     }
 
     fn builder(four_state: bool, steps: usize) -> SimulatorBuilder<'static, Simulator> {
@@ -724,16 +729,16 @@ mod process_tests {
     }
 
     fn check_all_backends(four_state: bool, steps: usize) {
+        let timed = || Simulation::from_frontend(design(four_state, steps)).four_state(four_state);
+        check(timed().build_interpreter().unwrap(), steps as u64);
+        check(timed().build_cranelift().unwrap(), steps as u64);
+        check(timed().build_wasm().unwrap(), steps as u64);
         check(
-            Simulation::new(builder(four_state, steps).build_interpreter().unwrap()),
-            steps as u64,
-        );
-        check(
-            Simulation::new(builder(four_state, steps).build_cranelift().unwrap()),
-            steps as u64,
-        );
-        check(
-            Simulation::new(builder(four_state, steps).build_wasm().unwrap()),
+            timed()
+                .threads(4)
+                .parallel_partition(crate::ParallelPartition::Always)
+                .build_cranelift()
+                .unwrap(),
             steps as u64,
         );
         check(
@@ -745,8 +750,13 @@ mod process_tests {
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
         {
+            check(timed().build_native().unwrap(), steps as u64);
             check(
-                Simulation::new(builder(four_state, steps).build_native().unwrap()),
+                timed()
+                    .threads(4)
+                    .parallel_partition(crate::ParallelPartition::Always)
+                    .build_native()
+                    .unwrap(),
                 steps as u64,
             );
             let image = builder(four_state, steps)

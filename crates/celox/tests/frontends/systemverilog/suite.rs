@@ -221,15 +221,28 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
     if design.timed {
-        // `Simulation` builds only the default backend.
-        if backend != "native" {
-            return Err(format!("no timed simulation for the {backend} backend").into());
-        }
         let builder = design.parameters.iter().fold(
             Simulation::from_sv_sources(sources, &design.top).four_state(design.four_state),
             |builder, (name, value)| builder.param(name, *value),
         );
-        return Ok(Box::new(TimedBackend::new(builder.build()?)));
+        return Ok(match backend {
+            "native" => Box::new(TimedBackend::new(builder.build_native()?)),
+            "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
+            "native-parallel" => Box::new(TimedBackend::new(
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_native()?,
+            )),
+            "cranelift-parallel" => Box::new(TimedBackend::new(
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_cranelift()?,
+            )),
+            "wasm" => Box::new(TimedBackend::new(builder.build_wasm()?)),
+            _ => return Err(format!("unknown backend: {backend}").into()),
+        });
     }
     let builder = design.parameters.iter().fold(
         Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),
