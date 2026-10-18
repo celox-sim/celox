@@ -1,0 +1,1 @@
+Address both PR #1506 follow-up findings: snapshot settled levels and accepted triggers at suspension, judge host reversals against that snapshot, and keep unchanged pre-stop transients filtered. Add regressions for both cases across all backends and state modes.
