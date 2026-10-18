@@ -77,8 +77,8 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
-    /// Run the ready processes in declaration order, including those they
-    /// wake, recording the event signals each one changes.
+    /// Resume the stopped process first, then run ready processes in declaration
+    /// order, including those they wake, recording the event signals each changes.
     fn run_ready<E>(
         &mut self,
         executor: &mut E,
@@ -93,9 +93,19 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         self.event_values(executor.backend(), &mut round.before);
-        while let Some(process) = self.process_state.ready.pop_first() {
+        let mut resume_process = round.resume_process.take();
+        if let Some(process) = resume_process {
+            self.process_state.ready.remove(&process);
+        }
+        while let Some(process) = resume_process
+            .take()
+            .or_else(|| self.process_state.ready.pop_first())
+        {
             loop {
                 let again = self.run_process(executor, current_time, process, returns);
+                if matches!(again, Err(Halt::Stop)) {
+                    round.resume_process = Some(process);
+                }
                 // Each run is a separate update of the event signals, so a
                 // pulse across two runs is an edge. A stop keeps those of its
                 // run for the rest of the round.
