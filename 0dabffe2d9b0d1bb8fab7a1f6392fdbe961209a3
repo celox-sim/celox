@@ -1,0 +1,6 @@
+Revision history for #1451:
+
+rev 2 (content) 2026-10-17 23:47 UTC — Address PR #1451 review: preserve named-type use-site dimensions and dependent defaults; resolve ambiguous part-select syntax as a type binding and add regressions
+rev 1 (initial) 2026-10-17 23:47 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1451,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d75da674c9530a1ceb65170758d9f4833e24ba00","timestamp_iso":"2026-10-17T23:47:37Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d75da674c9530a1ceb65170758d9f4833e24ba00","new_sha":"c4860fb8aa08bb145814c48e156770f8241b9e5d","timestamp_iso":"2026-10-17T23:47:37Z","reason":"Address PR #1451 review: preserve named-type use-site dimensions and dependent defaults; resolve ambiguous part-select syntax as a type binding and add regressions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d75da674c9530a1ceb65170758d9f4833e24ba00...c4860fb8aa08bb145814c48e156770f8241b9e5d"}]} -->
