@@ -99,6 +99,7 @@ fn query_operand_dimensions(
                 .extend(dimensions.function_return_types.clone());
             context.parameter_values = dimensions.parameter_values.clone();
         }
+        extend_variable_dimensions_from_const_env(&mut context, const_env);
         if let Some(locals) = containing_function_dimensions(
             RefNode::Expression(argument),
             syntax_tree,
@@ -900,6 +901,7 @@ fn size_function_expression_type(
             .function_return_types
             .extend(dimensions.function_return_types.clone());
     }
+    extend_variable_dimensions_from_const_env(&mut packed_dimensions, const_env);
     // The supplied module context can reintroduce constant values hidden by
     // function formals, locals or the implicit result variable.
     if let Some(locals) = containing_function_dimensions(
@@ -1697,6 +1699,64 @@ pub(super) fn variable_unpacked_dimensions_marker(name: &str) -> String {
     format!("__variable::unpacked_dimensions::{name}")
 }
 
+pub(super) fn variable_dimension_marker(name: &str, index: usize, bound: &str) -> String {
+    format!("__variable::dimension::{index}::{bound}::{name}")
+}
+
+/// Preliminary module discovery cannot see unqualified generate-local names.
+/// Restore their declared ranges before lowering selections, so an unpacked
+/// index removes an array dimension rather than selecting one packed bit.
+fn extend_variable_dimensions_from_const_env(
+    context: &mut PackedDimensions,
+    const_env: &HashMap<String, i128>,
+) {
+    for (key, count) in const_env {
+        let Some(name) = key.strip_prefix("__variable::dimensions::") else {
+            continue;
+        };
+        let Some(unpacked) = const_env.get(&variable_unpacked_dimensions_marker(name)) else {
+            continue;
+        };
+        let ranges = (0..*count)
+            .map(|index| {
+                let index = usize::try_from(index).ok()?;
+                let left = *const_env.get(&variable_dimension_marker(name, index, "left"))?;
+                let right = *const_env.get(&variable_dimension_marker(name, index, "right"))?;
+                Some(PackedRange::new(
+                    ConstExpr::Literal(left.to_string()),
+                    ConstExpr::Literal(right.to_string()),
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(mut ranges) = ranges else { continue };
+        let Ok(unpacked) = usize::try_from(*unpacked) else {
+            continue;
+        };
+        if unpacked > ranges.len() {
+            continue;
+        }
+        let packed_ranges = ranges.split_off(unpacked);
+        let ty = Type {
+            kind: TypeKind::Logic,
+            is_signed: variable_type_is_signed(const_env, name),
+            packed_ranges,
+            unpacked_ranges: ranges
+                .into_iter()
+                .map(|range| UnpackedRange::new(range.left, range.right))
+                .collect(),
+            members: Vec::new(),
+            signed_element_depth: None,
+        };
+        let mut shape = procedural::dimensions_from_type(&ty);
+        if let Some(existing) = context.get(name) {
+            shape.members = existing.members.clone();
+            shape.is_2state = existing.is_2state;
+            shape.signed_element_depth = existing.signed_element_depth;
+        }
+        context.insert(name.to_string(), shape);
+    }
+}
+
 pub(super) fn variable_size_function_width(
     const_env: &HashMap<String, i128>,
     name: &str,
@@ -1729,6 +1789,27 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
             variable_unpacked_dimensions_marker(name),
             r#type.unpacked_ranges().len() as i128,
         );
+        for (index, (left, right)) in r#type
+            .unpacked_ranges()
+            .iter()
+            .map(|range| (range.left(), range.right()))
+            .chain(
+                r#type
+                    .packed_ranges()
+                    .iter()
+                    .map(|range| (range.left(), range.right())),
+            )
+            .enumerate()
+        {
+            for (bound, value) in [("left", left), ("right", right)] {
+                let key = variable_dimension_marker(name, index, bound);
+                if let Some(value) = eval_ast_const_expr(value, const_env) {
+                    const_env.insert(key, value);
+                } else {
+                    const_env.remove(&key);
+                }
+            }
+        }
         let dimension_width = |range: &PackedRange| {
             let left = eval_ast_const_expr(range.left(), const_env)?;
             let right = eval_ast_const_expr(range.right(), const_env)?;
