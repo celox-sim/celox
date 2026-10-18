@@ -2292,3 +2292,81 @@ fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
     }
     clear_runtime();
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_time_properties_follow_the_attached_design_precision() {
+    for (declarations, unit, expected) in [
+        ("", -9, -12),
+        ("timeunit 1ns; timeprecision 1fs;", -9, -15),
+        ("timeunit 1us; timeprecision 100ns;", -6, -7),
+    ] {
+        let source = format!("module Top(output logic y); {declarations} endmodule");
+        let sim =
+            Simulator::from_sv_sources(vec![(&source, std::path::Path::new("time.sv"))], "Top")
+                .build_native()
+                .unwrap();
+        let bytes = sim
+            .shared_code()
+            .program_image()
+            .to_container_bytes()
+            .unwrap();
+        let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
+        install_runtime(trusted_instance(image));
+        unsafe {
+            let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+            assert_eq!(vpi_get(VPI_TIME_UNIT, ptr::null_mut()), expected);
+            assert_eq!(vpi_get(VPI_TIME_PRECISION, ptr::null_mut()), expected);
+            assert_eq!(vpi_get(VPI_TIME_UNIT, top), unit);
+            assert_eq!(vpi_get(VPI_TIME_PRECISION, top), expected);
+            vpi_free_object(top);
+        }
+        clear_runtime();
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_time_properties_preserve_module_scales_in_native_images() {
+    let source = r#"
+        `timescale 10ns / 1ps
+        module Top(output logic y);
+            Coarse coarse();
+            Fine fine();
+        endmodule
+        module Coarse(output logic value);
+            timeunit 1us; timeprecision 100ns;
+        endmodule
+        module Fine(output logic value);
+            timeunit 1ns; timeprecision 1fs;
+        endmodule
+    "#;
+    let sim = Simulator::from_sv_sources(vec![(source, std::path::Path::new("scales.sv"))], "Top")
+        .build_native()
+        .unwrap();
+    let bytes = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
+    install_runtime(trusted_instance(image));
+    unsafe {
+        assert_eq!(vpi_get(VPI_TIME_UNIT, ptr::null_mut()), -15);
+        assert_eq!(vpi_get(VPI_TIME_PRECISION, ptr::null_mut()), -15);
+        for (name, unit, precision) in [
+            (c"Top", -8, -12),
+            (c"Top.coarse", -6, -7),
+            (c"Top.coarse.value", -6, -7),
+            (c"Top.fine", -9, -15),
+            (c"Top.fine.value", -9, -15),
+        ] {
+            let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!handle.is_null(), "{name:?}");
+            assert_eq!(vpi_get(VPI_TIME_UNIT, handle), unit, "{name:?}");
+            assert_eq!(vpi_get(VPI_TIME_PRECISION, handle), precision, "{name:?}");
+            vpi_free_object(handle);
+        }
+    }
+    clear_runtime();
+}
