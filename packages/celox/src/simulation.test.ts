@@ -389,6 +389,111 @@ describe("Simulation", () => {
 		);
 	});
 
+	test("runUntil with maxSteps: returns normally at $stop and can resume", () => {
+		const mock = createMockNative();
+		let stopped = false;
+		mock.handle.isStopped = vi.fn(() => stopped);
+		vi.mocked(mock.handle.runUntilBounded!).mockImplementationOnce(() => {
+			mock.handle.step();
+			stopped = true;
+			return false;
+		});
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+		sim.dut.d = 42n;
+
+		expect(() => sim.runUntil(25, { maxSteps: 1 })).not.toThrow();
+		expect(sim.time()).toBe(5);
+		expect(sim.isStopped()).toBe(true);
+		expect(sim.dut.q).toBe(42n);
+		expect(mock.handle.evalComb).not.toHaveBeenCalled();
+
+		// No step was allowed to resume the stopped process, so this is
+		// still a budget exhaustion rather than a newly encountered stop.
+		expect(() => sim.runUntil(25, { maxSteps: 0 })).toThrow(
+			SimulationTimeoutError,
+		);
+		expect(sim.isStopped()).toBe(true);
+		expect(sim.time()).toBe(5);
+
+		vi.mocked(mock.handle.step).mockImplementationOnce(() => {
+			stopped = false;
+			return 5;
+		});
+		sim.runUntil(25, { maxSteps: 5 });
+		expect(sim.isStopped()).toBe(false);
+		expect(sim.time()).toBe(25);
+	});
+
+	test.each([0.5, -0.5, Number.NaN])(
+		"runUntil normalizes an effective zero budget while stopped (%s)",
+		(maxSteps) => {
+			const mock = createMockNative();
+			mock.handle.isStopped = vi.fn(() => true);
+			vi.mocked(mock.handle.runUntilBounded!).mockReturnValue(false);
+			const sim = Simulation.create(TopModule, {
+				__nativeCreate: mock.create,
+			});
+			sim.dut.d = 42n;
+
+			expect(() => sim.runUntil(25, { maxSteps })).toThrow(
+				SimulationTimeoutError,
+			);
+			expect(mock.handle.runUntilBounded).toHaveBeenCalledWith(25, 0);
+			expect(sim.isStopped()).toBe(true);
+			expect(sim.time()).toBe(0);
+			expect(sim.dut.q).toBe(42n);
+			expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+		},
+	);
+
+	test("runUntil truncates a fractional positive budget before passing it to native code", () => {
+		const mock = createMockNative();
+		const sim = Simulation.create(TopModule, {
+			__nativeCreate: mock.create,
+		});
+
+		sim.runUntil(25, { maxSteps: 5.9 });
+		expect(mock.handle.runUntilBounded).toHaveBeenCalledWith(25, 5);
+	});
+
+	test.each([true, false])(
+		"runUntil preserves input writes when resuming a stopped slot (stops again: %s)",
+		(stopsAgain) => {
+			const mock = createMockNative();
+			let stopped = true;
+			mock.handle.isStopped = vi.fn(() => stopped);
+			// Resuming the suspended slot can return before pending host
+			// writes are settled, both at another stop and at the step limit.
+			vi.mocked(mock.handle.runUntilBounded!).mockImplementationOnce(() => {
+				stopped = stopsAgain;
+				return false;
+			});
+			const sim = Simulation.create(TopModule, {
+				__nativeCreate: mock.create,
+			});
+			sim.dut.d = 42n;
+
+			if (stopsAgain) {
+				expect(() => sim.runUntil(25, { maxSteps: 1 })).not.toThrow();
+			} else {
+				expect(() => sim.runUntil(25, { maxSteps: 1 })).toThrow(
+					SimulationTimeoutError,
+				);
+			}
+			expect(sim.time()).toBe(0);
+			expect(sim.isStopped()).toBe(stopsAgain);
+			expect(mock.handle.evalComb).not.toHaveBeenCalled();
+			expect(sim.dut.q).toBe(42n);
+			expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+			// Reading twice must not evaluate twice or notify the scheduler again.
+			expect(sim.dut.q).toBe(42n);
+			expect(mock.handle.evalComb).toHaveBeenCalledOnce();
+			expect(mock.handle.noteHostWrites).toHaveBeenCalledOnce();
+		},
+	);
+
 	test("runUntil with maxSteps: timeout error has correct properties", () => {
 		const mock = createMockNative();
 		const sim = Simulation.create(TopModule, {
