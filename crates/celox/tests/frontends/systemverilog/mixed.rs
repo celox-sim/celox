@@ -904,6 +904,38 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 0x76u8.into());
     }
 
+    fn reaches_systemverilog_descendants_through_native_veryl_children(sim) {
+        @setup {
+    let veryl = r#"
+        module Inner (a: input logic<8>, y: output logic<8>) {
+            inst leaf: $sv::SvLeaf (a, y);
+        }
+        module Mid #(param K: u32 = 1) (a: input logic<8>, y: output logic<8>) {
+            var b: logic<8>;
+            assign b = a + K;
+            inst inner: Inner (a: b, y);
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y, output logic [7:0] wide);
+            prj_Mid plain(.a(a), .y(y));
+            prj_Mid #(.K(16)) specialized(.a(a), .y(wide));
+        endmodule
+        module SvLeaf(input logic [7:0] a, output logic [7:0] y);
+            assign y = a ^ 8'h55;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("mid.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x74u8.into());
+        assert_eq!(sim.get(sim.signal("wide")), 0x65u8.into());
+    }
+
     fn preserves_positional_veryl_to_systemverilog_port_order(sim) {
         @setup {
     let veryl = r#"
@@ -1294,6 +1326,36 @@ fn rejects_sv_modules_named_like_an_emitted_veryl_module() {
             .contains("Duplicate module declaration: Child"),
         "{error}"
     );
+}
+
+#[test]
+fn names_same_named_modules_of_dependencies_by_their_projects() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mixed_dependency");
+    let mut metadata = veryl_metadata::Metadata::load(project.join("Veryl.toml")).unwrap();
+    let sources = metadata
+        .paths::<std::path::PathBuf>(&[], false, true)
+        .unwrap()
+        .into_iter()
+        .map(|path| (std::fs::read_to_string(&path.src).unwrap(), path.src))
+        .collect::<Vec<_>>();
+    let sv = std::fs::read_to_string(project.join("top.sv")).unwrap();
+    let mut sim = Simulator::from_mixed_sources(
+        sources
+            .iter()
+            .map(|(source, path)| (source.as_str(), path.as_path()))
+            .collect(),
+        vec![(sv.as_str(), &project.join("top.sv"))],
+        "Top",
+    )
+    .with_metadata(metadata)
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("app_y")), 0x21u8.into());
+    assert_eq!(sim.get(sim.signal("lib_y")), 0x22u8.into());
+    assert_eq!(sim.get(sim.signal("app_wide")), 0x31u8.into());
+    assert_eq!(sim.get(sim.signal("lib_wide")), 0x42u8.into());
 }
 
 // These assert the intended simulation results, so implementing the missing
