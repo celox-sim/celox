@@ -1536,8 +1536,8 @@ fn rejects_unknown_system_functions_in_every_context() {
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
         (
-            "system function `$time` in an expression",
-            "module Top(output logic [63:0] y); assign y = $time; endmodule",
+            "system function `$realtime` in an expression",
+            "module Top(output logic [63:0] y); assign y = $realtime; endmodule",
         ),
         (
             "system function `$sqrt` in an expression",
@@ -2311,4 +2311,158 @@ fn urandom_parameter_storage_does_not_consume_default_seeds() {
     ] {
         assert_eq!(run(parameter), baseline, "{parameter}");
     }
+}
+
+/// Drive a rising edge of `clk` at `time`, then drain the runtime events.
+fn rising_edge_at(sim: &mut celox::Simulation, time: u64) -> Vec<celox::RuntimeEvent> {
+    let clk = sim.signal("clk");
+    sim.run_until(time).unwrap();
+    sim.modify(|io| io.set(clk, 1u8)).unwrap();
+    sim.run_until(time).unwrap();
+    sim.modify(|io| io.set(clk, 0u8)).unwrap();
+    sim.run_until(time).unwrap();
+    sim.drain_runtime_events()
+}
+
+fn displays(lines: &[&str]) -> Vec<celox::RuntimeEvent> {
+    lines
+        .iter()
+        .map(|line| celox::RuntimeEvent::Display {
+            message: line.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+#[test]
+fn time_counts_the_global_precision_in_the_unit_of_the_caller() {
+    // IEEE 1800-2023 20.3: a Simulation counts the global precision, 1 ps;
+    // `$time` rounds to the caller's unit and `$stime` keeps 32 bits.
+    let source = r#"
+        package P;
+            timeunit 100ps / 1ps;
+            function automatic longint now();
+                return $time;
+            endfunction
+        endpackage
+        module Top(input logic clk, input logic [7:0] a, output logic [31:0] y);
+            timeunit 1ns; timeprecision 1ps;
+            Child child(.clk(clk));
+            initial $display("initial %0d", $time);
+            always_ff @(posedge clk) $display("top %0d %0d %0d", $time, $stime, P::now());
+            always_comb y = a + $stime;
+        endmodule
+        module Child(input logic clk);
+            timeunit 10ps / 1ps;
+            always_ff @(posedge clk) $display("child %0d", $time);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (a, y) = (sim.signal("a"), sim.signal("y"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.drain_runtime_events(), displays(&["initial 0"]));
+    // 1.499 ns rounds down, 149.9 x 10 ps up; 1.5 ns, a half, rounds up.
+    // The package function counts the unit of its package.
+    assert_eq!(
+        rising_edge_at(&mut sim, 1_499),
+        displays(&["top 1 1 15", "child 150"]),
+    );
+    assert_eq!(
+        rising_edge_at(&mut sim, 1_500),
+        displays(&["top 2 2 15", "child 150"]),
+    );
+    assert_eq!(
+        rising_edge_at(&mut sim, 2_494),
+        displays(&["top 2 2 25", "child 249"]),
+    );
+    // Past 32 bits of the caller's unit, `$stime` wraps.
+    let late = ((1u64 << 32) + 3) * 1_000;
+    assert_eq!(
+        rising_edge_at(&mut sim, late),
+        displays(&["top 4294967299 3 42949672990", "child 429496729900"]),
+    );
+    // A combinational process reads the time when its inputs change, not
+    // when the time does.
+    assert_eq!(sim.get(y), 0u32.into());
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    sim.run_until(late).unwrap();
+    assert_eq!(sim.get(y), 8u32.into());
+}
+
+#[test]
+fn time_reaches_a_module_that_reads_it_only_combinationally() {
+    let source = r#"
+        module Top(input logic [7:0] a, output logic [63:0] y);
+            assign y = a + $time;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (a, y) = (sim.signal("a"), sim.signal("y"));
+    // No work is due at 7 ns: the run moves the time without a round.
+    sim.run_until(7_000).unwrap();
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    sim.run_until(7_000).unwrap();
+    assert_eq!(sim.get(y), 12u64.into());
+}
+
+#[test]
+fn time_is_not_a_constant_expression() {
+    let error = build_error(
+        "module Top(output logic [63:0] y);
+            localparam logic [63:0] T = $time;
+            assign y = T;
+        endmodule",
+    );
+    assert!(
+        error.contains("$time") && error.contains("constant-value expression"),
+        "{error}"
+    );
+}
+
+#[test]
+fn state_files_keep_the_time_in_their_schedule() {
+    let source = r#"
+        module Top(input logic clk);
+            timeunit 1ns / 1ps;
+            always_ff @(posedge clk) $display("%0d", $time);
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+            .build()
+            .unwrap()
+    };
+    let mut sim = build();
+    sim.run_until(5_000).unwrap();
+    let file = sim.save_state().unwrap();
+    // A Simulator has no time, also after loading a timed simulation's state.
+    let mut untimed = Simulator::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    untimed.load_state(&file).unwrap();
+    let clk = untimed.event("clk");
+    untimed.tick(clk).unwrap();
+    assert_eq!(untimed.drain_runtime_events(), displays(&["0"]));
+    // A Simulation continues at the saved time.
+    let mut timed = build();
+    timed.load_state(&file).unwrap();
+    assert_eq!(rising_edge_at(&mut timed, 5_000), displays(&["5"]));
+}
+
+#[test]
+fn time_is_zero_in_a_simulator_without_time() {
+    let source = r#"
+        module Top(input logic clk);
+            always_ff @(posedge clk) $display("%0d %0d", $time, $stime);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.drain_runtime_events(), displays(&["0 0"]));
 }

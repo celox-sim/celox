@@ -34,6 +34,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     pub(crate) timed: bool,
     /// Canonical event IDs whose evaluation commits their blocking results.
     pub(crate) active_commits: bit_set::BitSet,
+    /// Signals the current time is stored into before each round.
+    pub(crate) time_slots: Vec<SignalRef>,
 }
 
 impl<B: SimBackend> ResolvedSchedule<B> {
@@ -201,6 +203,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             combinational_derived,
             timed: model.timed,
             active_commits,
+            time_slots: model.time_slots.iter().map(resolve).collect(),
         }
     }
 }

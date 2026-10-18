@@ -640,6 +640,17 @@ fn expr_from_system_function_call(
                 arg_order: Vec::new(),
             })
         }
+        // The frontend divides the simulation time by the time units of the
+        // calling scope, which the call carries as its operand.
+        SystemFunction::Time | SystemFunction::Stime => Ok(Expr::Call {
+            callee: Callee::System(function),
+            args: vec![Some(Expr::Literal(format_typed_parameter_literal(
+                i128::from(timescales::time_divisor(call, syntax_tree)?),
+                64,
+                false,
+            )))],
+            arg_order: Vec::new(),
+        }),
         SystemFunction::Timeunit | SystemFunction::Timeprecision => {
             timescales::query(call, syntax_tree).map(|value| {
                 Expr::Literal(format_typed_parameter_literal(i128::from(value), 32, true))

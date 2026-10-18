@@ -300,11 +300,15 @@ impl<B: SimBackend> Simulator<B> {
     /// several objects share it.
     fn build_state_schema(&self) -> StateSchema {
         let comb_writes = &self.program.runtime_schema.comb_writes;
+        // A timed simulation stores its time into the time slots, and a state
+        // file keeps the time in its schedule; an untimed one reads zero.
+        let time_slots: crate::HashSet<_> = self.program.runtime_schema.time_slots.iter().collect();
         let mut objects: Vec<_> = self
             .backend
             .layout()
             .offsets
             .keys()
+            .filter(|address| !time_slots.contains(address))
             .map(|&address| (self.program.get_path(&address), address))
             .collect();
         objects.sort_unstable();

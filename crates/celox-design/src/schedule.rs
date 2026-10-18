@@ -40,6 +40,9 @@ pub struct ScheduleModel<A> {
     /// Canonical event domains whose evaluation commits their blocking
     /// results ([`RuntimeSchema::active_commits`]).
     pub active_commits: Vec<A>,
+    /// Objects the scheduler stores the current time into
+    /// ([`RuntimeSchema::time_slots`]).
+    pub time_slots: Vec<A>,
 }
 
 /// A counted signal and the canonical domains its counters trigger.
@@ -133,6 +136,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .iter()
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
+            time_slots: schema.time_slots.clone(),
         }
     }
 

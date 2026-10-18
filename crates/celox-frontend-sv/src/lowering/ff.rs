@@ -287,7 +287,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*aliases.get(id).unwrap_or(id))
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
-            } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
+            } else if working_set.contains(id)
+                || variables.get(id).is_some_and(SvVariable::is_scratch)
+            {
                 working(*id)
             } else {
                 stable(*id)
@@ -834,6 +836,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.random(args.first().and_then(Option::as_ref))?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Time | sv::ir::SystemFunction::Stime),
+                    ),
+                args,
+                ..
+            } => self.time(*function, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
@@ -1228,6 +1238,61 @@ impl<'p, 'a> Ff<'p, 'a> {
             signed: false,
         };
         self.hidden("urandom_range_result", &result, false)
+    }
+
+    /// IEEE 1800-2023 20.3.1: `$time` is the simulation time, which counts
+    /// the global time precision, in the time unit of the calling scope,
+    /// rounded to an integer; halves round up. The analyzer passes the
+    /// precision's units per time unit as the operand. `$stime` (20.3.2) is
+    /// its low 32 bits.
+    fn time(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let divisor = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported(format!("operand of `{function}`")))?
+            .clone();
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let time = Expr::Ident(self.m.time_slot());
+        let time = if divisor == Expr::Literal("64'd1".into()) {
+            time
+        } else {
+            let half = binary(
+                divisor.clone(),
+                BinaryOp::Shr,
+                Expr::Literal("64'd1".into()),
+            );
+            let rounds_up = binary(
+                binary(time.clone(), BinaryOp::Mod, divisor.clone()),
+                BinaryOp::Ge,
+                half,
+            );
+            binary(
+                binary(time, BinaryOp::Div, divisor),
+                BinaryOp::Add,
+                Expr::Resize {
+                    expr: Box::new(rounds_up),
+                    width: 64,
+                    signed: false,
+                },
+            )
+        };
+        Ok(match function {
+            sv::ir::SystemFunction::Stime => Expr::Resize {
+                expr: Box::new(time),
+                width: 32,
+                signed: false,
+            },
+            _ => time,
+        })
     }
 
     /// IEEE 1800-2023 20.14.1 and Annex N: `$random` is
@@ -2825,7 +2890,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut private_locals = HashMap::default();
         let unit = seal_builder(self.b).into_map_addr(&mut |addr| {
             let id = addr.var_id;
-            if !self.m.is_hidden(id) || self.m.created.contains(&id) {
+            if !self
+                .m
+                .variables
+                .get(&id)
+                .is_some_and(SvVariable::is_scratch)
+                || self.m.created.contains(&id)
+            {
                 return id;
             }
             *private_locals.entry(id).or_insert_with(|| {

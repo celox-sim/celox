@@ -13,7 +13,7 @@ use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
     InitialStateData, InitialStateValue, ModuleId, NbaSite, PROCESS_DELAY_WIDTH,
     PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TIME_SLOT_WIDTH, TriggerSet, UnaryOp, VarAtomBase,
     WORKING_REGION, WaitSite,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
@@ -44,6 +44,8 @@ mod procedural;
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
 const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
+/// The name of a module's [`SimModule::time_slot`].
+const TIME_SLOT: &str = "$time";
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrontendError {
@@ -90,6 +92,12 @@ impl SvVariable {
             source: self.source.clone(),
             module_affiliated: !self.hidden,
         }
+    }
+
+    /// A hidden variable other than the time slot, whose value the lowered
+    /// code computes. The time slot is state the scheduler writes.
+    fn is_scratch(&self) -> bool {
+        self.hidden && self.path != [TIME_SLOT]
     }
 }
 
@@ -2095,6 +2103,7 @@ fn lower_module_with_overrides(
             counter_slots: Vec::new(),
             wait_sites,
             nba_sites,
+            time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
         variables,
         port_order,
@@ -2513,6 +2522,8 @@ pub(crate) fn attach_instance_glue(
             .variables
             .insert(id, parent_variables[&id].to_symbolic_variable());
     }
+    // Combinational processes may read the time too.
+    module.time_slot = signal_names.get(TIME_SLOT).copied();
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -2942,7 +2953,7 @@ fn lower_comb_processes(
                 continue;
             }
         }
-        if pm.uses_random(process.body()) {
+        if pm.reads_simulation_state(process.body()) {
             pm.runtime_event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
@@ -4708,9 +4719,11 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
                 arena.alloc(SLTNode::Binary(count, op, one)).ok()?
             }
         }
-        // The random number functions need process state, and the analyzer
-        // folds the other functions to constants.
-        SystemFunction::Random
+        // The random number and time functions need process state, and the
+        // analyzer folds the other functions to constants.
+        SystemFunction::Time
+        | SystemFunction::Stime
+        | SystemFunction::Random
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
         | SystemFunction::Timeunit

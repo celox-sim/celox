@@ -18,6 +18,10 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    /// `$time` (20.3.1).
+    Time,
+    /// `$stime` (20.3.2).
+    Stime,
     /// `$timeunit` (20.4.2).
     Timeunit,
     /// `$timeprecision` (20.4.2).
@@ -72,6 +76,8 @@ impl SystemFunction {
     /// The name, with its leading `$`.
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Time => "$time",
+            Self::Stime => "$stime",
             Self::Timeunit => "$timeunit",
             Self::Timeprecision => "$timeprecision",
             Self::Signed => "$signed",
@@ -125,6 +131,13 @@ impl SystemFunction {
         matches!(self, Self::Random | Self::Urandom | Self::UrandomRange)
     }
 
+    /// Whether a call reads the state of the simulation: it has an effect,
+    /// or it returns the simulation time. Such a call is not a constant
+    /// expression, and a process evaluates it where it runs.
+    pub fn reads_simulation_state(self) -> bool {
+        self.is_effectful() || matches!(self, Self::Time | Self::Stime)
+    }
+
     /// Whether the call writes argument `position` back, as `$random(seed)`
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
@@ -144,7 +157,8 @@ impl SystemFunction {
             | Self::Countones => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
             Self::Random => Some((32, true)),
-            Self::Urandom | Self::UrandomRange => Some((32, false)),
+            Self::Urandom | Self::UrandomRange | Self::Stime => Some((32, false)),
+            Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
             | Self::Bits
@@ -446,8 +460,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     task(SystemTask::Stop, ProceduralAndInitial, 0, Some(1)),
     task(SystemTask::Exit, ProceduralAndInitial, 0, Some(0)),
     // 20.3 Simulation time system functions
-    unsupported("$time", Function),
-    unsupported("$stime", Function),
+    function(SystemFunction::Time, 0, Some(0)),
+    function(SystemFunction::Stime, 0, Some(0)),
     unsupported("$realtime", Function),
     // 20.4 Timescale system tasks and system functions
     task(SystemTask::Printtimescale, ProceduralAndInitial, 0, Some(1)),

@@ -5,6 +5,12 @@ use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath}
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
+/// Simulation time units in one time unit of a timed case. A case names
+/// times in the design's time unit, which is the default 1 ns because timed
+/// cases declare no scale, and a `Simulation` counts the global precision,
+/// the default 1 ps.
+const UNIT: u64 = 1000;
+
 /// A timed case: the design's own processes and clocks run in a
 /// [`Simulation`]. A host write is settled at the current time by the next
 /// run operation, read, eval or output collection.
@@ -138,16 +144,16 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn run_until(&mut self, time: u64) -> Result<()> {
-        let now = self.sim.time();
+        let now = self.sim.time() / UNIT;
         if time < now {
             return Err(format!("run_until {time}: the simulation is already at {now}").into());
         }
-        self.sim.run_until(time)?;
+        self.sim.run_until(time * UNIT)?;
         self.capture_events()?;
         if self.finished {
             return Err(format!(
                 "run_until {time}: the design finished the simulation at {}",
-                self.sim.time()
+                self.sim.time() / UNIT
             )
             .into());
         }
