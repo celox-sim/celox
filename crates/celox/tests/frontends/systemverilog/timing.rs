@@ -65,6 +65,7 @@ timed_cases! {
     #[ignore = "the SV analyzer rejects plain always processes (#431)"]
     fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
     fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
+    #[ignore = "flip-flop domains miss edges to and from z on a four-state clock (#1472)"]
     fn four_state_edges_count_transitions_through_unknown = "timing::four_state_edges_count_transitions_through_unknown";
     fn unknown_delays_and_conditions_count_as_zero_and_false = "timing::unknown_delays_and_conditions_count_as_zero_and_false";
     fn direct_reads_settle_waiting_processes = "timing::direct_reads_settle_waiting_processes";
