@@ -25,9 +25,11 @@ use crate::{AnalyzerError, system_functions, typecheck};
 mod array_compatibility;
 mod array_parameters;
 mod assignment_analysis;
+mod bound_patterns;
 mod case;
 mod casts;
 mod comb_process;
+pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
 mod constant_folding;
@@ -205,6 +207,7 @@ pub struct Source {
 pub(crate) struct ModuleParameterBindings<'a> {
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
+    pub patterns: &'a [(String, BoundPattern)],
 }
 
 impl Source {
@@ -293,6 +296,7 @@ impl Source {
             ModuleParameterBindings {
                 values: parameter_overrides,
                 types: &[],
+                patterns: &[],
             },
             extra_interfaces,
             &packages,
@@ -329,6 +333,11 @@ impl Source {
                     )?;
                     imported.type_parameter_bindings =
                         type_parameters::bind(node.clone(), syntax_tree, bindings.types)?;
+                    imported.pattern_parameter_bindings = type_parameters::bind_patterns(
+                        node.clone(),
+                        syntax_tree,
+                        bindings.patterns,
+                    )?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -1070,6 +1079,7 @@ impl Module {
         // A package keeps its symbols for the scopes that use it.
         let symbols = is_package.then(|| scope::ScopeSymbols {
             type_parameter_bindings: HashMap::default(),
+            pattern_parameter_bindings: HashMap::default(),
             const_env: const_env.clone(),
             parameter_values: parameter_values.clone(),
             parameters: parameters.clone(),
@@ -1579,7 +1589,7 @@ pub struct ParameterOverride {
     value: Option<ConstExpr>,
     /// The data type resolved in the instantiating scope.
     bound_type: Option<Type>,
-    pattern_text: Option<String>,
+    bound_pattern: Option<BoundPattern>,
 }
 
 impl ParameterOverride {
@@ -1588,7 +1598,7 @@ impl ParameterOverride {
             name,
             value,
             bound_type: None,
-            pattern_text: None,
+            bound_pattern: None,
         }
     }
 
@@ -1597,13 +1607,13 @@ impl ParameterOverride {
             name,
             value: None,
             bound_type: Some(bound_type),
-            pattern_text: None,
+            bound_pattern: None,
         }
     }
 
     /// A constant assignment pattern, evaluated in the caller scope.
-    pub fn pattern_text(&self) -> Option<&str> {
-        self.pattern_text.as_deref()
+    pub fn bound_pattern(&self) -> Option<&BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn name(&self) -> &str {
@@ -2214,7 +2224,7 @@ struct FunctionLocalType {
     is_2state: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Ident(String),
     Literal(String),
@@ -2263,7 +2273,7 @@ pub enum Expr {
 }
 
 /// One item of an `inside` set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InsideItem {
     /// A value matched with wildcard equality (`==?`).
     Value(Expr),

@@ -19,6 +19,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -42,6 +43,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -65,6 +67,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -88,6 +91,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -215,6 +219,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },
@@ -238,6 +243,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },
@@ -267,6 +273,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
@@ -290,6 +297,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
@@ -313,9 +321,58 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "name": "hierarchy::parameter_patterns_preserve_enclosing_expressions",
+      "category": "Hierarchy",
+      "expectation": "Simulation",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
+      "known_issue": {
+        "id": "sv_icarus_syntax",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects syntax used by these designs: selects of concatenations and replications (IEEE 1800-2023 A.8.4, primary), keyed and typed assignment patterns, packed-structure parameter declarations, and parameter type declarations in generate blocks.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
+    },
+    {
+      "name": "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings",
+      "category": "Hierarchy",
+      "expectation": "Simulation",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "detail": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+      "known_issue": {
+        "id": "sv_icarus_unpacked_array_parameters",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 reports that unpacked array parameters are not supported (IEEE 1800-2023 6.20.2) and rejects the typed assignment pattern of a struct parameter. Verilator passes the struct-parameter case; its internal error on the $isunbounded array query is recorded separately.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "phase": "skip",
+      "status": "ignored"
     }
   ]
 }
