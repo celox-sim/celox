@@ -1,1 +1,1 @@
-Address PR #1506 CI failure after #1462 merged: synchronize with master and give delayed host API regressions an explicit equal time unit and precision so #5 and scheduler tick 5 agree.
+Fix PR #1506 CI failure after #1462 merged: declare equal 1 ns time unit and precision in all four delayed host API regressions. Reproduced the four failures on latest master, then passed all 26 related tests with CI features and nextest CI profile.
