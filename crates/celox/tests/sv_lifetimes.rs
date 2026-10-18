@@ -247,11 +247,34 @@ fn output_arguments_and_loop_exits_write_static_locals() {
 
 #[test]
 fn interfaces_keep_their_default_lifetime() {
-    let detail = error(
-        "interface automatic I; logic [7:0] v; endinterface
-         module Top(output logic [7:0] y); I i(); assign i.v = 8'd1; assign y = i.v; endmodule",
+    // IEEE 1800-2023 6.21: the interface's default lifetime reaches its
+    // procedural locals. Lowering the original declaration preserves it.
+    assert_eq!(
+        ticks(
+            "interface automatic I;
+               logic clk; logic [7:0] v;
+               always_ff @(posedge clk) begin int c = 0; c++; v <= c; end
+             endinterface
+             module Top(input logic clk, output logic [7:0] y);
+               I i(); assign i.clk = clk; assign y = i.v;
+             endmodule",
+            3,
+        ),
+        [1, 1, 1],
     );
-    assert!(detail.contains("default lifetime"), "{detail}");
+    assert_eq!(
+        ticks(
+            "interface I;
+               logic clk; logic [7:0] v;
+               always_ff @(posedge clk) begin static int c = 0; c++; v <= c; end
+             endinterface
+             module Top(input logic clk, output logic [7:0] y);
+               I i(); assign i.clk = clk; assign y = i.v;
+             endmodule",
+            3,
+        ),
+        [1, 2, 3],
+    );
 }
 
 /// Review cases: static function results, initializer order, and the

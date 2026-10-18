@@ -1124,12 +1124,31 @@ fn printtimescale_rejects_invalid_operands_and_value_contexts() {
     build_error(
         "module Top(output int y); localparam UNUSED=$bits($printtimescale()); assign y=0; endmodule",
     );
-    let error = build_error(
+}
+
+#[test]
+fn printtimescale_in_interface_array_functions_keeps_each_instance_scope() {
+    let mut sim = initial_simulation(
         "interface I; function automatic int show(); $printtimescale; return 0; endfunction initial $display(\"%0d\", show()); endinterface module Top(output logic y); I info[2](); assign y=0; endmodule",
     );
-    assert!(
-        error.contains("uses its instance scope in `$printtimescale`"),
-        "{error}"
+    sim.step().unwrap();
+    let mut messages = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect::<Vec<_>>();
+    messages.sort();
+    assert_eq!(
+        messages,
+        [
+            "0",
+            "0",
+            "Time scale of (Top.info[0]) is 1ns / 1ps",
+            "Time scale of (Top.info[1]) is 1ns / 1ps",
+        ]
     );
 }
 

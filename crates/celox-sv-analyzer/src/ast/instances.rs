@@ -14,6 +14,7 @@ pub(super) fn instances_from_module_node(
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for item in &active {
+        let _interface_scope = item.interface_scope();
         let ScopeItem::Module(node) = item.node else {
             continue;
         };
@@ -21,6 +22,17 @@ pub(super) fn instances_from_module_node(
             continue;
         }
         let _constant_functions = item.enter();
+        if let sv_parser::ModuleOrGenerateItem::Module(instance) = node
+            && identifier_locate(RefNode::ModuleIdentifier(&instance.nodes.1.nodes.0)).is_some_and(
+                |locate| {
+                    scope::imported()
+                        .interface_declarations
+                        .contains(&locate.offset)
+                },
+            )
+        {
+            continue;
+        }
         let start = instances.len();
         let dimensions = views.dimensions(item);
         instances_from_module_or_generate_item(
@@ -178,11 +190,25 @@ fn instances_from_module_instantiation(
                     })?;
                 Some(bounds)
             };
+        let imported = scope::imported();
+        let binding = identifier_locate(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0))
+            .and_then(|locate| imported.interface_instances.get(&locate.offset));
+        let mut parameter_names = parameter_names.clone();
+        let mut parameter_overrides = parameter_overrides.clone();
+        if let Some(binding) = binding {
+            parameter_names.extend(
+                binding
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone()),
+            );
+            parameter_overrides.extend(binding.parameters.iter().cloned());
+        }
         instances.push(Instance::new(
-            module_name.clone(),
+            binding.map_or_else(|| module_name.clone(), |binding| binding.module.clone()),
             name,
-            parameter_names.clone(),
-            parameter_overrides.clone(),
+            parameter_names,
+            parameter_overrides,
             condition.clone(),
             port_names,
             port_connections,
@@ -192,7 +218,7 @@ fn instances_from_module_instantiation(
     Ok(())
 }
 
-fn parameter_overrides_from_value_assignment(
+pub(super) fn parameter_overrides_from_value_assignment(
     assignment: Option<&sv_parser::ParameterValueAssignment>,
     syntax_tree: &SyntaxTree,
     interface: Option<&ModuleInterface>,
@@ -257,12 +283,15 @@ fn parameter_overrides_from_value_assignment(
     Ok(overrides)
 }
 
-fn port_connections_from_hierarchical_instance(
+pub(super) fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
+    let imported = scope::imported();
+    let binding = identifier_locate(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0))
+        .and_then(|locate| imported.interface_instances.get(&locate.offset));
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
         return Ok(Vec::new());
     };
@@ -289,6 +318,10 @@ fn port_connections_from_hierarchical_instance(
             let formal = ports
                 .get(position)
                 .ok_or_else(|| AnalyzerError::Unsupported("ordered port connection".to_string()))?;
+            if let Some(connections) = binding.and_then(|binding| binding.connections.get(formal)) {
+                lowered.extend(connections.iter().cloned());
+                continue;
+            }
             let Some(expr) = connection.nodes.1.as_ref() else {
                 continue;
             };
@@ -314,6 +347,12 @@ fn port_connections_from_hierarchical_instance(
                                 "named port connection identifier".to_string(),
                             )
                         })?;
+                if let Some(connections) =
+                    binding.and_then(|binding| binding.connections.get(&formal))
+                {
+                    lowered.extend(connections.iter().cloned());
+                    continue;
+                }
                 let actual_expr = match connection.nodes.3.as_ref() {
                     None => Some(Expr::Ident(formal.clone())),
                     Some(paren) => match paren.nodes.1.as_ref() {
@@ -377,6 +416,30 @@ pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Op
 /// scope here since classes are not supported. Otherwise it is the first
 /// identifier, as [`identifier_text`] gives.
 pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+    if let Some(RefNode::HierarchicalIdentifier(identifier)) =
+        unwrap_node!(node.clone(), HierarchicalIdentifier)
+        && identifier.nodes.0.is_none()
+        && !identifier.nodes.1.is_empty()
+        && identifier
+            .nodes
+            .1
+            .iter()
+            .all(|(_, indices, _)| indices.nodes.0.is_empty())
+    {
+        let mut path = identifier
+            .nodes
+            .1
+            .iter()
+            .map(|(name, _, _)| identifier_text(RefNode::Identifier(name), syntax_tree))
+            .collect::<Option<Vec<_>>>()?;
+        path.push(identifier_text(
+            RefNode::Identifier(&identifier.nodes.2),
+            syntax_tree,
+        )?);
+        if let Some(name) = scope::imported().interface_members.get(&path.join(".")) {
+            return Some(name.clone());
+        }
+    }
     let mut package = None;
     // The package scope precedes the identifier it qualifies, and contains
     // the package identifier itself.

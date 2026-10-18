@@ -44,9 +44,11 @@ mod generate;
 mod imports;
 mod inlining;
 mod instances;
+mod interface_ast;
 pub mod interfaces;
 mod lifetimes;
 pub(crate) mod module_index;
+mod native_interfaces;
 pub mod packages;
 mod packed_structs;
 mod parameters;
@@ -205,6 +207,7 @@ pub struct Source {
 
 /// Overrides supplied by one instantiation. Types have been resolved in its scope.
 pub(crate) struct ModuleParameterBindings<'a> {
+    pub declarations_only: bool,
     pub values: &'a HashMap<String, ConstExpr>,
     pub types: &'a [(String, Type)],
     pub patterns: &'a [(String, BoundPattern)],
@@ -294,6 +297,7 @@ impl Source {
             &index,
             module_name,
             ModuleParameterBindings {
+                declarations_only: false,
                 values: parameter_overrides,
                 types: &[],
                 patterns: &[],
@@ -321,7 +325,9 @@ impl Source {
             extra: extra_interfaces,
         };
         let mut modules = Vec::new();
-        for node in index.nodes(syntax_tree, module_name) {
+        let interface_plan = packages.interface_plan.modules.get(module_name);
+        let original_name = interface_plan.map_or(module_name, |plan| plan.original.as_str());
+        for node in index.nodes(syntax_tree, original_name) {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
@@ -331,6 +337,7 @@ impl Source {
                         packages,
                         packages.unit(path),
                     )?;
+                    imported.declarations_only = bindings.declarations_only;
                     imported.type_parameter_bindings =
                         type_parameters::bind(node.clone(), syntax_tree, bindings.types)?;
                     imported.pattern_parameter_bindings = type_parameters::bind_patterns(
@@ -338,6 +345,22 @@ impl Source {
                         syntax_tree,
                         bindings.patterns,
                     )?;
+                    if let Some(mut module) = native_interfaces::analyze_module(
+                        module,
+                        syntax_tree,
+                        path,
+                        packages,
+                        native_interfaces::Bindings {
+                            values: bindings.values,
+                            plan: interface_plan,
+                        },
+                        &interfaces,
+                        imported.clone(),
+                    )? {
+                        module.name = module_name.to_string();
+                        modules.push(module);
+                        continue;
+                    }
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
@@ -462,6 +485,26 @@ impl Module {
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
         imported: Arc<scope::ScopeSymbols>,
+    ) -> Result<Self, AnalyzerError> {
+        Self::from_scope_node_with_parameter_overrides(
+            node,
+            syntax_tree,
+            override_module_name,
+            parameter_overrides,
+            interfaces,
+            imported,
+            false,
+        )
+    }
+
+    fn from_scope_node_with_parameter_overrides<'a>(
+        node: impl Into<RefNode<'a>>,
+        syntax_tree: &SyntaxTree,
+        override_module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &InterfaceLookup<'_>,
+        imported: Arc<scope::ScopeSymbols>,
+        export_symbols: bool,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let is_package = matches!(node, RefNode::PackageDeclaration(_));
@@ -597,77 +640,92 @@ impl Module {
             );
         }
 
-        match reject_silently_ignored_constructs(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-            &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-            &parameter_value_env_with_imported(&parameters, &const_env, &imported),
-        ) {
-            Ok(()) => {}
-            // A parameter initializer may inspect a port or signal type
-            // through `$bits`/`$size`. Collect declarations only when that
-            // missing type metadata is the remaining validation failure, so
-            // unsupported constructs keep their original diagnostics.
-            Err(AnalyzerError::Unsupported(construct))
-                if construct == "constant cast expression" =>
-            {
-                let preliminary_ports =
-                    ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
-                let preliminary_signals =
-                    signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
-                extend_const_env_with_variable_types(
-                    &mut const_env,
-                    preliminary_ports
-                        .iter()
-                        .map(|port| (port.name(), port.r#type()))
-                        .chain(
-                            preliminary_signals
-                                .iter()
-                                .map(|signal| (signal.name(), signal.r#type())),
-                        ),
-                );
-                parameters = parameters_from_module_node(
-                    node.clone(),
-                    syntax_tree,
-                    &type_aliases,
-                    &const_env,
-                    applicable_parameter_overrides,
-                )?;
-                for parameter in &mut parameters {
-                    parameter.value = parameter.value.take().map(|value| {
-                        substitute_typed_parameter_literals(
-                            value,
-                            &enum_constants.numbers,
-                            &enum_constants.types,
-                        )
-                    });
+        if !imported.declarations_only {
+            match reject_silently_ignored_constructs(
+                node.clone(),
+                syntax_tree,
+                &const_env,
+                &type_aliases,
+                &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
+                &parameter_value_env_with_imported(&parameters, &const_env, &imported),
+            ) {
+                Ok(()) => {}
+                // A parameter initializer may inspect a port or signal type
+                // through `$bits`/`$size`. Collect declarations only when that
+                // missing type metadata is the remaining validation failure, so
+                // unsupported constructs keep their original diagnostics.
+                Err(AnalyzerError::Unsupported(construct))
+                    if construct == "constant cast expression" =>
+                {
+                    let preliminary_ports = ports_from_module_node(
+                        node.clone(),
+                        syntax_tree,
+                        &const_env,
+                        &type_aliases,
+                    )?;
+                    let preliminary_signals = signals_from_module_node(
+                        node.clone(),
+                        syntax_tree,
+                        &const_env,
+                        &type_aliases,
+                    )?;
+                    extend_const_env_with_variable_types(
+                        &mut const_env,
+                        preliminary_ports
+                            .iter()
+                            .map(|port| (port.name(), port.r#type()))
+                            .chain(
+                                preliminary_signals
+                                    .iter()
+                                    .map(|signal| (signal.name(), signal.r#type())),
+                            ),
+                    );
+                    parameters = parameters_from_module_node(
+                        node.clone(),
+                        syntax_tree,
+                        &type_aliases,
+                        &const_env,
+                        applicable_parameter_overrides,
+                    )?;
+                    for parameter in &mut parameters {
+                        parameter.value = parameter.value.take().map(|value| {
+                            substitute_typed_parameter_literals(
+                                value,
+                                &enum_constants.numbers,
+                                &enum_constants.types,
+                            )
+                        });
+                    }
+                    if name == override_module_name {
+                        apply_parameter_overrides(&mut parameters, parameter_overrides)?;
+                    }
+                    extend_const_env_with_parameters(&mut const_env, &parameters);
+                    type_aliases = type_aliases_from_module_node_with_env(
+                        node.clone(),
+                        syntax_tree,
+                        &const_env,
+                    )?;
+                    array_parameters = array_parameters::array_parameters_from_module_node(
+                        node.clone(),
+                        syntax_tree,
+                        &const_env,
+                        &type_aliases,
+                    )?;
+                    reject_silently_ignored_constructs(
+                        node.clone(),
+                        syntax_tree,
+                        &const_env,
+                        &type_aliases,
+                        &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
+                        &parameter_value_env_with_imported(&parameters, &const_env, &imported),
+                    )?;
                 }
-                if name == override_module_name {
-                    apply_parameter_overrides(&mut parameters, parameter_overrides)?;
-                }
-                extend_const_env_with_parameters(&mut const_env, &parameters);
-                type_aliases =
-                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
-                array_parameters = array_parameters::array_parameters_from_module_node(
-                    node.clone(),
-                    syntax_tree,
-                    &const_env,
-                    &type_aliases,
-                )?;
-                reject_silently_ignored_constructs(
-                    node.clone(),
-                    syntax_tree,
-                    &const_env,
-                    &type_aliases,
-                    &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                    &parameter_value_env_with_imported(&parameters, &const_env, &imported),
-                )?;
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         }
-        let ports = ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+        let mut ports =
+            ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+        ports.extend(imported.ports.iter().cloned());
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
             return Err(AnalyzerError::DuplicatePort {
@@ -920,52 +978,61 @@ impl Module {
             automatic: lifetimes::automatic_by_default(&node),
             statics: Vec::new(),
         };
-        let mut subroutines = procedural::subroutines_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &packed_dimensions,
-            &parameter_values,
-            &mut body_state,
-        )?;
-        let mut comb_processes = comb_processes_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &packed_dimensions,
-            &parameter_values,
-            &mut body_state,
-        )?
-        .into_iter()
-        .map(|process| {
-            substitute_process_constants_with_parameter_literals(
-                process,
-                &const_env,
-                &parameter_values,
-            )
-        })
-        .collect::<Vec<_>>();
-        let mut ff_processes = ff_processes_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &parameter_values,
-            &packed_dimensions,
-            &mut body_state,
-        )?;
-        let mut initial_processes = Vec::new();
-        for parameter in &array_parameters {
-            initial_processes.push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
-        }
-        initial_processes.extend(imported.initial_processes.iter().cloned());
-        initial_processes.extend(procedural::initial_processes_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &packed_dimensions,
-            &parameter_values,
-            &mut body_state,
-        )?);
+        let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
+            if imported.declarations_only {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            } else {
+                let subroutines = procedural::subroutines_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &packed_dimensions,
+                    &parameter_values,
+                    &mut body_state,
+                )?;
+                let mut comb_processes = comb_processes_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &packed_dimensions,
+                    &parameter_values,
+                    &mut body_state,
+                )?
+                .into_iter()
+                .map(|process| {
+                    substitute_process_constants_with_parameter_literals(
+                        process,
+                        &const_env,
+                        &parameter_values,
+                    )
+                })
+                .collect::<Vec<_>>();
+                let mut ff_processes = ff_processes_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &parameter_values,
+                    &packed_dimensions,
+                    &mut body_state,
+                )?;
+                comb_processes.extend(imported.comb_processes.iter().cloned());
+                ff_processes.extend(imported.ff_processes.iter().cloned());
+                let mut initial_processes = Vec::new();
+                for parameter in &array_parameters {
+                    initial_processes
+                        .push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
+                }
+                initial_processes.extend(imported.initial_processes.iter().cloned());
+                initial_processes.extend(procedural::initial_processes_from_module_node(
+                    node.clone(),
+                    syntax_tree,
+                    &const_env,
+                    &packed_dimensions,
+                    &parameter_values,
+                    &mut body_state,
+                )?);
+                (subroutines, comb_processes, ff_processes, initial_processes)
+            };
         // Static locals of the processes that keep their value are variables
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
@@ -1020,7 +1087,8 @@ impl Module {
             }
         }
         if let Some(signal) = signals.iter().find(|signal| {
-            signal.is_net()
+            !imported.declarations_only
+                && signal.is_net()
                 && !procedurally_written.contains(signal.name())
                 && !connected_nets.contains(signal.name())
         }) {
@@ -1078,7 +1146,8 @@ impl Module {
             .flat_map(|process| process.assignments().iter().cloned())
             .collect();
         // A package keeps its symbols for the scopes that use it.
-        let symbols = is_package.then(|| scope::ScopeSymbols {
+        let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+            declarations_only: imported.declarations_only,
             type_parameter_bindings: HashMap::default(),
             pattern_parameter_bindings: HashMap::default(),
             const_env: const_env.clone(),
@@ -1097,9 +1166,18 @@ impl Module {
             // A package's signals are its array parameters and constant
             // variables, initialized by its initial processes.
             signals: signals.clone(),
+            ports: Vec::new(),
             state_signals: Vec::new(),
             initial_processes: initial_processes.clone(),
+            comb_processes: comb_processes.clone(),
+            ff_processes: ff_processes.clone(),
             aliases: imported.aliases.clone(),
+            interface_members: imported.interface_members.clone(),
+            interface_types: imported.interface_types.clone(),
+            interface_arrays: imported.interface_arrays.clone(),
+            interface_scopes: imported.interface_scopes.clone(),
+            interface_declarations: imported.interface_declarations.clone(),
+            interface_instances: imported.interface_instances.clone(),
             generate_imports: HashMap::default(),
         });
         // The subroutines, locals and DPI imports of the packages the module

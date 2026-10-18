@@ -14,8 +14,9 @@ use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, syn
 /// remain local to each analysis. Like `sv-parser`'s tree, this value is confined
 /// to the parsing thread; consumers can share it there with [`std::rc::Rc`].
 pub struct ParsedSource {
+    code: std::rc::Rc<str>,
     path: PathBuf,
-    tree: sv_parser::SyntaxTree,
+    tree: std::rc::Rc<sv_parser::SyntaxTree>,
     index: ast::module_index::ModuleIndex,
 }
 
@@ -24,8 +25,9 @@ impl ParsedSource {
         let tree = syntax::parse_source(code, path)?;
         let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))?;
         Ok(Self {
+            code: code.into(),
             path: path.to_path_buf(),
-            tree,
+            tree: std::rc::Rc::new(tree),
             index,
         })
     }
@@ -41,7 +43,7 @@ impl ParsedSource {
             .iter()
             .cloned()
             .collect::<fxhash::FxHashSet<_>>();
-        for node in &self.tree {
+        for node in self.tree.as_ref() {
             let identifier = match node {
                 sv_parser::RefNode::InterfaceDeclarationAnsi(interface) => {
                     &interface.nodes.0.nodes.3
@@ -88,9 +90,39 @@ impl ParsedSource {
     ) -> Result<Packages, AnalyzerError> {
         let trees: Vec<_> = sources
             .iter()
-            .map(|source| (&source.tree, source.path.as_path()))
+            .map(|source| (source.tree.as_ref(), source.path.as_path()))
             .collect();
-        ast::with_call_sites(|| Packages::analyze_with_roots(&trees, roots))
+        ast::with_call_sites(|| {
+            let mut packages = Packages::analyze_with_roots(&trees, roots)?;
+            for source in sources {
+                for node in source.tree.as_ref() {
+                    if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
+                        && let Some(name) =
+                            ast::component_identifier(&declaration.nodes.0.nodes.3, &source.tree)
+                        && packages
+                            .interface_sources
+                            .insert(name.clone(), (source.tree.clone(), source.path.clone()))
+                            .is_some()
+                    {
+                        return Err(AnalyzerError::DuplicateModule { name });
+                    }
+                }
+            }
+            if !packages.interface_sources.is_empty()
+                && trees.iter().any(|(tree, _)| {
+                    tree.into_iter()
+                        .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
+                })
+            {
+                let sources = sources
+                    .iter()
+                    .map(|source| (source.code.as_ref(), source.path.as_path()))
+                    .collect::<Vec<_>>();
+                packages.interface_plan =
+                    std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
+            }
+            Ok(packages)
+        })
     }
 
     /// Analyze an instance using its value and caller-resolved type bindings.
@@ -112,6 +144,37 @@ impl ParsedSource {
             interfaces,
             packages,
         )
+    }
+
+    /// Inspect declaration shapes without lowering procedures or tasks.
+    /// The returned IR is metadata for tooling, not an executable simulation.
+    pub fn analyze_module_declarations(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        packages: &Packages,
+    ) -> Result<Ir, AnalyzerError> {
+        let overrides = overrides
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone().into()))
+            .collect();
+        ast::with_call_sites(|| {
+            let source = ast::Source::from_indexed_syntax_module(
+                &self.tree,
+                &self.path,
+                &self.index,
+                module_name,
+                ast::ModuleParameterBindings {
+                    declarations_only: true,
+                    values: &overrides,
+                    types: &[],
+                    patterns: &[],
+                },
+                &ModuleInterfaces::default(),
+                packages,
+            )?;
+            analyze::analyze_source(source)
+        })
     }
 
     /// Analyze without rewriting the source, retaining literal override
@@ -146,6 +209,7 @@ impl ParsedSource {
                 &self.index,
                 module_name,
                 ast::ModuleParameterBindings {
+                    declarations_only: false,
                     values: &overrides,
                     types: type_overrides,
                     patterns: pattern_overrides,
@@ -586,5 +650,427 @@ mod pattern_override_tests {
                 )
                 .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod native_interface_tests {
+    use super::*;
+
+    #[test]
+    fn binds_generated_interface_instances_in_their_own_scopes() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4);
+                timeunit 1ns / 1ps;
+                logic [W-1:0] value;
+            endinterface
+            module Child(Bus bus);
+                timeunit 1us / 1ns;
+                logic [7:0] copy;
+                assign copy = bus.value;
+            endmodule
+            module Top(output int u);
+                timeunit 1us / 1ns;
+                for (genvar i=0; i<2; i++) begin : g
+                    Bus #(.W(i+3)) local_info();
+                    assign local_info.value = i;
+                    Child child(.bus(local_info));
+                end
+                if (1) begin : h
+                    Bus local_info();
+                    assign local_info.value = 1;
+                    assign u = $timeunit(local_info);
+                end
+            endmodule
+            "#,
+            Path::new("native_generated_interface.sv"),
+        )
+        .unwrap();
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        let top = &ir.modules()[0];
+        assert_eq!(top.instances().len(), 2);
+        for (index, instance) in top.instances().iter().enumerate() {
+            assert_eq!(
+                instance.port_connections()[0].actual_expr(),
+                Some(&ir::Expr::Ident(format!("g[{index}].local_info$value")))
+            );
+        }
+        for (name, width) in [
+            ("g[0].local_info$value", 3),
+            ("g[1].local_info$value", 4),
+            ("h.local_info$value", 4),
+        ] {
+            assert_eq!(
+                top.signals()
+                    .iter()
+                    .find(|signal| signal.name() == name)
+                    .unwrap()
+                    .r#type()
+                    .resolved_width(),
+                Some(width)
+            );
+        }
+        assert_eq!(top.assignments().len(), 4);
+    }
+
+    #[test]
+    fn resolves_interface_parameters_in_array_and_select_bounds() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Cfg #(parameter N = 3); endinterface
+            interface Lane; logic [3:0] data; endinterface
+            module Top(input logic [7:0] a, output logic [3:0] y);
+                Cfg cfg();
+                Lane rows[cfg.N]();
+                assign y = a[cfg.N:0];
+            endmodule
+            "#,
+            Path::new("native_interface_bounds.sv"),
+        )
+        .unwrap();
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        let top = &ir.modules()[0];
+        assert_eq!(top.signals().len(), 3);
+        assert_eq!(top.signals()[2].name(), "rows[2]$data");
+        assert_eq!(top.assignments().len(), 1);
+    }
+
+    #[test]
+    fn keeps_interface_timescales_and_instance_names_in_original_syntax() {
+        let source = ParsedSource::parse(
+            r#"
+            `define UNIT $timeunit()
+            interface ClockInfo;
+                timeunit 100ps / 10fs;
+                localparam U = `UNIT;
+                initial $printtimescale;
+            endinterface
+            module Top;
+                timeunit 1ms / 1us;
+                ClockInfo info[1:2]();
+                localparam U = `UNIT;
+            endmodule
+            "#,
+            Path::new("native_interface_timescales.sv"),
+        )
+        .unwrap();
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        let top = &ir.modules()[0];
+        assert_eq!(
+            top.parameters()
+                .iter()
+                .find(|p| p.name() == "U")
+                .unwrap()
+                .resolved_value(),
+            Some(-3)
+        );
+        let messages = top
+            .initial_processes()
+            .iter()
+            .flat_map(|process| process.body())
+            .filter_map(|statement| {
+                if let ir::Stmt::SystemTask { args, .. } = statement
+                    && let Some(ir::SystemTaskArg::Str(message)) = args.first()
+                {
+                    Some(message.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [
+                "Time scale of (%m.info[1]) is 100ps / 10fs",
+                "Time scale of (%m.info[2]) is 100ps / 10fs",
+            ]
+        );
+    }
+
+    #[test]
+    fn binds_generic_child_interfaces_without_cloning_source() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4);
+                logic [W-1:0] request, response;
+            endinterface
+            module Child(interface bus);
+                assign bus.response = bus.request + 1;
+            endmodule
+            module Top(input logic [7:0] a, output logic [7:0] y);
+                Bus #(.W(8)) bus();
+                Child child(.bus(bus));
+                assign bus.request = a;
+                assign y = bus.response;
+            endmodule
+        "#,
+            Path::new("generic.sv"),
+        )
+        .unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let ir = source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        let instance = &ir.modules()[0].instances()[0];
+        assert_eq!(instance.port_connections().len(), 2);
+        let overrides = instance
+            .parameter_overrides()
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name().to_string(),
+                    parameter.value().unwrap().clone(),
+                )
+            })
+            .collect();
+        let child = source
+            .analyze_module(
+                instance.module_name(),
+                &overrides,
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        assert_eq!(child.modules()[0].name(), instance.module_name());
+        assert_eq!(child.modules()[0].ports().len(), 2);
+        assert!(
+            child.modules()[0]
+                .ports()
+                .iter()
+                .all(|port| port.r#type().resolved_width() == Some(8))
+        );
+    }
+
+    #[test]
+    fn binds_modport_members_and_parameter_widths_without_source_elaboration() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4);
+                logic [W-1:0] request, response;
+                modport slave(input request, output response);
+            endinterface
+            module Child(Bus.slave bus);
+                assign bus.response = bus.request + 1;
+            endmodule
+        "#,
+            Path::new("modport.sv"),
+        )
+        .unwrap();
+        let overrides =
+            HashMap::from_iter([("bus$W".to_string(), ir::ConstExpr::Literal("8".to_string()))]);
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Child",
+                &overrides,
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        let module = &ir.modules()[0];
+        assert_eq!(module.ports().len(), 2);
+        assert!(module.signals().is_empty());
+        assert_eq!(module.ports()[0].name(), "bus$request");
+        assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+        assert_eq!(module.ports()[0].direction(), ir::PortDirection::Input);
+        assert_eq!(module.ports()[1].direction(), ir::PortDirection::Output);
+    }
+
+    #[test]
+    fn binds_interface_processes_from_another_compilation_unit() {
+        let bus = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4)(input logic clk);
+                logic [W-1:0] request, response;
+                initial response = 1;
+                always_ff @(posedge clk) response <= request + 1;
+            endinterface
+        "#,
+            Path::new("bus.sv"),
+        )
+        .unwrap();
+        let top = ParsedSource::parse(
+            r#"
+            module Top(input logic clk, input logic [7:0] a, output logic [7:0] y);
+                Bus #(.W(8)) bus(.clk(clk));
+                assign bus.request = a;
+                assign y = bus.response;
+            endmodule
+        "#,
+            Path::new("top.sv"),
+        )
+        .unwrap();
+        let packages = ParsedSource::analyze_packages(&[&bus, &top]).unwrap();
+        let ir = top
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        let module = &ir.modules()[0];
+        assert!(module.instances().is_empty());
+        assert_eq!(module.ff_processes().len(), 1);
+        assert_eq!(module.ff_processes()[0].events()[0].signal(), "bus$clk");
+        assert_eq!(module.initial_processes().len(), 1);
+        assert_eq!(module.comb_processes().len(), 3);
+    }
+
+    #[test]
+    fn binds_interface_instances_without_source_elaboration() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4);
+                logic [W-1:0] request, response;
+                assign response = request + 1;
+            endinterface
+            module Top #(parameter N = 8)(input logic [N-1:0] a, output logic [N-1:0] y);
+                Bus #(.W(N)) bus();
+                assign bus.request = a;
+                assign y = bus.response;
+            endmodule
+        "#,
+            Path::new("native_interface.sv"),
+        )
+        .unwrap();
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        let top = &ir.modules()[0];
+        assert!(top.instances().is_empty());
+        assert_eq!(
+            top.signals()
+                .iter()
+                .find(|signal| signal.name() == "bus$request")
+                .unwrap()
+                .r#type()
+                .resolved_width(),
+            Some(8)
+        );
+        assert_eq!(top.comb_processes().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+
+    #[test]
+    fn inspects_timed_module_shapes_without_editing_procedure_tokens() {
+        let source = ParsedSource::parse(
+            r#"
+            module Top #(parameter W = 3)(input logic [2*W-1:0] a, output logic [W-1:0] y);
+                logic [W-1:0] memory[2];
+                wire unused;
+                task automatic delayed(); #2 y = a; endtask
+                initial forever begin #1; delayed(); end
+                final $display("done");
+            endmodule
+            "#,
+            Path::new("timed_declarations.sv"),
+        )
+        .unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let overrides =
+            HashMap::from_iter([("W".to_string(), ir::ConstExpr::Literal("9".to_string()))]);
+        assert!(
+            source
+                .analyze_module(
+                    "Top",
+                    &overrides,
+                    &[],
+                    &[],
+                    &ModuleInterfaces::default(),
+                    &packages
+                )
+                .is_err()
+        );
+        let ir = source
+            .analyze_module_declarations("Top", &overrides, &packages)
+            .unwrap();
+        let module = &ir.modules()[0];
+        assert_eq!(module.ports()[0].r#type().resolved_width(), Some(18));
+        assert_eq!(module.ports()[1].r#type().resolved_width(), Some(9));
+        assert_eq!(
+            module
+                .signals()
+                .iter()
+                .find(|s| s.name() == "memory")
+                .unwrap()
+                .r#type()
+                .resolved_width(),
+            Some(18)
+        );
+        assert!(module.initial_processes().is_empty());
+        assert!(module.ff_processes().is_empty());
+        assert!(module.comb_processes().is_empty());
+    }
+
+    #[test]
+    fn inspects_interfaces_with_timed_processes_from_original_declarations() {
+        let source = ParsedSource::parse(
+            r#"
+            interface Bus #(parameter W = 4);
+                logic [W-1:0] value;
+                initial forever #1 value = value + 1;
+            endinterface
+            module Top(output logic [7:0] y);
+                Bus #(.W(8)) bus();
+                assign y = bus.value;
+            endmodule
+            "#,
+            Path::new("timed_interface_declarations.sv"),
+        )
+        .unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let ir = source
+            .analyze_module_declarations("Top", &HashMap::default(), &packages)
+            .unwrap();
+        let module = &ir.modules()[0];
+        assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+        assert_eq!(
+            module
+                .signals()
+                .iter()
+                .find(|s| s.name() == "bus$value")
+                .unwrap()
+                .r#type()
+                .resolved_width(),
+            Some(8)
+        );
+        assert!(module.initial_processes().is_empty());
     }
 }

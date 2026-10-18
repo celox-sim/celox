@@ -119,7 +119,7 @@ struct AnalyzedSvModule {
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
     /// The packages declared in all sources, analyzed once.
-    packages: std::sync::Arc<sv::Packages>,
+    packages: std::rc::Rc<sv::Packages>,
 }
 
 #[derive(Clone)]
@@ -212,38 +212,14 @@ pub fn interface_signatures_for(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    let (mut prototypes, signature_sources) = sv::interface_prototypes(sources)?;
-    if let Some(names) = names {
-        prototypes.retain(|prototype| names.contains(&prototype.name));
-    }
+    let prototypes = sv::interface_prototypes_for(sources, names)?;
     if prototypes.is_empty() {
         return Ok(Vec::new());
     }
-    let probe_path = Path::new("<interface-signatures>");
-    let mut all_sources = signature_sources
-        .iter()
-        .zip(sources)
-        .map(|(code, (_, path))| (code.as_str(), *path))
-        .collect::<Vec<_>>();
-    all_sources.extend(
-        prototypes
-            .iter()
-            .map(|prototype| (prototype.probe_source.as_str(), probe_path)),
-    );
-    let probe_roots = prototypes
-        .iter()
-        .map(|prototype| prototype.probe_name.as_str())
-        .collect::<Vec<_>>();
-    let analyzed = analyze_sources(&all_sources, &probe_roots)?;
     prototypes
         .into_iter()
         .map(|prototype| {
-            let lowered = specialize_module(
-                &analyzed[&prototype.probe_name],
-                &LoweredSvModuleKey::base(prototype.probe_name),
-                false,
-                false,
-            )?;
+            let lowered = lower_module(&prototype.module, false, true, false)?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -361,25 +337,8 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::elaborate_interfaces_with_metadata_and_roots(
-        sources,
-        &bindings,
-        selected_roots.as_deref(),
-    )?;
-    let elaborated = elaboration.sources;
-    let root_names = elaboration.root_names;
-    let elaborated_sources: Vec<(&str, &Path)>;
-    let sources = match &elaborated {
-        Some(codes) => {
-            elaborated_sources = codes
-                .iter()
-                .zip(sources)
-                .map(|(code, (_, path))| (code.as_str(), *path))
-                .collect();
-            elaborated_sources.as_slice()
-        }
-        None => sources,
-    };
+    let elaboration = sv::plan_interfaces(sources, &bindings)?;
+    let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
         .iter()
@@ -417,14 +376,19 @@ fn analyze_sources_with_requests(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = match roots {
+    let mut packages = match roots {
         Some(roots) => {
             let roots = roots
                 .iter()
                 .map(|root| {
                     root_names
                         .get(*root)
-                        .map(String::as_str)
+                        .map(|name| {
+                            elaboration
+                                .modules
+                                .get(name)
+                                .map_or(name.as_str(), |plan| plan.original.as_str())
+                        })
                         .or_else(|| {
                             requests
                                 .iter()
@@ -438,13 +402,24 @@ fn analyze_sources_with_requests(
         }
         None => sv::ParsedSource::analyze_packages(&parsed)?,
     };
-    let packages = std::sync::Arc::new(packages);
+    packages.set_interface_plan(elaboration.clone());
+    let packages = std::rc::Rc::new(packages);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
                 .into_iter()
                 .collect();
-        for module_name in source.module_names().iter().cloned() {
+        let mut module_names = source.module_names().to_vec();
+        module_names.extend(
+            elaboration
+                .modules
+                .iter()
+                .filter(|(name, plan)| {
+                    *name != &plan.original && source.module_names().contains(&plan.original)
+                })
+                .map(|(name, _)| name.clone()),
+        );
+        for module_name in module_names {
             if !declarations.is_empty() && foreign.roots.contains_key(&module_name) {
                 continue;
             }
@@ -456,12 +431,17 @@ fn analyze_sources_with_requests(
                 name,
                 AnalyzedSvModule {
                     interface_ports: elaboration
-                        .interface_ports
-                        .get(module_name.split('$').next().unwrap())
-                        .cloned()
+                        .modules
+                        .get(&module_name)
+                        .map(|plan| plan.ports.iter().map(|port| port.name.clone()).collect())
                         .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
-                        .get(&module_name)
+                        .get(
+                            elaboration
+                                .modules
+                                .get(&module_name)
+                                .map_or(module_name.as_str(), |plan| plan.original.as_str()),
+                        )
                         .copied()
                         .unwrap_or(true),
                     name: module_name,

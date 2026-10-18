@@ -19,6 +19,7 @@ pub(super) fn functions_from_module_node(
     {
         let _constant_functions = item.enter();
         let type_aliases = item.type_aliases(&module_type_aliases);
+        let _interface_scope = item.interface_scope();
         if let RefNode::TaskDeclaration(declaration) = child {
             let task_dimensions = views.dimensions(item);
             let const_env = &item.env;

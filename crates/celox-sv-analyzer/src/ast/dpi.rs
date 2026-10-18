@@ -20,6 +20,7 @@ pub(super) fn dpi_imports_from_module_node(
 ) -> Result<Vec<DpiImport>, AnalyzerError> {
     let mut imports = Vec::new();
     for item in generate::items(node, tree, const_env, type_aliases)? {
+        let _interface_scope = item.interface_scope();
         for child in item.node.node() {
             if let RefNode::DpiImportExport(declaration) = child {
                 imports.push(dpi_import(declaration, tree)?);

@@ -88,7 +88,7 @@ fn typed_pattern_type(
     Ok(r#type)
 }
 
-/// Serialize a typed constant pattern as positional values already converted
+/// Bind a typed constant pattern as positional values already converted
 /// to its caller-side type (IEEE 1800-2023 10.9). Packed values become
 /// literals; only unpacked dimensions need positional patterns.
 pub(super) fn constant_typed_pattern_value(
