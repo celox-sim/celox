@@ -1,0 +1,1 @@
+Address all five PR #1474 review findings: declaration/reference separation, enum and lexical collision scopes, lexical structure queries, caller type queries, and transitive/inherited port dependencies; add shared regressions and consistent Icarus evidence.
