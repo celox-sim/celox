@@ -241,10 +241,30 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   excludes them, and fails on selected-job failures or cancellations. Repository
   branch protection must require this check to make it a merge gate.
 
-The classifier selects CI jobs, not individual Rust tests. Selected Rust CI
-still runs the Celox workspace suite with CI features, doctests, default-feature
-checks, ARM64 backend checks, and the explicit cocotb test. Local validation
-uses the finer behavior-based matrix above.
+Ordinary PRs also scope Rust compilation and execution:
+
+- Library changes select the crate and its transitive consumers. Backend and
+  SV frontend changes narrow Celox integration tests to the affected variants;
+  shared implementation changes retain all affected variants.
+- A single package's integration test or recognized Insta snapshot changes
+  select only the corresponding test binaries, using Cargo `--test` as well
+  as a nextest filter. Shared helpers and fixtures retain the package's tests;
+  mixed library/test changes combine their requirements.
+- Clippy selects affected crates and test targets, including Lydite. Rust API
+  documentation and doctests select libraries reached through runtime/build
+  dependencies; dev-only consumers still run tests but do not rebuild their
+  API documentation. Test-only changes skip API documentation and doctests.
+- sv-tests conformance runs when the Celox library or its runtime/build
+  dependencies change, or its runner/expectations change. Test infrastructure
+  and downstream consumers do not select this separate release-mode build.
+- Python/cocotb setup runs only when VPI tests are selected.
+
+Queue drafts, merge groups, releases, `ci:full`, and daily/manual full runs
+retain the existing workspace tests, lint, documentation, sv-tests and platform
+coverage. Cargo manifest, lockfile, toolchain, unknown-path and failed scope
+analysis changes fall back to broad validation. Required checks permit skips
+only when explicitly unneeded and still reject failures and cancellations.
+Local validation uses the behavior-based matrix above.
 
 | Cadence | Coverage |
 | --- | --- |
