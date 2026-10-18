@@ -2270,6 +2270,29 @@ fn executor_call_traces_of_veryl_clock_domains_are_unchanged() {
 mod sv_traces {
     use super::*;
 
+    /// An `always` without a timing control repeats its statement forever at
+    /// time zero: the slot budget ends the step with an error instead of
+    /// hanging.
+    #[test]
+    fn an_always_without_timing_exhausts_the_slot_budget() {
+        let source = "module Top(output logic x); always x = ~x; endmodule";
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("spin.sv"))], "Top")
+                .build()
+                .unwrap();
+        sim.state.set_slot_budgets(256, 2);
+        let error = sim.run_until(0).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::RuntimeErrorCode::Runtime { message, .. }
+                    if message.contains("does not suspend")
+            ),
+            "{error}"
+        );
+        assert_eq!(sim.time(), 0);
+    }
+
     /// Clock and reset aliases, a combinationally gated clock, a register
     /// divided clock, both edges of one clock, and the timing suite's cases
     /// that Celox runs.
