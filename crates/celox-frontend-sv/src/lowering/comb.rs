@@ -1916,6 +1916,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.readmem(&mut store, frames, *format, args)?;
                 Ok(store)
             }
+            // IEEE 1800-2023 24.7: `$exit` outside a program block is
+            // ignored.
+            sv::ir::Stmt::SystemTask {
+                task: sv::ir::SystemTask::Exit,
+                ..
+            } => Ok(store),
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
@@ -3152,7 +3158,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Finish => RuntimeEventKind::Finish,
+            SystemTaskKind::Control(kind) => *kind,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
             SystemTaskKind::Assertion(kind) => *kind,
@@ -3169,8 +3175,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             })
         } else {
             match (&kind, condition) {
-                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
-                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+                (SystemTaskKind::Print(..) | SystemTaskKind::Control(_), None) => None,
+                (SystemTaskKind::Print(..) | SystemTaskKind::Control(_), Some((node, sources))) => {
                     observed.extend(sources);
                     Some(node)
                 }
@@ -3199,7 +3205,10 @@ impl<'p, 'a> Comb<'p, 'a> {
             effects.push(SLTForEffect::Event {
                 site_id,
                 guard,
-                emit_on_true: matches!(kind, SystemTaskKind::Print(..) | SystemTaskKind::Finish),
+                emit_on_true: matches!(
+                    kind,
+                    SystemTaskKind::Print(..) | SystemTaskKind::Control(_)
+                ),
                 args: captured.clone(),
                 fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
             });

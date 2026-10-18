@@ -202,7 +202,7 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
                             .unwrap_or_else(|_| message.escape_ascii().to_string())
                     ));
                 }
-                celox::RuntimeEvent::Finish => {}
+                celox::RuntimeEvent::Finish | celox::RuntimeEvent::Stop => {}
                 celox::RuntimeEvent::Missed { count } => {
                     return Err(format!("{count} runtime events were lost"));
                 }
@@ -215,7 +215,9 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     while !sim.is_finished() {
         let step = sim.step().map_err(|error| error.to_string());
         output(&mut sim)?;
-        if step?.is_none() {
+        // A batch run has no interactive mode to suspend into, so it ends at
+        // `$stop`, as `vvp -n` does.
+        if step?.is_none() || sim.is_stopped() {
             break;
         }
     }

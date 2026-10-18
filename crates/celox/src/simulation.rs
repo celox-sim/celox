@@ -244,6 +244,9 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Save the design state, simulation time, clocks and pending events.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
+        if self.state.is_suspended() {
+            return Err(CheckpointError::Stopped);
+        }
         Ok(SimulationCheckpoint {
             simulator: self.simulator.checkpoint()?,
             schedule: self.state.snapshot(),
@@ -254,6 +257,9 @@ impl<B: SimBackend> Simulation<B> {
     /// Save the value of every state object by path, together with the
     /// simulation time, clocks and pending events by name.
     pub fn save_state(&mut self) -> Result<celox_runtime::StateFile, StateError> {
+        if self.state.is_suspended() {
+            return Err(CheckpointError::Stopped.into());
+        }
         let mut file = self.simulator.save_state()?;
         // Settling for the file may have executed a `$finish`.
         self.sync_finish();
@@ -421,6 +427,9 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Advance time and run until `end_time` (inclusive).
     /// Targets earlier than the current time leave time and state unchanged.
+    /// A process that executes `$stop` returns control early, after the time
+    /// slot of the stop, with [`Self::is_stopped`] set; calling this again
+    /// continues.
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
         if end_time < self.state.time() {
             // Time only moves forward. Moving the timestamp back while the
@@ -433,6 +442,9 @@ impl<B: SimBackend> Simulation<B> {
                 break;
             }
             self.step_until(end_time)?;
+            if self.state.is_stopped() {
+                return Ok(());
+            }
         }
         if self.state.is_finished() {
             return Ok(());
@@ -444,7 +456,8 @@ impl<B: SimBackend> Simulation<B> {
 
     /// Like [`Self::run_until`], but takes at most `max_steps` steps.
     /// Returns `false`, with the simulation at the time of its last step,
-    /// when another step would be needed to reach `end_time`.
+    /// when another step would be needed to reach `end_time`, including when
+    /// a step stopped at `$stop`.
     pub fn run_until_bounded(
         &mut self,
         end_time: u64,
@@ -463,9 +476,12 @@ impl<B: SimBackend> Simulation<B> {
             }
             self.step_until(end_time)?;
             steps += 1;
+            if self.state.is_stopped() {
+                return Ok(false);
+            }
         }
         self.run_until(end_time)?;
-        Ok(true)
+        Ok(!self.state.is_stopped())
     }
 
     /// Whether a process of the design requested the end of the simulation.
@@ -473,6 +489,15 @@ impl<B: SimBackend> Simulation<B> {
     /// stops at the time of the request.
     pub fn is_finished(&self) -> bool {
         self.state.is_finished()
+    }
+
+    /// Whether the last [`Self::step`] or [`Self::run_until`] returned early
+    /// because a process of the design executed `$stop` (IEEE 1800-2023
+    /// 20.2). The simulation is suspended in the middle of that time; the
+    /// next step continues it after the `$stop`. Checkpoints and state files
+    /// cannot be taken while it is suspended.
+    pub fn is_stopped(&self) -> bool {
+        self.state.is_stopped()
     }
 
     /// Returns the current simulation time.

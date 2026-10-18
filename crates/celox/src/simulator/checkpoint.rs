@@ -132,6 +132,13 @@ pub enum CheckpointError {
          switch to a new VCD file first"
     )]
     VcdRewind { time: u64, last_dumped: u64 },
+    /// A `$stop` suspended the simulation in the middle of a time slot,
+    /// whose progress a checkpoint does not capture.
+    #[error(
+        "the simulation is suspended at `$stop` in the middle of a time step; \
+         continue it before taking a checkpoint"
+    )]
+    Stopped,
 }
 
 impl<B: SimBackend> Simulator<B> {
