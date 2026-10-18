@@ -1,3 +1,5 @@
 Address PR #1462 review: publish restored simulation time before combinational settling, reject overflow while scaling delays, and resolve conflicts against current master.
 
 Address the latest PR #1462 review: scan discarded calls and folded/void bodies, lower time-reading port actuals through guarded continuous assignments, and require backend publication in the public time setter.
+
+Address PR #1462 follow-up review: detect simulation-state reads through port-actual subroutine bodies and omitted defaults, with package-scope and transitive-call regressions.
