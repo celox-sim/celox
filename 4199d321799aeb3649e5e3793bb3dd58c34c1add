@@ -1,0 +1,1 @@
+Address PR #1506 review: retain host-created stable derived-clock edges alongside saved pending edges through inactive-region processing.
