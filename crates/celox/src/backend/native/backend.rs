@@ -427,6 +427,11 @@ pub struct NativeProgramImage {
 }
 
 impl NativeProgramImage {
+    /// Physical duration of one tick, retained in serialized native images.
+    pub fn time_precision(&self) -> celox_design::TimePrecision {
+        self.design.time_precision
+    }
+
     /// Remap filesystem paths in the image's runtime and diagnostic metadata.
     /// This permits relative paths in stored artifacts and rebinding on load.
     /// Machine code and design-authored literal strings are not modified.

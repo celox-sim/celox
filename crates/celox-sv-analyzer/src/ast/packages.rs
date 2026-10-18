@@ -102,6 +102,16 @@ impl Package {
 }
 
 impl Packages {
+    /// Global simulation precision, as a power of ten seconds (IEEE 1800-2023 3.14.3).
+    pub fn global_time_precision(&self) -> i32 {
+        self.timescales.global_precision()
+    }
+
+    /// Resolved local time unit and precision of a module or package.
+    pub fn scope_time_scale(&self, name: &str) -> Option<(i32, i32)> {
+        self.timescales.scope_scale(name)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }

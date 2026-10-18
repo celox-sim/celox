@@ -103,6 +103,11 @@ impl NativeProgramInstance {
         unsafe { Self::from_image(appended.image) }
     }
 
+    /// Physical duration of one tick in the attached design.
+    pub fn time_precision(&self) -> celox_design::TimePrecision {
+        self.shared.program_image().time_precision()
+    }
+
     /// Elaborated hierarchy and signal metadata embedded by the compiler.
     pub fn reflection(&self) -> &DesignReflection {
         self.shared.program_image().reflection()

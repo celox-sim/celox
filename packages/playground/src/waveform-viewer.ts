@@ -51,7 +51,7 @@ export function generateVcdText(trace: VcdTrace): string {
 	const L: string[] = [];
 	L.push("$date", `  ${new Date().toISOString()}`, "$end");
 	L.push("$version celox-playground $end");
-	L.push("$timescale 1ns $end");
+	L.push("$timescale 1ps $end");
 	L.push("$scope module top $end");
 	const ids = trace.signals.map((_, i) => vcdId(i));
 	for (let i = 0; i < trace.signals.length; i++) {

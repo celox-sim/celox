@@ -523,6 +523,17 @@ pub(crate) fn generated_source_declarations(
 }
 
 impl Timescales {
+    pub(super) fn scope_scale(&self, name: &str) -> Option<(i32, i32)> {
+        let scope = self
+            .definitions
+            .get(name)
+            .or_else(|| self.packages.get(name))?;
+        Some((scope.scale.unit, scope.scale.precision))
+    }
+
+    pub(super) fn global_precision(&self) -> i32 {
+        self.precision.unwrap_or(DEFAULT.precision)
+    }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
         let local = Self::collect(&[(tree, Path::new(""))])?;
         let specified = [
