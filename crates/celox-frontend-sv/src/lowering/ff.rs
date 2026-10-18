@@ -11,7 +11,7 @@
 
 use super::procedural::*;
 use super::*;
-use celox_design::{CounterKind, WaitSite};
+use celox_design::{CounterKind, NbaSite, WaitSite};
 use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
@@ -64,6 +64,8 @@ pub(super) struct Ff<'p, 'a> {
     process: usize,
     /// The wait sites of the process, by local index.
     wait_sites: Vec<WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the process, by local index.
+    nba_sites: Vec<NbaSite<SourceVarId>>,
     direct: bool,
 }
 
@@ -111,6 +113,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             direct: false,
             process: 0,
             wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         }
     }
 
@@ -1815,6 +1818,22 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
         match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: true,
+            } if self.kernel.is_some() => {
+                self.nonblocking(std::slice::from_ref(lhs), rhs)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: true,
+            } if self.kernel.is_some() => {
+                self.nonblocking(parts, rhs)?;
+                Ok(true)
+            }
             sv::ir::Stmt::Assign { lhs, rhs, .. } => {
                 self.assign(lhs, rhs)?;
                 Ok(true)
@@ -3172,30 +3191,8 @@ impl Ff<'_, '_> {
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
         process: usize,
-    ) -> Result<(ExecutionUnit<Addr>, Vec<WaitSite<SourceVarId>>), sv::AnalyzerError> {
+    ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
-        // A nonblocking update would take effect in a later region of the
-        // time step, after the process has run on.
-        for stmt in body {
-            let mut nonblocking = false;
-            stmt.walk(&mut |stmt| {
-                nonblocking |= matches!(
-                    stmt,
-                    sv::ir::Stmt::Assign {
-                        nonblocking: true,
-                        ..
-                    } | sv::ir::Stmt::AssignConcat {
-                        nonblocking: true,
-                        ..
-                    }
-                );
-            });
-            if nonblocking {
-                return Err(unsupported(
-                    "nonblocking assignment in an initial block that runs as a process",
-                ));
-            }
-        }
         let mut kernel = ProcessKernelBuilder::new(slots);
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
@@ -3204,7 +3201,125 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
-        Ok((unit, self.wait_sites))
+        Ok(KernelUnit {
+            unit,
+            wait_sites: self.wait_sites,
+            nba_sites: self.nba_sites,
+        })
+    }
+
+    /// A nonblocking assignment in a process (IEEE 1800-2023 10.4.2): the
+    /// right-hand side is evaluated now, once, and each target part becomes
+    /// an update the runtime queues for the NBA region.
+    fn nonblocking(
+        &mut self,
+        parts: &[sv::ir::LValue],
+        rhs: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        let mut targets = Vec::with_capacity(parts.len());
+        for part in parts {
+            targets.push(self.nba_target(part)?);
+        }
+        let total: usize = targets.iter().map(|(_, _, width)| width).sum();
+        let four_state = targets.iter().any(|(id, _, _)| self.m.var(*id).is_4state);
+        let (_, value_name) = self.m.temp("nba", total, false, four_state);
+        self.assign(&sv::ir::LValue::Ident(value_name.clone()), rhs)?;
+        // The parts, most significant first, take consecutive bits of the
+        // value.
+        let mut high = total;
+        for (id, lsb, width) in targets {
+            let low = high - width;
+            let (staged, staged_name) =
+                self.m
+                    .temp("nba_part", width, false, self.m.var(id).is_4state);
+            self.assign(
+                &sv::ir::LValue::Ident(staged_name),
+                &sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(value_name.clone())),
+                    msb: sv::ir::ConstExpr::Literal((high - 1).to_string()),
+                    lsb: sv::ir::ConstExpr::Literal(low.to_string()),
+                    signed: false,
+                },
+            )?;
+            high = low;
+            let site = NbaSite {
+                process: self.process,
+                target: id,
+                lsb,
+                width,
+                value: staged,
+                offset: None,
+                pending: None,
+            };
+            let index = self.nba_sites.len() as u32;
+            let staged_four_state = self.m.var(staged).is_4state;
+            self.with_kernel(|kernel| {
+                kernel.nonblocking(index, &site, |builder| {
+                    let value = if staged_four_state {
+                        builder.alloc_logic(width)
+                    } else {
+                        builder.alloc_bit(width, false)
+                    };
+                    builder.emit(SIRInstruction::Load(
+                        value,
+                        stable(staged),
+                        SIROffset::Static(0),
+                        width,
+                    ));
+                    Ok::<_, ProcessKernelError>((value, None))
+                })
+            })
+            .map_err(kernel_error)?;
+            self.nba_sites.push(site);
+        }
+        Ok(())
+    }
+
+    /// The variable and the constant bit range a nonblocking assignment in
+    /// a process writes.
+    fn nba_target(
+        &self,
+        lvalue: &sv::ir::LValue,
+    ) -> Result<(SourceVarId, usize, usize), sv::AnalyzerError> {
+        let id = self
+            .m
+            .id(lvalue.name())
+            .ok_or_else(|| unsupported(format!("assignment target `{}`", lvalue.name())))?;
+        let variable = self.m.var(id);
+        if !variable.array_dims.is_empty() {
+            return Err(unsupported(
+                "nonblocking assignment to an unpacked array in a process",
+            ));
+        }
+        match lvalue {
+            sv::ir::LValue::Ident(_) => Ok((id, 0, variable.width)),
+            sv::ir::LValue::Select { msb, lsb, .. } => {
+                let constant = |expr| {
+                    sv::typecheck::eval_const_expr_with_types(
+                        expr,
+                        self.m.constants,
+                        self.m.parameter_types,
+                    )
+                };
+                let (Some(msb), Some(lsb)) = (constant(msb), constant(lsb)) else {
+                    return Err(unsupported(
+                        "nonblocking assignment with a run-time position in a process",
+                    ));
+                };
+                let (Some(msb), Some(lsb)) = (
+                    packed_index_offset(variable, msb),
+                    packed_index_offset(variable, lsb),
+                ) else {
+                    return Err(unsupported("nonblocking assignment outside its target"));
+                };
+                if msb < lsb {
+                    return Err(unsupported(
+                        "nonblocking assignment to a reversed part select in a process",
+                    ));
+                }
+                Ok((id, lsb, msb - lsb + 1))
+            }
+        }
     }
 
     /// `#amount` (IEEE 1800-2023 9.4.1). The amount is self-determined and
@@ -3399,6 +3514,13 @@ impl Ff<'_, '_> {
         self.jump(header);
         Ok(back)
     }
+}
+
+/// The kernel of a process and its wait and nonblocking assignment sites.
+pub(super) struct KernelUnit {
+    pub unit: ExecutionUnit<Addr>,
+    pub wait_sites: Vec<WaitSite<SourceVarId>>,
+    pub nba_sites: Vec<NbaSite<SourceVarId>>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that

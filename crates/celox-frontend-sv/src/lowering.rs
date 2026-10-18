@@ -11,9 +11,10 @@ use std::path::Path;
 
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
-    InitialStateData, InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH,
-    PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind,
-    RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION, WaitSite,
+    InitialStateData, InitialStateValue, ModuleId, NbaSite, PROCESS_DELAY_WIDTH,
+    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION, WaitSite,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
@@ -2004,7 +2005,7 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
-    let (initial_values, processes, wait_sites) = lower_initial_processes(
+    let (initial_values, processes, wait_sites, nba_sites) = lower_initial_processes(
         module,
         &mut variables,
         &mut name_to_id,
@@ -2113,7 +2114,7 @@ fn lower_module_with_overrides(
             package_bindings: HashMap::default(),
             counter_slots: Vec::new(),
             wait_sites,
-            nba_sites: Vec::new(),
+            nba_sites,
         },
         variables,
         port_order,
@@ -2775,11 +2776,12 @@ fn lower_initial_processes(
         Vec<InitialStateValue<SourceVarId>>,
         Vec<SymbolicProcess>,
         Vec<WaitSite<SourceVarId>>,
+        Vec<NbaSite<SourceVarId>>,
     ),
     sv::AnalyzerError,
 > {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -2833,7 +2835,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new()));
+        return Ok((values, Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -2888,24 +2890,29 @@ fn lower_initial_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let mut wait_sites = Vec::new();
+    let mut nba_sites = Vec::new();
     let processes = runtime
         .into_iter()
         .zip(slots)
         .enumerate()
         .map(|(index, ((process, random_seed), slots))| {
-            let (kernel, sites) = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
+            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
                 process.body(),
                 slots,
                 index,
             )?;
-            wait_sites.extend(sites);
-            Ok(SymbolicProcess { kernel, slots })
+            wait_sites.extend(kernel.wait_sites);
+            nba_sites.extend(kernel.nba_sites);
+            Ok(SymbolicProcess {
+                kernel: kernel.unit,
+                slots,
+            })
         })
         .collect::<Result<Vec<_>, sv::AnalyzerError>>();
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?, wait_sites))
+    Ok((values, processes?, wait_sites, nba_sites))
 }
 
 fn lower_comb_processes(
