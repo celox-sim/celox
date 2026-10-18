@@ -38,6 +38,7 @@ pub(super) fn comb_processes_from_module_node(
         if !relevant {
             continue;
         }
+        let _constant_functions = item.enter();
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         comb_processes_from_module_or_generate_item(

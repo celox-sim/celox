@@ -1673,12 +1673,13 @@ pub(super) fn subroutine_argument_names(
             let Some(syntax) = syntax else {
                 continue;
             };
+            let _constant_functions = item.enter();
             let params = subroutine_param_declarations(
                 syntax.ports,
                 syntax.items,
                 tree,
                 &item.env,
-                type_aliases,
+                &item.type_aliases(type_aliases),
             )?;
             let qualified = item.name(&syntax.name);
             let param_shapes: Vec<VariableDimensions> = params
@@ -1754,9 +1755,9 @@ pub(super) fn subroutines_with_symbolic_parameters(
     mut rejected: Option<&mut HashMap<String, AnalyzerError>>,
     symbolic_parameters: &HashSet<String>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
-    let type_aliases = packed_dimensions.type_aliases.clone();
+    let module_type_aliases = &packed_dimensions.type_aliases;
     let mut subroutines = Vec::new();
-    let active = generate::subroutine_items(node, tree, const_env, &type_aliases)?;
+    let active = generate::subroutine_items(node, tree, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
         if item.is_parameter_declaration() {
@@ -1796,6 +1797,8 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 )
             };
 
+            let _constant_functions = item.enter();
+            let type_aliases = item.type_aliases(module_type_aliases);
             let name = syntax.name.clone();
             let lowered = (|| -> Result<Subroutine, AnalyzerError> {
                 let params = subroutine_param_declarations(
@@ -2000,6 +2003,7 @@ pub(super) fn initial_processes_from_module_node(
         if item.is_parameter_declaration() {
             continue;
         }
+        let _constant_functions = item.enter();
         let mut assignments = Vec::new();
         match item.node.declaration() {
             Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) => {
