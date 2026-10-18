@@ -723,7 +723,12 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let lowered = lower_module(module, four_state, true, ff_parts)?;
+            let mut lowered = lower_module(module, four_state, true, ff_parts)?;
+            lowered.sim_module.time_precision = Some(
+                celox_design::TimePrecision::try_from(packages.global_time_precision())
+                    .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+            );
+            lowered.sim_module.time_scale = scope_time_scale(packages, module.name())?;
             // Declaration initializers run before every `initial` block
             // (IEEE 1800-2023 10.5); one that is not folded into an initial
             // value would run among them.
@@ -1791,12 +1796,35 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(
+    let mut lowered = lower_module(
         specialized,
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
-    )
+    )?;
+    lowered.sim_module.time_precision = Some(
+        celox_design::TimePrecision::try_from(module.packages.global_time_precision())
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+    );
+    lowered.sim_module.time_scale = scope_time_scale(&module.packages, &module.name)?;
+    Ok(lowered)
+}
+
+fn scope_time_scale(
+    packages: &sv::Packages,
+    name: &str,
+) -> Result<celox_design::TimeScale, sv::AnalyzerError> {
+    let Some((unit, precision)) = packages.scope_time_scale(name) else {
+        return Ok(celox_design::TimeScale::default());
+    };
+    let convert = |exponent: i32| {
+        celox_design::TimePrecision::try_from(exponent)
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))
+    };
+    Ok(celox_design::TimeScale {
+        unit: convert(unit)?,
+        precision: convert(precision)?,
+    })
 }
 
 fn lower_module(
@@ -2060,6 +2088,8 @@ fn lower_module_with_overrides(
         source: module.clone(),
         implicit_nets_allowed,
         sim_module: SimModule {
+            time_precision: None,
+            time_scale: celox_design::TimeScale::default(),
             name,
             variables: shared_variables,
             ff_access_summaries: HashMap::default(),

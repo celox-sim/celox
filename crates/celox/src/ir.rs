@@ -913,6 +913,12 @@ impl RuntimeProgram {
                 name: scope.name.clone(),
                 full_name: scope.full_name.clone(),
                 module_name: scope.module_name.clone(),
+                time_scale: self
+                    .design
+                    .instance_time_scales
+                    .get(&scope.instance_id)
+                    .copied()
+                    .unwrap_or_default(),
                 parent: scope.parent_name.as_ref().map(|parent| scope_ids[parent]),
                 children: Vec::new(),
                 signals: Vec::new(),

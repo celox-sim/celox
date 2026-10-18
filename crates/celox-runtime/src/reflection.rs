@@ -24,6 +24,7 @@ pub struct ReflectionScope {
     pub name: String,
     pub full_name: String,
     pub module_name: String,
+    pub time_scale: celox_design::TimeScale,
     pub parent: Option<ReflectionScopeId>,
     pub children: Vec<ReflectionScopeId>,
     pub signals: Vec<ReflectionSignalId>,
