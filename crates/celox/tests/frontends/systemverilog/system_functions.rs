@@ -1834,18 +1834,27 @@ fn initial_blocks_that_read_design_state_run_at_time_zero() {
     assert_eq!(sim.get(y), 1u8.into());
 }
 
+/// A nonblocking assignment in an `initial` process updates its target in
+/// the NBA region: a `$display` in the same time slot sees the old value.
 #[test]
-fn rejects_nonblocking_assignments_in_initial_processes() {
-    let error = build_error(
-        r#"module Top(output logic y);
-            logic v;
+fn nonblocking_assignments_in_initial_processes_update_after_the_display() {
+    let source = r#"module Top(output logic y);
+            logic v = 1'b0;
             initial begin v <= 1'b1; $display("%0d", v); end
             assign y = v;
-        endmodule"#,
-    );
-    assert!(
-        error.contains("nonblocking assignment in an initial block that runs as a process"),
-        "{error}"
+        endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("system_functions.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"0".to_vec()
+        }]
     );
 }
 

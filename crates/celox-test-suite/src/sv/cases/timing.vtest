@@ -429,6 +429,42 @@
   (assert_eq cnt_gated 3 "so does a clock computed from it")
   (assert_eq cnt_derived 3 "and a falling one through an inverter"))
 
+(case nonblocking_assignments_in_processes_update_in_the_nba_region
+  (source "process_nba.sv" #"
+      module Top(output logic [7:0] q, early, late, bus, hi, lo, d, sampled);
+        logic clk = 1'b0;
+        always #5 clk = ~clk;
+        initial begin
+          q = 8'd0;
+          bus = 8'd0;
+          #1;
+          q <= 8'd1;
+          q <= 8'd2;
+          #0 early = q;
+          bus[7:4] <= 4'ha;
+          {hi, lo} <= 16'h1234;
+          #1 late = q;
+        end
+        // A stimulus process and a register sampling it at the same edge.
+        initial begin
+          d = 8'd0;
+          forever @(posedge clk) d <= d + 8'd1;
+        end
+        always_ff @(posedge clk) sampled <= d;
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq early 0 "a nonblocking update lands after the inactive region")
+  (assert_eq q 2 "the last update of a time slot wins")
+  (assert_eq bus 0xa0)
+  (assert_eq hi 0x12)
+  (assert_eq lo 0x34)
+  (run_until 2)
+  (assert_eq late 2)
+  (run_until 26)
+  (assert_eq d 3)
+  (assert_eq sampled 2 "the register samples the value before the edge's update"))
+
 (case nonblocking_ff_stores_remain_pending_during_inactive_work
   (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
       bit clk; wire [7:0] derived=q+1;
