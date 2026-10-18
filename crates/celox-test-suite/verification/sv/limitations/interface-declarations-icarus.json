@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "6ce28ffb7fe4e13462e350cf90f4eef28f4a010764251eebea9fb6810f93e139",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: error: A hierarchical reference (`cfg.N') is not allowed in a constant expression.\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_local_interfaces_before_dependent_declarations",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792288563
+    }
+  ],
+  "context_fingerprint": "0185e667b610d070b52cfb6c885fe5fc0f345fa82bf93a5673889554ef891bc4",
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 1,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

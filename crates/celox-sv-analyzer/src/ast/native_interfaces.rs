@@ -114,7 +114,7 @@ pub(super) fn analyze_module(
         return Ok(None);
     }
     let array_scope = if interface_ports.iter().any(|port| port.array_rank != 0) {
-        let header = declaration_view(&view);
+        let header = binding_declaration_view(&view, &instantiations, tree, &imported)?;
         let mut header_imports = imported.clone();
         header_imports.declarations_only = true;
         Some(Module::from_scope_node_with_parameter_overrides(
@@ -247,7 +247,7 @@ pub(super) fn analyze_module(
         }
     }
     // Resolve the caller's declarations before evaluating instance overrides.
-    let header = declaration_view(&view);
+    let header = binding_declaration_view(&view, &instantiations, tree, &imported)?;
     let mut header_imports = imported.clone();
     header_imports.declarations_only = true;
     let caller = Module::from_scope_node_with_parameter_overrides(
@@ -259,21 +259,38 @@ pub(super) fn analyze_module(
         Arc::new(header_imports),
         true,
     )?;
-    let caller_symbols = caller.symbols.as_ref().unwrap();
+    let mut caller_symbols = caller.symbols.as_ref().unwrap().clone();
     let _caller_scope = scope::install(Arc::new(caller_symbols.clone()));
     let _functions = const_functions::install(caller.constant_functions.clone());
     let mut port_assignments = Vec::new();
     let mut pending = instantiations
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|instance| (instance, None))
         .collect::<std::collections::VecDeque<_>>();
     let mut generated = false;
     loop {
         if pending.is_empty() && !generated {
+            // Interface constants now exist, so dependent ordinary declarations
+            // can be collected before elaborating generate conditions and bounds.
+            let header = declaration_view(&view);
+            let mut header_imports = imported.clone();
+            header_imports.declarations_only = true;
+            let caller = Module::from_scope_node_with_parameter_overrides(
+                RefNode::ModuleDeclarationAnsi(&header),
+                tree,
+                &name,
+                &overrides,
+                interfaces,
+                Arc::new(header_imports),
+                true,
+            )?;
+            caller_symbols = caller.symbols.unwrap();
             generated = true;
             let mut current = caller_symbols.clone();
             current.extend(&imported);
             let _scope = scope::install(Arc::new(current.clone()));
+            let _functions = const_functions::install(current.constant_functions.clone());
             for item in generate::items(
                 RefNode::ModuleDeclarationAnsi(&view),
                 tree,
@@ -297,6 +314,24 @@ pub(super) fn analyze_module(
         let Some((instantiation, generated_item)) = pending.pop_front() else {
             break;
         };
+        if generated_item.is_none() {
+            // Newly bound instances may unlock declarations used by the next
+            // instance's overrides. Keep only still-unbound dependencies out.
+            let header = binding_declaration_view(&view, &instantiations, tree, &imported)?;
+            let mut header_imports = imported.clone();
+            header_imports.declarations_only = true;
+            caller_symbols = Module::from_scope_node_with_parameter_overrides(
+                RefNode::ModuleDeclarationAnsi(&header),
+                tree,
+                &name,
+                &overrides,
+                interfaces,
+                Arc::new(header_imports),
+                true,
+            )?
+            .symbols
+            .unwrap();
+        }
         let mut current = caller_symbols.clone();
         current.extend(&imported);
         if let Some(item) = &generated_item {
@@ -305,11 +340,14 @@ pub(super) fn analyze_module(
                 .extend(item.env.iter().map(|(name, value)| (name.clone(), *value)));
         }
         let _scope = scope::install(Arc::new(current.clone()));
-        let dimensions = PackedDimensions::new(
-            HashMap::default(),
+        let _functions = const_functions::install(current.constant_functions.clone());
+        let mut dimensions = packed_dimensions_from_ports_and_signals(
+            &current.ports,
+            &current.signals,
             &current.const_env,
             &current.type_aliases,
         );
+        dimensions.extend(parameter_packed_dimensions(&current.parameters));
         let interface_name =
             identifier_text(RefNode::ModuleIdentifier(&instantiation.nodes.0), tree).unwrap();
         let (definition, definition_tree, definition_path) = definitions[&interface_name];
@@ -323,6 +361,7 @@ pub(super) fn analyze_module(
             tree,
             Some(&interface),
             &dimensions,
+            true,
         )?;
         let values = bindings
             .into_iter()
@@ -455,6 +494,7 @@ pub(super) fn analyze_module(
         let mut current = caller_symbols.clone();
         current.extend(&imported);
         let _scope = scope::install(Arc::new(current.clone()));
+        let _functions = const_functions::install(current.constant_functions.clone());
         for item in generate::items(
             RefNode::ModuleDeclarationAnsi(&view),
             tree,
@@ -591,6 +631,18 @@ pub(super) fn analyze_module(
             vec![assignment],
         ));
     }
+    // Check authored declarations before module collection can prefer a local
+    // function/type/constant over an imported interface binding of the same name.
+    let authored = scope_declared_names(RefNode::ModuleDeclarationAnsi(declaration), tree)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    for bound in imported.interface_members.values() {
+        if authored.contains(bound) {
+            return Err(unsupported(format!(
+                "interface binding collides with declaration `{bound}`"
+            )));
+        }
+    }
     let module = Module::from_module_node_with_parameter_overrides(
         RefNode::ModuleDeclarationAnsi(&view),
         tree,
@@ -613,6 +665,155 @@ pub(super) fn analyze_module(
         }
     }
     Ok(Some(module))
+}
+
+/// Delay declarations that reference local interface instances (and declarations
+/// depending on those names) until the instances have populated semantic scopes.
+fn binding_declaration_view(
+    module: &sv_parser::ModuleDeclarationAnsi,
+    instances: &[sv_parser::ModuleInstantiation],
+    tree: &SyntaxTree,
+    imported: &scope::ScopeSymbols,
+) -> Converted<sv_parser::ModuleDeclarationAnsi> {
+    let mut deferred = instances
+        .iter()
+        .flat_map(|instance| instance.nodes.2.contents())
+        .filter_map(|instance| {
+            identifier_text(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0), tree)
+        })
+        .filter(|name| {
+            !imported.interface_types.contains_key(name)
+                && !imported.interface_arrays.contains_key(name)
+        })
+        .collect::<HashSet<_>>();
+    let mut header = declaration_view(module);
+    loop {
+        let mut removed = false;
+        let mut kept = Vec::new();
+        for item in header.nodes.2 {
+            if references_deferred(RefNode::NonPortModuleItem(&item), tree, &deferred) {
+                deferred.extend(scope_declared_names(
+                    RefNode::NonPortModuleItem(&item),
+                    tree,
+                )?);
+                removed = true;
+            } else {
+                kept.push(item);
+            }
+        }
+        header.nodes.2 = kept;
+        if let Some(ports) = &mut header.nodes.0.nodes.6
+            && let Some(list) = &ports.nodes.0.nodes.1
+        {
+            let comma = list.nodes.1.first().map(|(comma, _)| comma.clone());
+            let mut kept = Vec::new();
+            let mut inherited_deferred = false;
+            for port in list.contents() {
+                let inherits_type = match &port.1 {
+                    sv_parser::AnsiPortDeclaration::Net(port) => port.nodes.0.is_none(),
+                    sv_parser::AnsiPortDeclaration::Variable(port) => port.nodes.0.is_none(),
+                    sv_parser::AnsiPortDeclaration::Paren(_) => false,
+                };
+                inherited_deferred = (inherits_type && inherited_deferred)
+                    || references_deferred(RefNode::AnsiPortDeclaration(&port.1), tree, &deferred);
+                if inherited_deferred {
+                    deferred.extend(scope_declared_names(
+                        RefNode::AnsiPortDeclaration(&port.1),
+                        tree,
+                    )?);
+                    removed = true;
+                } else {
+                    kept.push(port.clone());
+                }
+            }
+            let mut kept = kept.into_iter();
+            ports.nodes.0.nodes.1 = kept.next().map(|first| sv_parser::List {
+                nodes: (
+                    first,
+                    kept.map(|port| (comma.as_ref().unwrap().clone(), port))
+                        .collect(),
+                ),
+            });
+        }
+        if !removed {
+            break;
+        }
+    }
+    Ok(header)
+}
+
+/// The name introduced by a declaration, rather than identifiers used by its
+/// type or initializer. The caller determines which lexical scopes to collect.
+fn declaration_identifier(node: RefNode<'_>) -> Option<RefNode<'_>> {
+    Some(match node {
+        RefNode::VariableDeclAssignmentVariable(d) => RefNode::VariableIdentifier(&d.nodes.0),
+        RefNode::NetDeclAssignment(d) => RefNode::NetIdentifier(&d.nodes.0),
+        RefNode::ParamAssignment(d) => RefNode::ParameterIdentifier(&d.nodes.0),
+        RefNode::TypeAssignment(d) => RefNode::TypeIdentifier(&d.nodes.0),
+        RefNode::TypeDeclarationDataType(d) => RefNode::TypeIdentifier(&d.nodes.2),
+        RefNode::EnumNameDeclaration(d) => RefNode::EnumIdentifier(&d.nodes.0),
+        RefNode::AnsiPortDeclarationNet(d) => RefNode::PortIdentifier(&d.nodes.1),
+        RefNode::AnsiPortDeclarationVariable(d) => RefNode::PortIdentifier(&d.nodes.1),
+        RefNode::AnsiPortDeclarationParen(d) => RefNode::PortIdentifier(&d.nodes.2),
+        RefNode::TfPortItem(d) => RefNode::PortIdentifier(&d.nodes.4.as_ref()?.0),
+        RefNode::FunctionDeclaration(d) => {
+            unwrap_node!(RefNode::FunctionDeclaration(d), FunctionIdentifier)?
+        }
+        RefNode::TaskDeclaration(d) => unwrap_node!(RefNode::TaskDeclaration(d), TaskIdentifier)?,
+        _ => return None,
+    })
+}
+
+/// Collect only names introduced in this scope. Subroutine names belong here,
+/// but their formals/locals, process locals, and structure members do not.
+fn scope_declared_names(root: RefNode<'_>, tree: &SyntaxTree) -> Converted<Vec<String>> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    for event in root.into_iter().event() {
+        let (entering, node) = match event {
+            sv_parser::NodeEvent::Enter(node) => (true, node),
+            sv_parser::NodeEvent::Leave(node) => (false, node),
+        };
+        let subroutine = matches!(
+            node,
+            RefNode::FunctionDeclaration(_) | RefNode::TaskDeclaration(_)
+        );
+        let nested = subroutine
+            || matches!(
+                node,
+                RefNode::StructUnionMember(_)
+                    | RefNode::InitialConstruct(_)
+                    | RefNode::AlwaysConstruct(_)
+                    | RefNode::FinalConstruct(_)
+                    | RefNode::ConditionalGenerateConstruct(_)
+                    | RefNode::LoopGenerateConstruct(_)
+            );
+        if entering
+            && depth == 0
+            && (!nested || subroutine)
+            && let Some(identifier) = declaration_identifier(node.clone())
+            && let Some(name) = identifier_text(identifier, tree)
+        {
+            names.push(name);
+        }
+        if nested {
+            if entering {
+                depth += 1;
+            } else {
+                depth -= 1;
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn references_deferred(node: RefNode<'_>, tree: &SyntaxTree, deferred: &HashSet<String>) -> bool {
+    // Only names looked up in the enclosing scope can depend on an unbound
+    // instance. Qualified package names, member names, and references shadowed
+    // by nested declarations belong to other bindings.
+    super::imports::unqualified_names(node, tree)
+        .keys()
+        .any(|name| deferred.contains(name))
 }
 
 fn declaration_view(module: &sv_parser::ModuleDeclarationAnsi) -> sv_parser::ModuleDeclarationAnsi {

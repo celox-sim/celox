@@ -38,11 +38,14 @@ pub fn interface_prototypes_for(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    if selected.is_some_and(HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
     let files = sources
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Result<Vec<_>, _>>()?;
-    let design = Design::collect(&files)?;
+    let design = Design::collect_selected(&files, selected)?;
     let mut declarations = design
         .interfaces
         .values()
@@ -803,9 +806,27 @@ struct Design<'a> {
 
 impl<'a> Design<'a> {
     fn collect(files: &'a [File<'a>]) -> Result<Self, AnalyzerError> {
+        Self::collect_selected(files, None)
+    }
+
+    fn collect_selected(
+        files: &'a [File<'a>],
+        selected: Option<&HashSet<String>>,
+    ) -> Result<Self, AnalyzerError> {
         let mut interfaces = HashMap::default();
         for (index, file) in files.iter().enumerate() {
             for node in &file.syntax_tree {
+                if matches!(
+                    node,
+                    RefNode::InterfaceDeclarationAnsi(_)
+                        | RefNode::InterfaceDeclarationNonansi(_)
+                        | RefNode::InterfaceDeclarationWildcard(_)
+                ) && let Some(selected) = selected
+                    && let Some(identifier) = unwrap_node!(node.clone(), InterfaceIdentifier)
+                    && !selected.contains(&name(identifier, &file.syntax_tree)?)
+                {
+                    continue;
+                }
                 match node {
                     RefNode::InterfaceDeclarationAnsi(declaration) => {
                         let mut interface = InterfaceDecl::collect(declaration, index, file)?;

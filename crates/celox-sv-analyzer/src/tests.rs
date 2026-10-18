@@ -5263,3 +5263,59 @@ fn native_interface_port_views_do_not_repeat_instance_initializers() {
     );
     assert!(module.initial_processes().is_empty());
 }
+
+#[test]
+fn native_interface_bindings_reject_authored_subroutine_collisions() {
+    for declaration in [
+        "function automatic int h$f(); return 99; endfunction",
+        "localparam h$f = 99;",
+        "typedef logic h$f;",
+    ] {
+        let source = format!(
+            "interface I; function automatic int f(); return 7; endfunction endinterface
+             module Top(output int y); I h(); {declaration} assign y = h.f(); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("collision.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("interface binding collides with declaration `h$f`"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn interface_signatures_skip_unrequested_unsupported_syntax() {
+    for unselected in [
+        "interface Unselected #(parameter type T = logic); T value; endinterface",
+        "interface Unselected(input logic clk); logic value; endinterface",
+        "interface Unselected; enum { A, B } value; endinterface",
+        "interface Unselected; interface Nested; logic value; endinterface endinterface",
+    ] {
+        let source = format!("interface Selected; logic value; endinterface {unselected}");
+        let files = [(source.as_str(), Path::new("selected.sv"))];
+        let selected = fxhash::FxHashSet::from_iter(["Selected".to_string()]);
+        let signatures = crate::interface_prototypes_for(&files, Some(&selected)).unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].name, "Selected");
+        assert!(
+            crate::interface_prototypes_for(&files, Some(&Default::default()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn native_interface_bindings_reject_enum_constant_collisions() {
+    let source = "interface I; parameter f = 7; endinterface
+        module Top(output int y); I h(); typedef enum int {h$f = 3} E; assign y = h$f; endmodule";
+    let error = analyze_source(source, Path::new("enum_collision.sv")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interface binding collides with declaration `h$f`"),
+        "{error}"
+    );
+}
