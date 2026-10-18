@@ -201,6 +201,12 @@ pub struct Source {
     modules: Vec<Module>,
 }
 
+/// Overrides supplied by one instantiation. Types have been resolved in its scope.
+pub(crate) struct ModuleParameterBindings<'a> {
+    pub values: &'a HashMap<String, ConstExpr>,
+    pub types: &'a [(String, Type)],
+}
+
 impl Source {
     pub fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
         Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &HashMap::default())
@@ -284,7 +290,10 @@ impl Source {
             Path::new(""),
             &index,
             module_name,
-            parameter_overrides,
+            ModuleParameterBindings {
+                values: parameter_overrides,
+                types: &[],
+            },
             extra_interfaces,
             &packages,
         )
@@ -298,7 +307,7 @@ impl Source {
         path: &Path,
         index: &module_index::ModuleIndex,
         module_name: &str,
-        parameter_overrides: &HashMap<String, ConstExpr>,
+        bindings: ModuleParameterBindings<'_>,
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
     ) -> Result<Self, AnalyzerError> {
@@ -312,17 +321,19 @@ impl Source {
             match node {
                 RefNode::ModuleDeclarationAnsi(module) => {
                     let node = RefNode::ModuleDeclarationAnsi(module);
-                    let imported = imports::imported_symbols(
+                    let mut imported = imports::imported_symbols(
                         node.clone(),
                         syntax_tree,
                         packages,
                         packages.unit(path),
                     )?;
+                    imported.type_parameter_bindings =
+                        type_parameters::bind(node.clone(), syntax_tree, bindings.types)?;
                     modules.push(Module::from_module_node_with_parameter_overrides(
                         node,
                         syntax_tree,
                         module_name,
-                        parameter_overrides,
+                        bindings.values,
                         &interfaces,
                         Arc::new(imported),
                     )?);
@@ -1058,6 +1069,7 @@ impl Module {
             .collect();
         // A package keeps its symbols for the scopes that use it.
         let symbols = is_package.then(|| scope::ScopeSymbols {
+            type_parameter_bindings: HashMap::default(),
             const_env: const_env.clone(),
             parameter_values: parameter_values.clone(),
             parameters: parameters.clone(),
@@ -1565,8 +1577,8 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
-    /// The source text of a data type, for a `parameter type` override.
-    type_text: Option<String>,
+    /// The data type resolved in the instantiating scope.
+    bound_type: Option<Type>,
     pattern_text: Option<String>,
 }
 
@@ -1575,16 +1587,16 @@ impl ParameterOverride {
         Self {
             name,
             value,
-            type_text: None,
+            bound_type: None,
             pattern_text: None,
         }
     }
 
-    fn type_override(name: String, type_text: String) -> Self {
+    fn type_override(name: String, bound_type: Type) -> Self {
         Self {
             name,
             value: None,
-            type_text: Some(type_text),
+            bound_type: Some(bound_type),
             pattern_text: None,
         }
     }
@@ -1602,8 +1614,8 @@ impl ParameterOverride {
         self.value.as_ref()
     }
 
-    pub fn type_text(&self) -> Option<&str> {
-        self.type_text.as_deref()
+    pub fn bound_type(&self) -> Option<&Type> {
+        self.bound_type.as_ref()
     }
 }
 
@@ -1645,7 +1657,7 @@ pub enum PortDirection {
     Unspecified,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
     kind: TypeKind,
     is_signed: bool,
@@ -1698,7 +1710,7 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeKind {
     Bit,
     Logic,
@@ -1706,7 +1718,7 @@ pub enum TypeKind {
     Implicit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PackedRange {
     left: ConstExpr,
     right: ConstExpr,
@@ -1726,7 +1738,7 @@ impl PackedRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnpackedRange {
     left: ConstExpr,
     right: ConstExpr,
@@ -1767,7 +1779,7 @@ impl UnpackedRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstExpr {
     Literal(String),
     Ident(String),
@@ -1836,7 +1848,7 @@ impl ConstExpr {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Plus,
     Minus,
@@ -1848,7 +1860,7 @@ pub enum UnaryOp {
     RedXor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,

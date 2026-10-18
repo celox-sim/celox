@@ -171,29 +171,35 @@ pub(super) fn module_interface_from_node(
     }
     let mut parameters = Vec::new();
     if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node.clone()) {
-        let push_declaration = |declaration: &sv_parser::ParameterPortDeclaration,
-                                parameters: &mut Vec<String>| {
-            if matches!(
-                declaration,
-                sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_)
-                    | sv_parser::ParameterPortDeclaration::TypeList(_)
-            ) {
-                return;
-            }
-            for child in RefNode::ParameterPortDeclaration(declaration) {
-                match child {
-                    RefNode::ParamAssignment(assignment) => parameters.extend(identifier_text(
-                        RefNode::ParameterIdentifier(&assignment.nodes.0),
-                        syntax_tree,
-                    )),
-                    RefNode::TypeAssignment(assignment) => parameters.extend(identifier_text(
-                        RefNode::TypeIdentifier(&assignment.nodes.0),
-                        syntax_tree,
-                    )),
+        let mut local = false;
+        let mut push_declaration =
+            |declaration: &sv_parser::ParameterPortDeclaration, parameters: &mut Vec<String>| {
+                // IEEE 1800-2023 6.20.4: localparam applies until the next
+                // explicit parameter keyword, including shorthand type declarations.
+                match declaration {
+                    sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_) => {
+                        local = true
+                    }
+                    sv_parser::ParameterPortDeclaration::ParameterDeclaration(_) => local = false,
                     _ => {}
                 }
-            }
-        };
+                if local {
+                    return;
+                }
+                for child in RefNode::ParameterPortDeclaration(declaration) {
+                    match child {
+                        RefNode::ParamAssignment(assignment) => parameters.extend(identifier_text(
+                            RefNode::ParameterIdentifier(&assignment.nodes.0),
+                            syntax_tree,
+                        )),
+                        RefNode::TypeAssignment(assignment) => parameters.extend(identifier_text(
+                            RefNode::TypeIdentifier(&assignment.nodes.0),
+                            syntax_tree,
+                        )),
+                        _ => {}
+                    }
+                }
+            };
         match list {
             sv_parser::ParameterPortList::Assignment(list) => {
                 for child in RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0) {
