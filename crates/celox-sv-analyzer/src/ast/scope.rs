@@ -306,6 +306,7 @@ impl ScopeSymbols {
                         .collect(),
                     initializer: process.initializer,
                     synthetic: process.synthetic,
+                    repeats: process.repeats,
                 })
                 .collect();
             self.signals.push(signal);
@@ -505,6 +506,7 @@ impl ScopeSymbols {
                         .collect(),
                     initializer: process.initializer,
                     synthetic: process.synthetic,
+                    repeats: process.repeats,
                 })
                 .collect(),
             aliases: HashMap::default(),

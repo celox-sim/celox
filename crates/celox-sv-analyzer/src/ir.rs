@@ -878,6 +878,8 @@ pub struct InitialProcess {
     body: Vec<Stmt>,
     initializer: bool,
     synthetic: bool,
+    /// An `always` process: its body runs forever.
+    repeats: bool,
 }
 
 impl InitialProcess {
@@ -893,6 +895,7 @@ impl InitialProcess {
             body,
             initializer,
             synthetic: false,
+            repeats: false,
         }
     }
 
@@ -905,6 +908,12 @@ impl InitialProcess {
     /// run before every `initial` and `always` procedure.
     pub fn is_initializer(&self) -> bool {
         self.initializer
+    }
+
+    /// Whether this is an `always` process, which runs its body forever and
+    /// never finishes on its own.
+    pub fn repeats(&self) -> bool {
+        self.repeats
     }
 
     /// The condition of the enclosing conditional generate block, if any.
@@ -1245,6 +1254,7 @@ impl From<ast::InitialProcess> for InitialProcess {
         );
         result.creation_order = process.creation_order();
         result.synthetic = process.is_synthetic();
+        result.repeats = process.repeats();
         result
     }
 }
