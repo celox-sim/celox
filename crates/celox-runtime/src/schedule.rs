@@ -32,6 +32,8 @@ pub struct ResolvedSchedule<B: SimBackend> {
     /// The design has process kernels or counted signals. Without either, a
     /// round is exactly the batch step and skips every process check.
     pub(crate) timed: bool,
+    /// Canonical event IDs whose evaluation commits their blocking results.
+    pub(crate) active_commits: bit_set::BitSet,
 }
 
 impl<B: SimBackend> ResolvedSchedule<B> {
@@ -174,6 +176,13 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                 .collect()
         };
 
+        let mut active_commits = bit_set::BitSet::new();
+        for address in &model.active_commits {
+            if let Some(event) = backend.resolve_event_opt(address) {
+                active_commits.insert(event.id());
+            }
+        }
+
         let counted_by_offset = counted
             .iter()
             .enumerate()
@@ -191,6 +200,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             has_pending_nba_sites: model.has_pending_nba_sites,
             combinational_derived,
             timed: model.timed,
+            active_commits,
         }
     }
 }

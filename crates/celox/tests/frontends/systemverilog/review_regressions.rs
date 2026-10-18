@@ -8418,7 +8418,9 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
 #[test]
 fn commits_ff_output_actuals_whose_index_calls_a_function() {
     // `outer` writes `state[inner(k)]` from an always_ff select index; the
-    // write is committed with the process.
+    // write is committed with the process. `state` is cleared by a blocking
+    // assignment: a nonblocking clear would land after the call's write
+    // (IEEE 1800-2023 10.4) and hide it.
     let source = r#"
         module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
                    output logic [3:0] bits);
@@ -8431,7 +8433,7 @@ fn commits_ff_output_actuals_whose_index_calls_a_function() {
             endfunction
             logic [3:0] state;
             always_ff @(posedge clk) begin
-                state <= 4'd0;
+                state = 4'd0;
                 bits[outer(state[inner(k)])] <= 1'b1;
             end
             assign st = state;

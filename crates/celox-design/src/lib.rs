@@ -602,6 +602,10 @@ pub struct RuntimeSchema<A> {
     /// Nonblocking assignment sites of the process kernels, ordered like
     /// `wait_sites`.
     pub nba_sites: Vec<NbaSite<A>>,
+    /// Canonical event domains whose evaluation commits the results of
+    /// their blocking assignments, in the active region; their apply units
+    /// commit only the nonblocking results.
+    pub active_commits: Vec<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -621,6 +625,7 @@ impl<A> Default for RuntimeSchema<A> {
             watches: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            active_commits: Vec::new(),
         }
     }
 }
