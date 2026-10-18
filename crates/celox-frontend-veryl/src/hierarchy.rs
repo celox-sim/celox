@@ -176,12 +176,22 @@ fn parse_external_hierarchy<'a>(
         }
         module_names.insert(global_id, external_module.sim_module.name.clone());
         let native_module = match native_modules {
-            Some(names) => names
-                .get(&external_module.sim_module.name)
-                .and_then(|&index| match &ir.components[index] {
-                    Component::Module(module) => Some(module),
-                    _ => None,
-                }),
+            Some(names) => match names.get(&external_module.sim_module.name) {
+                Some(&index) => match ir.components.get(index) {
+                    Some(Component::Module(module)) => Some(module),
+                    _ => {
+                        return Err(ParserError::illegal_context(
+                            "external module hierarchy",
+                            format!(
+                                "native module `{}` maps to component {index}, which is not a module",
+                                external_module.sim_module.name
+                            ),
+                            None,
+                        ));
+                    }
+                },
+                None => None,
+            },
             None => name_to_ir
                 .get(&resource_table::insert_str(
                     &external_module.sim_module.name,
@@ -526,4 +536,46 @@ fn reject_generic_interface_ports(module: &Module) -> Result<(), ParserError> {
         ),
         Some(&module.token),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veryl_analyzer::{Analyzer, Context, attribute_table};
+    use veryl_parser::Parser;
+
+    #[test]
+    fn rejects_native_module_indices_outside_the_ir() {
+        symbol_table::clear();
+        attribute_table::clear();
+        let code = "module Top {} module Child {}";
+        let metadata = veryl_metadata::Metadata::create_default("prj").unwrap();
+        let parser = Parser::parse(code, &"top.veryl").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        assert!(analyzer.analyze_pass1("prj", &parser.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        let mut ir = veryl_analyzer::ir::Ir::default();
+        let mut context = Context::default();
+        assert!(
+            analyzer
+                .analyze_pass2(&parser.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        let config = BuildConfig::default();
+        let external = crate::external_signatures(&ir, &config).unwrap();
+        let native = [("Child".to_string(), ir.components.len())]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let error = parse_ir_with_external_hierarchy_and_native_modules(
+            &ir,
+            &LoopProvenance::default(),
+            &external,
+            &config,
+            &resource_table::insert_str("Top"),
+            &native,
+        )
+        .err()
+        .expect("an out-of-range index must be rejected");
+        assert!(error.to_string().contains("not a module"), "{error}");
+    }
 }
