@@ -54,6 +54,15 @@ pub struct SymbolicProcess {
     pub slots: ProcessSlots<SourceVarId>,
 }
 
+/// The commit of a trigger group's results, split by region.
+#[derive(Clone, Debug)]
+pub struct SplitCommit<A> {
+    /// Commits of the results of blocking assignments.
+    pub active: ExecutionUnit<A>,
+    /// Commits of the results of nonblocking assignments.
+    pub nba: ExecutionUnit<A>,
+}
+
 #[derive(Clone)]
 pub struct SimModule {
     /// A frontend's global tick precision; absent for scale-free frontends.
@@ -67,6 +76,11 @@ pub struct SimModule {
     pub eval_only_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<SourceVarId>, ExecutionUnit<SymbolicRegionedAddr>>,
+    /// `apply_ff_blocks` split into the commit of the blocking results (the
+    /// active region) and that of the nonblocking ones (the NBA region), for
+    /// a domain whose blocking results another unit observes before the NBA
+    /// region. Empty when the frontend does not distinguish them.
+    pub split_commit_ff_blocks: HashMap<TriggerSet<SourceVarId>, SplitCommit<SymbolicRegionedAddr>>,
     /// Lane-partitioning alternative of `eval_only_ff_blocks` and
     /// `apply_ff_blocks`: a trigger group split into parts which may be
     /// evaluated concurrently. Empty unless several lanes were requested.

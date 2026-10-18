@@ -19,6 +19,10 @@ sv_backends! {
         @case "procedural::always_ff_blocking_assignments_and_run_time_loops";
     }
 
+    fn mixed_blocking_and_nonblocking_writes_keep_their_regions(sim) {
+        @case "procedural::mixed_blocking_and_nonblocking_writes_keep_their_regions";
+    }
+
     fn constant_functions_size_parameters_and_ports(sim) {
         @case "procedural::constant_functions_size_parameters_and_ports";
     }

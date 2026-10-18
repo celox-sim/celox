@@ -1978,6 +1978,7 @@ fn lower_module_with_overrides(
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            split_commit_ff_blocks,
             reset_clock_map,
             parallel_ff_parts,
             event_vars,
@@ -2094,6 +2095,7 @@ fn lower_module_with_overrides(
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            split_commit_ff_blocks,
             parallel_ff_parts,
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
@@ -6294,6 +6296,10 @@ type SvFfBlocks = (
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    HashMap<
+        TriggerSet<SourceVarId>,
+        celox_frontend_core::symbolic::artifact::SplitCommit<RegionedVarAddr>,
+    >,
     HashMap<SourceVarId, SourceVarId>,
     HashMap<
         TriggerSet<SourceVarId>,
@@ -6390,6 +6396,8 @@ fn lower_ff_processes(
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
+    let mut active_ff_blocks = HashMap::default();
+    let mut nba_ff_blocks: HashMap<_, ExecutionUnit<RegionedVarAddr>> = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
 
@@ -6451,8 +6459,13 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
-        let (eval_only, apply, targets) =
-            ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
+        let ff::FfProcessUnits {
+            eval: eval_only,
+            apply,
+            active,
+            nba,
+            targets,
+        } = ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =
@@ -6470,7 +6483,9 @@ fn lower_ff_processes(
                 });
         }
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
-        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set, apply);
+        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
+        insert_or_merge_ff_unit(&mut active_ff_blocks, trigger_set.clone(), active);
+        insert_or_merge_ff_unit(&mut nba_ff_blocks, trigger_set, nba);
     }
     // Every process of a trigger evaluates against the pre-edge state before
     // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
@@ -6484,10 +6499,23 @@ fn lower_ff_processes(
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
 
+    let split_commit_ff_blocks = active_ff_blocks
+        .into_iter()
+        .map(|(trigger_set, active)| {
+            let nba = nba_ff_blocks
+                .remove(&trigger_set)
+                .expect("every trigger group has both commits");
+            (
+                trigger_set,
+                celox_frontend_core::symbolic::artifact::SplitCommit { active, nba },
+            )
+        })
+        .collect();
     Ok((
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
+        split_commit_ff_blocks,
         reset_clock_map,
         parallel_ff_parts,
         event_vars,

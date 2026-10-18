@@ -37,6 +37,9 @@ pub struct ScheduleModel<A> {
     pub has_pending_nba_sites: bool,
     /// The design can execute `$finish`.
     pub finish_sites: bool,
+    /// Canonical event domains whose evaluation commits their blocking
+    /// results ([`RuntimeSchema::active_commits`]).
+    pub active_commits: Vec<A>,
 }
 
 /// A counted signal and the canonical domains its counters trigger.
@@ -129,6 +132,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .runtime_event_sites
                 .iter()
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
+            active_commits: schema.active_commits.clone(),
         }
     }
 

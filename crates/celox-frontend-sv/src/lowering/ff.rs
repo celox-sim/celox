@@ -35,6 +35,8 @@ pub(super) struct Ff<'p, 'a> {
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
+    /// Variables a nonblocking assignment writes.
+    nonblocking: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
     loops: Vec<LoopBlocks>,
@@ -92,6 +94,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             m,
             b: SIRBuilder::new(),
             working: HashSet::default(),
+            nonblocking: HashSet::default(),
             targets: Vec::new(),
             loops: Vec::new(),
             functions: Vec::new(),
@@ -138,6 +141,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         if blocking {
             self.working.insert(id);
+        } else {
+            self.nonblocking.insert(id);
         }
         if self.m.is_hidden(id) {
             return;
@@ -2860,14 +2865,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     pub fn lower_process(
         mut self,
         body: &[sv::ir::Stmt],
-    ) -> Result<
-        (
-            ExecutionUnit<Addr>,
-            ExecutionUnit<Addr>,
-            Vec<VarAtomBase<SourceVarId>>,
-        ),
-        sv::AnalyzerError,
-    > {
+    ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // Merge the written ranges of each variable.
@@ -2894,14 +2892,275 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|access| VarAtomBase::new(id, access.lsb, access.msb)),
             );
         }
+        // A variable the process writes both ways keeps its nonblocking
+        // values apart: blocking reads see the blocking value, and the
+        // nonblocking update lands after it (IEEE 1800-2023 10.4).
+        let mut mixed: Vec<SourceVarId> = self
+            .nonblocking
+            .intersection(&self.working)
+            .copied()
+            .filter(|&id| !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty())
+            .collect();
+        mixed.sort_by_key(|id| id.0);
+        let staged: Vec<NbaStage> = mixed
+            .into_iter()
+            .map(|id| {
+                let (value, value_name) = self.m.shadow(id, "nba_value", false);
+                let (mask, mask_name) = self.m.shadow(id, "nba_mask", true);
+                NbaStage {
+                    id,
+                    name: self.m.var(id).path.join("."),
+                    value,
+                    value_name,
+                    mask,
+                    mask_name,
+                }
+            })
+            .collect();
+        let body = if staged.is_empty() {
+            body.to_vec()
+        } else {
+            stage_nonblocking(body, &staged, self.m)
+        };
         emit_ff_seeds(&mut self.b, &targets);
-        if self.exec_block(body)? {
+        for stage in &staged {
+            let width = self.m.var(stage.mask).width;
+            let zero = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            self.store(stage.mask, SIROffset::Static(0), width, zero);
+        }
+        if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let eval = seal_drained(self.b);
+        let (active_targets, nba_targets): (Vec<_>, Vec<_>) = targets
+            .iter()
+            .copied()
+            .partition(|target| self.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
         emit_ff_commits(&mut apply, &targets);
-        Ok((eval, seal_builder(apply), targets))
+        emit_nba_merges(&mut apply, &staged, self.m);
+        let mut active = SIRBuilder::new();
+        emit_ff_commits(&mut active, &active_targets);
+        let mut nba = SIRBuilder::new();
+        emit_ff_commits(&mut nba, &nba_targets);
+        emit_nba_merges(&mut nba, &staged, self.m);
+        Ok(FfProcessUnits {
+            eval,
+            apply: seal_builder(apply),
+            active: seal_builder(active),
+            nba: seal_builder(nba),
+            targets,
+        })
+    }
+}
+
+/// The units of an edge-triggered process: its evaluation, the commit of
+/// all its results, and that commit split into the blocking results (the
+/// active region) and the nonblocking ones (the NBA region).
+pub(super) struct FfProcessUnits {
+    pub eval: ExecutionUnit<Addr>,
+    pub apply: ExecutionUnit<Addr>,
+    pub active: ExecutionUnit<Addr>,
+    pub nba: ExecutionUnit<Addr>,
+    pub targets: Vec<VarAtomBase<SourceVarId>>,
+}
+
+/// The staging of a variable a process writes both by blocking and by
+/// nonblocking assignments: the nonblocking value and a mask of the bits
+/// the nonblocking assignments wrote.
+struct NbaStage {
+    id: SourceVarId,
+    name: String,
+    value: SourceVarId,
+    value_name: String,
+    mask: SourceVarId,
+    mask_name: String,
+}
+
+/// `stmts` with every nonblocking assignment to a staged variable writing
+/// its staging value instead, and marking the written bits in its mask.
+fn stage_nonblocking(
+    stmts: &[sv::ir::Stmt],
+    staged: &[NbaStage],
+    pm: &ProcModule<'_>,
+) -> Vec<sv::ir::Stmt> {
+    let stage_of = |lvalue: &sv::ir::LValue| {
+        staged
+            .iter()
+            .find(|stage| pm.id(lvalue.name()) == Some(stage.id))
+    };
+    let renamed = |lvalue: &sv::ir::LValue, name: &str| match lvalue {
+        sv::ir::LValue::Ident(_) => sv::ir::LValue::Ident(name.to_string()),
+        sv::ir::LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+            ..
+        } => sv::ir::LValue::Select {
+            name: name.to_string(),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            array_slice_width: array_slice_width.clone(),
+            array_slice_reversed: *array_slice_reversed,
+        },
+    };
+    let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {
+        lhs: renamed(lvalue, &stage.mask_name),
+        rhs: sv::ir::Expr::Literal("'1".to_string()),
+        nonblocking: true,
+    };
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: true,
+            } if stage_of(lhs).is_some() => {
+                let stage = stage_of(lhs).unwrap();
+                out.push(sv::ir::Stmt::Assign {
+                    lhs: renamed(lhs, &stage.value_name),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                out.push(mark(lhs, stage));
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: true,
+            } if parts.iter().any(|part| stage_of(part).is_some()) => {
+                out.push(sv::ir::Stmt::AssignConcat {
+                    parts: parts
+                        .iter()
+                        .map(|part| match stage_of(part) {
+                            Some(stage) => renamed(part, &stage.value_name),
+                            None => part.clone(),
+                        })
+                        .collect(),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                for part in parts {
+                    if let Some(stage) = stage_of(part) {
+                        out.push(mark(part, stage));
+                    }
+                }
+            }
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => out.push(sv::ir::Stmt::If {
+                condition: condition.clone(),
+                then_body: stage_nonblocking(then_body, staged, pm),
+                else_body: stage_nonblocking(else_body, staged, pm),
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => out.push(sv::ir::Stmt::Case {
+                kind: *kind,
+                selector: selector.clone(),
+                items: items
+                    .iter()
+                    .map(|item| sv::ir::CaseItem {
+                        labels: item.labels.clone(),
+                        body: stage_nonblocking(&item.body, staged, pm),
+                    })
+                    .collect(),
+                default: default
+                    .as_ref()
+                    .map(|body| stage_nonblocking(body, staged, pm)),
+            }),
+            sv::ir::Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => out.push(sv::ir::Stmt::Loop {
+                kind: kind.clone(),
+                init: init.clone(),
+                condition: condition.clone(),
+                step: step.clone(),
+                body: stage_nonblocking(body, staged, pm),
+            }),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// Publish the staged nonblocking values: each variable takes its staging
+/// value in the bits the mask marks, after its blocking value was
+/// committed.
+fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &ProcModule<'_>) {
+    for stage in staged {
+        let _ = &stage.name;
+        let variable = pm.var(stage.id);
+        let width = variable.width;
+        let current = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Load(
+            current,
+            stable(stage.id),
+            SIROffset::Static(0),
+            width,
+        ));
+        let value = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Load(
+            value,
+            working(stage.value),
+            SIROffset::Static(0),
+            width,
+        ));
+        let mask = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Load(
+            mask,
+            working(stage.mask),
+            SIROffset::Static(0),
+            width,
+        ));
+        let keep = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Unary(keep, UnaryOp::BitNot, mask));
+        let kept = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(kept, current, BinaryOp::And, keep));
+        let taken = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(taken, value, BinaryOp::And, mask));
+        let merged = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+        builder.emit(SIRInstruction::Store(
+            stable(stage.id),
+            SIROffset::Static(0),
+            width,
+            merged,
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 }
 

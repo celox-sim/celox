@@ -1905,6 +1905,7 @@ pub fn lower_frontend_artifact(
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
+        split_commit_ff_blocks: HashMap::default(),
         parallel_ff_parts: HashMap::default(),
         glue_blocks: HashMap::default(),
         indexed_instance_names: HashSet::default(),
