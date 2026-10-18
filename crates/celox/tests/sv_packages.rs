@@ -983,24 +983,6 @@ fn generate_block_imports_are_scoped_to_their_block() {
         ),
         59
     );
-    // A subroutine the block imports as another one than its module is not
-    // supported: calls look up formal names and shapes module-wide.
-    let detail = Simulator::from_sv_sources(
-        vec![(
-            "package p; function automatic int f(int a); return a + 1; endfunction endpackage
-             package q; function automatic int f(int b); return b + 2; endfunction endpackage
-             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
-               if (1) begin : g import p::*; assign a = f(4); end
-               assign y = a + f(0);
-             endmodule",
-            std::path::Path::new("packages.sv"),
-        )],
-        "Top",
-    )
-    .build()
-    .expect_err("a block-local subroutine binding is unsupported")
-    .to_string();
-    assert!(detail.contains("subroutine `f`"), "{detail}");
     // A loop's genvar hides a wildcard import of its body.
     assert_eq!(
         output(
@@ -1203,4 +1185,399 @@ fn generate_scopes_declare_loop_body_names_and_keep_inner_imports() {
         )),
         3
     );
+}
+
+/// A generate block can import a type or subroutine that is another
+/// declaration than the one its module sees under that name (#1206).
+#[test]
+fn generate_block_imports_bind_their_own_subroutines() {
+    // `f` takes its formals in another order in each package.
+    let functions = "package p; function automatic int f(int a, int b = 0); return a * 10 + b; endfunction
+                       endpackage
+                     package q; function automatic int f(int b, int a = 0); return b * 3 + a; endfunction
+                       endpackage";
+    let cases = [
+        // Positional and named arguments, against the block's formals.
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; assign a = f(4); end
+             assign y = a + f(1);",
+            43,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; assign a = f(.b(2), .a(1)); end
+             assign y = a + f(.a(1), .b(2));",
+            19,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; always_comb a = f(.a(2)); end
+             assign y = a + f(0);",
+            20,
+        ),
+        // Constant calls in declarations, selects, loop bounds and generate
+        // conditions of the block, and in the blocks inside it.
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; localparam int Y = f(.b(2), .a(1)); assign a = Y; end
+             assign y = a + f(1);",
+            15,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; logic [f(1)-1:0] v; assign a = $bits(v); end
+             assign y = a + f(0);",
+            10,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*; int n = f(1); assign a = n; end
+             assign y = a + f(0);",
+            10,
+        ),
+        (
+            "import q::*; logic [15:0] w; logic [7:0] a; assign w = 16'h0780;
+             if (1) begin : g import p::*; assign a = w[f(1) - 3 +: 4]; end
+             assign y = a + f(0);",
+            15,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*;
+               always_comb begin a = 0; for (int i = 0; i < f(1); i++) a = a + 1; end
+             end
+             assign y = a + f(0);",
+            10,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*;
+               function automatic int k(logic [f(1)-1:0] v); return $bits(v); endfunction
+               assign a = k(0);
+             end
+             assign y = a + f(0);",
+            10,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*;
+               if (f(1) == 10) begin : h assign a = 1; end else begin : h assign a = 2; end
+             end
+             assign y = a + f(0);",
+            1,
+        ),
+        (
+            "import q::*; logic [7:0] a;
+             if (1) begin : g import p::*;
+               if (1) begin : h localparam int Y = f(1); assign a = Y + f(2); end
+             end
+             assign y = a + f(0);",
+            30,
+        ),
+        (
+            "import q::*; logic [7:0] a [2];
+             for (genvar i = 0; i < 2; i++) begin : g import p::*; assign a[i] = f(i); end
+             assign y = a[0] + a[1] + f(0);",
+            10,
+        ),
+        // The block's import comes before a function of the module.
+        (
+            "function automatic int f(int a); return 99; endfunction logic [7:0] a;
+             if (1) begin : g import p::*; localparam int Y = f(1); assign a = Y; end
+             assign y = a + f(0);",
+            109,
+        ),
+        (
+            "function automatic int f(int a); return 99; endfunction logic [7:0] a;
+             if (1) begin : g import p::*;
+               if (f(1) == 10) begin : h assign a = 1; end else begin : h assign a = 2; end
+             end
+             assign y = a + f(0);",
+            100,
+        ),
+        // A function of the module still calls the declaration it sees.
+        (
+            "import q::*; function automatic int k(int v); return f(v); endfunction logic [7:0] a;
+             if (1) begin : g import p::*; localparam int Y = k(1); assign a = Y + k(2); end
+             assign y = a;",
+            9,
+        ),
+        (
+            "function automatic int f(int a); return 99; endfunction
+             function automatic int k(int v); return f(v); endfunction logic [7:0] a;
+             if (1) begin : g import p::*; localparam int Y = k(1); assign a = Y + f(1); end
+             assign y = a;",
+            109,
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(
+            output(&format!(
+                "{functions}
+                 module Top(output logic [7:0] y); {body} endmodule"
+            )),
+            expected,
+            "{body}"
+        );
+    }
+    // Assignment-pattern arguments take the shape of the block's formal.
+    assert_eq!(
+        output(
+            "package p; function automatic int f(int v[2]); return v[0] * 10 + v[1]; endfunction
+             endpackage
+             package q; function automatic int f(int v[3]); return v[0] + v[1] + v[2]; endfunction
+             endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a;
+               if (1) begin : g import p::*; assign a = f('{1, 2}); end
+               assign y = a + f('{1, 1, 1});
+             endmodule"
+        ),
+        15
+    );
+    assert_eq!(
+        output(
+            "package p; task automatic t(output int o, input int a); o = a + 1; endtask endpackage
+             package q; task automatic t(input int a, output int o); o = a + 2; endtask endpackage
+             module Top(output logic [7:0] y); import q::*; int a, b;
+               if (1) begin : g import p::*; always_comb t(a, 4); end
+               always_comb t(4, b);
+               assign y = a * 10 + b;
+             endmodule"
+        ),
+        56
+    );
+}
+
+/// A generate block can import a type that is another declaration than the
+/// one its module sees under that name (#1206).
+#[test]
+fn generate_block_imports_bind_their_own_types() {
+    let types = "package p; typedef logic [3:0] t; endpackage
+                 package q; typedef logic [7:0] t; endpackage";
+    // The module's `m` is a `q::t`.
+    let cases = [
+        (
+            "if (1) begin : g import p::*; t n; assign n = '1; assign a = n; end",
+            15,
+        ),
+        (
+            "if (1) begin : g import p::*; t n; initial n = 8'hff; assign a = n; end",
+            15,
+        ),
+        (
+            "if (1) begin : g import p::*; t n = 8'hff; assign a = $bits(n); end",
+            4,
+        ),
+        (
+            "if (1) begin : g import p::*; t n = 8'hff; assign a = n; end",
+            15,
+        ),
+        // Casts and type queries.
+        (
+            "if (1) begin : g import p::*; assign a = t'(8'hff) + $bits(t); end",
+            19,
+        ),
+        // Declarations and generate conditions of the block.
+        (
+            "if (1) begin : g import p::*; localparam t Z = '1; localparam int W = $bits(t);
+               assign a = Z + W; end",
+            19,
+        ),
+        (
+            "if (1) begin : g import p::*; t n; localparam int W = $bits(n); assign a = W; end",
+            4,
+        ),
+        (
+            "if (1) begin : g import p::*; logic [$bits(t)-1:0] v; assign a = $bits(v); end",
+            4,
+        ),
+        (
+            "if (1) begin : g import p::*;
+               if ($bits(t) == 4) begin : h assign a = 1; end else begin : h assign a = 2; end
+             end",
+            1,
+        ),
+        (
+            "if (1) begin : g import p::*; t n;
+               if ($bits(n) == 4) begin : h assign a = 1; end else begin : h assign a = 2; end
+             end",
+            1,
+        ),
+        // Subroutines of the block.
+        (
+            "if (1) begin : g import p::*;
+               function automatic t inc(t v); return v + 1; endfunction
+               assign a = inc(8'h1f);
+             end",
+            0,
+        ),
+        (
+            "if (1) begin : g import p::*;
+               function automatic int w(t v [2]); return v[0] + v[1] + $bits(v); endfunction
+               assign a = w('{8'hff, 8'h01});
+             end",
+            24,
+        ),
+        (
+            "if (1) begin : g import p::*;
+               task automatic k(output t o); o = 8'hff; endtask
+               always_comb k(a);
+             end",
+            15,
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(
+            output(&format!(
+                "{types}
+                 module Top(output logic [7:0] y); import q::*; logic [7:0] a; t m;
+                   assign m = 8'hf0; {body} assign y = a + m - 8'hf0;
+                 endmodule"
+            )),
+            expected,
+            "{body}"
+        );
+    }
+    assert_eq!(
+        output(
+            "package p; typedef struct packed { logic [3:0] x; logic [3:0] z; } t; endpackage
+             package q; typedef struct packed { logic [7:0] x; } t; endpackage
+             module Top(output logic [7:0] y); import q::*; logic [7:0] a; t m;
+               if (1) begin : g import p::*; t n; assign n = t'{x: 4'h1, z: 4'h2}; assign a = n;
+               end
+               assign m = t'{x: 8'h30}; assign y = a + m.x;
+             endmodule"
+        ),
+        0x42
+    );
+    // A block import of a value hides the module's type of that name.
+    let values = "package p; localparam int T = 3; endpackage
+                  package q; typedef logic [7:0] T; endpackage";
+    assert_eq!(
+        output(&format!(
+            "{values}
+             module Top(output logic [7:0] y); import q::*; T m; logic [7:0] a;
+               if (1) begin : g import p::*; assign a = T; end
+               assign m = 8'h10; assign y = a + m;
+             endmodule"
+        )),
+        0x13
+    );
+    let result = Simulator::from_sv_sources(
+        vec![(
+            format!(
+                "{values}
+                 module Top(output logic [7:0] y); import q::*; T m; logic [7:0] a;
+                   if (1) begin : g import p::*; T n; assign n = 8'hff; assign a = n; end
+                   assign m = 0; assign y = a + m;
+                 endmodule"
+            )
+            .as_str(),
+            std::path::Path::new("packages.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(result.is_err(), "`T` is a parameter in block `g`");
+}
+
+/// A declaration of a generate block hides a type of that name around it,
+/// whether the module declares or imports the type (IEEE 1800-2023 23.9).
+#[test]
+fn generate_block_declarations_hide_outer_types() {
+    let cases = [
+        "package p; typedef logic [3:0] T; endpackage
+         package q; typedef logic [7:0] T; endpackage
+         module Top(output logic [7:0] y); import q::*; T m; logic [7:0] a; assign m = 0;
+           if (1) begin : g import p::*; T o;
+             if (1) begin : h localparam int T = 2;
+               if (1) begin : i T n; assign n = '1; assign a = n; end
+             end
+           end
+           assign y = a + m;
+         endmodule",
+        "module Top(output logic [7:0] y); typedef logic [7:0] T; logic [7:0] a;
+           if (1) begin : h localparam int T = 2;
+             if (1) begin : i T n; assign n = '1; assign a = n; end
+           end
+           assign y = a;
+         endmodule",
+        "module Top(output logic [7:0] y); typedef logic [7:0] T; logic [7:0] a;
+           if (1) begin : h logic T; T n; assign n = '1; assign a = n; end
+           assign y = a;
+         endmodule",
+    ];
+    for source in cases {
+        let result =
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("packages.sv"))], "Top")
+                .build();
+        assert!(result.is_err(), "`T` is not a type in the block:\n{source}");
+    }
+}
+
+/// An inner block that imports the declaration its module sees still hides
+/// the binding of a block around it, by import or by declaration.
+#[test]
+fn nested_generate_block_imports_restore_the_module_binding() {
+    let packages = "package p; localparam int X = 3; typedef logic [3:0] t;
+                      function automatic int f(int a); return a + 1; endfunction endpackage
+                    package q; localparam int X = 5; typedef logic [7:0] t;
+                      function automatic int f(int a); return a + 2; endfunction endpackage";
+    let cases = [
+        (
+            "logic [7:0] a, c;
+             if (1) begin : g import p::*; assign c = X;
+               if (1) begin : h import q::*; assign a = X; end
+             end
+             assign y = a * 10 + c + X;",
+            58,
+        ),
+        (
+            "logic [7:0] a; t m; assign m = 0;
+             if (1) begin : g import p::*; t o;
+               if (1) begin : h import q::*; t n; assign n = '1; assign a = n; end
+             end
+             assign y = a + m;",
+            255,
+        ),
+        (
+            "logic [7:0] a, c;
+             if (1) begin : g import p::*; assign c = f(0);
+               if (1) begin : h import q::*; localparam int Y = f(0); assign a = Y + f(10); end
+             end
+             assign y = a + c * 10 + f(0);",
+            26,
+        ),
+        // The binding alternates down a chain of blocks.
+        (
+            "logic [7:0] a, b, c;
+             if (1) begin : g import p::*; assign c = X;
+               if (1) begin : h import q::*;
+                 if (1) begin : i import p::*; assign b = X; end
+                 assign a = X;
+               end
+             end
+             assign y = a * 10 + b + X + c * 0;",
+            58,
+        ),
+        (
+            "logic [7:0] a;
+             if (1) begin : g localparam int X = 9;
+               if (1) begin : h import q::X; assign a = X; end
+             end
+             assign y = a + X;",
+            10,
+        ),
+    ];
+    for (body, expected) in cases {
+        assert_eq!(
+            output(&format!(
+                "{packages}
+                 module Top(output logic [7:0] y); import q::*; {body} endmodule"
+            )),
+            expected,
+            "{body}"
+        );
+    }
 }

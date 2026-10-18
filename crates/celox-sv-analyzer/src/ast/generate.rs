@@ -53,11 +53,111 @@ pub(super) struct Item<'a> {
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     names: SharedMap<String>,
+    imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
     scope: String,
 }
 
+/// The names the imports of the enclosing generate blocks bind to another
+/// declaration than the module does (see `imports::resolve_imports`), unless
+/// a declaration of an inner block hides them again. The module-wide tables
+/// hold those declarations under their qualified names.
+#[derive(Clone, Copy)]
+struct BlockImports<'s> {
+    names: &'s HashMap<String, String>,
+    imports: &'s HashMap<String, String>,
+    /// The names the blocks declare or import.
+    shadowed: &'s HashSet<String>,
+}
+
+impl<'s> BlockImports<'s> {
+    fn bindings(self) -> impl Iterator<Item = (&'s String, &'s String)> {
+        self.imports
+            .iter()
+            .filter(move |(name, target)| self.names.get(*name) == Some(*target))
+    }
+
+    /// The type aliases visible here: a name the blocks declare or import
+    /// hides the module's type of that name, and an imported name denotes
+    /// the type of its declaration.
+    fn type_aliases<'m>(
+        self,
+        aliases: &'m HashMap<String, Type>,
+    ) -> Cow<'m, HashMap<String, Type>> {
+        let mut visible = Cow::Borrowed(aliases);
+        let hidden: Vec<&String> = if aliases.len() <= self.shadowed.len() {
+            aliases
+                .keys()
+                .filter(|name| self.shadowed.contains(*name))
+                .collect()
+        } else {
+            self.shadowed
+                .iter()
+                .filter(|name| aliases.contains_key(*name))
+                .collect()
+        };
+        for name in hidden {
+            visible.to_mut().remove(name);
+        }
+        for (name, target) in self.bindings() {
+            if let Some(r#type) = aliases.get(target) {
+                visible.to_mut().insert(name.clone(), r#type.clone());
+            }
+        }
+        visible
+    }
+
+    /// Make each imported name call the constant function of its
+    /// declaration, until the guard is dropped; a name that imports no
+    /// constant function calls none. Calls in the bodies of the functions it
+    /// hides keep their definition-site meaning.
+    fn install_constant_functions(self) -> Option<const_functions::Installed> {
+        let installed = const_functions::installed();
+        let rebound: Vec<_> = self
+            .bindings()
+            .filter(|(name, target)| installed.contains(name) || installed.contains(target))
+            .collect();
+        if rebound.is_empty() {
+            return None;
+        }
+        let hidden: HashMap<String, String> = rebound
+            .iter()
+            .filter(|(name, _)| installed.contains(name))
+            .map(|(name, _)| ((*name).clone(), format!("{OUTER_BINDING}{name}")))
+            .collect();
+        let rename = scope::Renamer { names: &hidden };
+        let mut visible =
+            installed.renamed(&mut |name| rename.name(name), &mut |stmt| rename.stmt(stmt));
+        for (name, target) in rebound {
+            visible.alias(name, target);
+        }
+        Some(const_functions::install(visible))
+    }
+}
+
 impl Item<'_> {
+    fn block_imports(&self) -> BlockImports<'_> {
+        BlockImports {
+            names: &self.names,
+            imports: &self.imports,
+            shadowed: &self.shadowed,
+        }
+    }
+
+    /// The type aliases this item sees, given the module's.
+    pub fn type_aliases<'m>(
+        &self,
+        aliases: &'m HashMap<String, Type>,
+    ) -> Cow<'m, HashMap<String, Type>> {
+        self.block_imports().type_aliases(aliases)
+    }
+
+    /// Make the constant functions this item sees the installed ones, until
+    /// the guard is dropped.
+    pub fn enter(&self) -> Option<const_functions::Installed> {
+        self.block_imports().install_constant_functions()
+    }
+
     pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
         match self.node {
             ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(item)) => {
@@ -139,6 +239,9 @@ impl Item<'_> {
                 local.function_return_types =
                     self.function_aliases(dimensions.function_return_types.clone());
             }
+        }
+        if let Cow::Owned(aliases) = self.type_aliases(&dimensions.type_aliases) {
+            local.type_aliases = aliases;
         }
         let mut signedness = dimensions.expression_signedness.clone();
         for name in self.shadowed.iter() {
@@ -340,12 +443,25 @@ struct Scope {
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     names: SharedMap<String>,
+    imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
+}
+
+impl Scope {
+    fn block_imports(&self) -> BlockImports<'_> {
+        BlockImports {
+            names: &self.names,
+            imports: &self.imports,
+            shadowed: &self.shadowed,
+        }
+    }
 }
 
 struct Elaborator<'a, 'b> {
     tree: &'a SyntaxTree,
-    aliases: &'b HashMap<String, Type>,
+    module_aliases: &'b HashMap<String, Type>,
+    /// The type aliases of the scope being elaborated.
+    aliases: Cow<'b, HashMap<String, Type>>,
     remaining: usize,
     functions: HashMap<String, Function>,
     items: Vec<Item<'a>>,
@@ -397,7 +513,8 @@ fn items_with_literal_use<'a>(
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
     let mut elaborator = Elaborator {
         tree,
-        aliases,
+        module_aliases: aliases,
+        aliases: Cow::Borrowed(aliases),
         remaining: MAX_GENERATE_LOOP_EXPANSION,
         functions: HashMap::default(),
         items: Vec::new(),
@@ -541,7 +658,7 @@ impl<'a> Elaborator<'a, '_> {
             RefNode::ConstantExpression(expr),
             self.tree,
             &scope.env,
-            self.aliases,
+            &self.aliases,
         )?
         else {
             return Ok(None);
@@ -564,6 +681,16 @@ impl<'a> Elaborator<'a, '_> {
             ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
                     self.expand_constant_calls(arg, scope)?;
+                }
+                // A block import binds the call to the qualified declaration,
+                // which the installed constant functions evaluate.
+                if let Callee::Subroutine(name) = callee
+                    && let Some(target) = scope
+                        .block_imports()
+                        .bindings()
+                        .find_map(|(imported, target)| (imported == name).then_some(target))
+                {
+                    *name = target.clone();
                 }
                 if let Callee::Subroutine(name) = callee
                     && self.functions.contains_key(name)
@@ -908,6 +1035,7 @@ impl<'a> Elaborator<'a, '_> {
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
             names: scope.names.clone(),
+            imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
         });
@@ -1140,7 +1268,7 @@ impl<'a> Elaborator<'a, '_> {
                 signals_from_module_or_generate_item(
                     item,
                     self.tree,
-                    self.aliases,
+                    &self.aliases,
                     &scope.env,
                     Some(&name),
                     &mut signals,
@@ -1200,7 +1328,7 @@ impl<'a> Elaborator<'a, '_> {
                             &mut scope.parameters,
                             true,
                             &base,
-                            self.aliases,
+                            &self.aliases,
                             &HashMap::default(),
                             &mut environment,
                         )?;
@@ -1249,7 +1377,7 @@ impl<'a> Elaborator<'a, '_> {
                     &mut scope.parameters,
                     true,
                     &scope.env,
-                    self.aliases,
+                    &self.aliases,
                     &HashMap::default(),
                 )?;
                 let parameter = scope
@@ -1327,6 +1455,22 @@ impl<'a> Elaborator<'a, '_> {
                 bind_import(&mut scope, name, target);
             }
         }
+        // The declarations and nested blocks are elaborated with the types and
+        // constant functions those imports bind.
+        let _constant_functions = scope.block_imports().install_constant_functions();
+        let aliases = scope.block_imports().type_aliases(self.module_aliases);
+        let outer = std::mem::replace(&mut self.aliases, aliases);
+        let elaborated = self.block_contents(children, scope, index);
+        self.aliases = outer;
+        elaborated
+    }
+
+    fn block_contents(
+        &mut self,
+        children: Vec<&'a sv_parser::GenerateItem>,
+        mut scope: Scope,
+        index: Option<(&str, i128)>,
+    ) -> Result<(), AnalyzerError> {
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
         if let Some((genvar, value)) = index {
@@ -1352,7 +1496,7 @@ impl<'a> Elaborator<'a, '_> {
                         signals_from_module_or_generate_item(
                             item,
                             self.tree,
-                            self.aliases,
+                            &self.aliases,
                             &scope.env,
                             None,
                             &mut signals,
@@ -1404,7 +1548,7 @@ impl<'a> Elaborator<'a, '_> {
                         signals_from_module_or_generate_item(
                             item,
                             self.tree,
-                            self.aliases,
+                            &self.aliases,
                             &scope.env,
                             None,
                             &mut signals,
@@ -1450,6 +1594,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
     let imported = scope::imported();
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
+    scope.imports.insert(name.to_string(), target.to_string());
     // The constant value and type markers of the item, under the name.
     let names = |key: &str| -> Option<String> {
         if key == target {
