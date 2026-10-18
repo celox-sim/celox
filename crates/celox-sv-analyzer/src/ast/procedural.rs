@@ -622,7 +622,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         match control {
             sv_parser::ProceduralTimingControl::DelayControl(delay) => {
                 self.allow_timing("delay control")?;
-                self.delay_control(delay).map(Stmt::Delay)
+                self.delay_control(delay)
             }
             sv_parser::ProceduralTimingControl::EventControl(control) => {
                 self.allow_timing("event control")?;
@@ -636,17 +636,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// the global time precision: the delay is given in time units of its
     /// scope (IEEE 1800-2023 3.14.1). Of a `min:typ:max` delay the typical
     /// value is used, as simulators do by default.
-    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
-        let amount = self.delay_amount(delay)?;
-        let factor = super::timescales::time_divisor(RefNode::DelayControl(delay), self.tree)?;
-        Ok(if factor == 1 {
-            amount
-        } else {
-            Expr::Binary {
-                left: Box::new(amount),
-                op: BinaryOp::Mul,
-                right: Box::new(Expr::Literal(format!("64'd{factor}"))),
-            }
+    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Stmt, AnalyzerError> {
+        Ok(Stmt::Delay {
+            amount: self.delay_amount(delay)?,
+            ticks_per_unit: super::timescales::time_divisor(
+                RefNode::DelayControl(delay),
+                self.tree,
+            )?,
         })
     }
 

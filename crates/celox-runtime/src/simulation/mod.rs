@@ -280,15 +280,17 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.time
     }
 
-    pub fn set_time(&mut self, time: u64) {
+    /// Set the scheduler time and publish it to the design's time slots.
+    /// This does not evaluate processes or combinational logic.
+    pub fn set_time(&mut self, backend: &mut B, time: u64) {
         self.scheduler.time = time;
+        self.publish_time(backend, time);
     }
 
     /// Move to `time` without running anything there, as the end of a run
     /// to a time without work does. Design code reads the new time.
     pub fn advance_time(&mut self, backend: &mut B, time: u64) {
-        self.scheduler.time = time;
-        self.publish_time(backend, time);
+        self.set_time(backend, time);
     }
 
     /// Store `time` where design code reads the simulation time (`$time`).

@@ -49,6 +49,8 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
+    fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
     fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
     fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";

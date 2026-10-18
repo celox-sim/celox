@@ -860,3 +860,63 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (set clk 1)
   (run_until 3)
   (assert_eq q 2))
+
+; Port actuals read the caller's time. $stime truncates before addition.
+(case time_calls_in_child_port_actuals
+  (source "time_ports.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      Child time_child(.x($time + a), .y(t));
+      Child stime_child(.x($stime + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))
+
+(case time_calls_in_child_port_subroutines
+  (source "time_port_functions.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      function automatic logic [63:0] leaf(); return $time; endfunction
+      function automatic logic [63:0] now(input logic [63:0] bias); return leaf() + bias; endfunction
+      function automatic logic [63:0] with_default(input logic [63:0] stamp = $stime);
+        return stamp;
+      endfunction
+      Child time_child(.x(now(a)), .y(t));
+      Child stime_child(.x(with_default() + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))

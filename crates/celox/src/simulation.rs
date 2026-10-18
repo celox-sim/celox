@@ -280,7 +280,7 @@ impl<B: SimBackend> Simulation<B> {
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;
-        self.simulator.load_state(file)?;
+        self.simulator.load_state_at_time(file, record.time)?;
         self.state.import_schedule(parts);
         // The file keeps the time in its schedule, not in the time slots.
         let time = self.state.time();

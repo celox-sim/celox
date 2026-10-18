@@ -2438,6 +2438,27 @@ fn delays_count_the_time_unit_of_their_scope() {
 }
 
 #[test]
+fn interface_functions_read_the_time_in_their_own_unit() {
+    let source = r#"
+        interface Clock;
+            timeunit 10ps / 1ps;
+            function automatic longint now();
+                return $time;
+            endfunction
+        endinterface
+        module Top(input logic clk);
+            timeunit 1ns / 1ps;
+            Clock bus();
+            always_ff @(posedge clk) $display("top %0d %0d", $time, bus.now());
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(rising_edge_at(&mut sim, 2_000), displays(&["top 2 200"]));
+}
+
+#[test]
 fn time_is_not_a_constant_expression() {
     let error = build_error(
         "module Top(output logic [63:0] y);
@@ -2472,6 +2493,31 @@ fn functions_that_read_the_simulation_state_are_no_constant_functions() {
             "g(1)",
         ),
         (
+            "function automatic int state_reader(); return int'($time); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic int state_reader(); return int'($stime); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction
+            function automatic int g(); if (0) f(); return 2; endfunction",
+            "g()",
+        ),
+        (
+            "function automatic int state_reader(); return $urandom; endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic void state_reader(); int x; x = int'($time); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic int f(); if (0) return int'($time); return 1; endfunction",
+            "f()",
+        ),
+        (
             "function automatic int f(input int x, input int seed = $urandom);
                 return x;
             endfunction",
@@ -2490,6 +2536,67 @@ fn functions_that_read_the_simulation_state_are_no_constant_functions() {
             "{call}: {error}"
         );
     }
+}
+
+#[test]
+fn constant_functions_reject_state_reads_in_selectors() {
+    for statement in [
+        "x[$time] = 1;",
+        "x[$stime +: 1] = 1;",
+        "x[31 - $time -: 1] = 1;",
+        "{x[0], x[$time]} = 2'b01;",
+        "x[now()] = 1;",
+        "x[0] = x[now()];",
+        "x[x[now()]] = 1;",
+        "x[0] = x[x[now()]];",
+        "x[$time ? 1 : 0] = 1;",
+        "x[int'($stime)] = 1;",
+        "x[$urandom] = 1;",
+        "x[0] = {x[now()], x[0]};",
+    ] {
+        let source = format!(
+            r#"
+            module Top(output logic [7:0] y);
+              function automatic int now(); return int'($time); endfunction
+              function automatic int f();
+                int x;
+                if (0) begin {statement} end
+                return 7;
+              endfunction
+              localparam int P = f();
+              assign y = P;
+            endmodule
+        "#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("not permitted in constant function"),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn constant_functions_accept_pure_selector_calls_and_ignore_task_selectors() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+          function automatic int index(input int n); return n; endfunction
+          function automatic int now(); return int'($time); endfunction
+          function automatic int f();
+            int x = 0;
+            x[index(1)] = 1;
+            $display("%0d", x[now()]);
+            return x[index(1)] + 1;
+          endfunction
+          localparam int P = f();
+          assign y = P;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("constant_selectors.sv"))], "Top")
+            .build()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
 }
 
 #[test]
