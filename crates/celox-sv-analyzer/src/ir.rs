@@ -3,7 +3,7 @@
 use crate::{ast, symbol::ModuleId, typecheck};
 
 pub use crate::procedural::{
-    CaseKind, CaseLabel, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
@@ -12,6 +12,7 @@ pub use crate::system_functions::{
 /// A procedural statement of the analyzed IR.
 pub type Stmt = StmtBase<Expr, LValue>;
 pub type CaseItem = crate::procedural::CaseItemBase<Expr, LValue>;
+pub type EventItem = crate::procedural::EventItemBase<Expr>;
 pub type LocalVariable = crate::procedural::LocalVariableBase<Type>;
 pub type Subroutine = crate::procedural::SubroutineBase<Expr, LValue, Type>;
 pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;

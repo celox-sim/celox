@@ -3485,6 +3485,67 @@ fn rejects_unlowered_constructs() {
     assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
 }
 
+/// Timing constructs that remain unimplemented are rejected with their
+/// own construct names, not as a generic timing control.
+#[test]
+fn rejects_unimplemented_timing_constructs() {
+    for (body, construct) in [
+        ("initial begin fork #1; join end", "fork-join block"),
+        ("initial wait fork;", "wait fork statement"),
+        // The `event` data type is rejected before its uses.
+        ("event e; initial @e;", "unsupported internal data type"),
+        ("event e; initial ->e;", "unsupported internal data type"),
+        (
+            "logic clk, en; initial @(posedge clk iff en);",
+            "iff-qualified event",
+        ),
+        (
+            "logic a, b; initial a = #1 b;",
+            "intra-assignment timing control",
+        ),
+        (
+            "logic a, b; initial a <= #1 b;",
+            "intra-assignment timing control",
+        ),
+        ("initial begin : b disable b; end", "disable statement"),
+        ("initial #1.5;", "delay value"),
+        (
+            "logic a; initial @* a = 1;",
+            "`@*` event control in a process",
+        ),
+        (
+            "logic clk; always @(posedge clk) #1;",
+            "always and always_latch processes",
+        ),
+        (
+            "task automatic t; #1; endtask",
+            "delay control in a subroutine",
+        ),
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let error = analyze_source(&code, Path::new("timing.sv"))
+            .expect_err(&format!("`{body}` must be rejected"));
+        assert!(
+            matches!(&error, AnalyzerError::Unsupported(text) if text.starts_with(construct)),
+            "`{body}`: {error:?}"
+        );
+    }
+    assert_eq!(
+        AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
+        1444
+    );
+}
+
+/// Delays, event controls and waits in an `initial` block keep their
+/// statement structure in the IR.
+#[test]
+fn analyzes_timing_controls_in_initial_blocks() {
+    let code = "module Top(input logic clk, output logic [7:0] y);\n\
+                initial begin #3; @(posedge clk or negedge clk, y); @(edge clk); #(1:2:3); wait (y > 1); end\n\
+                endmodule";
+    analyze_source(code, Path::new("timing.sv")).expect("timing controls in an initial block");
+}
+
 #[test]
 fn analyzes_veryl_emitted_fifo_with_runtime_casts() {
     analyze_source(

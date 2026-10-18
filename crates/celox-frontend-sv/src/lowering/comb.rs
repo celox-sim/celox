@@ -1788,6 +1788,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.assign_concat(&mut store, frames, parts, rhs)?;
                 Ok(store)
             }
+            // A timing control suspends a process; this lowering has none.
+            sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
+                Err(unsupported("procedural timing control"))
+            }
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m

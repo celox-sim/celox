@@ -7,7 +7,7 @@ struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
 /// A timed case: the design's own processes and clocks run in a
 /// [`Simulation`]. A host write is settled at the current time by the next
-/// run operation.
+/// run operation, read, eval or output collection.
 struct TimedBackend<B: SimBackend> {
     sim: Simulation<B>,
     /// Runtime events not yet taken as output.
@@ -60,6 +60,20 @@ impl<B: SimBackend> TimedBackend<B> {
         }
     }
 
+    /// Settle host writes and the work they wake at the current time, as
+    /// the reference simulators do before a read, then capture events.
+    fn settled(&mut self, operation: &str) -> Result<()> {
+        let finished = self.finished;
+        if !finished {
+            self.sim.run_until(self.sim.time())?;
+        }
+        self.capture_events()?;
+        if !finished && self.finished {
+            return Err(format!("the design finished during {operation}").into());
+        }
+        Ok(())
+    }
+
     /// Capture events after an operation that does not advance time.
     fn checked(&mut self, operation: &str) -> Result<()> {
         let finished = self.finished;
@@ -104,14 +118,14 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
-        self.checked("a read")?;
+        self.settled("a read")?;
         let signal = self.signal(path);
         Ok(self.sim.get_four_state(signal))
     }
 
     fn eval_comb(&mut self) -> Result<()> {
         self.sim.eval_comb()?;
-        self.checked("eval")
+        self.settled("eval")
     }
 
     fn tick(&mut self, _event: &str) -> Result<()> {
@@ -119,7 +133,7 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn take_output(&mut self) -> Result<Vec<u8>> {
-        self.checked("output collection")?;
+        self.settled("output collection")?;
         collect_output(std::mem::take(&mut self.events))
     }
 
