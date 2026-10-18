@@ -3,7 +3,7 @@ import {
 	createWasmSimulatorBridge,
 	type RawWasmSimulatorHandle,
 } from "./wasm-bridge.js";
-import type { EdgePlans } from "./wasm-edges.js";
+import { type EdgePlans, WasmEdgeRunner } from "./wasm-edges.js";
 
 // Memory map of a small design driven by hand-written WASM modules:
 // `gated = clk & en`, `inverted = ~clk`, and one counter per domain.
@@ -186,4 +186,94 @@ test("edges of a clock combinational logic does not read keep it settled", () =>
 	expect(handle.edges?.([1], [false], true)).toBe(false);
 	expect(handle.edges?.([1], [true], true)).toBe(true);
 	expect(sharedMemory[GATED_COUNT]).toBe(2);
+});
+
+test("four-state edges judge a gated clock from x and z (IEEE 1800-2023 Table 9-2)", () => {
+	// Value bytes with their unknown masks in the following byte.
+	const clk = { offset: 0, width: 1 };
+	const en = { offset: 2, width: 1 };
+	const gated = { offset: 4, width: 1 };
+	const COUNT = 8;
+	const plans: EdgePlans = {
+		fourState: true,
+		events: {
+			clk: {
+				signal: clk,
+				edge: "posedge",
+				combRead: true,
+				domains: [],
+				gated: [{ event: "gated", signal: gated, edge: "posedge" }],
+			},
+			gated: {
+				signal: gated,
+				edge: "posedge",
+				combRead: false,
+				domains: [],
+				gated: [],
+			},
+		},
+	};
+	const memory = { buffer: new ArrayBuffer(16) };
+	const bytes = new Uint8Array(memory.buffer);
+	const set = (offset: number, level: "0" | "1" | "x" | "z") => {
+		bytes[offset] = level === "1" || level === "x" ? 1 : 0;
+		bytes[offset + 1] = level === "x" || level === "z" ? 1 : 0;
+	};
+	// gated = clk & en, with four-state AND: a known 0 wins, then x.
+	const evalComb = () => {
+		const known0 = (offset: number) =>
+			(bytes[offset + 1] ?? 0) === 0 && (bytes[offset] ?? 0) === 0;
+		const known1 = (offset: number) =>
+			(bytes[offset + 1] ?? 0) === 0 && (bytes[offset] ?? 0) === 1;
+		if (known0(clk.offset) || known0(en.offset)) {
+			set(gated.offset, "0");
+		} else if (known1(clk.offset) && known1(en.offset)) {
+			set(gated.offset, "1");
+		} else {
+			set(gated.offset, "x");
+		}
+	};
+	const kernels = (name: string) =>
+		name === "gated"
+			? {
+					evalApply: () => {
+						bytes[COUNT] = (bytes[COUNT] ?? 0) + 1;
+					},
+				}
+			: undefined;
+	const runner = new WasmEdgeRunner(
+		memory,
+		plans,
+		{ clk: 0, gated: 1 },
+		kernels,
+		evalComb,
+	);
+	const rise = () => runner.edges([0], [true]);
+	const fall = () => runner.edges([0], [false]);
+
+	// x & x stays x when the clock rises from x: no edge.
+	set(clk.offset, "x");
+	set(en.offset, "x");
+	evalComb();
+	rise();
+	expect(bytes[COUNT]).toBe(0);
+	// x & 1 -> 1 & 1: a posedge.
+	set(clk.offset, "x");
+	set(en.offset, "1");
+	evalComb();
+	rise();
+	expect(bytes[COUNT]).toBe(1);
+	// z & 1 is x: z -> 1 of the clock is x -> 1 of the gated clock.
+	set(clk.offset, "z");
+	evalComb();
+	rise();
+	expect(bytes[COUNT]).toBe(2);
+	// A falling edge from x is no posedge, and the clock ends at a known 0.
+	set(clk.offset, "x");
+	evalComb();
+	fall();
+	expect(bytes[COUNT]).toBe(2);
+	expect([bytes[clk.offset], bytes[clk.offset + 1]]).toEqual([0, 0]);
+	rise();
+	expect(bytes[COUNT]).toBe(3);
 });

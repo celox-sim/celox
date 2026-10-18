@@ -12,6 +12,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("always_comb.vtest"),
     },
     Group {
+        file: "src/sv/cases/edges.vtest",
+        text: include_str!("edges.vtest"),
+    },
+    Group {
         file: "src/sv/cases/generate.vtest",
         text: include_str!("generate.vtest"),
     },
