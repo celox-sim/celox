@@ -1,0 +1,1 @@
+Replace warning-specific thread-local collection with explicit diagnostics owned by syntax metadata, IR and analyzer errors; requested review revision.
