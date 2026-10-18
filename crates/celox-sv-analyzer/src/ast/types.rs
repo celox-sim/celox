@@ -267,11 +267,19 @@ fn add_type_alias_from_type_assignment(
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
-    let Some((_, data_type)) = &assignment.nodes.1 else {
+    let identifier = RefNode::TypeIdentifier(&assignment.nodes.0);
+    let Some(name) = identifier_text(identifier.clone(), syntax_tree) else {
         return;
     };
-    let Some(name) = identifier_text(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
-    else {
+    if let Some(locate) = identifier_locate(identifier)
+        && let Some(bound) = scope::imported()
+            .type_parameter_bindings
+            .get(&locate.offset)
+    {
+        aliases.insert(name, bound.clone());
+        return;
+    }
+    let Some((_, data_type)) = &assignment.nodes.1 else {
         return;
     };
     let Some(r#type) = type_from_ref_node_with_env(
@@ -279,9 +287,17 @@ fn add_type_alias_from_type_assignment(
         syntax_tree,
         const_env,
         aliases,
-    ) else {
+    )
+    .or_else(|| type_alias_from_data_type(data_type, syntax_tree, aliases)) else {
         return;
     };
+    let r#type = type_with_fallback_ranges_with_env(
+        r#type,
+        RefNode::DataType(data_type),
+        syntax_tree,
+        const_env,
+        aliases,
+    );
     aliases.insert(name, r#type);
 }
 

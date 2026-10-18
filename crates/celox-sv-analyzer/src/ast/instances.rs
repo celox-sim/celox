@@ -464,9 +464,27 @@ fn parameter_override(
     packed_dimensions: &PackedDimensions,
 ) -> Result<ParameterOverride, AnalyzerError> {
     if let sv_parser::ParamExpression::DataType(data_type) = expr {
-        let text = node_source_text(RefNode::DataType(data_type), syntax_tree)
-            .ok_or_else(|| AnalyzerError::Unsupported("parameter type override".to_string()))?;
-        return Ok(ParameterOverride::type_override(name, text));
+        let ty = type_from_ref_node_with_env(
+            RefNode::DataType(data_type),
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+        )
+        .or_else(|| {
+            type_alias_from_data_type(data_type, syntax_tree, &packed_dimensions.type_aliases)
+        })
+        .map(|ty| {
+            type_with_fallback_ranges_with_env(
+                ty,
+                RefNode::DataType(data_type),
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+            )
+        })
+        .and_then(|ty| type_parameters::resolve(ty, &packed_dimensions.const_env))
+        .ok_or_else(|| AnalyzerError::Unsupported(format!("parameter type override `{name}`")))?;
+        return Ok(ParameterOverride::type_override(name, ty));
     }
     if RefNode::ParamExpression(expr)
         .into_iter()
@@ -477,6 +495,47 @@ fn parameter_override(
         bound.pattern_text = Some(text);
         return Ok(bound);
     }
+    // sv-parser accepts a single packed dimension on a named type as an
+    // expression part-select. Resolve the identifier before interpreting it.
+    if let sv_parser::ParamExpression::MintypmaxExpression(expression) = expr
+        && let sv_parser::MintypmaxExpression::Expression(expression) = expression.as_ref()
+        && let sv_parser::Expression::Primary(primary) = expression.as_ref()
+        && let sv_parser::Primary::Hierarchical(primary) = primary.as_ref()
+        && let Some(alias) = reference_name(RefNode::PrimaryHierarchical(primary), syntax_tree)
+            .and_then(|name| packed_dimensions.type_aliases.get(&name))
+        && let Some(range) = &primary.nodes.2.nodes.2
+    {
+        let select = &primary.nodes.2;
+        if select.nodes.0.is_some() || !select.nodes.1.nodes.0.is_empty() {
+            return Err(unsupported("select on type parameter argument"));
+        }
+        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
+            return Err(unsupported("indexed range on type parameter argument"));
+        };
+        let bound = |expression: &sv_parser::ConstantExpression| {
+            const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(expression),
+                syntax_tree,
+                &packed_dimensions.const_env,
+                &packed_dimensions.type_aliases,
+            )?
+            .ok_or_else(|| unsupported("type parameter packed bound"))
+        };
+        let mut ty = alias.clone();
+        ty.packed_ranges.insert(
+            0,
+            PackedRange::new(bound(&range.nodes.0)?, bound(&range.nodes.2)?),
+        );
+        ty.signed_element_depth = if ty.is_signed {
+            Some(1)
+        } else {
+            ty.signed_element_depth.map(|depth| depth + 1)
+        };
+        ty.is_signed = false;
+        let ty = type_parameters::resolve(ty, &packed_dimensions.const_env)
+            .ok_or_else(|| unsupported("type parameter packed bounds"))?;
+        return Ok(ParameterOverride::type_override(name, ty));
+    }
     let value = const_expr_from_param_expression(expr, syntax_tree)?
         .ok_or_else(|| AnalyzerError::Unsupported("parameter override expression".to_string()))?;
     // A bare name that denotes a type (a typedef, or the instantiating
@@ -484,33 +543,13 @@ fn parameter_override(
     if let ConstExpr::Ident(type_name) = &value
         && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
     {
-        let text = type_source_text(r#type, &packed_dimensions.const_env).ok_or_else(|| {
-            AnalyzerError::Unsupported(format!("parameter type override `{name}`"))
-        })?;
-        return Ok(ParameterOverride::type_override(name, text));
+        let ty = type_parameters::resolve(r#type.clone(), &packed_dimensions.const_env)
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("parameter type override `{name}`"))
+            })?;
+        return Ok(ParameterOverride::type_override(name, ty));
     }
     Ok(ParameterOverride::new(name, Some(value)))
-}
-
-/// Source text for a plain (possibly signed) packed vector type.
-fn type_source_text(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<String> {
-    if !r#type.unpacked_ranges().is_empty() || !r#type.members.is_empty() {
-        return None;
-    }
-    let mut text = match r#type.kind() {
-        TypeKind::Bit => "bit",
-        _ => "logic",
-    }
-    .to_string();
-    if r#type.is_signed() {
-        text.push_str(" signed");
-    }
-    for range in r#type.packed_ranges() {
-        let left = eval_ast_const_expr(range.left(), const_env)?;
-        let right = eval_ast_const_expr(range.right(), const_env)?;
-        text.push_str(&format!(" [{left}:{right}]"));
-    }
-    Some(text)
 }
 
 fn constant_pattern_literal(

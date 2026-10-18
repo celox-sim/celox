@@ -1,6 +1,104 @@
-//! `parameter type` overrides, applied to the source text of a module.
+//! Type parameter bindings and the remaining value-pattern source edits.
 
 use super::*;
+
+/// Bind only declarations in this module's parameter scope. Offsets identify
+/// declarations rather than names: a nested local type named T must not inherit
+/// the instance's binding for the module parameter T.
+pub(super) fn bind(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+    overrides: &[(String, Type)],
+) -> Result<HashMap<usize, Type>, AnalyzerError> {
+    let mut declarations = HashMap::default();
+    let mut collect = |node: RefNode<'_>, local: bool| {
+        for child in node {
+            if let RefNode::TypeAssignment(assignment) = child {
+                let identifier = RefNode::TypeIdentifier(&assignment.nodes.0);
+                if let Some(name) = identifier_text(identifier.clone(), tree)
+                    && let Some(locate) = identifier_locate(identifier)
+                {
+                    declarations.insert(name, (locate.offset, local));
+                }
+            }
+        }
+    };
+    let has_port_list = module_parameter_port_list(node.clone()).is_some();
+    if let Some(list) = module_parameter_port_list(node.clone()) {
+        let mut local = false;
+        for child in list {
+            if let RefNode::ParameterPortDeclaration(declaration) = child {
+                match declaration {
+                    sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_) => {
+                        local = true
+                    }
+                    sv_parser::ParameterPortDeclaration::ParameterDeclaration(_) => local = false,
+                    _ => {}
+                }
+                collect(RefNode::ParameterPortDeclaration(declaration), local);
+            }
+        }
+    }
+    for declaration in scope_declarations(node) {
+        match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
+                collect(RefNode::ParameterDeclaration(&declaration.0), has_port_list);
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
+                collect(RefNode::LocalParameterDeclaration(&declaration.0), true);
+            }
+            _ => {}
+        }
+    }
+    let mut bindings = HashMap::default();
+    for (name, ty) in overrides {
+        let &(offset, local) = declarations
+            .get(name)
+            .ok_or_else(|| AnalyzerError::UnknownParameterOverride { name: name.clone() })?;
+        if local {
+            return Err(AnalyzerError::Unsupported(format!(
+                "localparam override `{name}`"
+            )));
+        }
+        if bindings.insert(offset, ty.clone()).is_some() {
+            return Err(AnalyzerError::Unsupported(format!(
+                "duplicate parameter override `{name}`"
+            )));
+        }
+    }
+    Ok(bindings)
+}
+
+/// Freeze every dimension in the caller's environment before crossing the
+/// instance boundary. A child's parameters must not reinterpret caller names.
+pub(super) fn resolve(mut ty: Type, env: &HashMap<String, i128>) -> Option<Type> {
+    fn bound(expr: &ConstExpr, env: &HashMap<String, i128>) -> Option<ConstExpr> {
+        let value = eval_ast_const_expr(expr, env)?;
+        Some(if value >= 0 {
+            ConstExpr::Literal(value.to_string())
+        } else {
+            ConstExpr::Literal(format_typed_parameter_literal(value, 128, true))
+        })
+    }
+    for range in &mut ty.packed_ranges {
+        range.left = bound(&range.left, env)?;
+        range.right = bound(&range.right, env)?;
+    }
+    for range in &mut ty.unpacked_ranges {
+        range.left = bound(&range.left, env)?;
+        range.right = bound(&range.right, env)?;
+        if let Some(size) = &range.size {
+            range.size = Some(bound(size, env)?);
+        }
+    }
+    let mut members = Vec::new();
+    for member in ty.members {
+        let resolved = resolve(member.r#type().clone(), env)?;
+        members.push(member.with_type(|_| resolved));
+    }
+    ty.members = members;
+    Some(ty)
+}
 
 /// A source text edit: replace `start..end` with `replacement`.
 struct Edit {
@@ -55,79 +153,6 @@ fn apply_edits(text: &str, range: (usize, usize), mut edits: Vec<Edit>) -> Strin
     }
     result.push_str(&text[cursor..range.1]);
     result
-}
-
-/// `code` with the `parameter type` defaults of `module_name` replaced by the
-/// data types an instantiation binds them to, or `None` when `overrides` names
-/// no type parameter of the module.
-pub(crate) fn apply_type_parameter_overrides(
-    code: &str,
-    syntax_tree: &SyntaxTree,
-    module_name: &str,
-    overrides: &[(String, String)],
-) -> Result<Option<String>, AnalyzerError> {
-    for node in syntax_tree {
-        let RefNode::ModuleDeclarationAnsi(module) = node else {
-            continue;
-        };
-        if module_name_from_node(RefNode::ModuleDeclarationAnsi(module), syntax_tree)?
-            != module_name
-        {
-            continue;
-        }
-        let mut edits = Vec::new();
-        for child in RefNode::ModuleDeclarationAnsi(module) {
-            let RefNode::TypeAssignment(assignment) = child else {
-                continue;
-            };
-            let Some(name) =
-                identifier_text(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
-            else {
-                continue;
-            };
-            let Some((_, bound)) = overrides.iter().find(|(parameter, _)| *parameter == name)
-            else {
-                continue;
-            };
-            match &assignment.nodes.1 {
-                Some((_, default)) => {
-                    if let Some((start, end)) = node_span(RefNode::DataType(default), syntax_tree) {
-                        edits.push(Edit {
-                            start,
-                            end,
-                            replacement: bound.clone(),
-                        });
-                    }
-                }
-                None => {
-                    if let Some((_, end)) =
-                        node_span(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
-                    {
-                        edits.push(Edit {
-                            start: end,
-                            end,
-                            replacement: format!(" = {bound}"),
-                        });
-                    }
-                }
-            }
-        }
-        if edits.is_empty() {
-            return Ok(None);
-        }
-        let Some((start, end)) = node_span(RefNode::ModuleDeclarationAnsi(module), syntax_tree)
-        else {
-            return Ok(None);
-        };
-        let module_text = apply_edits(code, (start, end), edits);
-        return Ok(Some(format!(
-            "{}{}{}",
-            &code[..start],
-            module_text,
-            &code[end..]
-        )));
-    }
-    Ok(None)
 }
 
 /// Override array/structure value parameters before their target shapes are

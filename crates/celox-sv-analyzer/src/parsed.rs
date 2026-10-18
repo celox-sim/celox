@@ -112,33 +112,23 @@ impl ParsedSource {
         ast::with_call_sites(|| Packages::analyze_with_roots(&trees, roots))
     }
 
-    /// Analyze a module that may use `packages`, rewriting its type
-    /// parameters when needed. Numeric overrides reuse the original syntax
-    /// tree.
+    /// Analyze an instance using its value and caller-resolved type bindings.
+    /// Every specialization reuses the original syntax tree.
     pub fn analyze_module(
         &self,
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
-        type_overrides: &[(String, String)],
+        type_overrides: &[(String, ast::Type)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
-        let typed = if type_overrides.is_empty() {
-            None
-        } else {
-            ast::type_parameters::apply_type_parameter_overrides(
-                &self.code,
-                &self.tree,
-                module_name,
-                type_overrides,
-            )?
-        };
-        let typed_source = typed
-            .as_deref()
-            .map(|code| Self::parse(code, &self.path))
-            .transpose()?;
-        let source = typed_source.as_ref().unwrap_or(self);
-        source.analyze_module_with_packages(module_name, overrides, interfaces, packages)
+        self.analyze_module_with_packages(
+            module_name,
+            overrides,
+            type_overrides,
+            interfaces,
+            packages,
+        )
     }
 
     /// Analyze without rewriting the source, retaining literal override
@@ -150,13 +140,14 @@ impl ParsedSource {
         interfaces: &ModuleInterfaces,
     ) -> Result<Ir, AnalyzerError> {
         let packages = Self::analyze_packages(&[self])?;
-        self.analyze_module_with_packages(module_name, overrides, interfaces, &packages)
+        self.analyze_module_with_packages(module_name, overrides, &[], interfaces, &packages)
     }
 
     fn analyze_module_with_packages(
         &self,
         module_name: &str,
         overrides: &HashMap<String, ir::ConstExpr>,
+        type_overrides: &[(String, ast::Type)],
         interfaces: &ModuleInterfaces,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
@@ -170,7 +161,10 @@ impl ParsedSource {
                 &self.path,
                 &self.index,
                 module_name,
-                &overrides,
+                ast::ModuleParameterBindings {
+                    values: &overrides,
+                    types: type_overrides,
+                },
                 interfaces,
                 packages,
             )?;
@@ -182,6 +176,36 @@ impl ParsedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn type_binding(text: &str) -> ast::Type {
+        let code = format!("module Caller; Child #(.T({text})) c(); endmodule");
+        let ir = crate::analyze_source(&code, Path::new("caller.sv")).unwrap();
+        ir.modules()[0].instances()[0].parameter_overrides()[0]
+            .bound_type()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn named_type_arguments_preserve_use_site_dimensions() {
+        let code = r#"
+            module Top;
+                typedef logic signed [3:0] nibble_t;
+                localparam N = 2;
+                Child #(.T(nibble_t [N-1:0])) one_dimension();
+            endmodule
+        "#;
+        let ir = crate::analyze_source(code, Path::new("named_type_dimensions.sv")).unwrap();
+        let ty = ir.modules()[0].instances()[0].parameter_overrides()[0]
+            .bound_type()
+            .unwrap();
+        assert_eq!(ty.packed_ranges().len(), 2);
+        for (range, left) in ty.packed_ranges().iter().zip(["1", "3"]) {
+            assert_eq!(range.left(), &ast::ConstExpr::Literal(left.into()));
+            assert_eq!(range.right(), &ast::ConstExpr::Literal("0".into()));
+        }
+        assert!(!ty.is_signed());
+    }
 
     #[test]
     fn specializations_keep_constants_and_function_bindings_independent() {
@@ -275,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_type_parameters_and_resolves_packages() {
+    fn binds_type_parameters_and_resolves_packages() {
         let code = r#"
             package p; localparam V = 3; endpackage
             module Top #(parameter type T = logic [3:0]) (output T y);
@@ -286,7 +310,7 @@ mod tests {
         let path = Path::new("rewritten.sv");
         let source = ParsedSource::parse(code, path).unwrap();
         let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
-        let types = vec![("T".into(), "logic [7:0]".into())];
+        let types = vec![("T".into(), type_binding("logic [7:0]"))];
         let actual = source
             .analyze_module(
                 "Top",
@@ -296,14 +320,130 @@ mod tests {
                 &packages,
             )
             .unwrap();
-        let typed = crate::apply_module_type_parameters(code, path, "Top", &types)
-            .unwrap()
-            .unwrap();
+        let typed = code.replace("logic [3:0]", "logic [7:0]");
         let expected = crate::analyze_source(&typed, path).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(
             actual.modules()[0].ports()[0].r#type().resolved_width(),
             Some(8)
+        );
+    }
+
+    #[test]
+    fn type_bindings_preserve_dependent_defaults_and_instance_isolation() {
+        let code = r#"
+            module Child #(parameter type T = logic [1:0], parameter type U = T)
+                (output T first, output U second, output logic [7:0] width);
+                typedef U alias_t;
+                function automatic alias_t value(); return '1; endfunction
+                if ($bits(T) > 4) begin : wide
+                    T local_value;
+                    assign local_value = '1;
+                end
+                assign first = value();
+                assign second = value();
+                assign width = $bits(T);
+            endmodule
+        "#;
+        let source = ParsedSource::parse(code, Path::new("type_bindings.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        for width in [8, 4, 8, 2] {
+            let bindings = if width == 2 {
+                Vec::new()
+            } else {
+                vec![(
+                    "T".into(),
+                    type_binding(&format!("logic [{}:0]", width - 1)),
+                )]
+            };
+            let ir = source
+                .analyze_module(
+                    "Child",
+                    &HashMap::default(),
+                    &bindings,
+                    &ModuleInterfaces::default(),
+                    &packages,
+                )
+                .unwrap();
+            let module = &ir.modules()[0];
+            assert_eq!(module.ports()[0].r#type().resolved_width(), Some(width));
+            assert_eq!(module.ports()[1].r#type().resolved_width(), Some(width));
+            if width > 4 {
+                let signal = module
+                    .signals()
+                    .iter()
+                    .find(|s| s.name().ends_with("local_value"))
+                    .unwrap();
+                assert_eq!(signal.r#type().resolved_width(), Some(width));
+            }
+        }
+    }
+
+    #[test]
+    fn type_bindings_support_shorthand_and_missing_defaults() {
+        let source = ParsedSource::parse(
+            "module Child #(type T)(output T y); assign y='1; endmodule",
+            Path::new("required_type.sv"),
+        )
+        .unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let ir = source
+            .analyze_module(
+                "Child",
+                &HashMap::default(),
+                &[("T".into(), type_binding("bit signed [7:0]"))],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(8)
+        );
+        assert!(ir.modules()[0].ports()[0].r#type().is_signed());
+        assert_eq!(source.module_interfaces()["Child"].parameters, ["T"]);
+    }
+
+    #[test]
+    fn type_bindings_reject_unknown_local_and_duplicate_parameters() {
+        let source = ParsedSource::parse(
+            "module Child #(parameter type T = logic, localparam type L = logic, type M = logic, parameter type N = logic)(output T y); parameter type B = logic; assign y='1; endmodule",
+            Path::new("invalid_bindings.sv"),
+        ).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        let ty = type_binding("logic [7:0]");
+        assert_eq!(source.module_interfaces()["Child"].parameters, ["T", "N"]);
+        for bindings in [
+            vec![("missing".into(), ty.clone())],
+            vec![("L".into(), ty.clone())],
+            vec![("M".into(), ty.clone())],
+            vec![("B".into(), ty.clone())],
+            vec![("T".into(), ty.clone()), ("T".into(), ty.clone())],
+        ] {
+            assert!(
+                source
+                    .analyze_module(
+                        "Child",
+                        &HashMap::default(),
+                        &bindings,
+                        &ModuleInterfaces::default(),
+                        &packages
+                    )
+                    .is_err()
+            );
+        }
+        let ir = source
+            .analyze_module(
+                "Child",
+                &HashMap::default(),
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
+        assert_eq!(
+            ir.modules()[0].ports()[0].r#type().resolved_width(),
+            Some(1)
         );
     }
 

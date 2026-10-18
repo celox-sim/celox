@@ -13,7 +13,7 @@ pub(super) use selects::{
     variable_member,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PackedMember {
     name: String,
     offset: usize,
