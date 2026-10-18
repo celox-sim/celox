@@ -1,0 +1,1 @@
+Address PR #1471 review: preserve per-module VPI time units and precisions in reflected scopes instead of returning global precision for every handle.
