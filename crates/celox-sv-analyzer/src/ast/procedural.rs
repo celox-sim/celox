@@ -897,6 +897,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     arg_order,
                 }])
             }
+            sv_parser::SubroutineCall::MethodCall(call) => {
+                let (name, arguments) = native_interfaces::method_call(call, self.tree)?;
+                let (args, arg_order) = self.call_arguments(&name, arguments)?;
+                Ok(vec![Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                }])
+            }
             sv_parser::SubroutineCall::SystemTfCall(system_call) => {
                 let (name, args) = system_tf_call_parts(system_call, self.tree)
                     .ok_or_else(|| unsupported("system task or function name"))?;
@@ -1810,6 +1819,7 @@ pub(super) fn subroutine_argument_names(
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
     for item in generate::subroutine_items(node, tree, const_env, type_aliases)? {
+        let _interface_scope = item.interface_scope();
         for child in item.node.node() {
             let syntax = match child {
                 RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
@@ -1906,6 +1916,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
     let active = generate::subroutine_items(node, tree, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
+        let _interface_scope = item.interface_scope();
         if item.is_parameter_declaration() {
             continue;
         }
@@ -2146,6 +2157,7 @@ pub(super) fn initial_processes_from_module_node(
     let active = generate::items(node, tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
+        let _interface_scope = item.interface_scope();
         if item.is_parameter_declaration() {
             continue;
         }

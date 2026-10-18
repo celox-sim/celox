@@ -1279,7 +1279,43 @@ pub(super) fn const_expr_from_ref_node_with_env(
                 Ok(primary_literal_text(node, syntax_tree).map(ConstExpr::Literal))
             }
             sv_parser::ConstantPrimary::PsParameter(parameter) => {
-                if parameter.nodes.1.nodes.0.is_some() {
+                if let Some((members, _, last)) = &parameter.nodes.1.nodes.0 {
+                    let Some(mut path) = reference_name(
+                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
+                        syntax_tree,
+                    ) else {
+                        return Ok(None);
+                    };
+                    for (_, member, indices) in members {
+                        if !indices.nodes.0.is_empty() {
+                            return Ok(None);
+                        }
+                        let Some(member) =
+                            identifier_text(RefNode::MemberIdentifier(member), syntax_tree)
+                        else {
+                            return Ok(None);
+                        };
+                        path.push('.');
+                        path.push_str(&member);
+                    }
+                    let Some(member) =
+                        identifier_text(RefNode::MemberIdentifier(last), syntax_tree)
+                    else {
+                        return Ok(None);
+                    };
+                    path.push('.');
+                    path.push_str(&member);
+                    if let Some(name) = scope::imported().interface_members.get(&path).cloned() {
+                        let mut select = parameter.nodes.1.clone();
+                        select.nodes.0 = None;
+                        return const_select_expr(
+                            ConstExpr::Ident(name),
+                            &select,
+                            syntax_tree,
+                            const_env,
+                            type_aliases,
+                        );
+                    }
                     // Struct-valued parameters need typed member evaluation;
                     // never replace a member by the entire parameter value.
                     return Ok(None);
@@ -1300,6 +1336,17 @@ pub(super) fn const_expr_from_ref_node_with_env(
                 )
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
+                // sv-parser also represents a bare hierarchical constant such
+                // as bus.W as a method call without an argument list. Resolve
+                // it through the bound interface scope before classifying calls.
+                if let sv_parser::SubroutineCall::MethodCall(method) = &call.nodes.0.nodes.0
+                    && let Ok((name, arguments)) =
+                        native_interfaces::method_call(method, syntax_tree)
+                    && arguments.is_none()
+                    && const_env.contains_key(&name)
+                {
+                    return Ok(Some(ConstExpr::Ident(name)));
+                }
                 if let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0
                 {
                     let function =

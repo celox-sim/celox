@@ -821,6 +821,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
         let mut views = generate::ScopeViews::new(indexed_dimensions);
         for item in &active {
             let _constant_functions = item.enter();
+            let _interface_scope = item.interface_scope();
             let dimensions = views.dimensions(item);
             reject_silently_ignored_constructs_with_dimensions(
                 item.node.node(),

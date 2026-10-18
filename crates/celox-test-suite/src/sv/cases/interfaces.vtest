@@ -446,3 +446,50 @@
     (assert_eq high1 (trunc 8 (+ value 4)))
     (assert_eq lone_low (trunc 8 (+ value 5)))
     (assert_eq lone_high (trunc 8 (+ value 6)))))
+
+(case initializes_interface_array_members_from_their_declarations
+  (source "interface_array_initializers.sv" #"
+        interface Lane #(parameter int K = 3);
+            logic [7:0] value = 8'(K * 2);
+        endinterface
+        module Top(output logic [7:0] first, second);
+            Lane #(.K(5)) lanes[2]();
+            assign first = lanes[0].value;
+            assign second = lanes[1].value;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq first 10)
+  (assert_eq second 10))
+
+(case binds_interface_array_ports_in_declaration_order
+  (source "interface_array_ports.sv" #"
+        interface Lane #(parameter int W = 3);
+            logic [W-1:0] value;
+            modport writer(output value);
+            modport reader(input value);
+        endinterface
+        module Writer #(parameter int N = 1)(Lane.writer lanes[N], input logic [7:0] x);
+            for (genvar i = 0; i < N; i++) begin : g
+                assign lanes[i].value = x + 8'(i);
+            end
+        endmodule
+        module Reader(Lane.reader lanes[5:4], output logic [15:0] y);
+            assign y = {lanes[5].value, lanes[4].value};
+        endmodule
+        module Relay(Lane.reader lanes[8:9], output logic [15:0] y);
+            Reader r(.lanes(lanes), .y(y));
+        endmodule
+        module Top(input logic [7:0] x, output logic [15:0] y);
+            if (1) begin : g
+                Lane #(.W(8)) lanes[3:2]();
+                Writer #(.N(2)) w(.lanes(lanes), .x(x));
+                Relay r(.lanes(lanes), .y(y));
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y (| (<< value 8) (trunc 8 (+ value 1))))))

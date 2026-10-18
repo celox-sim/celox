@@ -257,22 +257,22 @@ fn unit_conflicts_overrides_and_interfaces() {
         ),
         6
     );
-    let error = build(&[
+    let mut simulator = build(&[
         (
             "localparam int W = 2;
              interface I; logic [$unit::W-1:0] v; endinterface",
             "a.sv",
         ),
         (
-            "module Top(output logic [7:0] y); I i(); assign i.v = 1; assign y = i.v; endmodule",
+            "localparam int W = 6;
+             module Top(output logic [7:0] y); I i(); assign i.v = '1; assign y = i.v; endmodule",
             "b.sv",
         ),
     ])
-    .expect_err("the interface names an item of another file's unit");
-    assert!(
-        error.to_string().contains("compilation-unit item"),
-        "{error}"
-    );
+    .expect("interface references bind in the defining compilation unit");
+    let y = simulator.signal("y");
+    // The instance must use a.sv's W=2, not the instantiating unit's W=6.
+    assert_eq!(u64::try_from(simulator.get(y)).unwrap(), 3);
 }
 
 /// Review cases: a unit import of a name the unit declares, and `$unit::`
@@ -287,20 +287,20 @@ fn unit_import_collisions_and_commented_unit_scopes() {
         "unit.sv",
     )]);
     assert!(detail.contains("the compilation unit declares"), "{detail}");
-    let error = build(&[
+    let mut simulator = build(&[
         (
             "localparam int W = 2;
              interface I; logic [$unit /* unit */ :: W-1:0] v; endinterface",
             "a.sv",
         ),
         (
-            "module Top(output logic [7:0] y); I i(); assign i.v = 1; assign y = i.v; endmodule",
+            "localparam int W = 6;
+             module Top(output logic [7:0] y); I i(); assign i.v = '1; assign y = i.v; endmodule",
             "b.sv",
         ),
     ])
-    .expect_err("the interface names an item of another file's unit");
-    assert!(
-        error.to_string().contains("compilation-unit item"),
-        "{error}"
-    );
+    .expect("interface references bind in the defining compilation unit");
+    let y = simulator.signal("y");
+    // The instance must use a.sv's W=2, not the instantiating unit's W=6.
+    assert_eq!(u64::try_from(simulator.get(y)).unwrap(), 3);
 }

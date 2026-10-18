@@ -22,12 +22,8 @@ pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
-pub use ast::interfaces::elaborate_interfaces_with_bindings;
-pub use ast::interfaces::{
-    InterfaceElaboration, elaborate_interfaces_with_metadata,
-    elaborate_interfaces_with_metadata_and_roots,
-};
-pub use ast::interfaces::{InterfacePrototype, interface_prototypes};
+pub use ast::interfaces::{InterfacePrototype, interface_prototypes, interface_prototypes_for};
+pub use ast::interfaces::{NativeInterfacePlan, plan_interfaces};
 pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
@@ -174,23 +170,6 @@ impl AnalyzerError {
     }
 }
 
-/// Rewrite `sources` so that they no longer declare or use interfaces, or
-/// return `None` when no source declares one. See [`ast::interfaces`].
-pub fn elaborate_interfaces(
-    sources: &[(&str, &Path)],
-) -> Result<Option<Vec<String>>, AnalyzerError> {
-    ast::interfaces::elaborate_interfaces(sources)
-}
-
-/// Expand interfaces using the design roots selected by the hierarchy
-/// elaborator when resolving queries before flattening.
-pub fn elaborate_interfaces_with_roots(
-    sources: &[(&str, &Path)],
-    roots: &[&str],
-) -> Result<Option<Vec<String>>, AnalyzerError> {
-    ast::interfaces::elaborate_interfaces_with_roots(sources, Some(roots))
-}
-
 /// Time declarations for synthetic foreign declaration files, preserving the
 /// authored design's explicit/default settings and simulation precision.
 pub fn generated_time_declarations(
@@ -204,6 +183,12 @@ pub fn generated_time_declarations(
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
     ast::with_call_sites(|| {
         let syntax_tree = syntax::parse_source(code, path)?;
+        if syntax_tree
+            .into_iter()
+            .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
+        {
+            return analyze_interface_source(code, path, "", &HashMap::default());
+        }
         let source = ast::Source::from_syntax(&syntax_tree)?;
         analyze::analyze_source(source)
     })
@@ -219,6 +204,12 @@ pub fn analyze_source_with_module_parameter_overrides(
 ) -> Result<Ir, AnalyzerError> {
     ast::with_call_sites(|| {
         let syntax_tree = syntax::parse_source(code, path)?;
+        if syntax_tree
+            .into_iter()
+            .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
+        {
+            return analyze_interface_source(code, path, module_name, parameter_overrides);
+        }
         let source = ast::Source::from_syntax_with_module_parameter_overrides(
             &syntax_tree,
             module_name,
@@ -226,6 +217,75 @@ pub fn analyze_source_with_module_parameter_overrides(
         )?;
         analyze::analyze_source(source)
     })
+}
+
+fn analyze_interface_source(
+    code: &str,
+    path: &Path,
+    override_module: &str,
+    overrides: &HashMap<String, i128>,
+) -> Result<Ir, AnalyzerError> {
+    let source = ParsedSource::parse(code, path)?;
+    let packages = ParsedSource::analyze_packages(&[&source])?;
+    let plan = &packages.interface_plan;
+    let mut names = source
+        .module_names()
+        .iter()
+        .filter(|name| {
+            plan.modules.contains_key(*name)
+                || !plan
+                    .modules
+                    .values()
+                    .any(|binding| binding.original == **name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    names.extend(
+        plan.modules
+            .keys()
+            .filter(|name| !source.module_names().contains(name))
+            .cloned(),
+    );
+    let mut modules = Vec::new();
+    for name in names {
+        let values = if name == override_module
+            || plan
+                .modules
+                .get(&name)
+                .is_some_and(|binding| binding.original == override_module)
+        {
+            overrides
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        if *value < 0 {
+                            ir::ConstExpr::Unary {
+                                op: ir::UnaryOp::Minus,
+                                expr: Box::new(ir::ConstExpr::Literal(
+                                    value.unsigned_abs().to_string(),
+                                )),
+                            }
+                        } else {
+                            ir::ConstExpr::Literal(value.to_string())
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::default()
+        };
+        let ir = source.analyze_module(
+            &name,
+            &values,
+            &[],
+            &[],
+            &ModuleInterfaces::default(),
+            &packages,
+        )?;
+        modules.extend(ir.modules().iter().cloned());
+    }
+    Ok(Ir::new(modules))
 }
 
 /// Return the module names declared in a SystemVerilog source without

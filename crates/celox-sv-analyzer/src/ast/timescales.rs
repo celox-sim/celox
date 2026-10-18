@@ -18,7 +18,6 @@ struct ResolvedScope {
     call: system_functions::SystemCall,
     scale: Scale,
     display: DisplayScope,
-    is_interface: bool,
 }
 
 impl ResolvedScope {
@@ -64,23 +63,6 @@ impl ResolvedScope {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
     }
-
-    fn replacement(&self, prefix: Option<&str>) -> String {
-        if self.call == system_functions::SystemCall::Task(SystemTask::Printtimescale) {
-            format!("$display(\"{}\")", self.message(prefix))
-        } else {
-            format!("32'sh{:08x}", self.value() as u32)
-        }
-    }
-}
-
-/// Whether `call` is a timescale query or `$printtimescale`, whose argument
-/// names a design element instead of a value.
-pub(super) fn is_timescale_call(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> bool {
-    matches!(
-        called_system_function(call, tree),
-        Some(SystemFunction::Timeunit | SystemFunction::Timeprecision)
-    ) || called_system_task(call, tree) == Some(SystemTask::Printtimescale)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +81,6 @@ enum ScopeKind {
 struct Scope {
     name: String,
     kind: ScopeKind,
-    is_interface: bool,
     start: usize,
     end: usize,
     scale: Scale,
@@ -126,6 +107,23 @@ pub(super) struct Timescales {
     instantiated: HashSet<String>,
     roots: Option<HashSet<String>>,
     specified: [u8; 2],
+}
+
+thread_local! {
+    static INTERFACE_INSTANCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub(super) fn with_interface_instance<T>(name: &str, analyze: impl FnOnce() -> T) -> T {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INTERFACE_INSTANCE.with(|current| *current.borrow_mut() = self.0.take());
+        }
+    }
+    let previous =
+        INTERFACE_INSTANCE.with(|current| current.borrow_mut().replace(name.to_string()));
+    let _restore = Restore(previous);
+    analyze()
 }
 
 #[cfg(test)]
@@ -424,10 +422,6 @@ fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
     Some(Scope {
         name,
         kind,
-        is_interface: matches!(
-            node,
-            RefNode::InterfaceDeclarationAnsi(_) | RefNode::InterfaceDeclarationNonansi(_)
-        ),
         start: offset(node)?,
         end,
         scale: DEFAULT,
@@ -798,23 +792,6 @@ impl Timescales {
             .map(|scope| scope.value())
     }
 
-    pub(super) fn interface_path_queries<'a>(
-        &'a self,
-        tree: &'a SyntaxTree,
-    ) -> Converted<
-        impl Fn(&sv_parser::SystemTfCall, system_functions::CallSite) -> Converted<Option<String>> + 'a,
-    > {
-        let unit = self
-            .units
-            .get(key(tree))
-            .ok_or_else(|| unsupported("missing interface query time scope"))?;
-        // Resolve the content key once for this rewrite, not for each query.
-        Ok(move |call: &sv_parser::SystemTfCall, site| {
-            self.resolve(call, tree, unit, site)
-                .map(|scope| scope.is_interface.then(|| scope.replacement(None)))
-        })
-    }
-
     fn resolve(
         &self,
         call: &sv_parser::SystemTfCall,
@@ -827,7 +804,6 @@ impl Timescales {
         let checked = system_functions::check_call(name, args.as_deref(), site)?;
         let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
         let current = scope_at(&unit.scopes, &unit.parents, at).map(|i| &unit.scopes[i]);
-        let mut interface_target = false;
         let mut display = match current {
             Some(scope) if scope.kind == ScopeKind::Package => {
                 DisplayScope::Absolute(scope.name.clone())
@@ -877,7 +853,14 @@ impl Timescales {
                             .ok_or_else(|| unsupported("timescale query identifier"))?,
                     );
                     let first = &path[0];
+                    let imported = scope::imported();
                     let (mut target, start) = if hierarchy.nodes.0.is_none()
+                        && let Some(interface) = imported.interface_types.get(first)
+                        && let Some(target) = self.definitions.get(interface)
+                    {
+                        display = DisplayScope::Relative(path.join("."));
+                        (target, 1)
+                    } else if hierarchy.nodes.0.is_none()
                         && current.is_some_and(|s| s.instances.contains_key(first))
                     {
                         display = DisplayScope::Relative(path.join("."));
@@ -932,7 +915,6 @@ impl Timescales {
                             unsupported(format!("unknown timescale query module `{module}`"))
                         })?;
                     }
-                    interface_target = target.is_interface;
                     target.scale
                 }
             }
@@ -941,7 +923,6 @@ impl Timescales {
             call: checked,
             scale,
             display,
-            is_interface: interface_target,
         })
     }
 
@@ -961,61 +942,6 @@ impl Timescales {
             .resolve(call, tree, &design.units[source], site)
             .map(|scope| scope.message(prefix))
     }
-
-    pub(super) fn interface_print_statement(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        site: system_functions::CallSite,
-        prefix: &str,
-        indices: &[String],
-    ) -> Converted<String> {
-        let source = key(tree);
-        let scope = self.resolve(call, tree, &self.units[source], site)?;
-        let args = if matches!(scope.display, DisplayScope::Relative(_)) && !indices.is_empty() {
-            format!(", {}", indices.join(", "))
-        } else {
-            String::new()
-        };
-        Ok(format!(
-            "$display(\"{}\"{args})",
-            scope.message(Some(prefix))
-        ))
-    }
-
-    pub(super) fn print_needs_instance_scope(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        site: system_functions::CallSite,
-    ) -> Converted<bool> {
-        let scope = self.resolve(call, tree, &self.units[key(tree)], site)?;
-        Ok(matches!(scope.display, DisplayScope::Relative(_)))
-    }
-
-    pub(super) fn interface_replacement(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        ty: &str,
-        handle: &str,
-        site: system_functions::CallSite,
-    ) -> Converted<String> {
-        let (name, args) =
-            system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        let checked = system_functions::check_call(name, args.as_deref(), site)?;
-        let scope = self
-            .definitions
-            .get(ty)
-            .ok_or_else(|| unsupported(format!("unknown timescale query design element `{ty}`")))?;
-        Ok(ResolvedScope {
-            call: checked,
-            scale: scope.scale,
-            display: DisplayScope::Relative(handle.to_string()),
-            is_interface: true,
-        }
-        .replacement(None))
-    }
 }
 
 pub(super) fn print_message(
@@ -1023,6 +949,7 @@ pub(super) fn print_message(
     tree: &SyntaxTree,
     site: system_functions::CallSite,
 ) -> Converted<String> {
+    let prefix = INTERFACE_INSTANCE.with(|current| current.borrow().clone());
     DESIGN.with(|context| {
         let context = context.borrow();
         if let Some(prepared) = &context.prepared
@@ -1031,9 +958,11 @@ pub(super) fn print_message(
             context
                 .design
                 .resolve(call, tree, &prepared.unit, site)
-                .map(|scope| scope.message(None))
+                .map(|scope| scope.message(prefix.as_deref()))
         } else {
-            context.design.print_message(call, tree, site, None)
+            context
+                .design
+                .print_message(call, tree, site, prefix.as_deref())
         }
     })
 }
@@ -1519,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_handle_queries_reject_invalid_operands_and_macro_edits() {
+    fn interface_handle_queries_validate_operands_without_editing_macros() {
         for (instance, expression) in [
             ("I i();", "$timeunit(i, 1)"),
             ("I i();", "$timeprecision(i + 1)"),
@@ -1531,8 +1460,7 @@ mod tests {
                 "interface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; {instance} assign y = {expression}; endmodule"
             );
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_handle_query.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_handle_query.sv")).is_err(),
                 "accepted {expression} with {instance}"
             );
         }
@@ -1544,14 +1472,8 @@ mod tests {
             let code = format!(
                 "{definition}\ninterface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; I i(); assign y = {call}; endmodule"
             );
-            let error = crate::elaborate_interfaces(&[(&code, Path::new("macro_handle_query.sv"))])
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("macro-origin interface timescale query"),
-                "{error}"
-            );
+            let result = crate::analyze_source(&code, Path::new("macro_handle_query.sv"));
+            assert!(result.is_ok(), "{result:?}");
         }
     }
 
@@ -1574,21 +1496,18 @@ mod tests {
         let prefix = "`define SCALE $timeunit()\ninterface I; timeunit 100ps / 10fs; function automatic int u(); return `SCALE; endfunction endinterface";
         let code =
             format!("{prefix} module Top(); timeunit 1ms / 1us; localparam U=`SCALE; endmodule");
-        let rewritten =
-            crate::elaborate_interfaces(&[(&code, Path::new("unused_macro_interface.sv"))])
-                .unwrap()
-                .unwrap();
-        let ir =
-            crate::analyze_source(&rewritten[0], Path::new("unused_macro_interface.sv")).unwrap();
+        let ir = crate::analyze_source(&code, Path::new("unused_macro_interface.sv")).unwrap();
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-3));
-        let code = format!("{prefix} module Top(); timeunit 1ms / 1us; I i(); endmodule");
-        let error = crate::elaborate_interfaces(&[(&code, Path::new("used_macro_interface.sv"))])
-            .unwrap_err();
+        let code = format!(
+            "{prefix} module Top(output int y); timeunit 1ms / 1us; localparam U=`SCALE; I i(); assign y=i.u(); endmodule"
+        );
+        let ir = crate::analyze_source(&code, Path::new("used_macro_interface.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-3));
         assert!(
-            error
-                .to_string()
-                .contains("macro or compiler directive in interface `I`"),
-            "{error}"
+            ir.modules()[0]
+                .subroutines()
+                .iter()
+                .any(|function| function.name == "i$u")
         );
     }
 
@@ -1693,12 +1612,9 @@ mod tests {
     }
 
     #[test]
-    fn interface_query_rewriting_preserves_macros_in_module_scopes() {
+    fn interface_bindings_preserve_macros_in_module_scopes() {
         let code = "`define U $timeunit()\ninterface I; timeunit 1ns / 1ps; endinterface module Top(); timeunit 1ms / 1us; localparam U=`U; endmodule module Child(); timeunit 1us / 1ns; localparam U=`U; endmodule";
-        let elaborated = crate::elaborate_interfaces(&[(code, Path::new("macro_times.sv"))])
-            .unwrap()
-            .unwrap();
-        let result = crate::analyze_source(&elaborated[0], Path::new("macro_times.sv")).unwrap();
+        let result = crate::analyze_source(code, Path::new("macro_times.sv")).unwrap();
         for (name, value) in [("Top", -3), ("Child", -6)] {
             let module = result.modules().iter().find(|m| m.name() == name).unwrap();
             assert_eq!(module.parameters()[0].resolved_value(), Some(value));
@@ -1706,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_query_rewriting_validates_discarded_and_hidden_operands() {
+    fn interface_queries_validate_discarded_and_hidden_operands() {
         for expression in [
             "$timeunit(missing);",
             "void'($timeprecision(1));",
@@ -1716,8 +1632,7 @@ mod tests {
                 "interface I; timeunit 1ns / 1ps; function automatic int f(); {expression} return 0; endfunction endinterface module Top(); timeunit 1ns / 1ps; I i(); endmodule"
             );
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_query.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_interface_query.sv")).is_err(),
                 "accepted {expression}"
             );
         }
@@ -1728,8 +1643,7 @@ mod tests {
         ] {
             let code = format!("interface I; {items} endinterface module Top(); endmodule");
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_scale.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_interface_scale.sv")).is_err(),
                 "accepted {items}"
             );
         }

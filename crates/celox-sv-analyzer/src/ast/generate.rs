@@ -158,6 +158,40 @@ impl Item<'_> {
         self.block_imports().install_constant_functions()
     }
 
+    pub fn scope_name(&self) -> &str {
+        &self.scope
+    }
+
+    pub fn interface_scope(&self) -> Option<scope::Installed> {
+        let imported = scope::imported();
+        if imported.interface_scopes.is_empty() {
+            return None;
+        }
+        let mut scopes = imported
+            .interface_scopes
+            .iter()
+            .filter(|(name, _)| {
+                self.scope == **name
+                    || self
+                        .scope
+                        .strip_prefix(name.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+            .collect::<Vec<_>>();
+        if scopes.is_empty() {
+            return None;
+        }
+        scopes.sort_by_key(|(name, _)| name.len());
+        let mut local = (*imported).clone();
+        for (_, bindings) in scopes {
+            local.interface_members.extend(bindings.members.clone());
+            local.interface_types.extend(bindings.types.clone());
+            local.interface_arrays.extend(bindings.arrays.clone());
+            local.interface_instances.extend(bindings.instances.clone());
+        }
+        Some(scope::install(Arc::new(local)))
+    }
+
     pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
         match self.node {
             ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(item)) => {
