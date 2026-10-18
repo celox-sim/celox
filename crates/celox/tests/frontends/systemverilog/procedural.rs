@@ -1,4 +1,16 @@
 sv_backends! {
+    fn typedef_declaration_initializers(sim) {
+        @case "procedural::typedef_declaration_initializers";
+    }
+
+    fn imported_typedef_declaration_initializers(sim) {
+        @case "procedural::imported_typedef_declaration_initializers";
+    }
+
+    fn typedef_declaration_initializers_keep_unknown_bits(sim) {
+        @case "procedural::typedef_declaration_initializers_keep_unknown_bits";
+    }
+
     fn always_comb_case_compares_at_the_common_width(sim) {
         @case "procedural::always_comb_case_compares_at_the_common_width";
     }
