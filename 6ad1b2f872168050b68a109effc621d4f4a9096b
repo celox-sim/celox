@@ -1,1 +1,1 @@
-Rebase PR #1432 onto current master to resolve conflicts with simulation-time changes, preserving warning diagnostics and both sets of regression tests.
+Adapt the timed warning regression to master simulation-time semantics by declaring its 1 ps time unit and precision explicitly.
