@@ -1482,7 +1482,8 @@ fn drain_runtime_assertions<B: SimBackend>(
             }
             RuntimeEvent::Display { message } => forward_display(&message, true),
             RuntimeEvent::Write { message } => forward_display(&message, false),
-            RuntimeEvent::Finish => finished = true,
+            // The testbench has no interactive mode to suspend into.
+            RuntimeEvent::Finish | RuntimeEvent::Stop => finished = true,
         }
     }
     DrainedAssertionEvents {

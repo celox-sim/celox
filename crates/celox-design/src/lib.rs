@@ -67,6 +67,8 @@ pub enum RuntimeEventKind {
     AssertFatal,
     /// `$finish` executed by the design (IEEE 1800-2023 20.2).
     Finish,
+    /// `$stop` executed by the design (IEEE 1800-2023 20.2).
+    Stop,
 }
 
 /// How a runtime event site sizes its formatted arguments.
@@ -244,6 +246,10 @@ pub enum ProcessStatus {
     /// The process returned so the runtime can charge its time-slot budget.
     /// It resumes at once.
     Yield,
+    /// The process suspended the simulation (`$stop`, IEEE 1800-2023 20.2).
+    /// It resumes at the point stored in [`ProcessSlots::resume`] when the
+    /// simulation continues.
+    Stop,
 }
 
 impl ProcessStatus {
@@ -259,6 +265,7 @@ impl ProcessStatus {
             Self::Pending => 6,
             Self::Nba => 7,
             Self::Yield => 8,
+            Self::Stop => 9,
         }
     }
 
@@ -272,6 +279,7 @@ impl ProcessStatus {
             6 => Some(Self::Pending),
             7 => Some(Self::Nba),
             8 => Some(Self::Yield),
+            9 => Some(Self::Stop),
             _ => None,
         }
     }

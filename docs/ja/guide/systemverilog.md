@@ -72,7 +72,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | 乱数 | `$urandom`、`$urandom_range`、`$random` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
-| システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -241,3 +241,14 @@ Icarus Verilog などそれを実装するシミュレータと同じ値を返�
 `$random(seed)` はシード変数を更新します。引数がなければプロセスごとのシードを
 使い、その初期値は0です。そのため `$random` を呼ぶプロセスが1つだけの設計では、
 設計全体で1つのシードを持つシミュレータと一致します。
+
+`initial` ブロックの `$stop` はシミュレーションを一時停止します（IEEE 1800-2023 20.2）。
+`Simulation::step` と `run_until` は停止した時刻で戻り、`is_stopped()` が真になります。
+その時刻の他のプロセスは待機し、次の呼び出しでループや関数の中も含めて `$stop` の
+直後から再開します。停止した時刻の処理は、停止前にプロセスが起こしたエッジも保ったまま
+再開します。停止中はチェックポイントと状態ファイルを作れません（`CheckpointError::Stopped`）。
+`always` 系のプロセスでは、`$finish` が `RuntimeEvent::Finish` に
+なるのと同様に `RuntimeEvent::Stop` として報告します。診断レベルの引数では何も
+表示しません。VPI ホストのように対話モードを持たないバッチ実行では `$stop` で終了します。
+`$exit` は呼び出した program ブロックの initial 手続きを終了します（24.7）。
+Celox は program ブロックを持たず、それ以外からの呼び出しは 24.7 の規定どおり無視します。

@@ -52,6 +52,8 @@ export interface RawNapiSimulationHandle {
 	nextEventTime(): number | null;
 	/** Whether a process requested the end of the simulation. */
 	isFinished?(): boolean;
+	/** Whether the last step or run returned early at `$stop`. */
+	isStopped?(): boolean;
 	evalComb(): void;
 	dump(timestamp: number): void;
 	sharedMemory(): Uint8Array;
@@ -912,6 +914,7 @@ export function wrapDirectSimulationHandle(
 			: {}),
 		...(raw.clockPeriods ? { clockPeriods: () => raw.clockPeriods!() } : {}),
 		...(raw.isFinished ? { isFinished: () => raw.isFinished!() } : {}),
+		...(raw.isStopped ? { isStopped: () => raw.isStopped!() } : {}),
 	};
 }
 

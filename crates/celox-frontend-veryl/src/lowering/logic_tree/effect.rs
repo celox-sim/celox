@@ -208,7 +208,10 @@ fn collect_system_function_effect(
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::Stop,
             active,
             None,
         ) => active,
@@ -227,11 +230,14 @@ fn collect_system_function_effect(
             Some(active)
         }
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::Stop,
             _,
             Some(_),
         ) => {
-            unreachable!("display/write/finish has no explicit guard")
+            unreachable!("display/write/finish/stop has no explicit guard")
         }
     }
     .map(|node| -> Result<NodeId, ParserError> {
@@ -249,7 +255,10 @@ fn collect_system_function_effect(
             guard,
             emit_on_true: matches!(
                 kind,
-                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                RuntimeEventKind::Display
+                    | RuntimeEventKind::Write
+                    | RuntimeEventKind::Finish
+                    | RuntimeEventKind::Stop
             ),
             args: observer_args.clone(),
             fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)

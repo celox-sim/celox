@@ -1974,13 +1974,26 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             return Ok(true);
         }
+        // IEEE 1800-2023 24.7: `$exit` outside a program block is ignored.
+        if task == sv::ir::SystemTask::Exit {
+            return Ok(true);
+        }
         let kind =
             system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         // A process ends the simulation itself; the rest of its body does not
-        // run.
-        if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
-            self.with_kernel(ProcessKernelBuilder::finish);
-            return Ok(false);
+        // run. A stop suspends the process with the simulation, which then
+        // continues after the call.
+        match kind {
+            SystemTaskKind::Control(RuntimeEventKind::Finish) if self.kernel.is_some() => {
+                self.with_kernel(ProcessKernelBuilder::finish);
+                return Ok(false);
+            }
+            SystemTaskKind::Control(RuntimeEventKind::Stop) if self.kernel.is_some() => {
+                self.with_kernel(ProcessKernelBuilder::stop)
+                    .map_err(|error| unsupported(error.to_string()))?;
+                return Ok(true);
+            }
+            _ => {}
         }
         let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
@@ -2042,7 +2055,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Finish => RuntimeEventKind::Finish,
+            SystemTaskKind::Control(kind) => *kind,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
             SystemTaskKind::Assertion(kind) => *kind,

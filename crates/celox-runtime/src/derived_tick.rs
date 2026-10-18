@@ -496,9 +496,9 @@ impl<E: EventHandle> DerivedTickPlan<E> {
             }
         };
         match result {
-            // An RTL `$finish` ends only a timed simulation, which does not
-            // tick; a tick leaves it to the host.
-            Ok(_) | Err(Halt::Finish) => Ok(()),
+            // An RTL `$finish` or `$stop` ends or suspends only a timed
+            // simulation, which does not tick; a tick leaves it to the host.
+            Ok(_) | Err(Halt::Finish | Halt::Stop) => Ok(()),
             Err(Halt::Error(error)) => Err(error),
         }
     }
