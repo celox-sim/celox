@@ -1,1 +1,6 @@
-Fix PR #1511 retained-report CI failure: register both new Icarus interface exclusions in the aggregate group report and align evidence links; targeted regression passes.
+Revision history for #1511:
+
+rev 2 (content) 2026-10-18 20:15 UTC — Fix PR #1511 retained-report CI failure: register both new Icarus interface exclusions in the aggregate group report and align evidence links; targeted regression passes.
+rev 1 (initial) 2026-10-18 20:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1511,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"74efadfee261fe47323907e3d7c91735bf0f45dd","timestamp_iso":"2026-10-18T20:15:54Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"74efadfee261fe47323907e3d7c91735bf0f45dd","new_sha":"e6f39607f8f50b67d0225b662b246f7c8c1fc909","timestamp_iso":"2026-10-18T20:15:54Z","reason":"Fix PR #1511 retained-report CI failure: register both new Icarus interface exclusions in the aggregate group report and align evidence links; targeted regression passes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/74efadfee261fe47323907e3d7c91735bf0f45dd...e6f39607f8f50b67d0225b662b246f7c8c1fc909"}]} -->
