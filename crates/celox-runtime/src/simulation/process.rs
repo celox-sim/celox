@@ -184,11 +184,12 @@ impl<B: SimBackend> SimulationState<B> {
             // before the inactive region's processes resume.
             if self.evaluate_before_inactive(executor, current_time, round)? {
                 // Their blocking results are updates of the active region:
-                // continuous assignments follow them and the waits they wake
-                // run before the inactive region (IEEE 1800-2023 4.5).
-                executor.eval_comb()?;
+                // the waits they wake and the domains their edges trigger run
+                // before the inactive region (IEEE 1800-2023 4.5).
                 self.observe_driven(executor.backend());
-                if !self.process_state.ready.is_empty() {
+                if !self.process_state.ready.is_empty()
+                    || !executor.backend().get_triggered_bits().is_empty()
+                {
                     continue;
                 }
             }

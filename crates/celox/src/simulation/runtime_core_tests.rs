@@ -2317,6 +2317,23 @@ mod sv_traces {
             &["q", "observed", "derived_seen"],
         ),
         (
+            // A blocking store of a domain committed in the active region
+            // clocks other domains, directly and through combinational
+            // logic, before the inactive region.
+            "sv_active_commit_edges",
+            "module Top(input logic clk, output logic [7:0] cnt, output logic [7:0] cnt_gated,
+                        output logic [7:0] seen);
+               logic clk2 = 1'b0, en = 1'b1;
+               wire gated = clk2 & en;
+               always @(posedge clk) clk2 = ~clk2;
+               always_ff @(posedge clk2) cnt <= cnt + 8'd1;
+               always_ff @(posedge gated) cnt_gated <= cnt_gated + 8'd1;
+               initial forever begin @(posedge clk); #0; seen = seen + 8'd1; end
+             endmodule",
+            &["clk"],
+            &["cnt", "cnt_gated", "seen"],
+        ),
+        (
             "sv_buffered_clock",
             "module Top(input logic clk, output logic [31:0] up, output logic [31:0] down);
                logic g1;

@@ -409,6 +409,26 @@
     endmodule"#)
   (top Top) (run_until 1) (assert_eq observed 1) (assert_eq derived_seen 2) (assert_eq q 9))
 
+(case blocking_ff_clock_edges_trigger_their_domains_before_inactive_work
+  (source "blocking_clocks.sv" #"
+      module Top(output bit [7:0] cnt, cnt_gated, cnt_derived, seen);
+        bit clk, clk2, en = 1'b1, q = 1'b1;
+        wire gated = clk2 & en;
+        wire derived = ~q;
+        always #5 clk = ~clk;
+        always @(posedge clk) begin clk2 = ~clk2; q = ~q; end
+        always_ff @(posedge clk2) cnt <= cnt + 8'd1;
+        always_ff @(posedge gated) cnt_gated <= cnt_gated + 8'd1;
+        always_ff @(posedge derived) cnt_derived <= cnt_derived + 8'd1;
+        initial forever begin @(posedge clk); #0; seen = seen + 8'd1; end
+      endmodule"#)
+  (top Top)
+  (run_until 50)
+  (assert_eq seen 5)
+  (assert_eq cnt 3 "a blocking clock edge triggers its domain")
+  (assert_eq cnt_gated 3 "so does a clock computed from it")
+  (assert_eq cnt_derived 3 "and a falling one through an inverter"))
+
 (case nonblocking_ff_stores_remain_pending_during_inactive_work
   (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
       bit clk; wire [7:0] derived=q+1;

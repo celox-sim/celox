@@ -175,7 +175,10 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Evaluate the triggered domains before an inactive region runs. Their
     /// nonblocking assignments stay in the working state until the NBA
-    /// region. Returns whether a domain committed its blocking results.
+    /// region. A domain that commits its blocking results does so now, in
+    /// the active region: combinational logic follows them and the domains
+    /// their edges trigger are marked. Returns whether a domain committed
+    /// its blocking results.
     pub(super) fn evaluate_before_inactive<E>(
         &mut self,
         executor: &mut E,
@@ -187,6 +190,10 @@ impl<B: SimBackend> SimulationState<B> {
     {
         let marked = executor.backend().get_triggered_bits();
         executor.backend_mut().clear_triggered_bits();
+        if !self.model.active_commits.is_empty() {
+            // The levels before any blocking result is committed.
+            self.event_values(executor.backend(), &mut round.before);
+        }
         let mut evaluated = BitSet::new();
         let mut committed = false;
         let mut unsplit = Vec::new();
@@ -213,13 +220,34 @@ impl<B: SimBackend> SimulationState<B> {
             committed |= self.model.active_commits.contains(info.canonical_id);
             self.evaluate_deferred(executor, current_time, round, info)?;
         }
+        // Edges the committed blocking results give, directly or through
+        // combinational logic, are occurrences of this active region.
+        let mut occurred = Vec::new();
+        if committed {
+            let pending = executor.backend().get_triggered_bits();
+            executor.eval_comb()?;
+            // The settle's own trigger marks are replaced by the edges judged
+            // against the levels before the commits.
+            executor.backend_mut().clear_triggered_bits();
+            self.record_transitions(executor.backend(), round);
+            let transitions = std::mem::take(&mut round.transitions);
+            round.begin_scan(self.model.domain_kinds.len());
+            self.mark_occurrences(executor.backend_mut(), round, &transitions);
+            occurred.extend(executor.backend().get_triggered_bits().iter());
+            executor.backend_mut().clear_triggered_bits();
+            for id in pending.iter() {
+                executor.backend_mut().mark_triggered_bit(id);
+            }
+            round.transitions = transitions;
+            round.transitions.clear();
+        }
         // The edges are consumed: later rounds compare against the values
         // they were evaluated at.
         self.synchronize_event_values(executor.backend());
         round.begin_scan(self.model.domain_kinds.len());
         round.scheduled_trigger_ids.make_empty();
         round.counted_triggered.make_empty();
-        for id in unsplit {
+        for id in unsplit.into_iter().chain(occurred) {
             // The edge stays approved: the new baseline no longer shows it.
             executor.backend_mut().mark_triggered_bit(id);
             round.scheduled_trigger_ids.insert(id);
