@@ -135,7 +135,6 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-ANSI module port declarations", 426),
     ("ref port direction", 427),
     ("always_latch process", 431),
-    ("non-zero-based multidimensional packed range", 438),
     (
         "unpacked struct, union, or unsupported packed struct member",
         440,

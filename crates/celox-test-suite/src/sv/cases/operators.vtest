@@ -1389,3 +1389,114 @@ endmodule
   (assert_eq newq (fourstate 1 0))
   (assert_eq eqw (fourstate 0 0))
   (assert_eq not_eqw (fourstate 1 0)))
+
+(case multidimensional_packed_declared_ranges
+  (source "packed_declared_ranges.sv" #"
+        module Top(input logic [1:5][1:6] value, input int row, col,
+                   output logic [1:6] selected,
+                   output logic bit_value,
+                   output logic [11:0] slice, indexed,
+                   output logic queries);
+            bit [1:5][1:6] ascending;
+            logic [7:3][-2:-7] descending;
+            logic [-2:2][6:1] mixed;
+            always_comb begin
+                ascending = value;
+                descending = value;
+                mixed = value;
+                selected = ascending[row];
+                bit_value = selected[col];
+                slice = descending[6:5];
+                indexed = mixed[-1 +: 2];
+                queries = $bits(ascending) == 30 && $dimensions(ascending) == 2
+                       && $size(ascending, 1) == 5 && $size(ascending, 2) == 6
+                       && $left(ascending, 1) == 1 && $right(ascending, 2) == 6
+                       && $low(descending, 2) == -7 && $high(descending, 2) == -2
+                       && $increment(ascending, 1) == -1
+                       && $increment(descending, 2) == 1;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set value 0x12345678) (set row 1) (set col 1))
+  (assert_eq selected 0x12)
+  (assert_eq bit_value 0)
+  (assert_eq slice 0x345)
+  (assert_eq indexed 0x345)
+  (assert_eq queries 1)
+  (modify (set row 5) (set col 3))
+  (assert_eq selected 0x38)
+  (assert_eq bit_value 1))
+
+(case multidimensional_packed_declared_range_writes
+  (source "packed_declared_range_writes.sv" #"
+        module Top(input int row, col, input logic bit_value,
+                   output logic [29:0] value, output logic [11:0] slices,
+                   output logic [5:0] negative);
+            bit [1:5][1:6] ascending;
+            bit [1:6] element;
+            logic [7:3][-2:-7] descending;
+            always_comb begin
+                element = '0;
+                element[col] = bit_value;
+                ascending = '0;
+                ascending[row] = element;
+                ascending[2][2:4] = 3'b101;
+                ascending[4][3 +: 2] = 2'b11;
+                descending = '0;
+                descending[6:5] = 12'habc;
+                descending[4][-4 -: 3] = 3'b101;
+                value = ascending;
+                negative = descending[4];
+                slices = {descending[6][-2:-7], descending[5][-7 +: 6]};
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set row 1) (set col 1) (set bit_value 1))
+  (assert_eq value 0x20500300)
+  (assert_eq slices 0xabc)
+  (assert_eq negative 0x0a)
+  (modify (set row 5) (set col 6))
+  (assert_eq value 0x00500301)
+  (modify (set row 6) (set col 1))
+  (assert_eq value 0x00500300))
+
+(case multidimensional_packed_declared_ranges_four_state
+  (four_state)
+  (source "packed_declared_ranges.sv" #"
+        module Top(input logic [1:5][1:6] value, input int row, col,
+                   output logic [1:6] selected,
+                   output logic bit_value,
+                   output logic [11:0] slice, indexed,
+                   output logic queries);
+            bit [1:5][1:6] ascending;
+            logic [7:3][-2:-7] descending;
+            logic [-2:2][6:1] mixed;
+            always_comb begin
+                ascending = value;
+                descending = value;
+                mixed = value;
+                selected = ascending[row];
+                bit_value = selected[col];
+                slice = descending[6:5];
+                indexed = mixed[-1 +: 2];
+                queries = $bits(ascending) == 30 && $dimensions(ascending) == 2
+                       && $size(ascending, 1) == 5 && $size(ascending, 2) == 6
+                       && $left(ascending, 1) == 1 && $right(ascending, 2) == 6
+                       && $low(descending, 2) == -7 && $high(descending, 2) == -2
+                       && $increment(ascending, 1) == -1
+                       && $increment(descending, 2) == 1;
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set value 0x12345678) (set row 1) (set col 1))
+  (assert_eq selected 0x12)
+  (assert_eq bit_value 0)
+  (assert_eq slice 0x345)
+  (assert_eq indexed 0x345)
+  (assert_eq queries 1)
+  (modify (set row 5) (set col 3))
+  (assert_eq selected 0x38)
+  (assert_eq bit_value 1))

@@ -158,10 +158,7 @@ use types::{
     unpacked_ranges_from_dimensions_with_env, unpacked_ranges_from_variable_dimensions_with_env,
     validate_unpacked_dimension_sizes,
 };
-use validation::{
-    AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs,
-    reject_unsupported_multidimensional_packed_bounds,
-};
+use validation::{AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs};
 
 /// A procedural statement of the analyzer AST.
 pub type Stmt = crate::procedural::StmtBase<Expr, LValue>;
@@ -883,7 +880,6 @@ impl Module {
                 name: conflict.to_string(),
             });
         }
-        reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let mut parameter_values =
             parameter_value_env_with_imported(&parameters, &const_env, &imported);
         for (name, value) in &enum_constants.exprs {
