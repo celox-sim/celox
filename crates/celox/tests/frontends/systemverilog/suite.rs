@@ -7,21 +7,18 @@ struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
 /// A timed case: the design's own processes and clocks run in a
 /// [`Simulation`]. A host write is settled at the current time by the next
-/// run operation. A timed simulation offers no four-state read; the cases
-/// that need it are excluded in `timing.rs`.
+/// run operation.
 struct TimedBackend<B: SimBackend> {
     sim: Simulation<B>,
-    four_state: bool,
     /// Runtime events not yet taken as output.
     events: Vec<RuntimeEvent>,
     finished: bool,
 }
 
 impl<B: SimBackend> TimedBackend<B> {
-    fn new(sim: Simulation<B>, four_state: bool) -> Self {
+    fn new(sim: Simulation<B>) -> Self {
         Self {
             sim,
-            four_state,
             events: Vec::new(),
             finished: false,
         }
@@ -107,12 +104,9 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
-        if self.four_state {
-            return Err("a timed simulation has no four-state read".into());
-        }
         self.checked("a read")?;
         let signal = self.signal(path);
-        Ok((self.sim.get(signal), BigUint::default()))
+        Ok(self.sim.get_four_state(signal))
     }
 
     fn eval_comb(&mut self) -> Result<()> {
@@ -235,10 +229,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
             Simulation::from_sv_sources(sources, &design.top).four_state(design.four_state),
             |builder, (name, value)| builder.param(name, *value),
         );
-        return Ok(Box::new(TimedBackend::new(
-            builder.build()?,
-            design.four_state,
-        )));
+        return Ok(Box::new(TimedBackend::new(builder.build()?)));
     }
     let builder = design.parameters.iter().fold(
         Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),

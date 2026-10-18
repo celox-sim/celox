@@ -72,9 +72,9 @@ timed_cases! {
     fn finish_in_an_always_process_ends_the_simulation = "timing::finish_in_an_always_process_ends_the_simulation";
     #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
     fn waiting_processes_do_not_keep_an_idle_simulation_running = "timing::waiting_processes_do_not_keep_an_idle_simulation_running";
-    #[ignore = "the SV analyzer rejects procedural timing controls (#88); a timed Simulation has no four-state read"]
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
     fn four_state_edges_count_transitions_through_unknown = "timing::four_state_edges_count_transitions_through_unknown";
-    #[ignore = "the SV analyzer rejects procedural timing controls (#88); a timed Simulation has no four-state read"]
+    #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
     fn unknown_delays_and_conditions_count_as_zero_and_false = "timing::unknown_delays_and_conditions_count_as_zero_and_false";
     #[ignore = "the SV analyzer rejects procedural timing controls (#88)"]
     fn direct_reads_settle_waiting_processes = "timing::direct_reads_settle_waiting_processes";

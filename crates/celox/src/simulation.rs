@@ -346,6 +346,18 @@ impl<B: SimBackend> Simulation<B> {
         value
     }
 
+    /// Retrieves the current four-state `(value, mask)` using a resolved signal.
+    /// Lazily evaluates dirty combinational logic, like [`Simulator::get_four_state`],
+    /// and records a finish request raised by that evaluation.
+    pub fn get_four_state(
+        &mut self,
+        signal: SignalRef,
+    ) -> (num_bigint::BigUint, num_bigint::BigUint) {
+        let value = self.simulator.get_four_state(signal);
+        self.sync_finish();
+        value
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process
