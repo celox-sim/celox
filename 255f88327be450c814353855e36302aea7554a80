@@ -1,0 +1,1 @@
+Address PR #1462 review: publish restored simulation time before combinational settling, reject overflow while scaling delays, and resolve conflicts against current master.
