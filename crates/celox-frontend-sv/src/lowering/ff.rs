@@ -11,7 +11,8 @@
 
 use super::procedural::*;
 use super::*;
-use celox_frontend_core::process::ProcessKernelBuilder;
+use celox_design::{CounterKind, WaitSite};
+use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
@@ -57,6 +58,10 @@ pub(super) struct Ff<'p, 'a> {
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    /// The index of the process being lowered among the module's kernels.
+    process: usize,
+    /// The wait sites of the process, by local index.
+    wait_sites: Vec<WaitSite<SourceVarId>>,
     direct: bool,
 }
 
@@ -101,6 +106,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             direct: false,
+            process: 0,
+            wait_sites: Vec::new(),
         }
     }
 
@@ -1811,6 +1818,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(parts, rhs)?;
                 Ok(true)
             }
+            sv::ir::Stmt::Delay(amount) => {
+                self.delay(amount)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::WaitEvent(items) => {
+                self.wait_event(items)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Wait(condition) => {
+                self.wait_level(condition)?;
+                Ok(true)
+            }
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m
@@ -2353,7 +2372,32 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
-                let value = self.eval(count, Some((64, signed)))?;
+                let value = if self.kernel.is_some() {
+                    // A count with an unknown bit, or a negative one, runs
+                    // the body zero times (IEEE 1800-2023 12.7.2).
+                    let count = if signed {
+                        sv::ir::Expr::Mux {
+                            condition: Box::new(sv::ir::Expr::Binary {
+                                left: Box::new(count.clone()),
+                                op: sv::ir::BinaryOp::Lt,
+                                right: Box::new(sv::ir::Expr::Literal("0".to_string())),
+                            }),
+                            then_expr: Box::new(sv::ir::Expr::Literal("0".to_string())),
+                            else_expr: Box::new(count.clone()),
+                        }
+                    } else {
+                        count.clone()
+                    };
+                    let mut arena = SLTNodeArena::new();
+                    let node = self.expr_slt(&count, None, &mut arena)?;
+                    let original = self.lower_slt(&arena, node)?;
+                    let node =
+                        coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
+                    let value = self.lower_slt(&arena, node)?;
+                    self.zero_if_unknown(value, original)
+                } else {
+                    self.eval(count, Some((64, signed)))?
+                };
                 self.store(id, SIROffset::Static(0), 64, value);
                 Some(name)
             }
@@ -2409,6 +2453,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         if falls? {
             self.jump(latch);
         }
+        // A kernel loop that may not suspend yields now and then, so the
+        // runtime charges it against the time slot's budget instead of
+        // spinning in the kernel.
+        let header = if self.kernel.is_some() && !always_suspends(body) {
+            self.yielding_back_edge(header)?
+        } else {
+            header
+        };
         // Latch: the step, then the condition again. A counted loop whose
         // step leaves its variable unchanged would never end; it stops the
         // simulation with an error instead.
@@ -2847,7 +2899,9 @@ impl Ff<'_, '_> {
         mut self,
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
-    ) -> Result<ExecutionUnit<Addr>, sv::AnalyzerError> {
+        process: usize,
+    ) -> Result<(ExecutionUnit<Addr>, Vec<WaitSite<SourceVarId>>), sv::AnalyzerError> {
+        self.process = process;
         // A nonblocking update would take effect in a later region of the
         // time step, after the process has run on.
         for stmt in body {
@@ -2878,8 +2932,265 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
-        Ok(unit)
+        Ok((unit, self.wait_sites))
     }
+
+    /// `#amount` (IEEE 1800-2023 9.4.1). The amount is self-determined and
+    /// read as an unsigned 64-bit time: a negative value as its two's
+    /// complement, and a value with an unknown bit as zero. `#0` resumes in
+    /// the inactive region.
+    fn delay(&mut self, amount: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        let signed = self.expr_signed(amount);
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(amount, None, &mut arena)?;
+        let original = self.lower_slt(&arena, node)?;
+        let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
+            .map_err(slt_error)?;
+        let delay = self.lower_slt(&arena, node)?;
+        let delay = self.zero_if_unknown(delay, original);
+        self.with_kernel(|kernel| kernel.inactive_delay(delay))
+            .map_err(kernel_error)
+    }
+
+    /// `value` as a two-state register that is zero when `source` has an
+    /// unknown bit.
+    fn zero_if_unknown(&mut self, value: RegisterId, source: RegisterId) -> RegisterId {
+        let width = self.b.register(&value).width();
+        if !matches!(self.b.register(&source), RegisterType::Logic { .. }) {
+            return value;
+        }
+        // The reduction XOR of a value is unknown exactly when a bit is.
+        let reduced = self.b.alloc_logic(1);
+        self.b
+            .emit(SIRInstruction::Unary(reduced, UnaryOp::Xor, source));
+        let zero = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let is_zero = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Binary(
+            is_zero,
+            reduced,
+            BinaryOp::EqCase,
+            zero,
+        ));
+        let is_one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Binary(
+            is_one,
+            reduced,
+            BinaryOp::EqCase,
+            one,
+        ));
+        let known = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(known, is_zero, BinaryOp::Or, is_one));
+        let value = match *self.b.register(&value) {
+            RegisterType::Logic { width } => {
+                let two_state = self.b.alloc_bit(width, false);
+                self.b
+                    .emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, value));
+                two_state
+            }
+            _ => value,
+        };
+        let zero = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let result = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Mux(result, known, value, zero));
+        result
+    }
+
+    /// `@(items)` (IEEE 1800-2023 9.4.2): the process waits for an
+    /// occurrence of any item, which the runtime detects on the watched
+    /// signals themselves, so nothing is left to check when it resumes.
+    fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut terms = Vec::new();
+        for item in items {
+            let id = match &item.expr {
+                sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| !self.m.is_hidden(id)),
+                _ => None,
+            }
+            .ok_or_else(|| unsupported("event expression other than a variable"))?;
+            match item.edge {
+                sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
+                sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
+                sv::ir::EventEdge::Neg => terms.push((id, CounterKind::Falls)),
+                sv::ir::EventEdge::Both => {
+                    terms.push((id, CounterKind::Rises));
+                    terms.push((id, CounterKind::Falls));
+                }
+            }
+        }
+        let site = self.wait_site(terms);
+        self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
+            kernel.suspend_wait(site)?;
+            let woken = kernel.builder().alloc_bit(1, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(woken, SIRValue::new(1u8)));
+            kernel.wake_if(woken);
+            Ok(())
+        })
+        .map_err(kernel_error)
+    }
+
+    /// `wait (condition)` (IEEE 1800-2023 9.4.3): the process goes on at once
+    /// if the condition holds, and otherwise checks it again whenever a
+    /// variable it reads changes.
+    fn wait_level(&mut self, condition: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        let mut names = HashSet::default();
+        expr_idents(condition, &mut names);
+        subroutine_reads(self.m, condition, &mut names);
+        let mut ids: Vec<_> = names
+            .iter()
+            .filter_map(|name| self.m.id(name))
+            .filter(|&id| !self.m.is_hidden(id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+        );
+        // The condition is lowered once per check: before the process
+        // suspends and at every resume.
+        let mut error = None;
+        let mut kernel = self.kernel.take().expect("lowering a process kernel");
+        std::mem::swap(&mut self.b, kernel.builder());
+        // The kernel is out of `self` while it builds the checks; reads go
+        // to stable state all the same.
+        let direct = std::mem::replace(&mut self.direct, true);
+        let result = kernel.wait_level(site, |builder| {
+            std::mem::swap(&mut self.b, builder);
+            let truth = self.eval_truth(condition).map(|(truth, _)| truth);
+            std::mem::swap(&mut self.b, builder);
+            truth.unwrap_or_else(|e| {
+                error = Some(e);
+                let never = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
+                never
+            })
+        });
+        self.direct = direct;
+        std::mem::swap(&mut self.b, kernel.builder());
+        self.kernel = Some(kernel);
+        result.map_err(kernel_error)?;
+        error.map_or(Ok(()), Err)
+    }
+
+    /// Declare a wait site of the process with the given terms and return
+    /// its local index.
+    fn wait_site(&mut self, terms: Vec<(SourceVarId, CounterKind)>) -> u32 {
+        let index = self.wait_sites.len() as u32;
+        self.wait_sites.push(WaitSite {
+            process: self.process,
+            terms,
+        });
+        index
+    }
+
+    /// The back edge of a kernel loop that may not suspend: count the
+    /// iteration, yield every 2^[`LOOP_YIELD_BITS`] of them, and continue at
+    /// `header`. Returns the block the loop's back edges jump to.
+    fn yielding_back_edge(&mut self, header: BlockId) -> Result<BlockId, sv::AnalyzerError> {
+        let back = self.b.new_block();
+        let (counter, _) = self.m.temp("loop", LOOP_YIELD_BITS, false, false);
+        self.b.switch_to_block(back);
+        let count = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Load(
+            count,
+            stable(counter),
+            SIROffset::Static(0),
+            LOOP_YIELD_BITS,
+        ));
+        let one = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let next = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b
+            .emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+        self.store(counter, SIROffset::Static(0), LOOP_YIELD_BITS, next);
+        let zero = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let wrapped = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(wrapped, next, BinaryOp::Eq, zero));
+        let yield_block = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: wrapped,
+            true_block: (yield_block, Vec::new()),
+            false_block: (header, Vec::new()),
+        });
+        self.b.switch_to_block(yield_block);
+        self.with_kernel(ProcessKernelBuilder::yield_now)
+            .map_err(kernel_error)?;
+        self.jump(header);
+        Ok(back)
+    }
+}
+
+/// Iterations, as a power of two, between the yields of a kernel loop that
+/// may not suspend.
+const LOOP_YIELD_BITS: usize = 16;
+
+/// Whether every pass through `stmts` suspends the process.
+fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
+    stmts
+        .iter()
+        .any(|stmt| matches!(stmt, sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_)))
+}
+
+/// The module variables the subroutines `expr` calls read, directly or
+/// through further calls, besides their own formals and locals.
+fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSet<String>) {
+    let mut pending = Vec::new();
+    collect_call_names(expr, &mut pending);
+    let mut visited = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        for param in &subroutine.params {
+            if let Some(default) = &param.default {
+                expr_idents(default, names);
+            }
+        }
+        for stmt in &subroutine.body {
+            let mut stmt = stmt.clone();
+            stmt.visit_mut(
+                &mut |expr| {
+                    expr_idents(expr, names);
+                    collect_call_names(expr, &mut pending);
+                },
+                &mut |_| {},
+                &mut |_| {},
+            );
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Call { name, .. } = stmt {
+                    pending.push(name.clone());
+                }
+            });
+        }
+    }
+}
+
+/// The names of the user subroutines `expr` calls.
+fn collect_call_names(expr: &sv::ir::Expr, names: &mut Vec<String>) {
+    let called = std::cell::RefCell::new(Vec::new());
+    expr_calls(expr, &|callee| {
+        if let Some(name) = callee.subroutine() {
+            called.borrow_mut().push(name.to_string());
+        }
+        false
+    });
+    names.extend(called.into_inner());
+}
+
+fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
+    unsupported(error.to_string())
 }
 
 fn seal_drained(mut builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {
