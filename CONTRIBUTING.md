@@ -170,6 +170,11 @@ same coverage on its next push. Unrelated paths may still skip jobs.
 - Add `merge-ready` to request automatic queueing, or comment `@mergifyio queue`
   for an ordinary PR. A failed queue entry receives `dequeued`; investigate it,
   remove that label, and request queueing again. There is no automatic retry loop.
+- A PR that conflicts with its base branch does not enter the queue. Once a
+  rebase resolves the conflict, `merge-ready` queues it without manual
+  label changes. A PR that conflicts only with a PR ahead of it in the queue is
+  held without running checks; it is dequeued, with `dequeued`, only if that
+  PR merges.
 - To cancel an automatic merge request, remove `merge-ready`, then comment
   `@mergifyio dequeue`. Removing the label alone does not remove a queued PR.
 - The release PR requires `merge-ready` from the weekly release workflow and
@@ -225,7 +230,10 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   replaces it. Re-enable nothing under the old path.
 - Shared dependency/toolchain configuration runs the core lane; an unreadable
   diff or dependency graph runs both lanes. The graph includes optional, build
-  and dev edges.
+  and dev edges. A `Cargo.lock` diff selects a lane only when a changed lock
+  entry is in that lane's lockfile dependency closure, so adding a dependency
+  to a Celox crate does not run Lydite. The Nix flake and `ci.yml` do not
+  select Lydite; its jobs use neither.
 - Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
   formatting/lint/build checks remain there. The dedicated workflow tests the
   selected Lydite packages, including doctests, and installs its solver.

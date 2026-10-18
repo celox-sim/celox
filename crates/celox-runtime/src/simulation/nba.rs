@@ -20,7 +20,7 @@ impl<B: SimBackend> SimulationState<B> {
         process: usize,
         site: usize,
     ) -> Result<(), Halt> {
-        let refs = *self.processes[process]
+        let refs = *self.model.processes[process]
             .nba_sites
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
@@ -51,14 +51,14 @@ impl<B: SimBackend> SimulationState<B> {
             return false;
         }
         round.nba_published = true;
-        let flagged = round.kernels_ran && self.has_pending_nba_sites;
+        let flagged = round.kernels_ran && self.model.has_pending_nba_sites;
         if self.process_state.nba_queue.is_empty() && !flagged {
             return false;
         }
         let mut updates = std::mem::take(&mut self.process_state.nba_queue);
         if flagged {
             let backend = executor.backend_mut();
-            for process in &self.processes {
+            for process in &self.model.processes {
                 for site in &process.nba_sites {
                     let Some(pending) = site.pending else {
                         continue;

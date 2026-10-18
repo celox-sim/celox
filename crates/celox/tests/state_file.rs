@@ -519,3 +519,103 @@ fn a_failed_load_changes_nothing() {
     assert_eq!(target.time(), 10);
     assert_eq!(target.get(b), 3u8.into());
 }
+
+/// Three clocks of different periods; `clocks.state` was saved from it by
+/// the scheduler before periodic events were marked on the queue entries.
+const CLOCKS_DESIGN: &str = r#"
+module Top (
+    clk_a: input 'a clock, clk_b: input 'b clock, clk_c: input 'c clock,
+    qa: output 'a logic<8>, qb: output 'b logic<8>, qc: output 'c logic<8>,
+) {
+    var ra: 'a logic<8>;
+    var rb: 'b logic<8>;
+    var rc: 'c logic<8>;
+    always_ff (clk_a) { ra = ra + 8'd1; }
+    always_ff (clk_b) { rb = rb + 8'd3; }
+    always_ff (clk_c) { rc = rc + 8'd5; }
+    assign qa = ra;
+    assign qb = rb;
+    assign qc = rc;
+}
+"#;
+
+/// Saved at time 37 after clocks of periods 10, 6 and 15 with delays 5, 3
+/// and 1, and two one-shot events: one identical to clk_b's pending edge at
+/// 39, and one of clk_a at 52.
+const CLOCKS_FIXTURE: &[u8] = include_bytes!("fixtures/state_file/clocks.state");
+
+fn resave(saved: &[u8]) -> Vec<u8> {
+    let file = StateFile::read_from(saved).unwrap();
+    let mut sim = Simulation::builder(CLOCKS_DESIGN, "Top").build().unwrap();
+    sim.load_state(&file).unwrap();
+    let mut bytes = Vec::new();
+    sim.save_state().unwrap().write_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// The file with its periodic events in a fixed order: the scheduler that
+/// saved the fixture listed them in hash order.
+fn sorted_periodic(saved: &[u8]) -> StateFile {
+    let mut file = StateFile::read_from(saved).unwrap();
+    let schedule = file.schedule.as_mut().unwrap();
+    schedule
+        .periodic
+        .sort_by_key(|(event, count)| format!("{event:?} {count}"));
+    file
+}
+
+#[test]
+fn an_older_state_file_resaves_with_the_same_schedule() {
+    let resaved = resave(CLOCKS_FIXTURE);
+    assert_eq!(
+        format!("{:?}", sorted_periodic(&resaved)),
+        format!("{:?}", sorted_periodic(CLOCKS_FIXTURE)),
+    );
+    // Only the order of the periodic events may differ.
+    assert_eq!(resaved.len(), CLOCKS_FIXTURE.len());
+    // From then on the file is stable.
+    assert!(resave(&resaved) == resaved);
+}
+
+#[test]
+fn a_saved_state_file_resaves_byte_identically() {
+    let mut sim = Simulation::builder(CLOCKS_DESIGN, "Top").build().unwrap();
+    sim.add_clock("clk_a", 10, 5);
+    sim.add_clock("clk_b", 6, 3);
+    sim.add_clock("clk_c", 15, 1);
+    sim.run_until(37).unwrap();
+    sim.schedule("clk_b", 39, 1).unwrap();
+    sim.schedule("clk_a", 52, 1).unwrap();
+    let mut saved = Vec::new();
+    sim.save_state().unwrap().write_to(&mut saved).unwrap();
+    assert!(resave(&saved) == saved);
+    // The same schedule as the older scheduler saved.
+    assert_eq!(
+        format!("{:?}", sorted_periodic(&saved)),
+        format!("{:?}", sorted_periodic(CLOCKS_FIXTURE)),
+    );
+}
+
+#[test]
+fn a_loaded_state_file_runs_its_periodic_events_once() {
+    let file = StateFile::read_from(CLOCKS_FIXTURE).unwrap();
+    let mut loaded = Simulation::builder(CLOCKS_DESIGN, "Top").build().unwrap();
+    loaded.load_state(&file).unwrap();
+    let mut live = Simulation::builder(CLOCKS_DESIGN, "Top").build().unwrap();
+    live.add_clock("clk_a", 10, 5);
+    live.add_clock("clk_b", 6, 3);
+    live.add_clock("clk_c", 15, 1);
+    live.run_until(37).unwrap();
+    live.schedule("clk_b", 39, 1).unwrap();
+    live.schedule("clk_a", 52, 1).unwrap();
+    let trace = |sim: &mut Simulation| {
+        let outputs = ["qa", "qb", "qc"].map(|name| sim.signal(name));
+        (0..40)
+            .map(|_| {
+                sim.step().unwrap();
+                (sim.time(), outputs.map(|signal| sim.get(signal)).to_vec())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(trace(&mut loaded), trace(&mut live));
+}

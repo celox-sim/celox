@@ -8,6 +8,9 @@ use std::{
     fmt,
 };
 
+pub mod edges;
+pub mod schedule;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DomainKind {
     ClockPosedge,
@@ -328,10 +331,10 @@ impl CounterKind {
 
     /// The counter kind that wakes an event domain of `kind`.
     pub const fn for_domain(kind: DomainKind) -> Self {
-        match kind {
-            DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => Self::Rises,
-            DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => Self::Falls,
-            DomainKind::Other => Self::Changes,
+        match edges::polarity(kind) {
+            Some(true) => Self::Rises,
+            Some(false) => Self::Falls,
+            None => Self::Changes,
         }
     }
 }
@@ -612,6 +615,10 @@ pub struct EventTopology<A> {
     /// an earlier one writes, and none has side effects.
     #[serde(default)]
     pub independent_derived: BTreeSet<A>,
+    /// Canonical events whose signal combinational logic reads. Moving such
+    /// a signal needs a settle before its domains evaluate.
+    #[serde(default)]
+    pub combinationally_read: BTreeSet<A>,
 }
 
 /// A clock computed combinationally from an event's signal.
@@ -706,6 +713,7 @@ impl<A> Default for EventTopology<A> {
             derived_events: BTreeMap::new(),
             combinational_derived: BTreeMap::new(),
             independent_derived: BTreeSet::new(),
+            combinationally_read: BTreeSet::new(),
         }
     }
 }

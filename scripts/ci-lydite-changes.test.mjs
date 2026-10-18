@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { lyditeScope, isLydite, pullRequestScope } from "./ci-lydite-changes.mjs";
+import {
+  lockChanges,
+  lyditeScope,
+  isLydite,
+  pullRequestScope,
+} from "./ci-lydite-changes.mjs";
 import { celoxRustTestScope } from "./ci-changes.mjs";
 import { readWorkspace } from "./ci-rust-scope.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -20,7 +25,6 @@ test("Lydite core changes and shared configuration run both lanes", () => {
     "Cargo.lock",
     "Cargo.toml",
     "rust-toolchain.toml",
-    "flake.lock",
     ".github/workflows/lydite-checks.yml",
     "scripts/ci-lydite-changes.mjs",
     "vendor/new/src/lib.rs",
@@ -55,6 +59,10 @@ test("unrelated consumers and upstream private tests do not select Lydite", () =
     "packages/celox/src/index.ts",
     "docs/guide.md",
     "scripts/report-full-ci.mjs",
+    // Lydite's jobs use neither the Nix shell nor Celox's CI workflow.
+    "flake.lock",
+    "flake.nix",
+    ".github/workflows/ci.yml",
   ])
     assert.deepEqual(scope(path), neither, path);
   assert.deepEqual(scope(), neither);
@@ -74,7 +82,6 @@ test("PRs run the bridge only for Lydite-owned changes", () => {
   for (const path of [
     "Cargo.lock",
     "rust-toolchain.toml",
-    ".github/workflows/ci.yml",
     ".github/workflows/lydite-checks.yml",
     "scripts/ci-lydite-changes.mjs",
   ])
@@ -86,6 +93,37 @@ test("PRs run the bridge only for Lydite-owned changes", () => {
   ])
     assert.equal(pr(path).bridge, true, path);
   assert.deepEqual(pullRequestScope(null, packages), both);
+});
+
+test("Cargo.lock edits select only the lanes that reach the changed entries", () => {
+  const lockfile = readFileSync(`${root}Cargo.lock`, "utf8");
+  const edit = (name, from, to) => {
+    const start = lockfile.indexOf(`[[package]]\nname = "${name}"\n`);
+    assert.notEqual(start, -1, name);
+    const end = lockfile.indexOf("\n\n", start);
+    const entry = lockfile.slice(start, end);
+    assert.ok(entry.includes(from), name);
+    return lockChanges(
+      lockfile,
+      lockfile.slice(0, start) + entry.replace(from, to) + lockfile.slice(end),
+    );
+  };
+  const pr = (lock) => pullRequestScope(["Cargo.lock"], packages, lock);
+  // A Celox crate gaining a workspace dependency reaches no Lydite lane.
+  assert.deepEqual(
+    pr(edit("celox-vpi", ' "celox",\n', ' "celox",\n "celox-design",\n')),
+    neither,
+  );
+  assert.deepEqual(pr(edit("serde_json", "dependencies = [", "dependencies = [\n \"new\",")), {
+    core: true,
+    bridge: false,
+  });
+  assert.deepEqual(
+    lyditeScope(["Cargo.lock"], packages, edit("celox", "dependencies = [", "dependencies = [\n \"new\",")),
+    { core: false, bridge: true },
+  );
+  assert.deepEqual(pr(lockChanges(lockfile, lockfile)), neither);
+  assert.deepEqual(pr(null), { core: true, bridge: false });
 });
 
 test("version-only release PRs skip Lydite", () => {

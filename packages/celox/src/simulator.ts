@@ -19,6 +19,7 @@ import {
 	wrapDirectSimulatorHandle,
 } from "./napi-helpers.js";
 import type {
+	ClockEdge,
 	CreateResult,
 	EventHandle,
 	FourStateValue,
@@ -517,6 +518,98 @@ export class Simulator<P = Record<string, unknown>> {
 		} else if (ticks > 1) {
 			this._handle.tickN(eventId, ticks);
 		}
+	}
+
+	/**
+	 * Move a clock's signal to 1 and run every domain sensitive to that
+	 * rising edge: its own domain when the edge is its active edge, clocks
+	 * computed combinationally from it (sampling the state before the edge),
+	 * and the domains the commit clocks in turn. The signal stays high; an
+	 * edge to the level the signal already has does nothing.
+	 *
+	 * @param event  Event handle or known raw event ID. Defaults to the first
+	 *               event.
+	 */
+	posedge(event?: EventHandle | number): void {
+		this.edges([[this.resolveEventId(event), "posedge"]]);
+	}
+
+	/** Move a clock's signal to 0; see `posedge()`. */
+	negedge(event?: EventHandle | number): void {
+		this.edges([[this.resolveEventId(event), "negedge"]]);
+	}
+
+	/**
+	 * The event's active edge: rising for a positive-edge clock or an
+	 * active-high reset (including Veryl's `clock` under a `posedge` clock
+	 * type), falling otherwise. See `posedge()`.
+	 */
+	activeEdge(event?: EventHandle | number): void {
+		const id = this.resolveEventId(event);
+		this.edges([[id, this.activeIsRising(id) ? "posedge" : "negedge"]]);
+	}
+
+	/** The edge opposite to the event's active edge. See `posedge()`. */
+	inactiveEdge(event?: EventHandle | number): void {
+		const id = this.resolveEventId(event);
+		this.edges([[id, this.activeIsRising(id) ? "negedge" : "posedge"]]);
+	}
+
+	/** One clock cycle: `activeEdge()`, then `inactiveEdge()`. */
+	cycle(event?: EventHandle | number): void {
+		this.activeEdge(event);
+		this.inactiveEdge(event);
+	}
+
+	/**
+	 * Move several event signals at one instant. Every domain sensitive to
+	 * one of the edges evaluates against the state before them, then all of
+	 * them commit, as coincident edges in hardware.
+	 */
+	edges(
+		moves: ReadonlyArray<readonly [EventHandle | number, ClockEdge]>,
+	): void {
+		this.ensureAlive();
+		const handle = this._handle;
+		if (!handle.edges) {
+			throw new Error("This simulator backend does not support explicit edges");
+		}
+		const ids: number[] = [];
+		const rising: boolean[] = [];
+		for (const [event, edge] of moves) {
+			const id = typeof event === "number" ? event : event.id;
+			this.assertKnownEventId(id);
+			if (edge !== "posedge" && edge !== "negedge") {
+				throw new RangeError(`Unknown clock edge '${String(edge)}'`);
+			}
+			ids.push(id);
+			rising.push(edge === "posedge");
+		}
+		// The handle settles first only when needed, and leaves
+		// combinational logic as it was when no domain ran and nothing
+		// combinational reads the moved signals.
+		this._state.dirty = !handle.edges(ids, rising, this._state.dirty);
+	}
+
+	private resolveEventId(event: EventHandle | number | undefined): number {
+		this.ensureAlive();
+		if (event === undefined) {
+			if (this._eventIds.size === 0) {
+				throw new Error("Simulator has no events");
+			}
+			return this._defaultEventId;
+		}
+		const id = typeof event === "number" ? event : event.id;
+		this.assertKnownEventId(id);
+		return id;
+	}
+
+	private activeIsRising(eventId: number): boolean {
+		const handle = this._handle;
+		if (!handle.activeEdgeIsRising) {
+			throw new Error("This simulator backend does not support explicit edges");
+		}
+		return handle.activeEdgeIsRising(eventId);
 	}
 
 	/** Resolve an event name to a handle for use with `tick()`. */
