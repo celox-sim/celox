@@ -439,7 +439,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 *
 	 * When `maxSteps` is provided, the Rust run loop takes at most that many
 	 * steps and a `SimulationTimeoutError` is thrown if the budget is
-	 * exhausted before reaching `endTime`.
+	 * exhausted before reaching `endTime`. A design that executes `$stop`
+	 * returns normally; use `isStopped()` to detect the suspension.
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
@@ -451,7 +452,8 @@ export class Simulation<P = Record<string, unknown>> {
 			this._state.dirty = false;
 			return;
 		}
-		const max = opts.maxSteps;
+		// Normalize zero-step budgets before interpreting the native result.
+		const max = Math.max(0, Math.trunc(opts.maxSteps) || 0);
 		if (!this._handle.runUntilBounded) {
 			throw new Error("This simulation does not support bounded runs");
 		}
@@ -463,9 +465,14 @@ export class Simulation<P = Record<string, unknown>> {
 			const next = this._handle.nextEventTime();
 			if (next == null || next > endTime) return;
 		}
+		const wasStopped = this.isStopped();
 		if (!this._handle.runUntilBounded(endTime, max)) {
-			// A step took the pending inputs unless none was allowed.
-			if (max > 0) this._state.dirty = false;
+			if (max > 0) {
+				// A resumed slot can stop or exhaust the budget before pending
+				// host writes are consumed. Keep them eligible for lazy evaluation.
+				if (!wasStopped) this._state.dirty = false;
+				if (this.isStopped()) return;
+			}
 			throw new SimulationTimeoutError(
 				`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
 				this._handle.time(),
