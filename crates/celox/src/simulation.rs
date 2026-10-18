@@ -7,8 +7,8 @@ use crate::{
     },
 };
 use celox_runtime::{
-    CountedDomainRefs, CountedRefs, EventInfo, Halt, HostBoundary, HostWatch, NbaSiteRefs,
-    ProcessRefs, SimulationSnapshot, SimulationState, TermRefs, TickExecutor, UnitExecutor,
+    Halt, HostBoundary, ResolvedSchedule, SimulationSnapshot, SimulationState, TickExecutor,
+    UnitExecutor, host_watch,
 };
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
@@ -218,198 +218,19 @@ impl Simulation {
 // ── Generic methods available for any backend ───────────────────────
 
 pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
-    let num_events = simulator.backend.num_events();
-    let topo_signals: Vec<(SignalRef, usize)> = simulator
-        .program
-        .design
-        .events
-        .ordered_events
-        .iter()
-        .map(|addr| {
-            let signal = simulator.backend.resolve_signal(addr);
-            let id = simulator
-                .backend
-                .resolve_event_opt(addr)
-                .map(|ev| ev.id())
-                .unwrap_or(usize::MAX);
-            (signal, id)
-        })
-        .collect();
-
-    let mut domain_kinds = vec![None; num_events];
-    let kinds = simulator.program.design.event_kinds();
-    for (_, id) in topo_signals.iter().copied() {
-        if id != usize::MAX {
-            let addr = simulator.backend.id_to_addr_slice()[id];
-            domain_kinds[id] = kinds.get(&addr).copied();
-        }
-    }
-
-    let mut event_info = vec![
-        EventInfo {
-            canonical_id: usize::MAX,
-            is_cascaded: false,
-            eval_ff_event: None,
-            eval_only_event: None,
-            apply_event: None,
-        };
-        num_events
-    ];
-    for (id, info) in event_info.iter_mut().enumerate() {
-        let addr = simulator.backend.id_to_addr_slice()[id];
-        let canonical = simulator.program.design.events.canonical(addr);
-
-        let is_cascaded = simulator
-            .program
-            .design
-            .events
-            .cascaded_events
-            .contains(&canonical);
-
-        let eval_ff_event = simulator.backend.resolve_event_opt(&canonical);
-        let eval_only_event = simulator.backend.resolve_eval_only_event(&canonical);
-        let apply_event = simulator.backend.resolve_apply_event(&canonical);
-
-        if let Some(canonical_ev) = eval_ff_event {
-            *info = EventInfo {
-                canonical_id: canonical_ev.id(),
-                is_cascaded,
-                eval_ff_event,
-                eval_only_event,
-                apply_event,
-            };
-        }
-    }
-
-    let schema = &simulator.program.runtime_schema;
-    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
-    let counted: Vec<CountedDomainRefs> = schema
-        .watches
-        .iter()
-        .filter_map(|watch| {
-            Some(CountedDomainRefs {
-                refs: CountedRefs {
-                    signal: resolve(&watch.signal),
-                    changes: resolve(&watch.changes?),
-                    rises: resolve(&watch.rises?),
-                    falls: resolve(&watch.falls?),
-                },
-                domains: watch
-                    .domains
-                    .iter()
-                    .filter_map(|(event, kind)| {
-                        Some((simulator.backend.resolve_event_opt(event)?.id(), *kind))
-                    })
-                    .collect(),
-            })
-        })
-        .collect();
-    // Signals design code writes; the rest only the host and the scheduler
-    // write.
-    let driven: crate::HashSet<crate::AbsoluteAddr> =
-        schema.rtl_writes.iter().map(|atom| atom.id).collect();
-    let counter_of = |signal: SignalRef, kind| {
-        counted
-            .iter()
-            .find(|counted| counted.refs.signal == signal)
-            .map(|counted| counted.refs.counter(kind))
-    };
-    let mut processes: Vec<ProcessRefs> = schema
-        .processes
-        .iter()
-        .map(|slots| ProcessRefs::new(resolve(&slots.status), resolve(&slots.delay)))
-        .collect();
-    for site in &schema.wait_sites {
-        let terms = site
-            .terms
-            .iter()
-            .map(|(address, kind)| {
-                let signal = resolve(address);
-                TermRefs {
-                    signal,
-                    kind: *kind,
-                    counter: counter_of(signal, *kind),
-                    driven: driven.contains(address),
-                }
-            })
-            .collect();
-        processes[site.process].wait_sites.push(terms);
-    }
-    for site in &schema.nba_sites {
-        processes[site.process].nba_sites.push(NbaSiteRefs {
-            target: resolve(&site.target),
-            lsb: site.lsb,
-            width: site.width,
-            value: resolve(&site.value),
-            offset: site.offset.as_ref().map(resolve),
-            pending: site.pending.as_ref().map(resolve),
-        });
-    }
-
-    let mut state = SimulationState::new(
+    SimulationState::new(
         &simulator.backend,
-        topo_signals,
-        domain_kinds,
-        event_info,
-        processes,
-    )
-    .with_counted(&simulator.backend, counted);
-    let events = &simulator.program.design.events;
-    if !events.combinational_derived.is_empty() {
-        let derived = simulator
-            .backend
-            .id_to_addr_slice()
-            .iter()
-            .map(|address| {
-                events
-                    .combinational_derived
-                    .get(&events.canonical(*address))
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|derived| simulator.backend.resolve_event_opt(&derived.clock))
-                    .map(|event| event.id())
-                    .collect()
-            })
-            .collect();
-        state.set_combinational_derived(derived);
-    }
-    state
-}
-
-/// Host writes a timed simulation of `simulator` observes one at a time:
-/// those of counted signals and of signals a wait watches.
-fn host_watch<B: SimBackend>(simulator: &Simulator<B>) -> HostWatch {
-    let schema = &simulator.program.runtime_schema;
-    let resolve = |addr: &crate::AbsoluteAddr| simulator.backend.resolve_signal(addr);
-    HostWatch::new(
-        schema.watches.iter().filter_map(|watch| {
-            Some(CountedRefs {
-                signal: resolve(&watch.signal),
-                changes: resolve(&watch.changes?),
-                rises: resolve(&watch.rises?),
-                falls: resolve(&watch.falls?),
-            })
-        }),
-        schema
-            .wait_sites
-            .iter()
-            .flat_map(|site| site.terms.iter().map(|(signal, _)| resolve(signal).offset))
-            .collect(),
+        ResolvedSchedule::resolve(&simulator.backend, &simulator.schedule),
     )
 }
 
 impl<B: SimBackend> Simulation<B> {
     pub(crate) fn new(mut simulator: Simulator<B>) -> Self {
         let state = simulation_state(&simulator);
-        simulator.host_watch = host_watch(&simulator);
+        simulator.host_watch = host_watch(&simulator.backend, &simulator.schedule);
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
-        simulator.finish_sites = simulator
-            .program
-            .runtime_schema
-            .runtime_event_sites
-            .iter()
-            .any(|site| matches!(site.kind, crate::ir::RuntimeEventKind::Finish));
+        simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.skip_runtime_finish();
         Self { simulator, state }
     }

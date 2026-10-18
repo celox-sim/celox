@@ -46,7 +46,20 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
     }
 
     fn tick(&mut self, event: &str) -> Result<()> {
-        self.0.tick(self.0.event(event)).map_err(Into::into)
+        // The suite pulses the port as the external testbenches do: to its
+        // inactive level, to its active level, and back unless it was active.
+        let handle = self.0.event(event);
+        let signal = self.0.signal(event);
+        let active = self.0.event_edges()[celox::EventHandle::id(&handle)].active_edge();
+        let (value, mask) = self.0.get_four_state(signal);
+        let was_active = mask == BigUint::default()
+            && (value != BigUint::default()) == (active == celox::Edge::Rising);
+        self.0.inactive_edge(handle)?;
+        self.0.active_edge(handle)?;
+        if !was_active {
+            self.0.inactive_edge(handle)?;
+        }
+        Ok(())
     }
 }
 

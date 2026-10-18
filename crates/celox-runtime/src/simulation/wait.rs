@@ -28,7 +28,7 @@ impl<B: SimBackend> SimulationState<B> {
         process: usize,
         site: usize,
     ) -> Result<(), Halt> {
-        let terms = self.processes[process]
+        let terms = self.model.processes[process]
             .wait_sites
             .get(site)
             .ok_or_else(|| Self::site_error(process, site))?;
@@ -80,16 +80,16 @@ impl<B: SimBackend> SimulationState<B> {
         signal: SignalRef,
         write: impl FnOnce(&mut B),
     ) {
-        if self.counted.is_empty() && self.process_state.waiters.is_empty() {
+        if self.model.counted.is_empty() && self.process_state.waiters.is_empty() {
             write(backend);
             return;
         }
-        match self.counted_by_offset.get(&signal.offset).copied() {
+        match self.model.counted_by_offset.get(&signal.offset).copied() {
             Some(counted) => {
                 let old = read(backend, signal);
                 write(backend);
                 let new = read(backend, signal);
-                self.counted[counted].refs.bump(backend, &old, &new);
+                self.model.counted[counted].refs.bump(backend, &old, &new);
             }
             None => write(backend),
         }
@@ -116,7 +116,7 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     fn check_waits(&mut self, backend: &B, only: Option<SignalRef>, driven_only: bool) {
-        let processes = &self.processes;
+        let processes = &self.model.processes;
         let state = StateView::new(backend);
         let ProcessState { waiters, ready, .. } = &mut self.process_state;
         waiters.retain(driven_only, |process, waiter| {
@@ -180,7 +180,7 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Show the waits one value the host wrote to `signal`.
     pub(super) fn observe_host_write(&mut self, signal: SignalRef, value: &Value) {
-        let processes = &self.processes;
+        let processes = &self.model.processes;
         let ProcessState { waiters, ready, .. } = &mut self.process_state;
         waiters.retain(false, |process, waiter| {
             let terms = &processes[process].wait_sites[waiter.site];

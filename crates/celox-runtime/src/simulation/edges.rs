@@ -1,17 +1,32 @@
 //! Edges of event signals: marking the domains that scheduled values,
 //! process writes, publications and counters trigger.
 
-use celox_design::DomainKind;
+use celox_design::edges::{scheduled_edge, settled_edge};
 
 use super::round::Round;
 use super::{SimulationState, event_level};
 use crate::{backend::SimBackend, timing::kind_index};
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Take the levels of the event signals as the baseline that edge
+    /// detection compares against.
+    pub(super) fn resample_clock_values(&mut self, backend: &B) {
+        for (signal, id) in &self.model.topo_signals {
+            if *id == usize::MAX {
+                continue;
+            }
+            if event_level(backend, *signal) != 0 {
+                self.last_clock_values.insert(*id);
+            } else {
+                self.last_clock_values.remove(*id);
+            }
+        }
+    }
+
     /// Rebase edge detection after state was advanced outside this scheduler.
     pub fn synchronize_event_values(&mut self, backend: &B) {
         self.last_clock_values.make_empty();
-        for (signal, id) in &self.topo_signals {
+        for (signal, id) in &self.model.topo_signals {
             if *id == usize::MAX {
                 continue;
             }
@@ -23,7 +38,7 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Mark the domains whose counters moved since they last triggered.
     pub(super) fn mark_counted_domains(&mut self, backend: &mut B, round: &mut Round) {
-        for (index, counted) in self.counted.iter().enumerate() {
+        for (index, counted) in self.model.counted.iter().enumerate() {
             for &(id, kind) in &counted.domains {
                 let value: u32 = backend.get_as(counted.refs.counter(kind));
                 let seen = &mut self.process_state.domain_counters[index][kind_index(kind)];
@@ -54,21 +69,14 @@ impl<B: SimBackend> SimulationState<B> {
                 round.previous(id, is_nonzero, || self.last_clock_values.contains(id));
             if was_nonzero != is_nonzero
                 && self
+                    .model
                     .combinational_derived
                     .get(id)
                     .is_some_and(|derived| !derived.is_empty())
             {
                 round.gating_sources.push(id);
             }
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => !was_nonzero && is_nonzero,
-            };
+            let triggered = scheduled_edge(self.model.domain_kinds[id], was_nonzero, is_nonzero);
             if triggered {
                 round.scheduled_trigger_ids.insert(id);
                 backend.mark_triggered_bit(id);
@@ -79,7 +87,8 @@ impl<B: SimBackend> SimulationState<B> {
     pub(super) fn event_values(&self, backend: &B, values: &mut Vec<u8>) {
         values.clear();
         values.extend(
-            self.topo_signals
+            self.model
+                .topo_signals
                 .iter()
                 .map(|(signal, _)| event_level(backend, *signal)),
         );
@@ -89,6 +98,7 @@ impl<B: SimBackend> SimulationState<B> {
     pub(super) fn record_transitions(&self, backend: &B, round: &mut Round) {
         self.event_values(backend, &mut round.after);
         for (((_, id), &old), &new) in self
+            .model
             .topo_signals
             .iter()
             .zip(&round.before)
@@ -113,15 +123,7 @@ impl<B: SimBackend> SimulationState<B> {
         for &(id, is_nonzero) in transitions {
             let was_nonzero =
                 round.previous(id, is_nonzero, || self.last_clock_values.contains(id));
-            let triggered = match self.domain_kinds[id] {
-                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
-                    !was_nonzero && is_nonzero
-                }
-                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
-                    was_nonzero && !is_nonzero
-                }
-                _ => was_nonzero != is_nonzero,
-            };
+            let triggered = settled_edge(self.model.domain_kinds[id], was_nonzero, is_nonzero);
             if triggered {
                 round.occurrences.insert(id);
                 round.scheduled_trigger_ids.insert(id);
