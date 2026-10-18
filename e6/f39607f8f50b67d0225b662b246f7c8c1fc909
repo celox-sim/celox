@@ -1,0 +1,1 @@
+Fix PR #1511 retained-report CI failure: register both new Icarus interface exclusions in the aggregate group report and align evidence links; targeted regression passes.
