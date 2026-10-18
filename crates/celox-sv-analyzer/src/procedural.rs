@@ -70,6 +70,36 @@ pub enum StmtBase<E, L> {
         name: String,
         init: Option<E>,
     },
+    /// `#amount`: suspend the process for `amount` time units (IEEE
+    /// 1800-2023 9.4.1).
+    Delay(E),
+    /// `@(items)`: suspend the process until one of the events occurs
+    /// (9.4.2).
+    WaitEvent(Vec<EventItemBase<E>>),
+    /// `wait (condition)`: suspend the process until the condition is true
+    /// (9.4.3).
+    Wait(E),
+}
+
+/// One item of an event control, `[edge] expr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventItemBase<E> {
+    pub edge: EventEdge,
+    pub expr: E,
+}
+
+/// Which transitions of an event expression are events (IEEE 1800-2023
+/// 9.4.2, Table 9-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventEdge {
+    /// Any change of the value.
+    Any,
+    /// `posedge`: the least significant bit rises.
+    Pos,
+    /// `negedge`: the least significant bit falls.
+    Neg,
+    /// `edge`: the least significant bit rises or falls.
+    Both,
 }
 
 /// How a case statement compares its selector with the item labels.
@@ -255,6 +285,17 @@ impl<E, L> StmtBase<E, L> {
                 name,
                 init: init.map(fe),
             },
+            StmtBase::Delay(amount) => StmtBase::Delay(fe(amount)),
+            StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
+                items
+                    .into_iter()
+                    .map(|item| EventItemBase {
+                        edge: item.edge,
+                        expr: fe(item.expr),
+                    })
+                    .collect(),
+            ),
+            StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
         }
     }
 
@@ -360,6 +401,13 @@ impl<E, L> StmtBase<E, L> {
                     fe(init);
                 }
             }
+            StmtBase::Delay(amount) => fe(amount),
+            StmtBase::WaitEvent(items) => {
+                for item in items {
+                    fe(&mut item.expr);
+                }
+            }
+            StmtBase::Wait(condition) => fe(condition),
         }
     }
 

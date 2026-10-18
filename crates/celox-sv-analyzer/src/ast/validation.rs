@@ -353,6 +353,20 @@ fn reject_silently_ignored_constructs_with_dimensions(
         .flat_map(|root| root.into_iter())
         .filter(|child| matches!(child, RefNode::Cast(_)))
         .collect();
+    // The `min:typ:max` value of a procedural delay control is lowered as its
+    // typical value; any other one is not supported.
+    let delay_mintypmax: Vec<_> = validation_nodes(node.clone(), is_module)
+        .flat_map(|root| root.into_iter())
+        .filter_map(|child| match child {
+            RefNode::DelayControlMintypmax(delay) => Some(delay),
+            _ => None,
+        })
+        .flat_map(|delay| RefNode::DelayControlMintypmax(delay).into_iter())
+        .filter_map(|child| match child {
+            RefNode::MintypmaxExpressionTernary(ternary) => Some(ternary),
+            _ => None,
+        })
+        .collect();
     // Procedure locals, parameters and loop indices are installed by
     // BodyBuilder. Validate their queries while lowering that scoped body.
     let procedural_queries: Vec<_> = validation_nodes(node.clone(), is_module)
@@ -587,6 +601,8 @@ fn reject_silently_ignored_constructs_with_dimensions(
             RefNode::SpecifyBlock(_) => {
                 return Err(AnalyzerError::Unsupported("specify block".to_string()));
             }
+            RefNode::MintypmaxExpressionTernary(ternary)
+                if delay_mintypmax.iter().any(|delay| std::ptr::eq(*delay, ternary)) => {}
             RefNode::MintypmaxExpressionTernary(_)
             | RefNode::ConstantMintypmaxExpressionTernary(_) => {
                 return Err(AnalyzerError::Unsupported(
