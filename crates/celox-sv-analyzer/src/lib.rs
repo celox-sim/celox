@@ -328,6 +328,7 @@ pub fn analyze_source_module_with_packages(
         module_name,
         &overrides,
         &[],
+        &[],
         &ModuleInterfaces::default(),
         packages,
     )

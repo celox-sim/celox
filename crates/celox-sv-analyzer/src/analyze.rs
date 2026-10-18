@@ -135,7 +135,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                                 parameter.name().to_string(),
                                 parameter.value().cloned().map(Into::into),
                                 parameter.bound_type().cloned(),
-                                parameter.pattern_text().map(str::to_string),
+                                parameter.bound_pattern().cloned(),
                             )
                         })
                         .collect(),

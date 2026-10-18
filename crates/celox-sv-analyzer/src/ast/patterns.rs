@@ -91,11 +91,11 @@ fn typed_pattern_type(
 /// Serialize a typed constant pattern as positional values already converted
 /// to its caller-side type (IEEE 1800-2023 10.9). Packed values become
 /// literals; only unpacked dimensions need positional patterns.
-pub(super) fn constant_typed_pattern_text(
+pub(super) fn constant_typed_pattern_value(
     pattern: &sv_parser::AssignmentPatternExpression,
     tree: &SyntaxTree,
     dims: &PackedDimensions,
-) -> Converted<String> {
+) -> Converted<bound_patterns::Value> {
     let r#type = typed_pattern_type(pattern, tree, dims)?;
     let shape = procedural::dimensions_from_type(&r#type);
     let value = expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)?;
@@ -112,15 +112,15 @@ pub(super) fn constant_typed_pattern_text(
     };
     let value = typecheck::parse_integral_literal(&value)
         .ok_or_else(|| unsupported("typed parameter pattern value"))?;
-    pattern_value_text(&value, &shape, 0, dims)
+    pattern_value(&value, &shape, 0, dims)
 }
 
-fn pattern_value_text(
+fn pattern_value(
     value: &typecheck::IntegralLiteral,
     shape: &VariableDimensions,
     offset: usize,
     dims: &PackedDimensions,
-) -> Converted<String> {
+) -> Converted<bound_patterns::Value> {
     let mut parts = Vec::new();
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
@@ -131,7 +131,7 @@ fn pattern_value_text(
         let width = shape_width(&element, dims)
             .ok_or_else(|| unsupported("typed pattern element width"))?;
         for position in 0..count {
-            parts.push(pattern_value_text(
+            parts.push(pattern_value(
                 value,
                 &element,
                 offset + position * width,
@@ -152,9 +152,11 @@ fn pattern_value_text(
             literal.value ^= &literal.value & &literal.mask;
             literal.mask = num_bigint::BigUint::default();
         }
-        return Ok(typecheck::format_integral_literal_binary(&literal));
+        return Ok(bound_patterns::Value::Expression(Expr::Literal(
+            typecheck::format_integral_literal_binary(&literal),
+        )));
     }
-    Ok(format!("'{{{}}}", parts.join(", ")))
+    Ok(bound_patterns::Value::list(parts))
 }
 
 /// The value of one element of a pattern, as a `shape`.
