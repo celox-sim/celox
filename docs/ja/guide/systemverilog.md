@@ -31,7 +31,11 @@ let mut sim = Simulator::from_sv_sources(
 
 `Simulator::from_mixed_sources` は両言語のソースを組み合わせます。トップはどちらの言語でもよく、
 階層は Veryl → SV → Veryl のように言語境界を複数回跨げます。Veryl では `$sv::Module`、
-SV では Veryl のモジュール名でインスタンス化します。数値パラメータは、それぞれの frontend が解決します。
+SV からは Veryl のモジュールや interface を Veryl の emitter が出力する名前で参照します。
+出力された SV に対して書いた SV コードがそのまま使えます。プロジェクト `prj` のモジュール `Module` は
+`prj_Module`、`Veryl.toml` で `omit_project_prefix` を設定した場合は `Module` です。
+`Veryl.toml` がない場合のプロジェクト名は `prj` です。Veryl モジュールの出力名と同名の SV モジュールは
+重複定義になります。Veryl のトップは Veryl の名前で指定します。数値パラメータは、それぞれの frontend が解決します。
 
 interface と `input` / `output` modport のメンバー接続も双方向に対応します。SV の interface は
 Veryl で `inst bus: $sv::Bus;`、ポートで `bus: modport $sv::Bus::slave` と指定できます。

@@ -662,6 +662,7 @@ pub fn parse_mixed(
     requests: &[celox_frontend_sv::SvModuleRequest],
     sv_interfaces: &[celox_frontend_sv::InterfaceSignature],
     used_names: &mut fxhash::FxHashSet<String>,
+    names: crate::simulator::mixed::EmittedNames,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -699,8 +700,23 @@ pub fn parse_mixed(
         external_roots.insert(top_name.clone());
     }
     let mut foreign = celox_frontend_veryl::external_signatures(ir, config)?;
-    let authored = celox_frontend_sv::module_interfaces(sv_sources).map_err(sv_analysis_error)?;
-    foreign.roots.retain(|name, _| !authored.contains_key(name));
+    // SV instantiates a Veryl module by its emitted name. The linker binds
+    // that name back to the Veryl body; an SV module declaring the same name
+    // is a duplicate the SV analyzer reports.
+    let mut native_modules = crate::HashMap::default();
+    let mut roots = std::mem::take(&mut foreign.roots);
+    for component in &ir.components {
+        let veryl_analyzer::ir::Component::Module(module) = component else {
+            continue;
+        };
+        let Some(id) = roots.remove(&module.name.to_string()) else {
+            continue;
+        };
+        let emitted = names.module(module);
+        foreign.modules.get_mut(&id).unwrap().sim_module.name = emitted.clone();
+        foreign.roots.insert(emitted.clone(), id);
+        native_modules.insert(emitted, module.name);
+    }
     let sv_top_parameters = (!native_top).then_some((top_name.as_str(), top_parameters));
     let base = ir.clone();
     let mut specializations = Vec::new();
@@ -743,8 +759,19 @@ pub fn parse_mixed(
                     ));
                 }
                 let mut prepare = || -> Result<_, ParserError> {
+                    let native = native_modules.get(name).ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "foreign module specialization",
+                            format!("`{name}` is not a Veryl module"),
+                            None,
+                        )
+                    })?;
                     let module = crate::simulator::mixed::specialize_foreign_module(
-                        &base, context, name, parameters, used_names,
+                        &base,
+                        context,
+                        &native.to_string(),
+                        parameters,
+                        used_names,
                     )?;
                     let mut specialized = veryl_analyzer::ir::Ir {
                         components: vec![veryl_analyzer::ir::Component::Module(module)],
@@ -767,6 +794,7 @@ pub fn parse_mixed(
                         &joint_sources,
                         context,
                         used_names,
+                        names,
                     )?;
                     let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
                     let signature = exported.modules.values().next().cloned().ok_or_else(|| {
@@ -818,17 +846,12 @@ pub fn parse_mixed(
                 .map(|source| (source, std::path::PathBuf::from("<sv-interface-behavior>"))),
         );
     };
-    ir.components.extend(specializations);
-    let mut native_modules = foreign.roots.keys().cloned().collect::<HashSet<_>>();
-    native_modules.extend(ir.components.iter().filter_map(|component| {
-        if let veryl_analyzer::ir::Component::Module(module) = component
-            && !authored.contains_key(&module.name.to_string())
-        {
-            Some(module.name.to_string())
-        } else {
-            None
+    for component in &specializations {
+        if let veryl_analyzer::ir::Component::Module(module) = component {
+            native_modules.insert(module.name.to_string(), module.name);
         }
-    }));
+    }
+    ir.components.extend(specializations);
     parse_with_external_hierarchy(
         top,
         ir,
@@ -856,7 +879,7 @@ pub fn parse_with_external_hierarchy(
     ir: &veryl_analyzer::ir::Ir,
     loop_provenance: &loop_provenance::LoopProvenance,
     external: &celox_frontend_core::symbolic::artifact::ExternalHierarchy,
-    native_modules: Option<&HashSet<String>>,
+    native_modules: Option<&crate::HashMap<String, StrId>>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),

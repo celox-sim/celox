@@ -83,6 +83,8 @@ pub fn external_signatures(
             ExternalModule {
                 sim_module,
                 port_order,
+                // Veryl children link through the IR; only SV children are
+                // left for the SV frontend to resolve by name.
                 unresolved_instances: module
                     .declarations
                     .iter()
@@ -90,12 +92,13 @@ pub fn external_signatures(
                         let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
                             return None;
                         };
-                        let name = match instance.component.as_ref() {
-                            Component::Module(module) => module.name,
-                            Component::SystemVerilog(module) => module.name,
-                            Component::Interface(_) => return None,
+                        let Component::SystemVerilog(module) = instance.component.as_ref() else {
+                            return None;
                         };
-                        Some(veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
+                        Some(
+                            veryl_parser::resource_table::get_str_value(module.name)
+                                .unwrap_or_default(),
+                        )
                     })
                     .collect(),
             },
