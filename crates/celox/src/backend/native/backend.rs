@@ -396,6 +396,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
     pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
     pub(crate) active_commits: Vec<AbsoluteAddr>,
+    pub(crate) time_slots: Vec<AbsoluteAddr>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -506,6 +507,7 @@ impl NativeProgramImage {
                 wait_sites: self.runtime_schema.wait_sites.clone(),
                 nba_sites: self.runtime_schema.nba_sites.clone(),
                 active_commits: self.runtime_schema.active_commits.clone(),
+                time_slots: self.runtime_schema.time_slots.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -2286,6 +2288,7 @@ fn compile_program(
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
+                time_slots: sir.runtime().runtime_schema.time_slots.clone(),
             },
             layout: layout.clone(),
             native_memory_size,

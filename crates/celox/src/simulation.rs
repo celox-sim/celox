@@ -280,8 +280,11 @@ impl<B: SimBackend> Simulation<B> {
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;
-        self.simulator.load_state(file)?;
+        self.simulator.load_state_at_time(file, record.time)?;
         self.state.import_schedule(parts);
+        // The file keeps the time in its schedule, not in the time slots.
+        let time = self.state.time();
+        self.state.advance_time(&mut self.simulator.backend, time);
         self.simulator.host_watch.set_log(host_writes);
         self.simulator.frozen = self.state.is_finished();
         Ok(())
@@ -449,7 +452,8 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_finished() {
             return Ok(());
         }
-        self.state.set_time(end_time);
+        self.state
+            .advance_time(&mut self.simulator.backend, end_time);
         self.simulator.dump_unless_rewound(end_time);
         Ok(())
     }

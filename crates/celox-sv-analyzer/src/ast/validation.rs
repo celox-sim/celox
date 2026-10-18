@@ -872,7 +872,7 @@ fn reject_constant_random_calls(node: RefNode<'_>, tree: &SyntaxTree) -> Convert
                 if in_constant
                     && let RefNode::SystemTfCall(call) = child
                     && let Some(function) = called_system_function(call, tree)
-                    && function.is_effectful()
+                    && function.reads_simulation_state()
                     && !unevaluated.contains(&(call as *const _))
                 {
                     return Err(AnalyzerError::InvalidSystemTfCall {

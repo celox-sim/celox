@@ -1322,6 +1322,7 @@ pub fn schedule_symbolic_rtl(
     let TimingMetadata {
         wait_sites,
         nba_sites,
+        time_slots,
         ..
     } = timing;
     let source_sir = SirProgram {
@@ -1557,6 +1558,7 @@ pub fn schedule_symbolic_rtl(
     let nba_sites: Vec<NbaSite<StateAddr>> =
         nba_sites.iter().map(|site| site.map(project)).collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
+    let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
     let timing_read_roots = watches
@@ -1625,6 +1627,7 @@ pub fn schedule_symbolic_rtl(
             wait_sites,
             nba_sites,
             active_commits,
+            time_slots,
         },
     };
 
@@ -2796,11 +2799,13 @@ struct RelocatedProcess {
     key: (InstanceId, usize),
 }
 
-/// Counter slots, wait sites and nonblocking sites of the whole design.
+/// Counter slots, wait sites, nonblocking sites and time slots of the whole
+/// design.
 struct TimingMetadata {
     counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
     wait_sites: Vec<WaitSite<AbsoluteAddr>>,
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
+    time_slots: Vec<AbsoluteAddr>,
 }
 
 /// For every combinational value, the variables it is computed from.
@@ -2956,6 +2961,7 @@ fn relocate_timing(
         counter_slots: Vec::new(),
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
+        time_slots: Vec::new(),
     };
     for (&instance, module) in instances {
         let module = &modules[module];
@@ -2975,6 +2981,7 @@ fn relocate_timing(
                 process: process_index[&(instance, site.process)],
                 ..site.map(locate)
             }));
+        metadata.time_slots.extend(module.time_slot.map(locate));
     }
     metadata
 }

@@ -13,8 +13,8 @@ use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
     InitialStateData, InitialStateValue, ModuleId, NbaSite, PROCESS_DELAY_WIDTH,
     PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
-    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION, WaitSite,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TIME_SLOT_WIDTH, TriggerSet, UnaryOp,
+    VarAtomBase, WORKING_REGION, WaitSite,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
@@ -44,6 +44,8 @@ mod procedural;
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
 const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
+/// The name of a module's [`SimModule::time_slot`].
+const TIME_SLOT: &str = "$time";
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrontendError {
@@ -90,6 +92,12 @@ impl SvVariable {
             source: self.source.clone(),
             module_affiliated: !self.hidden,
         }
+    }
+
+    /// A hidden variable other than the time slot, whose value the lowered
+    /// code computes. The time slot is state the scheduler writes.
+    fn is_scratch(&self) -> bool {
+        self.hidden && self.path != [TIME_SLOT]
     }
 }
 
@@ -2095,6 +2103,7 @@ fn lower_module_with_overrides(
             counter_slots: Vec::new(),
             wait_sites,
             nba_sites,
+            time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
         variables,
         port_order,
@@ -2421,8 +2430,66 @@ pub(crate) fn attach_instance_glue(
         )?;
         resolved_instances.push((instance, child_id, child, connections));
     }
+    // Materialize state-reading input actuals as continuous assignments in
+    // the parent, including reads through callees and omitted defaults.
+    // Stateful lowering guards activation, so time alone (or an unrelated
+    // input) cannot reevaluate a time-only actual.
+    let mut port_assignments = Vec::new();
+    {
+        let mut pm = procedural::ProcModule::new(
+            &lowered.source,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+        );
+        for (_, _, child, connections) in &mut resolved_instances {
+            for connection in connections {
+                let Some(actual) = &connection.actual_expr else {
+                    continue;
+                };
+                if !pm.reads_simulation_state(&[sv::ir::Stmt::Eval(actual.clone())]) {
+                    continue;
+                }
+                let Some(port) =
+                    child
+                        .port_order
+                        .iter()
+                        .map(|id| &child.variables[id])
+                        .find(|var| {
+                            var.path.join(".") == connection.formal
+                                && var.kind == VariableKind::Input
+                        })
+                else {
+                    continue;
+                };
+                let (id, name) = pm.temp(
+                    "port_time",
+                    port.width,
+                    port.signed,
+                    four_state && port.is_4state,
+                );
+                port_assignments.push((
+                    id,
+                    vec![sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(name.clone()),
+                        rhs: actual.clone(),
+                        nonblocking: false,
+                    }],
+                ));
+                connection.actual_expr = Some(sv::ir::Expr::Ident(name));
+            }
+        }
+        for id in &pm.created {
+            module
+                .variables
+                .insert(*id, pm.variables[id].to_symbolic_variable());
+        }
+    }
     let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
         &lowered.source,
+        &port_assignments,
         &mut parent_variables,
         &mut signal_names,
         &lowered.constants,
@@ -2513,6 +2580,8 @@ pub(crate) fn attach_instance_glue(
             .variables
             .insert(id, parent_variables[&id].to_symbolic_variable());
     }
+    // Combinational processes may read the time too.
+    module.time_slot = signal_names.get(TIME_SLOT).copied();
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -2897,6 +2966,7 @@ fn lower_initial_processes(
 
 fn lower_comb_processes(
     module: &sv::ir::Module,
+    port_assignments: &[(SourceVarId, Vec<sv::ir::Stmt>)],
     variables: &mut HashMap<SourceVarId, SvVariable>,
     name_to_id: &mut HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
@@ -2942,13 +3012,14 @@ fn lower_comb_processes(
                 continue;
             }
         }
-        if pm.uses_random(process.body()) {
+        if pm.reads_simulation_state(process.body()) {
             pm.runtime_event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
                     process.sensitivity_body(),
                     process.kind(),
+                    &[],
                     &mut arena,
                 )?,
             );
@@ -3008,6 +3079,17 @@ fn lower_comb_processes(
             observers.push(observer);
         }
         sites.append(&mut comb.sites);
+    }
+    for (target, body) in port_assignments {
+        pm.runtime_event_sites = std::mem::take(&mut sites);
+        comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
+            body,
+            &[],
+            sv::ir::CombProcessKind::ContinuousAssign,
+            &[*target],
+            &mut arena,
+        )?);
+        sites = std::mem::take(&mut pm.runtime_event_sites);
     }
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
@@ -4708,9 +4790,11 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
                 arena.alloc(SLTNode::Binary(count, op, one)).ok()?
             }
         }
-        // The random number functions need process state, and the analyzer
-        // folds the other functions to constants.
-        SystemFunction::Random
+        // The random number and time functions need process state, and the
+        // analyzer folds the other functions to constants.
+        SystemFunction::Time
+        | SystemFunction::Stime
+        | SystemFunction::Random
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
         | SystemFunction::Timeunit

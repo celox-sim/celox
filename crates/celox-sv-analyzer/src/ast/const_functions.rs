@@ -420,7 +420,8 @@ fn collect_module_constant_functions(
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),
     };
-    let functions = subroutines
+    let readers = simulation_state_readers(&subroutines);
+    let functions: ConstantFunctionTable = subroutines
         .into_iter()
         .filter(|subroutine| !subroutine.is_task)
         .filter_map(|subroutine| {
@@ -453,6 +454,11 @@ fn collect_module_constant_functions(
             ))
         })
         .collect();
+    let mut functions = functions;
+    for (name, error) in readers {
+        functions.remove(&name);
+        rejected.entry(name).or_insert(error);
+    }
     ConstantFunctions {
         errors: Arc::new(FunctionErrors {
             all: None,
@@ -465,6 +471,188 @@ fn collect_module_constant_functions(
                 .map(|local| (local.name, local.r#type))
                 .collect(),
         ),
+    }
+}
+
+/// The functions among `functions` that are no constant functions because
+/// they call a system function that reads the state of the simulation, such
+/// as `$time`, in their bodies or argument defaults, or call a function that
+/// does (IEEE 1800-2023 13.4.3), whether the call is reached or not. Each
+/// comes with the error a constant call of it reports.
+fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, AnalyzerError> {
+    let mut readers: HashMap<String, AnalyzerError> = HashMap::default();
+    let mut callees: HashMap<&str, Vec<&str>> = HashMap::default();
+    for function in functions.iter().filter(|function| !function.is_task) {
+        let name = &function.name;
+        let mut exprs: Vec<&Expr> = function
+            .params
+            .iter()
+            .filter_map(|param| param.default.as_ref())
+            .collect();
+        let mut calls = Vec::new();
+        let mut selectors = Vec::new();
+        // Constant-folded branches still constrain whether a declaration is
+        // a constant function. Void callees also matter for discarded calls.
+        for stmt in function.body.iter().chain(&function.sensitivity_body) {
+            // A constant function ignores its system task calls (13.4.3), so
+            // their arguments call nothing.
+            stmt.walk(&mut |stmt| {
+                if let Stmt::Call { name, .. } = stmt {
+                    calls.push(name.as_str());
+                }
+                let targets = match stmt {
+                    Stmt::Assign { lhs, .. } => std::slice::from_ref(lhs),
+                    Stmt::AssignConcat { parts, .. } => parts.as_slice(),
+                    _ => &[],
+                };
+                for lhs in targets {
+                    if let LValue::Select {
+                        msb,
+                        lsb,
+                        array_slice_width,
+                        ..
+                    } = lhs
+                    {
+                        selectors.extend([msb, lsb]);
+                        selectors.extend(array_slice_width);
+                    }
+                }
+                if !matches!(stmt, Stmt::SystemTask { .. }) {
+                    exprs.extend(lifetimes::stmt_exprs(stmt));
+                }
+            });
+        }
+        let mut callees_in_exprs = Vec::new();
+        for expr in exprs {
+            visit_expr_callees(expr, &mut |callee| callees_in_exprs.push(callee));
+        }
+        for selector in selectors {
+            visit_const_callees(selector, &mut |callee| callees_in_exprs.push(callee));
+        }
+        let mut reads = None;
+        for callee in callees_in_exprs {
+            match callee {
+                Callee::System(system) if system.reads_simulation_state() => {
+                    reads.get_or_insert(*system);
+                }
+                Callee::System(_) => {}
+                Callee::Subroutine(callee) => calls.push(callee.as_str()),
+            }
+        }
+        if let Some(system) = reads {
+            readers.insert(
+                name.clone(),
+                AnalyzerError::InvalidSystemTfCall {
+                    name: system.name().into(),
+                    detail: format!("not permitted in constant function `{name}`"),
+                },
+            );
+        }
+        callees.insert(name, calls);
+    }
+    // The callers of a reader read the state too.
+    loop {
+        let found: Vec<(String, AnalyzerError)> = callees
+            .iter()
+            .filter(|(name, _)| !readers.contains_key(**name))
+            .filter_map(|(name, calls)| {
+                let error = calls.iter().find_map(|callee| readers.get(*callee))?;
+                Some((name.to_string(), error.clone()))
+            })
+            .collect();
+        if found.is_empty() {
+            return readers;
+        }
+        readers.extend(found);
+    }
+}
+
+/// Calls in an expression, including the index expressions represented by
+/// ConstExpr. Those indices can contain runtime calls in procedural code.
+fn visit_expr_callees<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Callee)) {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call { callee, args, .. } => {
+            f(callee);
+            for arg in args.iter().flatten() {
+                visit_expr_callees(arg, f);
+            }
+        }
+        Expr::Select { expr, msb, lsb, .. } => {
+            visit_expr_callees(expr, f);
+            visit_const_callees(msb, f);
+            visit_const_callees(lsb, f);
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_callees(expr, f),
+        Expr::Concat(parts) => {
+            for part in parts {
+                visit_expr_callees(part, f);
+            }
+        }
+        Expr::RepeatConcat { count, parts } => {
+            visit_const_callees(count, f);
+            for part in parts {
+                visit_expr_callees(part, f);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            visit_expr_callees(left, f);
+            visit_expr_callees(right, f);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_expr_callees(condition, f);
+            visit_expr_callees(then_expr, f);
+            visit_expr_callees(else_expr, f);
+        }
+        Expr::Inside { expr, items } => {
+            visit_expr_callees(expr, f);
+            for item in items {
+                for expr in item.exprs() {
+                    visit_expr_callees(expr, f);
+                }
+            }
+        }
+    }
+}
+
+fn visit_const_callees<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee)) {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Function { callee, args, .. } => {
+            f(callee);
+            for arg in args {
+                visit_const_callees(arg, f);
+            }
+        }
+        ConstExpr::Select { expr, bit } => {
+            visit_const_callees(expr, f);
+            visit_const_callees(bit, f);
+        }
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            visit_const_callees(expr, f);
+            visit_const_callees(msb, f);
+            visit_const_callees(lsb, f);
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            visit_const_callees(expr, f)
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            visit_const_callees(left, f);
+            visit_const_callees(right, f);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_const_callees(condition, f);
+            visit_const_callees(then_expr, f);
+            visit_const_callees(else_expr, f);
+        }
     }
 }
 
@@ -974,7 +1162,7 @@ impl Frame<'_> {
             // system tasks are rejected before elaboration.
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
-            Stmt::Delay(_) | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
+            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)

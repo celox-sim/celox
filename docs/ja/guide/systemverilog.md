@@ -76,6 +76,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 | パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
 | 乱数 | `$urandom`、`$urandom_range`、`$random` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
+| シミュレーション時刻 | `$time` と `$stime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
 | 状態 | 2 値・4 値シミュレーション |
 
@@ -116,7 +117,7 @@ package・interface の手続きは宣言元の時間単位と精度を保持し
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）、X/Z を含む値や 128 ビットを超える値など、単純な整数で
   ないパラメータ上書き（[#461](https://github.com/celox-sim/celox/issues/461)）。
 - システムタスクとシステム関数：Celox は IEEE 1800-2023 が定義するすべての名前を、
-  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$time`、`$fopen` など）は、
+  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$realtime`、`$fopen` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
@@ -256,3 +257,12 @@ Icarus Verilog などそれを実装するシミュレータと同じ値を返�
 表示しません。VPI ホストのように対話モードを持たないバッチ実行では `$stop` で終了します。
 `$exit` は呼び出した program ブロックの initial 手続きを終了します（24.7）。
 Celox は program ブロックを持たず、それ以外からの呼び出しは 24.7 の規定どおり無視します。
+
+`Simulation` は設計全体の時間精度（IEEE 1800-2023 3.14.3）で時刻を数えます。
+既定は 1 ps で、`run_until(1000)` は 1 ns まで進めます。時間単位が 1 ns の
+モジュールの `#10` は 10,000 ps 待ちます（3.14.1）。`$time` は呼び出した
+スコープの時間単位で表した時刻を整数に丸めて返し、半分は切り上げます（20.3.1）。
+パッケージの関数ではそのパッケージの時間単位を使います。`$stime` はその値の
+下位32ビットを返します（20.3.2）。組合せ回路は入力が変わったときに時刻を読み、
+時刻だけが進んでも評価し直しません。時刻を持たない `Simulator` では0を返します。
+`$realtime` は `real` 型への対応を待っています。

@@ -287,7 +287,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*aliases.get(id).unwrap_or(id))
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
-            } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
+            } else if working_set.contains(id)
+                || variables.get(id).is_some_and(SvVariable::is_scratch)
+            {
                 working(*id)
             } else {
                 stable(*id)
@@ -834,6 +836,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.random(args.first().and_then(Option::as_ref))?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Time | sv::ir::SystemFunction::Stime),
+                    ),
+                args,
+                ..
+            } => self.time(*function, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
@@ -1228,6 +1238,61 @@ impl<'p, 'a> Ff<'p, 'a> {
             signed: false,
         };
         self.hidden("urandom_range_result", &result, false)
+    }
+
+    /// IEEE 1800-2023 20.3.1: `$time` is the simulation time, which counts
+    /// the global time precision, in the time unit of the calling scope,
+    /// rounded to an integer; halves round up. The analyzer passes the
+    /// precision's units per time unit as the operand. `$stime` (20.3.2) is
+    /// its low 32 bits.
+    fn time(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let divisor = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported(format!("operand of `{function}`")))?
+            .clone();
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let time = Expr::Ident(self.m.time_slot());
+        let time = if divisor == Expr::Literal("64'd1".into()) {
+            time
+        } else {
+            let half = binary(
+                divisor.clone(),
+                BinaryOp::Shr,
+                Expr::Literal("64'd1".into()),
+            );
+            let rounds_up = binary(
+                binary(time.clone(), BinaryOp::Mod, divisor.clone()),
+                BinaryOp::Ge,
+                half,
+            );
+            binary(
+                binary(time, BinaryOp::Div, divisor),
+                BinaryOp::Add,
+                Expr::Resize {
+                    expr: Box::new(rounds_up),
+                    width: 64,
+                    signed: false,
+                },
+            )
+        };
+        Ok(match function {
+            sv::ir::SystemFunction::Stime => Expr::Resize {
+                expr: Box::new(time),
+                width: 32,
+                signed: false,
+            },
+            _ => time,
+        })
     }
 
     /// IEEE 1800-2023 20.14.1 and Annex N: `$random` is
@@ -1842,8 +1907,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.assign_concat(parts, rhs)?;
                 Ok(true)
             }
-            sv::ir::Stmt::Delay(amount) => {
-                self.delay(amount)?;
+            sv::ir::Stmt::Delay {
+                amount,
+                ticks_per_unit,
+            } => {
+                self.delay(amount, *ticks_per_unit)?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitEvent(items) => {
@@ -2670,11 +2738,14 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Lower a stateful combinational process. Its memory guard records the
     /// implicit sensitivity values, independently of internal settling calls.
+    /// `explicit_targets` are hidden buffers consumed outside this process,
+    /// such as child-port actuals. They retain their module-wide addresses.
     pub fn lower_comb_process(
         mut self,
         body: &[sv::ir::Stmt],
         sensitivity_body: &[sv::ir::Stmt],
         kind: sv::ir::CombProcessKind,
+        explicit_targets: &[SourceVarId],
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
@@ -2700,6 +2771,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         self.scan(body, &mut HashSet::default());
+        for &id in explicit_targets {
+            let width = self.m.var(id).width;
+            self.targets.push((id, BitAccess::new(0, width - 1)));
+        }
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
@@ -2707,7 +2782,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut targets: Vec<_> = self
             .targets
             .iter()
-            .filter(|(id, _)| !self.m.is_hidden(*id))
+            .filter(|(id, _)| !self.m.is_hidden(*id) || explicit_targets.contains(id))
             .map(|(id, access)| VarAtomBase::new(*id, access.lsb, access.msb))
             .collect();
         targets.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
@@ -2825,7 +2900,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut private_locals = HashMap::default();
         let unit = seal_builder(self.b).into_map_addr(&mut |addr| {
             let id = addr.var_id;
-            if !self.m.is_hidden(id) || self.m.created.contains(&id) {
+            if !self
+                .m
+                .variables
+                .get(&id)
+                .is_some_and(SvVariable::is_scratch)
+                || self.m.created.contains(&id)
+                || explicit_targets.contains(&id)
+            {
                 return id;
             }
             *private_locals.entry(id).or_insert_with(|| {
@@ -3326,7 +3408,11 @@ impl Ff<'_, '_> {
     /// read as an unsigned 64-bit time: a negative value as its two's
     /// complement, and a value with an unknown bit as zero. `#0` resumes in
     /// the inactive region.
-    fn delay(&mut self, amount: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+    fn delay(
+        &mut self,
+        amount: &sv::ir::Expr,
+        ticks_per_unit: u64,
+    ) -> Result<(), sv::AnalyzerError> {
         let signed = self.expr_signed(amount);
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(amount, None, &mut arena)?;
@@ -3334,7 +3420,46 @@ impl Ff<'_, '_> {
         let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
             .map_err(slt_error)?;
         let delay = self.lower_slt(&arena, node)?;
-        let delay = self.zero_if_unknown(delay, original);
+        let mut delay = self.zero_if_unknown(delay, original);
+        if ticks_per_unit > 1 {
+            // Check before multiplying so the 64-bit delay slot cannot wrap.
+            let limit = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b.emit(SIRInstruction::Imm(
+                limit,
+                SIRValue::new(u64::MAX / ticks_per_unit),
+            ));
+            let overflow = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                overflow,
+                delay,
+                BinaryOp::GtU,
+                limit,
+            ));
+            let error = self.b.new_block();
+            let scaled = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: overflow,
+                true_block: (error, Vec::new()),
+                false_block: (scaled, Vec::new()),
+            });
+            self.b.switch_to_block(error);
+            let code = self
+                .m
+                .runtime_error("simulation delay overflows the simulation time range".to_string());
+            self.b.seal_block(SIRTerminator::Error(code));
+            self.b.switch_to_block(scaled);
+            let factor = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b
+                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_unit)));
+            let product = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b.emit(SIRInstruction::Binary(
+                product,
+                delay,
+                BinaryOp::Mul,
+                factor,
+            ));
+            delay = product;
+        }
         self.with_kernel(|kernel| kernel.inactive_delay(delay))
             .map_err(kernel_error)
     }
@@ -3529,9 +3654,12 @@ const LOOP_YIELD_BITS: usize = 16;
 
 /// Whether every pass through `stmts` suspends the process.
 fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
-    stmts
-        .iter()
-        .any(|stmt| matches!(stmt, sv::ir::Stmt::Delay(_) | sv::ir::Stmt::WaitEvent(_)))
+    stmts.iter().any(|stmt| {
+        matches!(
+            stmt,
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_)
+        )
+    })
 }
 
 /// The module variables the subroutines `expr` calls read, directly or

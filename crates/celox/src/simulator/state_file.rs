@@ -268,6 +268,16 @@ impl<B: SimBackend> Simulator<B> {
     /// ignored. An attached VCD writer records the loaded values as changes
     /// at the next dump.
     pub fn load_state(&mut self, file: &StateFile) -> Result<(), StateError> {
+        self.load_state_at_time(file, 0)
+    }
+
+    /// Publish time after validating the objects and before settling them.
+    /// The checkpoint also rolls this publication back if evaluation fails.
+    pub(crate) fn load_state_at_time(
+        &mut self,
+        file: &StateFile,
+        time: u64,
+    ) -> Result<(), StateError> {
         if !self.testbench_strings.is_empty() {
             return Err(StateError::TestbenchStrings);
         }
@@ -280,6 +290,17 @@ impl<B: SimBackend> Simulator<B> {
         self.state_schema()
             .load(&mut self.backend, file)
             .map_err(StateError::Mismatch)?;
+        for address in &self.program.runtime_schema.time_slots {
+            self.backend.set(
+                SignalRef {
+                    offset: self.backend.layout().offsets[address],
+                    width: celox_design::TIME_SLOT_WIDTH,
+                    is_4state: false,
+                    array_layout: None,
+                },
+                time,
+            );
+        }
         // The loaded state replaces the simulation history, so combinational
         // observers take it as their baseline instead of reporting changes.
         if let Err(error) = self.backend.eval_comb() {
@@ -300,11 +321,15 @@ impl<B: SimBackend> Simulator<B> {
     /// several objects share it.
     fn build_state_schema(&self) -> StateSchema {
         let comb_writes = &self.program.runtime_schema.comb_writes;
+        // A timed simulation stores its time into the time slots, and a state
+        // file keeps the time in its schedule; an untimed one reads zero.
+        let time_slots: crate::HashSet<_> = self.program.runtime_schema.time_slots.iter().collect();
         let mut objects: Vec<_> = self
             .backend
             .layout()
             .offsets
             .keys()
+            .filter(|address| !time_slots.contains(address))
             .map(|&address| (self.program.get_path(&address), address))
             .collect();
         objects.sort_unstable();
