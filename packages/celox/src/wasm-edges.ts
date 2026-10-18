@@ -18,6 +18,10 @@
  *
  * Gates are judged by settling the design with the signal at each level.
  *
+ * In a four-state design, levels are 0, 1, x and z, and edges follow
+ * IEEE 1800-2023 Table 9-2: a posedge leaves 0 or reaches 1, a negedge
+ * leaves 1 or reaches 0, and a change between x and z is neither.
+ *
  * @module
  */
 
@@ -30,6 +34,11 @@ export interface EdgeMemory {
 export interface EdgePlanSignal {
 	readonly offset: number;
 	readonly width: number;
+	/**
+	 * The signal keeps unknown bits; its mask follows the value byte.
+	 * Defaults to the plans' `fourState`.
+	 */
+	readonly fourState?: boolean;
 }
 
 /** The active edge of a domain, or `"any"` for a domain of unknown kind. */
@@ -98,26 +107,37 @@ export function cachedEdgeKernels(
 	};
 }
 
-/** One entry of a cascade round: a domain and the level it last had. */
+/**
+ * The bit of an edge level that marks an unknown value; the value bit then
+ * tells x (1) from z (0). An edge level is 0, 1, x (3) or z (2).
+ */
+const UNKNOWN = 2;
+
+/** One entry of a cascade round: a domain and the edge level it last had. */
 interface RoundEntry {
 	readonly domain: EdgePlanDomain;
-	was: boolean;
+	was: number;
 	fired: boolean;
 }
 
-/** A signal moved by an edge, with its level before and after. */
+/** A signal moved by an edge, with its edge level before and after. */
 interface Lever {
 	readonly signal: EdgePlanSignal;
 	readonly from: number;
 	readonly to: number;
 }
 
-function stableEdge(edge: EdgePlanEdge, was: boolean, is: boolean): boolean {
+/**
+ * Whether a change between the edge levels `was` and `is` is an active edge
+ * of a domain sensing `edge` (IEEE 1800-2023 Table 9-2).
+ */
+function stableEdge(edge: EdgePlanEdge, was: number, is: number): boolean {
+	const betweenUnknowns = (was & is & UNKNOWN) !== 0;
 	switch (edge) {
 		case "posedge":
-			return !was && is;
+			return was !== 1 && is !== 0 && !betweenUnknowns;
 		case "negedge":
-			return was && !is;
+			return was !== 0 && is !== 1 && !betweenUnknowns;
 		default:
 			return was !== is;
 	}
@@ -212,7 +232,7 @@ export class WasmEdgeRunner {
 				return;
 			}
 			const to = rising[index] ? 1 : 0;
-			const old = this.knownLevel(plan.signal);
+			const old = this.level(plan.signal);
 			if (
 				old === to ||
 				levers.some((l) => l.signal.offset === plan.signal.offset)
@@ -222,7 +242,9 @@ export class WasmEdgeRunner {
 			moved = true;
 			combRead ||= plan.combRead;
 			this.setLevel(plan.signal, to);
-			const lever = { signal: plan.signal, from: old ?? to ^ 1, to };
+			// A gated clock is judged from the lever's real level, x and z
+			// included.
+			const lever = { signal: plan.signal, from: old, to };
 			if (plan.edge === "any" || (plan.edge === "posedge") === (to === 1)) {
 				sources.push(name);
 			}
@@ -281,7 +303,7 @@ export class WasmEdgeRunner {
 			: levers.map((lever) => this.saveLevel(lever.signal));
 		let moved = false;
 		for (const lever of levers) {
-			if (this.level(lever.signal) !== (lever.from === 1)) {
+			if (this.level(lever.signal) !== lever.from) {
 				this.setLevel(lever.signal, lever.from);
 				moved = true;
 			}
@@ -382,37 +404,40 @@ export class WasmEdgeRunner {
 		return this.bytes()[offset] ?? 0;
 	}
 
-	private level(signal: EdgePlanSignal): boolean {
-		return (this.byte(signal.offset) & 1) !== 0;
+	private fourState(signal: EdgePlanSignal): boolean {
+		return signal.fourState ?? this.plans.fourState;
 	}
 
-	/** The signal's level, or `null` while it is unknown. */
-	private knownLevel(signal: EdgePlanSignal): number | null {
-		if (this.plans.fourState && (this.byte(signal.offset + 1) & 1) !== 0) {
-			return null;
+	/** The signal's edge level: 0, 1, or x (3) and z (2) while unknown. */
+	private level(signal: EdgePlanSignal): number {
+		const value = this.byte(signal.offset) & 1;
+		if (this.fourState(signal) && (this.byte(signal.offset + 1) & 1) !== 0) {
+			return UNKNOWN | value;
 		}
-		return this.byte(signal.offset) & 1;
+		return value;
 	}
 
+	/** Move the signal to the edge level `level`. */
 	private setLevel(signal: EdgePlanSignal, level: number): void {
 		const bytes = this.bytes();
-		bytes[signal.offset] = (this.byte(signal.offset) & ~1) | level;
-		if (this.plans.fourState) {
-			bytes[signal.offset + 1] = this.byte(signal.offset + 1) & ~1;
+		bytes[signal.offset] = (this.byte(signal.offset) & ~1) | (level & 1);
+		if (this.fourState(signal)) {
+			const unknown = (level & UNKNOWN) !== 0 ? 1 : 0;
+			bytes[signal.offset + 1] = (this.byte(signal.offset + 1) & ~1) | unknown;
 		}
 	}
 
 	private saveLevel(signal: EdgePlanSignal): [number, number] {
 		return [
 			this.byte(signal.offset),
-			this.plans.fourState ? this.byte(signal.offset + 1) : 0,
+			this.fourState(signal) ? this.byte(signal.offset + 1) : 0,
 		];
 	}
 
 	private restoreLevel(signal: EdgePlanSignal, saved: [number, number]): void {
 		const bytes = this.bytes();
 		bytes[signal.offset] = saved[0];
-		if (this.plans.fourState) {
+		if (this.fourState(signal)) {
 			bytes[signal.offset + 1] = saved[1];
 		}
 	}

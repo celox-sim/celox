@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
+import { type FourStateSignalValue, X } from "./types.js";
 
 const COUNTERS = `
 module Top (
@@ -195,6 +196,52 @@ module Top (
 			expect(() => sim.edges([[aClk, "sideways" as "posedge"]])).toThrow(
 				RangeError,
 			);
+		} finally {
+			sim.dispose();
+		}
+	});
+
+	test("edges of a four-state clock follow IEEE 1800-2023 Table 9-2 from x", () => {
+		const source = `
+module Top (
+    clk: input '_ clock,
+    rst: input '_ reset_async_low,
+    en: input logic,
+    rising: output logic<8>,
+    gated_rising: output logic<8>,
+) {
+    var r: logic<8>;
+    var g: logic<8>;
+    always_ff (clk, rst) { if_reset { r = 0; } else { r = r + 8'd1; } }
+    let gated: '_ clock = clk & en;
+    always_ff (gated, rst) { if_reset { g = 0; } else { g = g + 8'd1; } }
+    assign rising = r;
+    assign gated_rising = g;
+}
+`;
+		type Ports = {
+			get en(): bigint;
+			set en(value: FourStateSignalValue);
+			readonly rising: bigint;
+			readonly gated_rising: bigint;
+		};
+		const sim = Simulator.fromSource<Ports>(source, "Top", {
+			fourState: true,
+		});
+		try {
+			const clk = sim.event("clk");
+			const counters = () => [sim.dut.rising, sim.dut.gated_rising];
+			reset(sim);
+			expect(counters()).toEqual([0n, 0n]);
+			// The clock rises from x: a posedge of its own domain, while
+			// `x & x` stays x and the gated clock has no edge.
+			sim.dut.en = X;
+			sim.posedge(clk);
+			expect(counters()).toEqual([1n, 0n]);
+			sim.negedge(clk);
+			sim.dut.en = 1n;
+			sim.posedge(clk);
+			expect(counters()).toEqual([2n, 1n]);
 		} finally {
 			sim.dispose();
 		}

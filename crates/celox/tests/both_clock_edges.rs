@@ -166,6 +166,7 @@ fn a_reset_at_both_edges() {
          endmodule";
     for four_state in [false, true] {
         let mut sim = build(source, four_state);
+        let initial_low = get(&mut sim, "low");
         let mut observed = Vec::new();
         let mut time = 0;
         let mut edge = |sim: &mut Simulation, port: &str, level: u64| {
@@ -189,12 +190,14 @@ fn a_reset_at_both_edges() {
         observed.push(edge(&mut sim, "rst", 1));
         observed.push(edge(&mut sim, "clk", 1));
         // Before `rst` first falls, `low` is unknown, and stays unknown when
-        // incremented.
+        // incremented. In four-state, `rst` rises from its initial unknown
+        // level, a posedge but no negedge (IEEE 1800-2023 Table 9-2), so
+        // `low` keeps its initial value until the first clock edge.
         let low = |count: u64| if four_state { 0xff } else { count };
         assert_eq!(
             observed,
             vec![
-                (0, low(0)),
+                (0, if four_state { initial_low } else { 0 }),
                 (0, low(1)),
                 (0, low(2)),
                 (0, 0),

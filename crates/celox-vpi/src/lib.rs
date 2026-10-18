@@ -190,18 +190,24 @@ fn logic_level(value: &BigUint, mask: &BigUint) -> LogicLevel {
     }
 }
 
-fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
-    match celox_design::edges::polarity(kind) {
-        Some(true) => {
-            matches!(old, LogicLevel::Zero) && !matches!(new, LogicLevel::Zero)
-                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::One)
+impl LogicLevel {
+    /// The edge level of [`celox_design::edges`].
+    fn edge_level(self) -> u8 {
+        use celox_design::edges::LEVEL_UNKNOWN;
+        match self {
+            LogicLevel::Zero => 0,
+            LogicLevel::One => 1,
+            LogicLevel::X => LEVEL_UNKNOWN | 1,
+            LogicLevel::Z => LEVEL_UNKNOWN,
         }
-        Some(false) => {
-            matches!(old, LogicLevel::One) && !matches!(new, LogicLevel::One)
-                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::Zero)
-        }
-        None => false,
     }
+}
+
+/// Whether a write from `old` to `new` is an active edge of a domain of
+/// `kind` (IEEE 1800-2023 Table 9-2). A domain without an edge has none.
+fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
+    celox_design::edges::polarity(kind).is_some()
+        && celox_design::edges::settled_edge::<true>(Some(kind), old.edge_level(), new.edge_level())
 }
 
 fn record_pending_write(
