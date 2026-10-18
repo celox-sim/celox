@@ -1642,6 +1642,32 @@ fn exit_in_a_constant_function_warns_at_the_call() {
     );
 }
 
+#[test]
+fn package_warnings_survive_a_failing_module() {
+    // Analyzing the top fails the build before the package states lower.
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          always_comb y <= P::Q;
+        endmodule
+    "#;
+    let Err(error) = Simulator::from_sv_sources(vec![(source, Path::new("package.sv"))], "Top")
+        .build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        exit_warning_locations(error.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+}
+
 /// Type and assignment-pattern parameters are bound by rewriting the module
 /// source; the warnings still point at the call in the file.
 #[test]
@@ -2903,4 +2929,109 @@ fn readmem_warnings_survive_a_later_lowering_error() {
             file.display().to_string()
         )]
     );
+}
+
+#[test]
+fn exit_warnings_survive_analyzer_errors() {
+    for source in [
+        r#"module Top(output int y);
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            always_comb y <= N;
+        endmodule"#,
+        r#"package P;
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            localparam int BAD = missing();
+        endpackage
+        module Top(output int y); assign y = P::N; endmodule"#,
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("error.sv"))], "Top")
+            .build_cranelift()
+            .unwrap_err();
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")],
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn exit_warnings_survive_simulator_initialization_errors() {
+    let source = "module Top(output int y); initial $exit; assign y = 1; endmodule";
+    let dir = tempfile::tempdir().unwrap();
+    // A directory cannot be opened as a VCD file, after compilation succeeded.
+    let builder =
+        || Simulator::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top").vcd(dir.path());
+    let mut errors = vec![
+        builder().build_cranelift().unwrap_err(),
+        builder().build_interpreter().unwrap_err(),
+        builder().build_tiered().unwrap_err(),
+        builder().build_wasm().unwrap_err(),
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top")
+            .vcd(dir.path())
+            .build_cranelift()
+            .unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().build_native().unwrap_err());
+    for error in errors {
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+#[test]
+fn review_warnings_survive_test_runner_errors() {
+    let source = r#"module Top(output int y);
+        function automatic int value(); $exit; return 1; endfunction
+        localparam int N = value();
+        assign y = N;
+    endmodule"#;
+    let builder = || Simulator::from_sv_sources(vec![(source, Path::new("testbench.sv"))], "Top");
+    let mut errors = vec![
+        builder().run_test().unwrap_err(),
+        builder().run_test_cranelift().unwrap_err(),
+        builder().run_test_detailed().unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().run_test_native().unwrap_err());
+    for error in errors {
+        assert!(
+            error.to_string().contains("no initial block found"),
+            "{error}"
+        );
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+sv_backends! {
+    fn review_warnings_deduplicate_parameterized_readmem_calls(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"module Child #(parameter N = 2)(output logic [7:0] y);
+                logic [7:0] mem [0:N-1];
+                initial $readmemh("{}", mem);
+                assign y = mem[0];
+            endmodule
+            module Top(output logic [7:0] a, b, c);
+                Child #(.N(2)) one(a);
+                Child #(.N(3)) two(b);
+                Child #(.N(4)) three(c);
+            endmodule"#, file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("specialized.sv"))], "Top");
+        let warnings = readmem_warnings(sim.warnings());
+        assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
+        assert_eq!(warnings[0].0, "specialized.sv");
+        assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
+    }
 }

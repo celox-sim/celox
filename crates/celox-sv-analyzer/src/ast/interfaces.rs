@@ -70,7 +70,9 @@ pub fn interface_prototypes_for(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = packages::Packages::analyze(&trees)?;
+    let (packages, package_warnings) =
+        super::warnings::analyzing(|| packages::Packages::analyze(&trees));
+    let packages = packages?;
     let mut used_names = design
         .modules
         .keys()
@@ -205,9 +207,14 @@ pub fn interface_prototypes_for(
                             .collect(),
                     })
                 });
-            prototype.map(|prototype| InterfacePrototype {
-                warnings,
-                ..prototype
+            prototype.map(|mut prototype| {
+                prototype.warnings = package_warnings.clone();
+                for warning in warnings {
+                    if !prototype.warnings.contains(&warning) {
+                        prototype.warnings.push(warning);
+                    }
+                }
+                prototype
             })
         })
         .collect::<Result<Vec<_>, AnalyzerError>>()
