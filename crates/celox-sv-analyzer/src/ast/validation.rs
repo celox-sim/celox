@@ -2,37 +2,6 @@
 
 use super::*;
 
-pub(super) fn reject_unsupported_multidimensional_packed_bounds(
-    ports: &[Port],
-    signals: &[Signal],
-    const_env: &HashMap<String, i128>,
-) -> Result<(), AnalyzerError> {
-    let unsupported = ports
-        .iter()
-        .map(Port::r#type)
-        .chain(signals.iter().map(Signal::r#type))
-        .any(|r#type| {
-            let ranges = r#type.packed_ranges();
-            ranges.len() > 1
-                && ranges.iter().any(|range| {
-                    let left = eval_ast_const_expr(range.left(), const_env);
-                    let right = eval_ast_const_expr(range.right(), const_env);
-                    !matches!(
-                        (left, right),
-                        (Some(left), Some(right))
-                            if (right == 0 && left >= 0) || (left == 0 && right >= 0)
-                    )
-                })
-        });
-    if unsupported {
-        Err(AnalyzerError::Unsupported(
-            "non-zero-based multidimensional packed range".to_string(),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 /// How an `always` construct is simulated.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum AlwaysKind {
