@@ -5319,3 +5319,67 @@ fn native_interface_bindings_reject_enum_constant_collisions() {
         "{error}"
     );
 }
+
+#[test]
+fn public_analyses_report_constant_function_exit_warnings() {
+    let exit_sites = |ir: &Ir| {
+        ir.warnings()
+            .iter()
+            .map(|warning| match warning {
+                ir::AnalyzerWarning::ExitOutsideProgram { site } => {
+                    let site = site.as_ref().unwrap();
+                    (site.path.clone(), site.start)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let module = "module Top(output int y);
+        function automatic int f(); $exit; return 1; endfunction
+        localparam int N = f();
+        assign y = N;
+    endmodule";
+    let path = Path::new("exit.sv");
+    let expected = vec![(path.to_path_buf(), module.find("$exit").unwrap())];
+    let overrides = HashMap::default();
+    assert_eq!(exit_sites(&analyze_source(module, path).unwrap()), expected);
+    assert_eq!(
+        exit_sites(
+            &analyze_source_with_module_parameter_overrides(module, path, "Top", &overrides)
+                .unwrap()
+        ),
+        expected
+    );
+    assert_eq!(
+        exit_sites(
+            &analyze_source_module_with_parameter_overrides(module, path, "Top", &overrides)
+                .unwrap()
+        ),
+        expected
+    );
+    // A source with an interface is analyzed module by module.
+    let with_interface = format!("interface Bus; logic x; endinterface\n{module}");
+    assert_eq!(
+        exit_sites(&analyze_source(&with_interface, path).unwrap()),
+        vec![(path.to_path_buf(), with_interface.find("$exit").unwrap())]
+    );
+}
+
+#[test]
+fn interface_prototypes_include_package_warnings() {
+    let source = r#"package P;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+    endpackage
+    interface Bus;
+        logic [P::W-1:0] req;
+    endinterface"#;
+    let prototypes = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    assert_eq!(prototypes.len(), 1);
+    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] =
+        prototypes[0].warnings.as_slice()
+    else {
+        panic!("unexpected warnings: {:?}", prototypes[0].warnings);
+    };
+    assert_eq!(site.path, Path::new("bus.sv"));
+    assert_eq!(site.start, source.find("$exit").unwrap());
+}

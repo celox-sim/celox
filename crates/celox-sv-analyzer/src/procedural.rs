@@ -9,6 +9,15 @@
 
 use crate::system_functions::SystemTask;
 
+/// Where a construct is written: its file and byte range in the source text
+/// before preprocessing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceSpan {
+    pub path: std::path::PathBuf,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// One procedural statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtBase<E, L> {
@@ -59,10 +68,12 @@ pub enum StmtBase<E, L> {
     /// the expression is evaluated like any other operand and its value is
     /// discarded.
     Eval(E),
-    /// A system task call statement such as `$display`.
+    /// A system task call statement such as `$display`. `site` is the call,
+    /// unless the analyzer created the statement.
     SystemTask {
         task: SystemTask,
         args: Vec<SystemTaskArg<E>>,
+        site: Option<SourceSpan>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
     /// to `init` or to the default value of its type.
@@ -274,8 +285,9 @@ impl<E, L> StmtBase<E, L> {
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
             StmtBase::Eval(expr) => StmtBase::Eval(fe(expr)),
-            StmtBase::SystemTask { task, args } => StmtBase::SystemTask {
+            StmtBase::SystemTask { task, args, site } => StmtBase::SystemTask {
                 task,
+                site,
                 args: args
                     .into_iter()
                     .map(|arg| match arg {

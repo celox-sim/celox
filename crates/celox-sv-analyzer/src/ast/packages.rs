@@ -29,6 +29,8 @@ pub struct Packages {
     /// The compilation unit of each source file that declares items outside
     /// its modules and packages.
     units: HashMap<PathBuf, Arc<Unit>>,
+    /// What analyzing the packages warned about.
+    warnings: Vec<super::warnings::AnalyzerWarning>,
 }
 
 /// The compilation-unit scope of a source file.
@@ -118,6 +120,17 @@ impl Packages {
     /// Use interface bindings supplied by the hierarchy's selected roots.
     pub fn set_interface_plan(&mut self, plan: interfaces::NativeInterfacePlan) {
         self.interface_plan = Arc::new(plan);
+    }
+
+    pub(crate) fn with_warnings(mut self, warnings: Vec<super::warnings::AnalyzerWarning>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    /// What analyzing the packages warned about, such as constant functions
+    /// that call `$exit`.
+    pub fn warnings(&self) -> &[super::warnings::AnalyzerWarning] {
+        &self.warnings
     }
 
     pub fn is_empty(&self) -> bool {

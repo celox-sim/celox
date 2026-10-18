@@ -1159,7 +1159,16 @@ impl Frame<'_> {
                 self.eval(expr)?;
             }
             // Messages have no effect on the value. Unknown and unsupported
-            // system tasks are rejected before elaboration.
+            // system tasks are rejected before elaboration. `$exit` is
+            // ignored outside a program block (IEEE 1800-2023 24.7), and is
+            // reported like the `$exit` of a process.
+            Stmt::SystemTask {
+                task: crate::system_functions::SystemTask::Exit,
+                site,
+                ..
+            } => super::warnings::warn(super::warnings::AnalyzerWarning::ExitOutsideProgram {
+                site: site.clone(),
+            }),
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
             Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,

@@ -629,10 +629,10 @@ dependencies = [
  "celox-slt",
  "celox-sv-analyzer",
  "fxhash",
+ "miette",
  "num-bigint",
  "num-traits",
  "thiserror 2.0.21",
- "tracing",
 ]
 
 [[package]]
