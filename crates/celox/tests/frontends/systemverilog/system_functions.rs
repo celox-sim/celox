@@ -1560,6 +1560,122 @@ fn exit_outside_a_program_block_is_ignored() {
     );
 }
 
+/// The location of each `$exit` warning, which must be all of them.
+fn exit_warning_locations(warnings: &[celox::CompilationWarning]) -> Vec<(usize, usize)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => (location.line, location.column),
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line and column of the first `needle` in `source`.
+fn source_position(source: &str, needle: &str) -> (usize, usize) {
+    let line = source_line(source, needle);
+    let column = source.lines().nth(line - 1).unwrap().find(needle).unwrap() + 1;
+    (line, column)
+}
+
+#[test]
+fn exit_in_a_timed_process_warns_at_the_call() {
+    let source = r#"
+        module Top(input logic clk, output int a);
+          timeunit 1ps;
+          timeprecision 1ps;
+          initial begin
+            #1 $exit;
+            a = 1;
+          end
+          always @(posedge clk) begin
+            #1;
+            $exit();
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+#[test]
+fn exit_in_a_constant_function_warns_at_the_call() {
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          function automatic int f();
+            $exit();
+            return 4;
+          endfunction
+          localparam int N = f();
+          assign y = N + P::Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 6u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+/// Type and assignment-pattern parameters are bound by rewriting the module
+/// source; the warnings still point at the call in the file.
+#[test]
+fn warnings_of_rewritten_specializations_point_at_their_call() {
+    let source = r#"
+        module Child #(parameter type T = logic, parameter int P [2] = '{1, 2})
+            (output int y);
+          T v;
+          initial begin
+            $exit;
+          end
+          assign y = P[0];
+        endmodule
+        module Top(output int a, b, c);
+          Child #(.T(logic [63:0])) c0(.y(a));
+          Child #(.P('{100000, 200000})) c1(.y(b));
+          Child c2(.y(c));
+        endmodule
+    "#;
+    let sim = Simulator::from_sv_sources(vec![(source, Path::new("rewritten.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    // The three specializations share the call.
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+    let rendered = celox::render_diagnostic(&sim.warnings()[0]);
+    assert!(
+        rendered.contains("$exit;") && !rendered.contains("logic [63:0]"),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn rejects_unknown_system_functions_in_every_context() {
     let cases = [

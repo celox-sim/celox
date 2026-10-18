@@ -2,6 +2,7 @@
 
 use crate::{ast, symbol::ModuleId, typecheck};
 
+pub use crate::ast::warnings::AnalyzerWarning;
 pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
@@ -20,15 +21,30 @@ pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ir {
     modules: Vec<Module>,
+    warnings: Vec<AnalyzerWarning>,
 }
 
 impl Ir {
     pub(crate) fn new(modules: Vec<Module>) -> Self {
-        Self { modules }
+        Self {
+            modules,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_warnings(mut self, warnings: Vec<AnalyzerWarning>) -> Self {
+        self.warnings = warnings;
+        self
     }
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    /// What the analysis warned about, such as constructs evaluated while
+    /// elaborating that no process lowers.
+    pub fn warnings(&self) -> &[AnalyzerWarning] {
+        &self.warnings
     }
 }
 

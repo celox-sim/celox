@@ -92,37 +92,42 @@ impl ParsedSource {
             .iter()
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
             .collect();
-        ast::with_call_sites(|| {
-            let mut packages = Packages::analyze_with_roots(&trees, roots)?;
-            for source in sources {
-                for node in source.tree.as_ref() {
-                    if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
-                        && let Some(name) =
-                            ast::component_identifier(&declaration.nodes.0.nodes.3, &source.tree)
-                        && packages
-                            .interface_sources
-                            .insert(name.clone(), (source.tree.clone(), source.path.clone()))
-                            .is_some()
-                    {
-                        return Err(AnalyzerError::DuplicateModule { name });
+        let (packages, warnings) = ast::warnings::analyzing(|| {
+            ast::with_call_sites(|| {
+                let mut packages = Packages::analyze_with_roots(&trees, roots)?;
+                for source in sources {
+                    for node in source.tree.as_ref() {
+                        if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
+                            && let Some(name) = ast::component_identifier(
+                                &declaration.nodes.0.nodes.3,
+                                &source.tree,
+                            )
+                            && packages
+                                .interface_sources
+                                .insert(name.clone(), (source.tree.clone(), source.path.clone()))
+                                .is_some()
+                        {
+                            return Err(AnalyzerError::DuplicateModule { name });
+                        }
                     }
                 }
-            }
-            if !packages.interface_sources.is_empty()
-                && trees.iter().any(|(tree, _)| {
-                    tree.into_iter()
-                        .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
-                })
-            {
-                let sources = sources
-                    .iter()
-                    .map(|source| (source.code.as_ref(), source.path.as_path()))
-                    .collect::<Vec<_>>();
-                packages.interface_plan =
-                    std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
-            }
-            Ok(packages)
-        })
+                if !packages.interface_sources.is_empty()
+                    && trees.iter().any(|(tree, _)| {
+                        tree.into_iter()
+                            .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
+                    })
+                {
+                    let sources = sources
+                        .iter()
+                        .map(|source| (source.code.as_ref(), source.path.as_path()))
+                        .collect::<Vec<_>>();
+                    packages.interface_plan =
+                        std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
+                }
+                Ok(packages)
+            })
+        });
+        packages.map(|packages| packages.with_warnings(warnings))
     }
 
     /// Analyze an instance using its value and caller-resolved type bindings.
@@ -202,23 +207,26 @@ impl ParsedSource {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        ast::with_call_sites(|| {
-            let source = ast::Source::from_indexed_syntax_module(
-                &self.tree,
-                &self.path,
-                &self.index,
-                module_name,
-                ast::ModuleParameterBindings {
-                    declarations_only: false,
-                    values: &overrides,
-                    types: type_overrides,
-                    patterns: pattern_overrides,
-                },
-                interfaces,
-                packages,
-            )?;
-            analyze::analyze_source(source)
-        })
+        let (ir, warnings) = ast::warnings::analyzing(|| {
+            ast::with_call_sites(|| {
+                let source = ast::Source::from_indexed_syntax_module(
+                    &self.tree,
+                    &self.path,
+                    &self.index,
+                    module_name,
+                    ast::ModuleParameterBindings {
+                        declarations_only: false,
+                        values: &overrides,
+                        types: type_overrides,
+                        patterns: pattern_overrides,
+                    },
+                    interfaces,
+                    packages,
+                )?;
+                analyze::analyze_source(source)
+            })
+        });
+        ir.map(|ir| ir.with_warnings(warnings))
     }
 }
 

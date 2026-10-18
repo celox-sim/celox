@@ -729,11 +729,12 @@ pub fn parse_mixed(
     // A native specialization can introduce further SV specializations and
     // interface behavior. Analyze the expanded requests until every alternating
     // language boundary has been prepared; cache native elaboration by key.
-    // Each pass lowers every SV module again, so only the last one's warnings
-    // are kept.
-    let earlier_warnings = sv_warnings.len();
+    // Each pass lowers every SV module again, so a successful pass replaces
+    // the warnings of the previous one. A failing pass may stop before the
+    // modules that warned, so its warnings join the previous pass's.
+    let mut pass_warnings = Vec::new();
     let external = loop {
-        sv_warnings.truncate(earlier_warnings);
+        let mut warnings = Vec::new();
         let borrowed_sources = sources
             .iter()
             .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -826,13 +827,26 @@ pub fn parse_mixed(
             Some(&mut resolver),
             sv_top_parameters,
             &requests,
-            sv_warnings,
-        )
-        .map_err(|error| match error {
-            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-            celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
-        })?;
+            &mut warnings,
+        );
+        let external = match external {
+            Ok(external) => external,
+            Err(error) => {
+                for warning in warnings {
+                    if !pass_warnings.contains(&warning) {
+                        pass_warnings.push(warning);
+                    }
+                }
+                sv_warnings.extend(pass_warnings);
+                return Err(match error {
+                    celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+                    celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+                });
+            }
+        };
+        pass_warnings = warnings;
         if pending_sources.is_empty() && pending_requests.is_empty() {
+            sv_warnings.extend(pass_warnings);
             break external;
         }
         external_roots.extend(pending_roots);

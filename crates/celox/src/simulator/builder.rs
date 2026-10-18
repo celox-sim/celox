@@ -12,6 +12,16 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
+
+#[cfg(feature = "systemverilog")]
+fn sv_compilation_warnings(
+    warnings: Vec<celox_frontend_sv::FrontendWarning>,
+) -> Vec<CompilationWarning> {
+    warnings
+        .into_iter()
+        .map(CompilationWarning::SystemVerilog)
+        .collect()
+}
 use crate::{
     CompilationWarning, FrontendDiagnostic, HashMap, ParserError, SimulatorError,
     SimulatorErrorKind, ir::OptimizedSir, parser,
@@ -358,27 +368,41 @@ fn analyze(
     }
     #[cfg(feature = "systemverilog")]
     let mut sv_interface_signatures = Vec::new();
+    // Lowering the design reports the warnings of the interface probes
+    // again, for its own parameters. These are reported only when the build
+    // fails before that.
+    #[cfg(feature = "systemverilog")]
+    let mut sv_probe_warnings = Vec::new();
     #[cfg(feature = "systemverilog")]
     if let Some(sv_sources) = sv_sources {
         let references = super::mixed::referenced_sv_components(
             authored_parsers.iter().map(|parser| &parser.veryl),
         );
-        let contracts = celox_frontend_sv::interface_signatures_for(sv_sources, Some(&references))
-            .map_err(|error| match error {
-                celox_frontend_sv::FrontendError::Analyzer(error) => {
-                    parser::sv_analysis_error(error)
-                }
-                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-            })
-            .and_then(|mut signatures| {
-                signatures.retain(|signature| references.contains(&signature.name));
-                let source = super::mixed::veryl_interface_contracts(&signatures)?;
-                sv_interface_signatures = signatures;
-                Ok(source)
-            });
+        let contracts = celox_frontend_sv::interface_signatures_for(
+            sv_sources,
+            Some(&references),
+            &mut sv_probe_warnings,
+        )
+        .map_err(|error| match error {
+            celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
+            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+        })
+        .and_then(|mut signatures| {
+            signatures.retain(|signature| references.contains(&signature.name));
+            let source = super::mixed::veryl_interface_contracts(&signatures)?;
+            sv_interface_signatures = signatures;
+            Ok(source)
+        });
         let contracts = match contracts {
             Ok(contracts) => contracts,
-            Err(error) => return (Err(error.into()), errors, Vec::new(), Vec::new()),
+            Err(error) => {
+                return (
+                    Err(error.into()),
+                    errors,
+                    Vec::new(),
+                    sv_compilation_warnings(sv_probe_warnings),
+                );
+            }
         };
         if !contracts.is_empty() {
             let parsed = match Parser::parse(&contracts, &Path::new("<sv-interface-contracts>")) {
@@ -388,7 +412,7 @@ fn analyze(
                         Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
                         errors,
                         Vec::new(),
-                        Vec::new(),
+                        sv_compilation_warnings(sv_probe_warnings),
                     );
                 }
             };
@@ -421,7 +445,11 @@ fn analyze(
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
-        return (Err(error.into()), errors, Vec::new(), Vec::new());
+        #[cfg(feature = "systemverilog")]
+        let warnings = sv_compilation_warnings(sv_probe_warnings);
+        #[cfg(not(feature = "systemverilog"))]
+        let warnings = Vec::new();
+        return (Err(error.into()), errors, Vec::new(), warnings);
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
@@ -613,10 +641,16 @@ fn analyze(
         })
         .map_err(SimulatorError::from);
     #[cfg(feature = "systemverilog")]
-    let elaboration_warnings = sv_warnings
-        .into_iter()
-        .map(CompilationWarning::SystemVerilog)
-        .collect();
+    let elaboration_warnings = {
+        if sir.is_err() || errors.iter().any(AnalyzerError::is_error) {
+            for warning in sv_probe_warnings {
+                if !sv_warnings.contains(&warning) {
+                    sv_warnings.push(warning);
+                }
+            }
+        }
+        sv_compilation_warnings(sv_warnings)
+    };
     #[cfg(not(feature = "systemverilog"))]
     let elaboration_warnings = Vec::new();
     (sir, errors, frontend_diagnostics, elaboration_warnings)

@@ -214,12 +214,27 @@ pub struct InterfaceSignature {
 pub fn interface_signatures(
     sources: &[(&str, &Path)],
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    interface_signatures_for(sources, None)
+    interface_signatures_for(sources, None, &mut Vec::new())
 }
 
+/// The signatures of the interfaces in `names`, or of every interface.
+/// Lowering an interface for its signature reports its warnings in
+/// `warnings`; lowering the design reports them again.
 pub fn interface_signatures_for(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    let mut found = Vec::new();
+    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    signatures
+}
+
+fn interface_signatures_collecting(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let prototypes = sv::interface_prototypes_for(sources, names)?;
     if prototypes.is_empty() {
@@ -228,8 +243,8 @@ pub fn interface_signatures_for(
     prototypes
         .into_iter()
         .map(|prototype| {
-            // The probe lowers only the interface; its own lowering warns.
-            let lowered = lower_module(&prototype.module, false, true, false, &mut Vec::new())?;
+            warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
+            let lowered = lower_module(&prototype.module, false, true, false, warnings)?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -708,6 +723,7 @@ fn lower_package_states(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
+    warnings.extend(crate::warning::analyzer_warnings(packages.warnings()));
     let mut states = packages.state_modules().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
@@ -1865,6 +1881,7 @@ fn specialize_module(
         &module.interfaces,
         &module.packages,
     )?;
+    warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
     let specialized = ir
         .modules()
         .iter()

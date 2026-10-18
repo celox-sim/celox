@@ -14,6 +14,21 @@ pub struct FrontendWarning {
     pub location: Option<WarningLocation>,
 }
 
+/// Warnings are the same when they report the same thing at the same place.
+impl PartialEq for FrontendWarning {
+    fn eq(&self, other: &Self) -> bool {
+        let place = |warning: &Self| {
+            warning
+                .location
+                .as_ref()
+                .map(|location| (location.path.clone(), location.line, location.column))
+        };
+        self.kind == other.kind && place(self) == place(other)
+    }
+}
+
+impl Eq for FrontendWarning {}
+
 /// What a [`FrontendWarning`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
 pub enum FrontendWarningKind {
@@ -61,6 +76,17 @@ impl WarningLocation {
 
 /// A warning found while lowering, with the span of its construct.
 pub(crate) type PendingWarning = (FrontendWarningKind, Option<SourceSpan>);
+
+/// The warnings of an analysis, as warnings of the frontend.
+pub(crate) fn analyzer_warnings(
+    found: &[celox_sv_analyzer::ir::AnalyzerWarning],
+) -> impl Iterator<Item = PendingWarning> + '_ {
+    found.iter().map(|warning| match warning {
+        celox_sv_analyzer::ir::AnalyzerWarning::ExitOutsideProgram { site } => {
+            (FrontendWarningKind::ExitOutsideProgram, site.clone())
+        }
+    })
+}
 
 /// Appends `found` to `warnings` in source order, once for each construct:
 /// each specialization of a module and each lowering attempt of a process

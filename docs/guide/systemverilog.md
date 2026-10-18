@@ -322,7 +322,8 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
 - **`$exit`** ends the initial procedures of the program block that calls it
   (24.7). Celox has no program blocks, and a call from anywhere else is
   ignored, as 24.7 specifies, with a compilation warning
-  (`Simulator::warnings()`) at the call.
+  (`Simulator::warnings()`) at the call. This includes a call in a constant
+  function.
 - **Immediate cover** executes its pass statement when the condition is true.
   Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
   is rejected because its scheduling is not modeled.
