@@ -90,8 +90,19 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         // A suspended time slot continues where the `$stop` left it.
-        if let Some(suspended) = self.suspended.take() {
+        if let Some(mut suspended) = self.suspended.take() {
             let current_time = self.scheduler.time;
+            if std::mem::take(&mut self.host_pending) {
+                // Host updates belong to the suspended slot. Show logged
+                // pulses to existing waits, then settle raw and derived values
+                // before any continuation reads them. Keep the round's pending
+                // edges and NBA publications intact.
+                for (signal, value) in executor.take_host_writes() {
+                    self.observe_host_write(signal, &value);
+                }
+                self.settle_host_resume(executor, &mut suspended.round, &suspended.levels)?;
+                self.observe(executor.backend(), None);
+            }
             self.continue_round(
                 executor,
                 current_time,
