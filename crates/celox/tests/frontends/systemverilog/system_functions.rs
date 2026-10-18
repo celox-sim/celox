@@ -1337,6 +1337,26 @@ fn stop_suspends_the_simulation_until_it_continues() {
     assert_eq!(sim.time(), 10);
     assert_eq!(sim.get(count), 6u8.into());
     assert_eq!(sim.get(other), 5u8.into());
+
+    // The bounded API returns false both at a new stop and when no step is
+    // allowed to resume it. Bindings distinguish these using the stop state
+    // and whether the budget allowed a step.
+    let mut sim = initial_simulation(source);
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    for expected in [1u8, 2, 4, 5] {
+        assert!(!sim.run_until_bounded(10, 1).unwrap());
+        assert!(sim.is_stopped());
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.get(count), expected.into());
+        assert!(!sim.run_until_bounded(10, 0).unwrap());
+        assert!(sim.is_stopped());
+        assert_eq!(sim.get(count), expected.into());
+    }
+    assert!(sim.run_until_bounded(10, 1).unwrap());
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.time(), 10);
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
 }
 
 /// The time step a `$stop` suspends continues where it stopped: an edge a
