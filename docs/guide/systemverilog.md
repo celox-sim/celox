@@ -32,9 +32,13 @@ let mut sim = Simulator::from_sv_sources(
 ```
 
 `Simulator::from_mixed_sources` combines both source lists in one simulation.
-Veryl instantiates an SV module with `$sv::Module`; SV instantiates a Veryl
-module by its name. A Veryl module and an SV module may share a name;
-`$sv::Module` selects the SV definition. Numeric module parameters are resolved by the owning
+Veryl instantiates an SV module with `$sv::Module`. SV refers to a Veryl module
+or interface by the name the Veryl emitter gives it, as SV written against the
+emitted code does: `prj_Module` for module `Module` of project `prj`, or
+`Module` when `omit_project_prefix` is set in `Veryl.toml`. Without a
+`Veryl.toml` the project is named `prj`. An SV module whose name equals the
+emitted name of a Veryl module is a duplicate definition. A Veryl top is named
+by its Veryl name. Numeric module parameters are resolved by the owning
 frontend, including parameters of Veryl children instantiated from SV.
 
 Interfaces and `input` / `output` modports may cross the boundary in either

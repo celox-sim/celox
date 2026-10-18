@@ -48,13 +48,15 @@ pub fn parse_ir_with_external_hierarchy<'a>(
 }
 
 /// Link the explicitly identified Veryl exports without matching SV namesakes.
+/// `native_modules` maps each external module name that stands for a Veryl
+/// body to the name of that body in `ir`.
 pub fn parse_ir_with_external_hierarchy_and_native_modules<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     loop_provenance: &LoopProvenance,
     external: &'a ExternalHierarchy,
     config: &BuildConfig,
     top: &StrId,
-    native_modules: &HashSet<String>,
+    native_modules: &HashMap<String, StrId>,
 ) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     parse_external_hierarchy(
         ir,
@@ -72,7 +74,7 @@ fn parse_external_hierarchy<'a>(
     external: &'a ExternalHierarchy,
     config: &BuildConfig,
     top: &StrId,
-    native_modules: Option<&HashSet<String>>,
+    native_modules: Option<&HashMap<String, StrId>>,
 ) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     // Token-to-scope resolution uses process-global analyzer state and is not
     // safe while independent compilations run on other test threads. Snapshot
@@ -116,7 +118,7 @@ fn parse_external_hierarchy<'a>(
     let top_name = resource_table::get_str_value(*top).unwrap_or_default();
     let root_ir = name_to_ir.get(top).copied();
     let external_root = external.roots.get(&top_name).copied().filter(|_| {
-        root_ir.is_none() || native_modules.is_none_or(|names| names.contains(&top_name))
+        root_ir.is_none() || native_modules.is_none_or(|names| names.contains_key(&top_name))
     });
     if root_ir.is_none() && external_root.is_none() {
         return Err(ParserError::TopNotFound { name: top_name });
@@ -172,11 +174,18 @@ fn parse_external_hierarchy<'a>(
             binding.package = external_ids[&binding.package];
         }
         module_names.insert(global_id, external_module.sim_module.name.clone());
-        let native_name = resource_table::insert_str(&external_module.sim_module.name);
-        if let Some(&native_module) = name_to_ir.get(&native_name)
-            && native_modules.is_none_or(|names| names.contains(&external_module.sim_module.name))
+        let native_name = match native_modules {
+            Some(names) => names.get(&external_module.sim_module.name).copied(),
+            None => Some(resource_table::insert_str(&external_module.sim_module.name)),
+        };
+        if let Some(native_name) = native_name
+            && let Some(&native_module) = name_to_ir.get(&native_name)
             && !module_ir.contains_key(&global_id)
         {
+            module_names.insert(
+                global_id,
+                resource_table::get_str_value(native_name).unwrap_or_default(),
+            );
             module_ir.insert(global_id, native_module);
             signature_to_id.insert(native_module.signature.clone(), global_id);
             worklist.push((global_id, native_module));
