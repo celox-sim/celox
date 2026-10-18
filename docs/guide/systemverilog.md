@@ -75,7 +75,7 @@ synthesis and is tested at the design level.
 | --- | --- |
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
-| Types | `logic`, `bit`, `reg`, packed vectors, packed arrays, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs and hard packed untagged unions, enums (with implicit values), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
 | Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
 | Continuous logic | `assign`, `wire w = expr;` |
@@ -137,8 +137,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
-  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, multidimensional packed ranges that are not zero-based and
-  descending ([#438](https://github.com/celox-sim/celox/issues/438)), internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
+  array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   unpacked structs, strings and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
   plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists.
