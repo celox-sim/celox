@@ -904,6 +904,36 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 0x76u8.into());
     }
 
+    fn keeps_specialized_systemverilog_leaves_of_identical_veryl_children(sim) {
+        @setup {
+    let veryl = r#"
+        module Inner (a: input logic<8>, y: output logic<8>) {
+            inst leaf: $sv::SvLeaf #(K: 8'h0f) (a, y);
+        }
+        module Mid (a: input logic<8>, y0: output logic<8>, y1: output logic<8>) {
+            inst first: Inner (a, y: y0);
+            inst second: Inner (a: a + 8'd1, y: y1);
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y0, y1);
+            prj_Mid mid(.a(a), .y0(y0), .y1(y1));
+        endmodule
+        module SvLeaf #(parameter logic [7:0] K = 0)(input logic [7:0] a, output logic [7:0] y);
+            assign y = a ^ K;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("mid.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y0")), 0x2fu8.into());
+        assert_eq!(sim.get(sim.signal("y1")), 0x2eu8.into());
+    }
+
     fn reaches_systemverilog_descendants_through_native_veryl_children(sim) {
         @setup {
     let veryl = r#"
