@@ -424,6 +424,13 @@ pub(super) fn expr_from_primary_with_types(
             }
             let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
                 .ok_or_else(|| unsupported("hierarchical identifier"))?;
+            if scope::imported().interface_types.contains_key(&name)
+                && packed_dimensions.get(&name).is_none()
+            {
+                return Err(unsupported(format!(
+                    "use of interface `{name}` other than as a port connection or through a member"
+                )));
+            }
             let base = Expr::Ident(name);
             let select = &hierarchical.nodes.2;
             if select.nodes.1.nodes.0.is_empty() && select.nodes.2.is_none() {
@@ -575,7 +582,10 @@ pub(super) fn expr_from_subroutine_call(
         sv_parser::SubroutineCall::TfCall(call) => {
             expr_from_tf_call(call, syntax_tree, packed_dimensions)
         }
-        sv_parser::SubroutineCall::MethodCall(_) => Err(unsupported("method call")),
+        sv_parser::SubroutineCall::MethodCall(call) => {
+            let (name, arguments) = native_interfaces::method_call(call, syntax_tree)?;
+            expr_from_named_call(name, arguments, syntax_tree, packed_dimensions)
+        }
         sv_parser::SubroutineCall::Randomize(_) => Err(unsupported("randomize call")),
     }
 }
@@ -815,6 +825,20 @@ pub(super) fn expr_from_tf_call(
     {
         return Ok(Expr::Ident(name));
     }
+    expr_from_named_call(
+        name,
+        call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
+        syntax_tree,
+        packed_dimensions,
+    )
+}
+
+fn expr_from_named_call(
+    name: String,
+    arguments: Option<&sv_parser::ListOfArguments>,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &PackedDimensions,
+) -> Converted<Expr> {
     let query_formals = packed_dimensions
         .type_query
         .then(|| {
@@ -834,12 +858,7 @@ pub(super) fn expr_from_tf_call(
     } else {
         &packed_dimensions.subroutine_param_names
     };
-    let (bindings, arg_order) = bind_call_arguments(
-        &name,
-        call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
-        syntax_tree,
-        signatures,
-    )?;
+    let (bindings, arg_order) = bind_call_arguments(&name, arguments, syntax_tree, signatures)?;
     if let Some(formals) = query_formals {
         if bindings.len() > formals.len() {
             return Err(unsupported(format!("extra arguments of `{name}`")));

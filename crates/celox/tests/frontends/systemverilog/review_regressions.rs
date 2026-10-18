@@ -5450,13 +5450,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "initializer of member `value` in the interface array `lanes`",
-            r#"
-            interface Lane; logic value = 1'b1; endinterface
-            module Top(output logic y); Lane lanes [2] (); assign y = lanes[0].value; endmodule
-        "#,
-        ),
-        (
             "non-zero-based multidimensional packed range",
             r#"
             module Top(input logic [2:1][7:0] a, output logic [7:0] y);
@@ -8527,4 +8520,15 @@ fn runs_processes_sensing_one_signal_at_two_edges_or_roles() {
         });
         assert_eq!(observed, expected, "{source}");
     }
+}
+
+#[test]
+fn rejects_interface_array_port_shape_mismatches() {
+    let error = cranelift_build_error(
+        "interface I; logic x; endinterface module C(I p[3]); endmodule module Top; I a[2](); C c(.p(a)); endmodule",
+    );
+    assert!(
+        error.contains("interface array dimension mismatch"),
+        "{error}"
+    );
 }

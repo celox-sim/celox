@@ -63,6 +63,28 @@ pub(super) fn dimensions_system_function_call_value(
     }
 }
 
+fn extend_interface_dimensions(dimensions: &mut PackedDimensions) {
+    let imported = scope::imported();
+    if imported.interface_members.is_empty() {
+        return;
+    }
+    for (name, ty) in imported
+        .ports
+        .iter()
+        .map(|port| (port.name(), port.r#type()))
+        .chain(
+            imported
+                .signals
+                .iter()
+                .map(|signal| (signal.name(), signal.r#type())),
+        )
+    {
+        if dimensions.get(name).is_none() {
+            dimensions.insert(name.to_string(), procedural::dimensions_from_type(ty));
+        }
+    }
+}
+
 fn query_operand_dimensions(
     argument: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
@@ -82,6 +104,7 @@ fn query_operand_dimensions(
             type_aliases,
         )
         .unwrap_or_else(|| PackedDimensions::new(HashMap::default(), const_env, type_aliases));
+        extend_interface_dimensions(&mut context);
         context.function_return_types = containing_function_return_types(
             RefNode::Expression(argument),
             syntax_tree,
@@ -883,6 +906,7 @@ fn size_function_expression_type(
         type_aliases: type_aliases.clone(),
         ..PackedDimensions::default()
     });
+    extend_interface_dimensions(&mut packed_dimensions);
     packed_dimensions.function_return_types = containing_function_return_types(
         RefNode::Expression(argument),
         syntax_tree,

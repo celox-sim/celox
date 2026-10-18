@@ -2,7 +2,11 @@
 
 use super::*;
 
-fn hierarchical_path(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Vec<String>> {
+fn hierarchical_path(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
+) -> Option<Vec<String>> {
     let Some(RefNode::HierarchicalIdentifier(identifier)) =
         unwrap_node!(node.clone(), HierarchicalIdentifier)
     else {
@@ -13,11 +17,20 @@ fn hierarchical_path(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Vec<
     }
     let mut path = Vec::new();
     for (name, indices, _) in &identifier.nodes.1 {
-        // Indexing arrays of structs is a separate extension. Never drop an index.
-        if !indices.nodes.0.is_empty() {
-            return None;
+        let mut name = identifier_text(RefNode::Identifier(name), syntax_tree)?;
+        for index in &indices.nodes.0 {
+            let value = const_expr_from_ref_node_with_env(
+                RefNode::ConstantExpression(&index.nodes.1),
+                syntax_tree,
+                &dimensions.const_env,
+                &dimensions.type_aliases,
+            )
+            .ok()
+            .flatten()?;
+            let value = eval_ast_const_expr(&value, &dimensions.const_env)?;
+            name.push_str(&format!("[{value}]"));
         }
-        path.push(identifier_text(RefNode::Identifier(name), syntax_tree)?);
+        path.push(name);
     }
     path.push(identifier_text(
         RefNode::Identifier(&identifier.nodes.2),
@@ -35,6 +48,19 @@ pub(in crate::ast) fn has_member_access(node: RefNode<'_>, select: RefNode<'_>) 
             RefNode::ConstantSelect(select) => select.nodes.0.is_some(),
             _ => false,
         }
+}
+
+/// Collapse an interface handle/member prefix using its bound symbols. Any
+/// remaining path selects a packed-structure member of the interface signal.
+fn bind_interface_path(path: &mut Vec<String>) -> bool {
+    let imported = scope::imported();
+    for length in (2..=path.len()).rev() {
+        if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
+            path.splice(..length, [name.clone()]);
+            return true;
+        }
+    }
+    false
 }
 
 fn selected_member<'a>(
@@ -114,8 +140,9 @@ fn variable_path(
     node: RefNode<'_>,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
 ) -> Option<Vec<String>> {
-    let mut path = hierarchical_path(node, syntax_tree)?;
+    let mut path = hierarchical_path(node, syntax_tree, dimensions)?;
     if let Some((members, _, last)) = &select.nodes.0 {
         for (_, name, indices) in members {
             if !indices.nodes.0.is_empty() {
@@ -140,7 +167,7 @@ pub(in crate::ast) fn member_first_dimension_width(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree)?;
+    let path = variable_path(node, select, syntax_tree, dimensions)?;
     let (_, r#type) = selected_member(&path, dimensions)?;
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
@@ -177,7 +204,7 @@ pub(in crate::ast) fn member_dimension_count(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree)?;
+    let path = variable_path(node, select, syntax_tree, dimensions)?;
     let (_, ty) = selected_member(&path, dimensions)?;
     let remaining = ty
         .packed_ranges
@@ -198,15 +225,25 @@ pub(in crate::ast) fn variable_member(
     syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let mut path = variable_path(node, select, syntax_tree)
+    let mut path = variable_path(node, select, syntax_tree, dimensions)
         .ok_or_else(|| unsupported("member access through an indexed structure"))?;
-    if let Some(base) = base {
+    let bound_interface = bind_interface_path(&mut path);
+    if !bound_interface && let Some(base) = base {
         path[0] = base;
+    }
+    let mut leaf_select = select.clone();
+    leaf_select.nodes.0 = None;
+    if bound_interface && path.len() == 1 {
+        return super::super::selects::lvalue_from_select(
+            path[0].clone(),
+            &leaf_select,
+            syntax_tree,
+            dimensions,
+            false,
+        );
     }
     let (offset, r#type) = selected_member(&path, dimensions)
         .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
-    let mut leaf_select = select.clone();
-    leaf_select.nodes.0 = None;
     let relative = super::super::selects::lvalue_from_select(
         path[0].clone(),
         &leaf_select,
@@ -229,7 +266,7 @@ pub(in crate::ast) fn net_member(
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     let indexed = || unsupported("member access through an indexed structure");
-    let mut path = hierarchical_path(node, syntax_tree).ok_or_else(indexed)?;
+    let mut path = hierarchical_path(node, syntax_tree, dimensions).ok_or_else(indexed)?;
     if let Some((members, _, last)) = &select.nodes.0 {
         for (_, name, indices) in members {
             if !indices.nodes.0.is_empty() {
@@ -245,10 +282,20 @@ pub(in crate::ast) fn net_member(
                 .ok_or_else(|| unsupported("structure member name"))?,
         );
     }
-    let (offset, r#type) = selected_member(&path, dimensions)
-        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
+    let bound_interface = bind_interface_path(&mut path);
     let mut leaf_select = select.clone();
     leaf_select.nodes.0 = None;
+    if bound_interface && path.len() == 1 {
+        return super::super::selects::lvalue_from_constant_select(
+            path[0].clone(),
+            &leaf_select,
+            syntax_tree,
+            dimensions,
+            false,
+        );
+    }
+    let (offset, r#type) = selected_member(&path, dimensions)
+        .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
     let relative = super::super::selects::lvalue_from_constant_select(
         path[0].clone(),
         &leaf_select,

@@ -536,6 +536,22 @@ impl Type {
         self.resolved_width
     }
 
+    /// Preserve resolved layout while rebinding names in declaration contracts.
+    pub(crate) fn map_range_expressions(
+        mut self,
+        mut map: impl FnMut(ConstExpr) -> ConstExpr,
+    ) -> Self {
+        for range in &mut self.packed_ranges {
+            range.left = map(range.left.clone());
+            range.right = map(range.right.clone());
+        }
+        for range in &mut self.unpacked_ranges {
+            range.left = map(range.left.clone());
+            range.right = map(range.right.clone());
+        }
+        self
+    }
+
     pub(crate) fn has_symbolic_ranges(&self) -> bool {
         let constants = fxhash::FxHashMap::default();
         self.packed_ranges.iter().any(|range| {
@@ -1042,6 +1058,18 @@ impl From<ast::InsideItem> for InsideItem {
     }
 }
 
+impl From<InsideItem> for ast::InsideItem {
+    fn from(item: InsideItem) -> Self {
+        match item {
+            InsideItem::Value(value) => ast::InsideItem::Value(value.into()),
+            InsideItem::Range { low, high } => ast::InsideItem::Range {
+                low: low.into(),
+                high: high.into(),
+            },
+        }
+    }
+}
+
 impl From<ast::ConstExpr> for ConstExpr {
     fn from(expr: ast::ConstExpr) -> Self {
         match expr {
@@ -1332,6 +1360,71 @@ impl From<ast::Expr> for Expr {
                 args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
+                expr: Box::new((*expr).into()),
+                items: items.into_iter().map(Into::into).collect(),
+            },
+        }
+    }
+}
+
+impl From<Expr> for ast::Expr {
+    fn from(expr: Expr) -> Self {
+        match expr {
+            Expr::Ident(name) => ast::Expr::Ident(name),
+            Expr::Literal(value) => ast::Expr::Literal(value),
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ast::Expr::Select {
+                expr: Box::new((*expr).into()),
+                msb: msb.into(),
+                lsb: lsb.into(),
+                signed,
+            },
+            Expr::Concat(parts) => ast::Expr::Concat(parts.into_iter().map(Into::into).collect()),
+            Expr::RepeatConcat { count, parts } => ast::Expr::RepeatConcat {
+                count: count.into(),
+                parts: parts.into_iter().map(Into::into).collect(),
+            },
+            Expr::Resize {
+                expr,
+                width,
+                signed,
+            } => ast::Expr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
+            },
+            Expr::Unary { op, expr } => ast::Expr::Unary {
+                op: op.into(),
+                expr: Box::new((*expr).into()),
+            },
+            Expr::Binary { left, op, right } => ast::Expr::Binary {
+                left: Box::new((*left).into()),
+                op: op.into(),
+                right: Box::new((*right).into()),
+            },
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ast::Expr::Mux {
+                condition: Box::new((*condition).into()),
+                then_expr: Box::new((*then_expr).into()),
+                else_expr: Box::new((*else_expr).into()),
+            },
+            Expr::Call {
+                callee,
+                args,
+                arg_order,
+            } => ast::Expr::Call {
+                arg_order: arg_order.clone(),
+                callee,
+                args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
+            },
+            Expr::Inside { expr, items } => ast::Expr::Inside {
                 expr: Box::new((*expr).into()),
                 items: items.into_iter().map(Into::into).collect(),
             },
