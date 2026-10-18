@@ -1,0 +1,6 @@
+Revision history for #1467:
+
+rev 2 (content) 2026-10-18 02:10 UTC — Fix CI retained-report consistency: register the new reviewed Icarus pattern exclusions and synchronize their metadata.
+rev 1 (initial) 2026-10-18 02:10 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1467,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c39aa0948887492161028df9a4a499e9cdd9c573","timestamp_iso":"2026-10-18T02:10:48Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c39aa0948887492161028df9a4a499e9cdd9c573","new_sha":"b4519bc46b473a5123a14d85f8146a835cee0e62","timestamp_iso":"2026-10-18T02:10:48Z","reason":"Fix CI retained-report consistency: register the new reviewed Icarus pattern exclusions and synchronize their metadata.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c39aa0948887492161028df9a4a499e9cdd9c573...b4519bc46b473a5123a14d85f8146a835cee0e62"}]} -->
