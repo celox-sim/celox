@@ -838,7 +838,7 @@ impl<A> Default for ElaboratedDesign<A> {
 
 impl<A: Copy + Eq + std::hash::Hash> ElaboratedDesign<A> {
     /// Effective kinds of canonical event domains. Infer only unambiguous
-    /// one-bit alias edges; declaration metadata and signal types stay intact.
+    /// one-bit alias edges by polarity; declaration metadata and signal types stay intact.
     /// Opposite edges on one net require separate dispatch domains and retain
     /// their existing canonical kind here.
     pub fn event_kinds(&self) -> HashMap<A, DomainKind> {
@@ -857,8 +857,19 @@ impl<A: Copy + Eq + std::hash::Hash> ElaboratedDesign<A> {
             }
             let canonical = self.events.canonical(*address);
             let kind = inferred.entry(canonical).or_insert(Some(metadata.kind));
-            if kind.is_some_and(|kind| kind != metadata.kind) {
-                *kind = None;
+            if let Some(previous) = *kind {
+                if edges::polarity(previous) != edges::polarity(metadata.kind) {
+                    *kind = None;
+                } else if previous != metadata.kind {
+                    // A clock and asynchronous reset can share one edge. Use
+                    // the clock spelling for the mixed role, independent of
+                    // state-object iteration order.
+                    *kind = Some(if edges::polarity(previous) == Some(true) {
+                        DomainKind::ClockPosedge
+                    } else {
+                        DomainKind::ClockNegedge
+                    });
+                }
             }
         }
         self.events
@@ -1334,6 +1345,35 @@ mod tests {
         assert!(!design.events.is_empty());
         assert_eq!(design.state_objects[&10].width, 1);
     }
+    #[test]
+    fn alias_event_kinds_merge_clock_and_reset_by_polarity() {
+        for (clock, reset) in [
+            (DomainKind::ClockPosedge, DomainKind::ResetAsyncHigh),
+            (DomainKind::ClockNegedge, DomainKind::ResetAsyncLow),
+        ] {
+            for roles in [[clock, reset], [reset, clock]] {
+                let mut design = ElaboratedDesign::<u32>::default();
+                for (address, kind) in [(10, DomainKind::Other), (11, roles[0]), (12, roles[1])] {
+                    design.state_objects.insert(
+                        address,
+                        VariableMetadata {
+                            width: 1,
+                            is_4state: true,
+                            kind,
+                            type_kind: PortTypeKind::Logic,
+                            array_dims: Vec::new(),
+                        },
+                    );
+                }
+                design.events.ordered_events = vec![10];
+                design.events.aliases.insert(11, 10);
+                design.events.aliases.insert(12, 10);
+                assert_eq!(design.event_kinds()[&10], clock);
+                assert_eq!(design.state_objects[&10].kind, DomainKind::Other);
+            }
+        }
+    }
+
     #[test]
     fn alias_event_kinds_are_separate_from_declaration_metadata() {
         let mut design = ElaboratedDesign::<u32>::default();
