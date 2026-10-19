@@ -47,7 +47,7 @@ pub fn compile_native_image(source: &Path, top: &str) -> Result<NativeProgramIma
 
 /// Run cocotb's VPI bootstrap against a compiled native program instance.
 pub fn run_cocotb(instance: NativeProgramInstance, vpi_path: &Path) -> Result<(), String> {
-    crate::install_runtime(instance);
+    let _session = crate::install_runtime(instance)?;
     // Safety: cocotb's VPI library is kept loaded throughout all callbacks and
     // its documented bootstrap takes no arguments.
     let library = match unsafe { Library::new(vpi_path) } {
