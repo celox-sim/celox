@@ -93,6 +93,16 @@ fn cocotb_drives_an_attached_native_flip_flop() {
 }
 
 fn check_cocotb_native_flip_flop(source: &[&str]) {
+    check_cocotb_native_design(source, "test_counter", "drives_native_flip_flop");
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_observes_edges_before_nonblocking_updates() {
+    check_cocotb_native_design(&["edge_phase.sv"], "test_edge_phase", "edge_precedes_nba");
+}
+
+fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
     let python = env::var_os("CELOX_COCOTB_PYTHON")
         .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
@@ -123,9 +133,9 @@ fn check_cocotb_native_flip_flop(source: &[&str]) {
     let runtime = Command::new(&executable)
         .args([
             "--test-module",
-            "test_counter",
+            module,
             "--test-filter",
-            "drives_native_flip_flop",
+            filter,
             "--python",
             &python,
         ])
