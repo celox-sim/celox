@@ -12,7 +12,11 @@ use celox::{
     NativeProgramImage, NativeProgramInstance, StateDifference, StateFile, StateObject, StateRole,
     format_state_value,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+
+#[path = "celox/project.rs"]
+mod project;
+use project::{Design, DesignArgs};
 
 #[derive(Parser)]
 #[command(
@@ -37,34 +41,78 @@ enum CliCommand {
 
 #[derive(Args)]
 struct RunArgs {
-    /// SystemVerilog sources in compilation order, or one Veryl project entry file.
-    #[arg(required = true)]
-    sources: Vec<PathBuf>,
+    #[command(flatten)]
+    design: DesignArgs,
 
-    /// Top-level testbench module name.
-    #[arg(long)]
-    top: String,
+    /// Compiler optimization level: O0, O1, O2 (default: project setting or O2).
+    #[arg(short = 'O', long, value_parser = parse_opt_level)]
+    opt_level: Option<celox::OptLevel>,
 
-    /// Compiler optimization level: O0, O1, O2.
-    #[arg(short = 'O', long, default_value = "O2", value_parser = parse_opt_level)]
-    opt_level: celox::OptLevel,
-
-    /// Maximum SV scheduler steps or Veryl testbench ticks before failing.
+    /// Maximum SV scheduler steps or Veryl ticks (default: project setting or 1000000).
     /// Does not bound compilation or work within a single step/tick.
-    #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_steps: Option<u64>,
+}
+
+struct RunConfig {
+    design: Design,
+    opt_level: celox::OptLevel,
     max_steps: u64,
+}
+
+fn resolve_design(arguments: DesignArgs) -> Design {
+    arguments.resolve().unwrap_or_else(|message| {
+        Cli::command()
+            .error(clap::error::ErrorKind::InvalidValue, message)
+            .exit()
+    })
+}
+
+fn cli_from_matches(matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
+    let mut cli = Cli::from_arg_matches(matches)?;
+    match &mut cli.command {
+        CliCommand::Run(arguments) => arguments.design.capture_input_order(
+            matches
+                .subcommand_matches("run")
+                .expect("parsed run command"),
+        ),
+        CliCommand::Vpi(VpiArgs {
+            command: VpiCommand::Build(arguments),
+        }) => {
+            arguments.design.capture_input_order(
+                matches
+                    .subcommand_matches("vpi")
+                    .and_then(|matches| matches.subcommand_matches("build"))
+                    .expect("parsed vpi build command"),
+            );
+        }
+        CliCommand::State(_) => {}
+    }
+    Ok(cli)
 }
 
 fn parse_opt_level(value: &str) -> Result<celox::OptLevel, String> {
     celox::OptLevel::parse(value).ok_or_else(|| "expected O0, O1, or O2".to_string())
 }
 
+fn resolve_run_config(arguments: RunArgs) -> RunConfig {
+    let design = resolve_design(arguments.design);
+    RunConfig {
+        opt_level: arguments
+            .opt_level
+            .or(design.opt_level)
+            .unwrap_or(celox::OptLevel::O2),
+        max_steps: arguments
+            .max_steps
+            .or(design.max_steps)
+            .unwrap_or(1_000_000),
+        design,
+    }
+}
+
 fn run_testbench(arguments: RunArgs) -> Result<(), String> {
-    let all_sv = arguments.sources.iter().all(|path| {
-        path.extension()
-            .is_some_and(|extension| extension == "sv" || extension == "v")
-    });
-    if all_sv {
+    let arguments = resolve_run_config(arguments);
+    if arguments.design.is_sv() {
         #[cfg(feature = "systemverilog")]
         return run_sv(arguments);
         #[cfg(not(feature = "systemverilog"))]
@@ -73,14 +121,14 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if arguments.sources.len() != 1
-        || !arguments.sources[0]
+    if arguments.design.sources.len() != 1
+        || !arguments.design.sources[0]
             .extension()
             .is_some_and(|extension| extension == "veryl")
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let source = &arguments.sources[0];
+    let source = &arguments.design.sources[0];
     let mut metadata = veryl_metadata::Metadata::search_from(source)
         .ok()
         .map(|path| {
@@ -117,7 +165,7 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
             .iter()
             .map(|(text, path)| (text.as_str(), *path))
             .collect(),
-        &arguments.top,
+        &arguments.design.top,
     )
     .four_state(true)
     .opt_level(arguments.opt_level);
@@ -148,21 +196,13 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
 }
 
 #[cfg(feature = "systemverilog")]
-fn run_sv(arguments: RunArgs) -> Result<(), String> {
-    let contents = arguments
-        .sources
+fn run_sv(arguments: RunConfig) -> Result<(), String> {
+    let sources = arguments.design.sv_sources()?;
+    let source_refs = sources
         .iter()
-        .map(|path| {
-            std::fs::read_to_string(path)
-                .map_err(|error| format!("failed to read {}: {error}", path.display()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let sources = contents
-        .iter()
-        .zip(&arguments.sources)
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
-    let simulation = celox::Simulation::from_sv_sources(sources, &arguments.top)
+    let simulation = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
         .four_state(true)
         .opt_level(arguments.opt_level)
         .build()
@@ -311,13 +351,8 @@ enum VpiCommand {
 
 #[derive(Args)]
 struct BuildArgs {
-    /// One Veryl project entry file, or one or more SystemVerilog (.sv) files.
-    #[arg(required = true)]
-    sources: Vec<PathBuf>,
-
-    /// Top-level module name.
-    #[arg(long)]
-    top: String,
+    #[command(flatten)]
+    design: DesignArgs,
 
     /// Native simulation executable to create.
     #[arg(short, long, default_value = "celox.out")]
@@ -356,6 +391,7 @@ struct SimulationArgs {
 }
 
 fn build(arguments: BuildArgs) -> Result<(), String> {
+    let design = resolve_design(arguments.design);
     let runtime = env::current_exe()
         .map_err(|error| format!("failed to locate the celox executable: {error}"))?;
     if arguments.output.exists()
@@ -379,16 +415,44 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
         })?;
     }
 
-    let sources = arguments
-        .sources
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    celox_vpi::driver::compile_native_sources(&sources, &arguments.top)?
+    compile_native_design(&design)?
         .write_attached_runtime(runtime, &arguments.output)
         .map_err(|error| format!("failed to write {}: {error}", arguments.output.display()))?;
     println!("Created {}", arguments.output.display());
     Ok(())
+}
+
+fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> {
+    if design.is_sv() {
+        #[cfg(feature = "systemverilog")]
+        {
+            let sources = design.sv_sources()?;
+            let refs = sources
+                .iter()
+                .map(|(text, path)| (text.as_str(), path.as_path()))
+                .collect();
+            let simulator = celox::Simulator::from_sv_sources(refs, &design.top)
+                .four_state(true)
+                .native_force_support(true)
+                .opt_level(celox::OptLevel::O0)
+                .build()
+                .map_err(|error| format!("compilation failed:\n{error}"))?;
+            return Ok(simulator.shared_code().program_image().clone());
+        }
+        #[cfg(not(feature = "systemverilog"))]
+        return Err(
+            "SystemVerilog support requires building celox-vpi with --features systemverilog"
+                .to_string(),
+        );
+    }
+    if design.sources.len() != 1
+        || !design.sources[0]
+            .extension()
+            .is_some_and(|extension| extension == "veryl")
+    {
+        return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
+    }
+    celox_vpi::driver::compile_native_image(&design.sources[0], &design.top)
 }
 
 fn environment_path(name: &str) -> Option<PathBuf> {
@@ -731,7 +795,10 @@ fn run() -> Result<ExitCode, String> {
         Some(attached) => {
             run_simulation(attached.image, SimulationArgs::parse()).map(|()| ExitCode::SUCCESS)
         }
-        None => match Cli::parse().command {
+        None => match cli_from_matches(&Cli::command().get_matches())
+            .unwrap_or_else(|error| error.exit())
+            .command
+        {
             CliCommand::Run(arguments) => run_testbench(arguments).map(|()| ExitCode::SUCCESS),
             CliCommand::Vpi(arguments) => match arguments.command {
                 VpiCommand::Build(arguments) => build(arguments).map(|()| ExitCode::SUCCESS),
@@ -757,28 +824,73 @@ mod tests {
 
     #[test]
     fn run_defaults_to_o2_for_both_languages_and_allows_overrides() {
-        for (source, default) in [
-            ("top.sv", celox::OptLevel::O2),
-            ("top.v", celox::OptLevel::O2),
-            ("top.veryl", celox::OptLevel::O2),
-        ] {
-            for (extra, expected) in [
-                (Vec::new(), default),
-                (vec!["-O", "O0"], celox::OptLevel::O0),
-                (vec!["-O", "O1"], celox::OptLevel::O1),
-                (vec!["--opt-level", "O2"], celox::OptLevel::O2),
-            ] {
-                let cli = Cli::try_parse_from(
-                    ["celox", "run", source, "--top", "Top"]
-                        .into_iter()
-                        .chain(extra),
-                )
-                .unwrap();
-                let CliCommand::Run(arguments) = cli.command else {
-                    panic!("expected the run command");
-                };
-                assert_eq!(arguments.opt_level, expected, "{source}");
+        let temporary = tempfile::tempdir().unwrap();
+        for project_level in [None, Some("O0"), Some("O1"), Some("O2")] {
+            let project = temporary.path().join("celox.toml");
+            if let Some(level) = project_level {
+                std::fs::write(&project, format!("opt_level = '{level}'\n")).unwrap();
             }
+            for source in ["top.sv", "top.v", "top.veryl"] {
+                for extra in [
+                    vec![],
+                    vec!["-O", "O0"],
+                    vec!["-O", "O1"],
+                    vec!["--opt-level", "O2"],
+                ] {
+                    let mut argv = vec!["celox", "run", source, "--top", "Top"];
+                    if project_level.is_some() {
+                        argv.extend(["--project", project.to_str().unwrap()]);
+                    }
+                    argv.extend(extra.iter().copied());
+                    let cli = Cli::try_parse_from(argv).unwrap();
+                    let CliCommand::Run(arguments) = cli.command else {
+                        panic!("expected the run command");
+                    };
+                    let expected =
+                        parse_opt_level(extra.last().copied().or(project_level).unwrap_or("O2"))
+                            .unwrap();
+                    assert_eq!(
+                        resolve_run_config(arguments).opt_level,
+                        expected,
+                        "{source}: {project_level:?} {extra:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn source_and_filelist_arguments_keep_their_command_line_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let list = temporary.path().join("sources.f");
+        std::fs::write(&list, "middle.sv\n").unwrap();
+        for command in [vec!["celox", "run"], vec!["celox", "vpi", "build"]] {
+            let matches = Cli::command()
+                .try_get_matches_from(command.into_iter().chain([
+                    "first.sv",
+                    "-f",
+                    list.to_str().unwrap(),
+                    "last.sv",
+                    "--top",
+                    "Top",
+                ]))
+                .unwrap();
+            let cli = cli_from_matches(&matches).unwrap();
+            let design = match cli.command {
+                CliCommand::Run(args) => args.design.resolve().unwrap(),
+                CliCommand::Vpi(VpiArgs {
+                    command: VpiCommand::Build(args),
+                }) => args.design.resolve().unwrap(),
+                _ => panic!("expected a compilation command"),
+            };
+            assert_eq!(
+                design.sources,
+                [
+                    PathBuf::from("first.sv"),
+                    temporary.path().join("middle.sv"),
+                    PathBuf::from("last.sv")
+                ]
+            );
         }
     }
 
