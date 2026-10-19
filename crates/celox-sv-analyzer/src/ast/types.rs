@@ -4,18 +4,18 @@ use super::*;
 
 pub(super) fn type_aliases_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Result<HashMap<String, Type>, AnalyzerError> {
     type_aliases_from_module_node_with_env(node, syntax_tree, &HashMap::default())
 }
 
 pub(super) fn type_aliases_from_module_node_with_env(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
 ) -> Result<HashMap<String, Type>, AnalyzerError> {
     // The scope's own typedefs hide the package types it imports.
-    let mut aliases = scope::imported().type_aliases.clone();
+    let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         if let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list {
             add_type_aliases_from_parameter_port_list(
@@ -80,24 +80,24 @@ pub(super) fn type_aliases_from_module_node_with_env(
     // widen the index arithmetic of a run-time select to 128 bits.
     for ty in aliases.values_mut() {
         for range in &mut ty.packed_ranges {
-            if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
                 range.right = bound_literal(value);
             }
         }
         for range in &mut ty.unpacked_ranges {
-            if let Some(value) = eval_ast_const_expr(&range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&range.right, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
                 range.right = bound_literal(value);
             }
             if let Some(value) = range
                 .size
                 .as_ref()
-                .and_then(|size| eval_ast_const_expr(size, const_env))
+                .and_then(|size| eval_ast_const_expr(&syntax_tree.state, size, const_env))
             {
                 range.size = Some(bound_literal(value));
             }
@@ -116,7 +116,7 @@ fn bound_literal(value: i128) -> ConstExpr {
 
 fn add_type_alias_from_data_declaration(
     declaration: &sv_parser::DataDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
@@ -182,7 +182,7 @@ fn add_type_alias_from_data_declaration(
 
 fn add_type_aliases_from_parameter_port_list(
     list: &sv_parser::ParameterPortList,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
@@ -213,7 +213,7 @@ fn add_type_aliases_from_parameter_port_list(
 
 fn add_type_aliases_from_parameter_port_declaration(
     declaration: &sv_parser::ParameterPortDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
@@ -235,7 +235,7 @@ fn add_type_aliases_from_parameter_port_declaration(
 
 fn add_type_aliases_from_localparam(
     declaration: &sv_parser::LocalParameterDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
@@ -249,7 +249,7 @@ fn add_type_aliases_from_localparam(
 
 fn add_type_aliases_from_parameter(
     declaration: &sv_parser::ParameterDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
@@ -263,7 +263,7 @@ fn add_type_aliases_from_parameter(
 
 fn add_type_alias_from_type_assignment(
     assignment: &sv_parser::TypeAssignment,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
@@ -272,7 +272,7 @@ fn add_type_alias_from_type_assignment(
         return;
     };
     if let Some(locate) = identifier_locate(identifier)
-        && let Some(bound) = scope::imported()
+        && let Some(bound) = scope::imported(&syntax_tree.state)
             .type_parameter_bindings
             .get(&locate.offset)
     {
@@ -318,13 +318,16 @@ pub(super) fn direction_from_port_direction(direction: &sv_parser::PortDirection
     }
 }
 
-pub(super) fn type_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Type> {
+pub(super) fn type_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &AnalysisContext<'_>,
+) -> Option<Type> {
     type_from_ref_node_with_env(node, syntax_tree, &HashMap::default(), &HashMap::default())
 }
 
 pub(super) fn type_from_ref_node_with_env(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -375,7 +378,7 @@ fn integer_atom_is_2state(node: RefNode<'_>) -> bool {
 
 pub(super) fn type_from_net_port_header(
     header: &sv_parser::NetPortHeaderOrInterfacePortHeader,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -409,7 +412,7 @@ pub(super) fn type_from_net_port_header(
 
 pub(super) fn type_from_variable_port_header(
     header: &sv_parser::VariablePortHeader,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -438,7 +441,7 @@ pub(super) fn type_from_variable_port_header(
 
 pub(super) fn type_alias_from_data_type_or_implicit(
     data_type: &sv_parser::DataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
     let sv_parser::DataTypeOrImplicit::DataType(data_type) = data_type else {
@@ -450,11 +453,15 @@ pub(super) fn type_alias_from_data_type_or_implicit(
 /// The name of a type the parser reads as a class type. `p::t` parses as the
 /// class `p` with member `t` (IEEE 1800-2023 A.2.2.1); without classes, that
 /// is the type `t` of package `p`.
-fn class_type_name(class_type: &sv_parser::ClassType, syntax_tree: &SyntaxTree) -> Option<String> {
+fn class_type_name(
+    class_type: &sv_parser::ClassType,
+    syntax_tree: &AnalysisContext<'_>,
+) -> Option<String> {
     let base = reference_name(RefNode::PsClassIdentifier(&class_type.nodes.0), syntax_tree)?;
     match class_type.nodes.2.as_slice() {
         [] => Some(base),
         [(_, member, None)] if class_type.nodes.1.is_none() => Some(scope::qualified_name(
+            &syntax_tree.state,
             &base,
             &identifier_text(RefNode::ClassIdentifier(member), syntax_tree)?,
         )),
@@ -464,7 +471,7 @@ fn class_type_name(class_type: &sv_parser::ClassType, syntax_tree: &SyntaxTree) 
 
 pub(super) fn type_alias_from_data_type(
     data_type: &sv_parser::DataType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
     let name = match data_type {
@@ -480,7 +487,7 @@ pub(super) fn type_alias_from_data_type(
 pub(super) fn type_with_fallback_ranges_with_env(
     mut r#type: Type,
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Type {
@@ -520,7 +527,7 @@ pub(super) fn type_with_fallback_ranges_with_env(
 /// packed dimensions of a type name enclose that type's elements.
 pub(super) fn signed_element_depth_from_ref_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<usize> {
     let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases)?;
@@ -554,7 +561,7 @@ pub(super) fn is_signed_from_ref_node(node: RefNode<'_>) -> Option<bool> {
 
 pub(super) fn packed_ranges_from_ref_node_with_env(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<PackedRange> {
@@ -585,7 +592,7 @@ pub(super) fn packed_ranges_from_ref_node_with_env(
 
 pub(super) fn unpacked_ranges_from_dimensions_with_env(
     dimensions: &[sv_parser::UnpackedDimension],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
@@ -629,13 +636,14 @@ pub(super) fn unpacked_ranges_from_dimensions_with_env(
 }
 
 pub(super) fn validate_unpacked_dimension_sizes(
+    state: &AnalysisState,
     ranges: &[UnpackedRange],
     const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
     if ranges.iter().any(|range| {
         range
             .size()
-            .and_then(|size| eval_ast_const_expr(size, const_env))
+            .and_then(|size| eval_ast_const_expr(state, size, const_env))
             .is_some_and(|size| size <= 0)
     }) {
         return Err(AnalyzerError::Unsupported(
@@ -647,7 +655,7 @@ pub(super) fn validate_unpacked_dimension_sizes(
 
 pub(super) fn unpacked_ranges_from_variable_dimensions_with_env(
     dimensions: &[sv_parser::VariableDimension],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {

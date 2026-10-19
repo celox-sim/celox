@@ -83,7 +83,7 @@ pub(super) fn always_comb_body(
 
 pub(super) fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_dimensions: &ScopedMap<VariableDimensions>,
@@ -126,11 +126,11 @@ fn validation_nodes(node: RefNode<'_>, is_module: bool) -> impl Iterator<Item = 
 /// without lowering or materializing potentially enormous literal operands.
 fn validate_folded_parameter_names(
     initializer: &sv_parser::ConstantParamExpression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
     unavailable_parameters: &HashSet<String>,
 ) -> Converted<()> {
-    let signatures = const_functions::argument_names();
+    let signatures = const_functions::argument_names(&tree.state.const_functions);
     let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
     let mut value_operands = HashSet::<*const sv_parser::Expression>::default();
     let mut query_stack = vec![false];
@@ -217,7 +217,8 @@ fn validate_folded_parameter_names(
                     .is_some_and(|scope| scope.get(&name).is_some()));
         if let RefNode::TfCall(call) = node
             && (call.nodes.2.is_some()
-                || (!visible_value && const_functions::is_constant_function(&name)))
+                || (!visible_value
+                    && const_functions::is_constant_function(&tree.state.const_functions, &name)))
         {
             let (bindings, _) = expressions::bind_call_arguments(
                 &name,
@@ -226,6 +227,7 @@ fn validate_folded_parameter_names(
                 &signatures,
             )?;
             const_functions::validate_argument_bindings(
+                &tree.state.const_functions,
                 &name,
                 &bindings.iter().map(Option::is_some).collect::<Vec<_>>(),
             )?;
@@ -242,7 +244,7 @@ fn validate_folded_parameter_names(
 
 fn reject_silently_ignored_constructs_with_dimensions(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     indexed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     reject_constant_random_calls(node.clone(), syntax_tree)?;
@@ -620,7 +622,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                     syntax_tree,
                     indexed_dimensions,
                 )?;
-                if eval_ast_const_expr(&base, const_env).is_none() {
+                if eval_ast_const_expr(&syntax_tree.state, &base, const_env).is_none() {
                     return Err(AnalyzerError::Unsupported(
                         "indexed part-select start that is not constant".to_string(),
                     ));
@@ -638,7 +640,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                     &call.nodes.0.nodes.0,
                     sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some()
                         && !reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), syntax_tree)
-                            .is_some_and(|name| const_functions::is_constant_function(&name))
+                            .is_some_and(|name| const_functions::is_constant_function(&syntax_tree.state.const_functions, &name))
                 ) =>
             {
                 // A function whose body could not be converted is not a
@@ -647,7 +649,7 @@ fn reject_silently_ignored_constructs_with_dimensions(
                     && let Some(error) = reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
                         syntax_tree,
                     )
-                    .and_then(|name| const_functions::conversion_error(&name))
+                    .and_then(|name| const_functions::conversion_error(&syntax_tree.state.const_functions, &name))
                 {
                     return Err(error);
                 }
@@ -875,11 +877,13 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
 /// Reject an indexed part-select width that is not a positive constant.
 fn check_indexed_width(
     width: &sv_parser::ConstantExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     let width = indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)?;
-    if eval_ast_const_expr(&width, &dimensions.const_env).is_some_and(|width| width > 0) {
+    if eval_ast_const_expr(&syntax_tree.state, &width, &dimensions.const_env)
+        .is_some_and(|width| width > 0)
+    {
         Ok(())
     } else {
         Err(AnalyzerError::Unsupported(

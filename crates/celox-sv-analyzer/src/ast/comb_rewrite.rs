@@ -3,17 +3,20 @@
 use super::*;
 
 pub(super) fn expr_static_width(
+    state: &AnalysisState,
     expr: &Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Option<usize> {
     match expr {
-        Expr::Ident(name) => lvalue_expr_type(&LValue::Ident(name.clone()), packed_dimensions)
-            .map(|r#type| r#type.width)
-            .or_else(|| variable_size_function_width(&packed_dimensions.const_env, name, false))
-            .or_else(|| {
-                parameter_type_from_const_env(&packed_dimensions.const_env, name)
-                    .map(|r#type| r#type.width)
-            }),
+        Expr::Ident(name) => {
+            lvalue_expr_type(state, &LValue::Ident(name.clone()), packed_dimensions)
+                .map(|r#type| r#type.width)
+                .or_else(|| variable_size_function_width(&packed_dimensions.const_env, name, false))
+                .or_else(|| {
+                    parameter_type_from_const_env(&packed_dimensions.const_env, name)
+                        .map(|r#type| r#type.width)
+                })
+        }
         Expr::Literal(literal) => {
             typecheck::integral_literal_type_metadata(literal).map(|(width, _)| width)
         }
@@ -23,13 +26,13 @@ pub(super) fn expr_static_width(
             &packed_dimensions.const_env,
         ),
         Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
-            width.checked_add(expr_static_width(part, packed_dimensions)?)
+            width.checked_add(expr_static_width(state, part, packed_dimensions)?)
         }),
         Expr::RepeatConcat { count, parts } => {
-            let count = eval_ast_const_expr(count, &packed_dimensions.const_env)?;
+            let count = eval_ast_const_expr(state, count, &packed_dimensions.const_env)?;
             let count = usize::try_from(count).ok()?;
             let width = parts.iter().try_fold(0usize, |width, part| {
-                width.checked_add(expr_static_width(part, packed_dimensions)?)
+                width.checked_add(expr_static_width(state, part, packed_dimensions)?)
             })?;
             width.checked_mul(count)
         }
@@ -41,7 +44,7 @@ pub(super) fn expr_static_width(
             ) {
                 Some(1)
             } else {
-                expr_static_width(expr, packed_dimensions)
+                expr_static_width(state, expr, packed_dimensions)
             }
         }
         Expr::Binary { left, op, right } => {
@@ -49,8 +52,8 @@ pub(super) fn expr_static_width(
             // resolve the types of both original operands.
             if packed_dimensions.type_query && matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
             {
-                expr_static_width(left, packed_dimensions)?;
-                expr_static_width(right, packed_dimensions)?;
+                expr_static_width(state, left, packed_dimensions)?;
+                expr_static_width(state, right, packed_dimensions)?;
             }
             if matches!(
                 op,
@@ -69,11 +72,14 @@ pub(super) fn expr_static_width(
             ) {
                 Some(1)
             } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
-                expr_static_width(left, packed_dimensions)
+                expr_static_width(state, left, packed_dimensions)
             } else {
                 Some(
-                    expr_static_width(left, packed_dimensions)?
-                        .max(expr_static_width(right, packed_dimensions)?),
+                    expr_static_width(state, left, packed_dimensions)?.max(expr_static_width(
+                        state,
+                        right,
+                        packed_dimensions,
+                    )?),
                 )
             }
         }
@@ -83,8 +89,11 @@ pub(super) fn expr_static_width(
             else_expr,
             ..
         } => Some(
-            expr_static_width(then_expr, packed_dimensions)?
-                .max(expr_static_width(else_expr, packed_dimensions)?),
+            expr_static_width(state, then_expr, packed_dimensions)?.max(expr_static_width(
+                state,
+                else_expr,
+                packed_dimensions,
+            )?),
         ),
         Expr::Call {
             callee: Callee::System(function),

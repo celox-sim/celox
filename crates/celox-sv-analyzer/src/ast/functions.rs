@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn functions_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
@@ -133,7 +133,7 @@ pub(super) fn functions_from_module_node(
 
 fn validate_function_local_names(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
@@ -187,7 +187,7 @@ fn validate_function_local_names(
 
 fn validate_function_return_type(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
@@ -221,7 +221,7 @@ fn validate_function_return_type(
 
 fn validate_function_formal_types(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
@@ -288,7 +288,7 @@ fn validate_function_formal_types(
 
 fn validate_function_declaration_statements(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
@@ -372,7 +372,7 @@ fn validate_function_declaration_statements(
 
 fn validate_function_statement_or_null(
     statement: &sv_parser::StatementOrNull,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::StatementOrNull::Statement(statement) = statement else {
@@ -383,7 +383,7 @@ fn validate_function_statement_or_null(
 
 fn validate_function_statement(
     statement: &sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     match &statement.nodes.2 {
@@ -477,7 +477,7 @@ fn validate_function_statement(
 /// during unrelated function-type discovery.
 pub(super) fn function_result_dimensions(
     declaration: &sv_parser::FunctionDeclaration,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<(String, VariableDimensions)> {
@@ -512,7 +512,7 @@ pub(super) fn function_result_dimensions(
 
 pub(super) fn function_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
@@ -707,7 +707,7 @@ pub(super) fn function_from_declaration(
 /// nothing: its `output` / `inout` arguments are written by the call statement.
 pub(super) fn task_from_declaration(
     declaration: &sv_parser::TaskDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
@@ -814,7 +814,7 @@ fn insert_function_param_types(
 
 fn function_local_types_from_block_items(
     items: &[sv_parser::BlockItemDeclaration],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, FunctionLocalType>> {
@@ -823,7 +823,7 @@ fn function_local_types_from_block_items(
 
 pub(super) fn function_local_packed_dimensions_from_block_items(
     items: &[sv_parser::BlockItemDeclaration],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<VariablePackedDimensions> {
@@ -837,7 +837,7 @@ pub(super) fn function_local_packed_dimensions_from_block_items(
 
 pub(super) fn function_local_packed_dimensions_from_block_item_iter<'a>(
     items: impl IntoIterator<Item = &'a sv_parser::BlockItemDeclaration>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<VariablePackedDimensions> {
@@ -873,7 +873,7 @@ pub(super) fn function_local_packed_dimensions_from_block_item_iter<'a>(
 
 fn function_local_types_from_block_item_iter<'a>(
     items: impl IntoIterator<Item = &'a sv_parser::BlockItemDeclaration>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, FunctionLocalType>> {
@@ -902,8 +902,10 @@ fn function_local_types_from_block_item_iter<'a>(
                     .packed_ranges()
                     .iter()
                     .try_fold(1usize, |acc, range| {
-                        let left = eval_ast_const_expr(range.left(), const_env)?;
-                        let right = eval_ast_const_expr(range.right(), const_env)?;
+                        let left =
+                            eval_ast_const_expr(&syntax_tree.state, range.left(), const_env)?;
+                        let right =
+                            eval_ast_const_expr(&syntax_tree.state, range.right(), const_env)?;
                         acc.checked_mul(left.abs_diff(right) as usize + 1)
                     })?
             };
@@ -922,7 +924,7 @@ fn function_local_types_from_block_item_iter<'a>(
 
 pub(super) fn function_return_is_2state(
     node: &sv_parser::FunctionDataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
     let r#type = match node {
@@ -948,7 +950,7 @@ pub(super) fn function_return_is_2state(
 
 pub(super) fn function_return_type(
     node: &sv_parser::FunctionDataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -973,7 +975,7 @@ pub(super) fn function_return_type(
 /// The declared return shape is needed by `$dimensions`, before call inlining.
 pub(super) fn function_return_dimensions(
     node: &sv_parser::FunctionDataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<usize> {
@@ -988,7 +990,7 @@ pub(super) fn function_return_dimensions(
 
 pub(super) fn function_return_first_packed_dimension_width(
     node: &sv_parser::FunctionDataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     return_type: Option<ExprType>,
@@ -1005,8 +1007,8 @@ pub(super) fn function_return_first_packed_dimension_width(
     else {
         return return_type.map(|r#type| r#type.width);
     };
-    let left = eval_ast_const_expr(first.left(), const_env)?;
-    let right = eval_ast_const_expr(first.right(), const_env)?;
+    let left = eval_ast_const_expr(&syntax_tree.state, first.left(), const_env)?;
+    let right = eval_ast_const_expr(&syntax_tree.state, first.right(), const_env)?;
     usize::try_from(left.abs_diff(right))
         .ok()
         .and_then(|width| width.checked_add(1))
@@ -1014,7 +1016,7 @@ pub(super) fn function_return_first_packed_dimension_width(
 
 pub(super) fn tf_params(
     list: &sv_parser::TfPortList,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<FunctionParam> {
@@ -1142,7 +1144,7 @@ pub(super) fn tf_params(
 
 pub(super) fn tf_item_params(
     items: &[sv_parser::TfItemDeclaration],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<FunctionParam> {
@@ -1203,7 +1205,7 @@ pub(super) fn tf_item_params(
 
 fn value_type_from_data_type_or_implicit(
     node: &sv_parser::DataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -1217,7 +1219,7 @@ fn value_type_from_data_type_or_implicit(
 
 fn value_type_from_data_type(
     node: &sv_parser::DataType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -1231,17 +1233,17 @@ fn value_type_from_data_type(
 
 fn value_type_from_ref_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
     let r#type = function_type_from_ref_node(node, syntax_tree, const_env, type_aliases)?;
-    expr_type_from_type(&r#type, const_env)
+    expr_type_from_type(&syntax_tree.state, &r#type, const_env)
 }
 
 pub(super) fn function_type_from_ref_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -1333,7 +1335,7 @@ fn task_statement_list(statements: &[sv_parser::StatementOrNull]) -> Vec<&sv_par
 
 fn function_body_expr(
     statements: &[&sv_parser::Statement],
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
@@ -1385,7 +1387,7 @@ fn function_body_expr(
 fn function_expr_from_sequence(
     statements: &[&sv_parser::Statement],
     locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
@@ -1550,7 +1552,7 @@ fn function_statement_ref(statement: &sv_parser::StatementOrNull) -> Option<&sv_
 fn function_expr_from_statement_or_null_stmt(
     statement: &sv_parser::StatementOrNull,
     locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
@@ -1569,7 +1571,7 @@ fn function_expr_from_statement_or_null_stmt(
 fn function_expr_from_statement(
     statement: &sv_parser::Statement,
     locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
@@ -1612,7 +1614,8 @@ fn function_expr_from_statement(
                     let rhs = match (&lhs, rhs, op) {
                         (_, Some(rhs), Some("=")) => Some(rhs),
                         (Some(lhs), Some(rhs), Some(op)) => {
-                            assignment_op_expr(lhs, op, rhs, packed_dimensions).ok()
+                            assignment_op_expr(&syntax_tree.state, lhs, op, rhs, packed_dimensions)
+                                .ok()
                         }
                         _ => None,
                     };
@@ -1673,7 +1676,7 @@ fn function_expr_from_statement(
 fn function_expr_from_conditional_statement(
     statement: &sv_parser::ConditionalStatement,
     locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
@@ -1811,7 +1814,7 @@ pub(super) fn procedural_truth_condition(condition: Expr) -> Expr {
 fn function_expr_from_case_statement(
     statement: &sv_parser::CaseStatement,
     locals: &mut HashMap<String, Expr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
@@ -1957,7 +1960,7 @@ pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bo
 /// The signature of a function whose body has no expression form.
 fn function_signature_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Function> {
@@ -2008,7 +2011,7 @@ fn function_signature_from_declaration(
 /// The signature of a task whose body has no expression form.
 fn task_signature_from_declaration(
     declaration: &sv_parser::TaskDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Function> {
