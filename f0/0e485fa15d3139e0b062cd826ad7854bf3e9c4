@@ -1,0 +1,1 @@
+Repair PR #1575: the Veryl roll adds Factor::ResetValue and causes 31 exhaustive-match compile errors. Add frontend constant lowering and regression coverage before republishing the existing integration PR.
