@@ -11,7 +11,8 @@
 
 use super::procedural::*;
 use super::*;
-use celox_frontend_core::process::ProcessKernelBuilder;
+use celox_design::{CounterKind, NbaSite, WaitSite};
+use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
 use num_traits::{ToPrimitive, Zero};
@@ -34,6 +35,8 @@ pub(super) struct Ff<'p, 'a> {
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
+    /// Variables a nonblocking assignment writes.
+    nonblocking: HashSet<SourceVarId>,
     /// The bits whose working value is the process result.
     targets: Vec<(SourceVarId, BitAccess)>,
     loops: Vec<LoopBlocks>,
@@ -57,6 +60,12 @@ pub(super) struct Ff<'p, 'a> {
     /// body is lowered, and the process reads and writes stable state
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
+    /// The index of the process being lowered among the module's kernels.
+    process: usize,
+    /// The wait sites of the process, by local index.
+    wait_sites: Vec<WaitSite<SourceVarId>>,
+    /// The nonblocking assignment sites of the process, by local index.
+    nba_sites: Vec<NbaSite<SourceVarId>>,
     direct: bool,
 }
 
@@ -87,6 +96,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             m,
             b: SIRBuilder::new(),
             working: HashSet::default(),
+            nonblocking: HashSet::default(),
             targets: Vec::new(),
             loops: Vec::new(),
             functions: Vec::new(),
@@ -101,6 +111,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             direct: false,
+            process: 0,
+            wait_sites: Vec::new(),
+            nba_sites: Vec::new(),
         }
     }
 
@@ -131,6 +144,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         if blocking {
             self.working.insert(id);
+        } else {
+            self.nonblocking.insert(id);
         }
         if self.m.is_hidden(id) {
             return;
@@ -198,7 +213,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     writes.extend(parts.iter().map(|part| (part.clone(), !nonblocking)));
                 }
                 // `$readmemh` writes its destination immediately.
-                sv::ir::Stmt::SystemTask { task, args } => {
+                sv::ir::Stmt::SystemTask { task, args, .. } => {
                     if let Some(destination) = readmem_destination(*task, args) {
                         writes.push((sv::ir::LValue::Ident(destination.to_string()), true));
                     }
@@ -272,7 +287,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*aliases.get(id).unwrap_or(id))
             } else if let Some(var) = aliases.get(id) {
                 working(*var)
-            } else if working_set.contains(id) || variables.get(id).is_some_and(|var| var.hidden) {
+            } else if working_set.contains(id)
+                || variables.get(id).is_some_and(SvVariable::is_scratch)
+            {
                 working(*id)
             } else {
                 stable(*id)
@@ -819,6 +836,14 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.random(args.first().and_then(Option::as_ref))?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Time | sv::ir::SystemFunction::Stime),
+                    ),
+                args,
+                ..
+            } => self.time(*function, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 args,
                 arg_order,
@@ -1213,6 +1238,61 @@ impl<'p, 'a> Ff<'p, 'a> {
             signed: false,
         };
         self.hidden("urandom_range_result", &result, false)
+    }
+
+    /// IEEE 1800-2023 20.3.1: `$time` is the simulation time, which counts
+    /// the global time precision, in the time unit of the calling scope,
+    /// rounded to an integer; halves round up. The analyzer passes the
+    /// precision's units per time unit as the operand. `$stime` (20.3.2) is
+    /// its low 32 bits.
+    fn time(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let divisor = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported(format!("operand of `{function}`")))?
+            .clone();
+        let binary = |left, op, right| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let time = Expr::Ident(self.m.time_slot());
+        let time = if divisor == Expr::Literal("64'd1".into()) {
+            time
+        } else {
+            let half = binary(
+                divisor.clone(),
+                BinaryOp::Shr,
+                Expr::Literal("64'd1".into()),
+            );
+            let rounds_up = binary(
+                binary(time.clone(), BinaryOp::Mod, divisor.clone()),
+                BinaryOp::Ge,
+                half,
+            );
+            binary(
+                binary(time, BinaryOp::Div, divisor),
+                BinaryOp::Add,
+                Expr::Resize {
+                    expr: Box::new(rounds_up),
+                    width: 64,
+                    signed: false,
+                },
+            )
+        };
+        Ok(match function {
+            sv::ir::SystemFunction::Stime => Expr::Resize {
+                expr: Box::new(time),
+                width: 32,
+                signed: false,
+            },
+            _ => time,
+        })
     }
 
     /// IEEE 1800-2023 20.14.1 and Annex N: `$random` is
@@ -1803,12 +1883,43 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
         match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: true,
+            } if self.kernel.is_some() => {
+                self.nonblocking(std::slice::from_ref(lhs), rhs)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: true,
+            } if self.kernel.is_some() => {
+                self.nonblocking(parts, rhs)?;
+                Ok(true)
+            }
             sv::ir::Stmt::Assign { lhs, rhs, .. } => {
                 self.assign(lhs, rhs)?;
                 Ok(true)
             }
             sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
                 self.assign_concat(parts, rhs)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Delay {
+                amount,
+                ticks_per_unit,
+            } => {
+                self.delay(amount, *ticks_per_unit)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::WaitEvent(items) => {
+                self.wait_event(items)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::Wait(condition) => {
+                self.wait_level(condition)?;
                 Ok(true)
             }
             sv::ir::Stmt::Local { name, init } => {
@@ -1924,7 +2035,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.eval(expr, None)?;
                 Ok(true)
             }
-            sv::ir::Stmt::SystemTask { task, args } => self.system_task(*task, args),
+            sv::ir::Stmt::SystemTask { task, args, site } => {
+                self.system_task(*task, args, site.as_ref())
+            }
         }
     }
 
@@ -1934,6 +2047,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         task: sv::ir::SystemTask,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<bool, sv::AnalyzerError> {
         if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
@@ -1957,7 +2071,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .ok_or_else(|| unsupported(format!("`{task}` address")))?,
                 );
             }
-            let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
+            let (id, words) = self
+                .m
+                .readmem(format, args, addresses[0], addresses[1], site)?;
             for word in words {
                 let width = word.access.msb - word.access.lsb + 1;
                 let reg = if word.mask.is_zero() {
@@ -1974,13 +2090,29 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             return Ok(true);
         }
+        // IEEE 1800-2023 24.7: `$exit` outside a program block is ignored,
+        // with a warning.
+        if task == sv::ir::SystemTask::Exit {
+            self.m
+                .warn(crate::FrontendWarningKind::ExitOutsideProgram, site);
+            return Ok(true);
+        }
         let kind =
             system_task_kind(task).ok_or_else(|| unsupported(format!("system task `{task}`")))?;
         // A process ends the simulation itself; the rest of its body does not
-        // run.
-        if matches!(kind, SystemTaskKind::Finish) && self.kernel.is_some() {
-            self.with_kernel(ProcessKernelBuilder::finish);
-            return Ok(false);
+        // run. A stop suspends the process with the simulation, which then
+        // continues after the call.
+        match kind {
+            SystemTaskKind::Control(RuntimeEventKind::Finish) if self.kernel.is_some() => {
+                self.with_kernel(ProcessKernelBuilder::finish);
+                return Ok(false);
+            }
+            SystemTaskKind::Control(RuntimeEventKind::Stop) if self.kernel.is_some() => {
+                self.with_kernel(ProcessKernelBuilder::stop)
+                    .map_err(|error| unsupported(error.to_string()))?;
+                return Ok(true);
+            }
+            _ => {}
         }
         let assertion = if matches!(kind, SystemTaskKind::Assertion(_)) {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
@@ -2042,7 +2174,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Finish => RuntimeEventKind::Finish,
+            SystemTaskKind::Control(kind) => *kind,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
             SystemTaskKind::Assertion(kind) => *kind,
@@ -2353,7 +2485,32 @@ impl<'p, 'a> Ff<'p, 'a> {
             sv::ir::LoopKind::Repeat(count) => {
                 let signed = self.expr_signed(count);
                 let (id, name) = self.m.temp("repeat", 64, false, false);
-                let value = self.eval(count, Some((64, signed)))?;
+                let value = if self.kernel.is_some() {
+                    // A count with an unknown bit, or a negative one, runs
+                    // the body zero times (IEEE 1800-2023 12.7.2).
+                    let count = if signed {
+                        sv::ir::Expr::Mux {
+                            condition: Box::new(sv::ir::Expr::Binary {
+                                left: Box::new(count.clone()),
+                                op: sv::ir::BinaryOp::Lt,
+                                right: Box::new(sv::ir::Expr::Literal("0".to_string())),
+                            }),
+                            then_expr: Box::new(sv::ir::Expr::Literal("0".to_string())),
+                            else_expr: Box::new(count.clone()),
+                        }
+                    } else {
+                        count.clone()
+                    };
+                    let mut arena = SLTNodeArena::new();
+                    let node = self.expr_slt(&count, None, &mut arena)?;
+                    let original = self.lower_slt(&arena, node)?;
+                    let node =
+                        coerce_node_width(&mut arena, node, Some(64), signed).map_err(slt_error)?;
+                    let value = self.lower_slt(&arena, node)?;
+                    self.zero_if_unknown(value, original)
+                } else {
+                    self.eval(count, Some((64, signed)))?
+                };
                 self.store(id, SIROffset::Static(0), 64, value);
                 Some(name)
             }
@@ -2409,6 +2566,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         if falls? {
             self.jump(latch);
         }
+        // A kernel loop that may not suspend yields now and then, so the
+        // runtime charges it against the time slot's budget instead of
+        // spinning in the kernel.
+        let header = if self.kernel.is_some() && !always_suspends(body) {
+            self.yielding_back_edge(header)?
+        } else {
+            header
+        };
         // Latch: the step, then the condition again. A counted loop whose
         // step leaves its variable unchanged would never end; it stops the
         // simulation with an error instead.
@@ -2581,11 +2746,14 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Lower a stateful combinational process. Its memory guard records the
     /// implicit sensitivity values, independently of internal settling calls.
+    /// `explicit_targets` are hidden buffers consumed outside this process,
+    /// such as child-port actuals. They retain their module-wide addresses.
     pub fn lower_comb_process(
         mut self,
         body: &[sv::ir::Stmt],
         sensitivity_body: &[sv::ir::Stmt],
         kind: sv::ir::CombProcessKind,
+        explicit_targets: &[SourceVarId],
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
         let always_comb = kind != sv::ir::CombProcessKind::AlwaysStar;
@@ -2611,6 +2779,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         self.scan(body, &mut HashSet::default());
+        for &id in explicit_targets {
+            let width = self.m.var(id).width;
+            self.targets.push((id, BitAccess::new(0, width - 1)));
+        }
         if self.exec_block(body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
@@ -2618,7 +2790,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut targets: Vec<_> = self
             .targets
             .iter()
-            .filter(|(id, _)| !self.m.is_hidden(*id))
+            .filter(|(id, _)| !self.m.is_hidden(*id) || explicit_targets.contains(id))
             .map(|(id, access)| VarAtomBase::new(*id, access.lsb, access.msb))
             .collect();
         targets.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
@@ -2736,7 +2908,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut private_locals = HashMap::default();
         let unit = seal_builder(self.b).into_map_addr(&mut |addr| {
             let id = addr.var_id;
-            if !self.m.is_hidden(id) || self.m.created.contains(&id) {
+            if !self
+                .m
+                .variables
+                .get(&id)
+                .is_some_and(SvVariable::is_scratch)
+                || self.m.created.contains(&id)
+                || explicit_targets.contains(&id)
+            {
                 return id;
             }
             *private_locals.entry(id).or_insert_with(|| {
@@ -2795,14 +2974,7 @@ impl<'p, 'a> Ff<'p, 'a> {
     pub fn lower_process(
         mut self,
         body: &[sv::ir::Stmt],
-    ) -> Result<
-        (
-            ExecutionUnit<Addr>,
-            ExecutionUnit<Addr>,
-            Vec<VarAtomBase<SourceVarId>>,
-        ),
-        sv::AnalyzerError,
-    > {
+    ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // Merge the written ranges of each variable.
@@ -2829,14 +3001,275 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .map(|access| VarAtomBase::new(id, access.lsb, access.msb)),
             );
         }
+        // A variable the process writes both ways keeps its nonblocking
+        // values apart: blocking reads see the blocking value, and the
+        // nonblocking update lands after it (IEEE 1800-2023 10.4).
+        let mut mixed: Vec<SourceVarId> = self
+            .nonblocking
+            .intersection(&self.working)
+            .copied()
+            .filter(|&id| !self.m.is_hidden(id) && self.m.var(id).array_dims.is_empty())
+            .collect();
+        mixed.sort_by_key(|id| id.0);
+        let staged: Vec<NbaStage> = mixed
+            .into_iter()
+            .map(|id| {
+                let (value, value_name) = self.m.shadow(id, "nba_value", false);
+                let (mask, mask_name) = self.m.shadow(id, "nba_mask", true);
+                NbaStage {
+                    id,
+                    name: self.m.var(id).path.join("."),
+                    value,
+                    value_name,
+                    mask,
+                    mask_name,
+                }
+            })
+            .collect();
+        let body = if staged.is_empty() {
+            body.to_vec()
+        } else {
+            stage_nonblocking(body, &staged, self.m)
+        };
         emit_ff_seeds(&mut self.b, &targets);
-        if self.exec_block(body)? {
+        for stage in &staged {
+            let width = self.m.var(stage.mask).width;
+            let zero = self.b.alloc_bit(width, false);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+            self.store(stage.mask, SIROffset::Static(0), width, zero);
+        }
+        if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let eval = seal_drained(self.b);
+        let (active_targets, nba_targets): (Vec<_>, Vec<_>) = targets
+            .iter()
+            .copied()
+            .partition(|target| self.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
         emit_ff_commits(&mut apply, &targets);
-        Ok((eval, seal_builder(apply), targets))
+        emit_nba_merges(&mut apply, &staged, self.m);
+        let mut active = SIRBuilder::new();
+        emit_ff_commits(&mut active, &active_targets);
+        let mut nba = SIRBuilder::new();
+        emit_ff_commits(&mut nba, &nba_targets);
+        emit_nba_merges(&mut nba, &staged, self.m);
+        Ok(FfProcessUnits {
+            eval,
+            apply: seal_builder(apply),
+            active: seal_builder(active),
+            nba: seal_builder(nba),
+            targets,
+        })
+    }
+}
+
+/// The units of an edge-triggered process: its evaluation, the commit of
+/// all its results, and that commit split into the blocking results (the
+/// active region) and the nonblocking ones (the NBA region).
+pub(super) struct FfProcessUnits {
+    pub eval: ExecutionUnit<Addr>,
+    pub apply: ExecutionUnit<Addr>,
+    pub active: ExecutionUnit<Addr>,
+    pub nba: ExecutionUnit<Addr>,
+    pub targets: Vec<VarAtomBase<SourceVarId>>,
+}
+
+/// The staging of a variable a process writes both by blocking and by
+/// nonblocking assignments: the nonblocking value and a mask of the bits
+/// the nonblocking assignments wrote.
+struct NbaStage {
+    id: SourceVarId,
+    name: String,
+    value: SourceVarId,
+    value_name: String,
+    mask: SourceVarId,
+    mask_name: String,
+}
+
+/// `stmts` with every nonblocking assignment to a staged variable writing
+/// its staging value instead, and marking the written bits in its mask.
+fn stage_nonblocking(
+    stmts: &[sv::ir::Stmt],
+    staged: &[NbaStage],
+    pm: &ProcModule<'_>,
+) -> Vec<sv::ir::Stmt> {
+    let stage_of = |lvalue: &sv::ir::LValue| {
+        staged
+            .iter()
+            .find(|stage| pm.id(lvalue.name()) == Some(stage.id))
+    };
+    let renamed = |lvalue: &sv::ir::LValue, name: &str| match lvalue {
+        sv::ir::LValue::Ident(_) => sv::ir::LValue::Ident(name.to_string()),
+        sv::ir::LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+            ..
+        } => sv::ir::LValue::Select {
+            name: name.to_string(),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            array_slice_width: array_slice_width.clone(),
+            array_slice_reversed: *array_slice_reversed,
+        },
+    };
+    let mark = |lvalue: &sv::ir::LValue, stage: &NbaStage| sv::ir::Stmt::Assign {
+        lhs: renamed(lvalue, &stage.mask_name),
+        rhs: sv::ir::Expr::Literal("'1".to_string()),
+        nonblocking: true,
+    };
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        match stmt {
+            sv::ir::Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: true,
+            } if stage_of(lhs).is_some() => {
+                let stage = stage_of(lhs).unwrap();
+                out.push(sv::ir::Stmt::Assign {
+                    lhs: renamed(lhs, &stage.value_name),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                out.push(mark(lhs, stage));
+            }
+            sv::ir::Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking: true,
+            } if parts.iter().any(|part| stage_of(part).is_some()) => {
+                out.push(sv::ir::Stmt::AssignConcat {
+                    parts: parts
+                        .iter()
+                        .map(|part| match stage_of(part) {
+                            Some(stage) => renamed(part, &stage.value_name),
+                            None => part.clone(),
+                        })
+                        .collect(),
+                    rhs: rhs.clone(),
+                    nonblocking: true,
+                });
+                for part in parts {
+                    if let Some(stage) = stage_of(part) {
+                        out.push(mark(part, stage));
+                    }
+                }
+            }
+            sv::ir::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => out.push(sv::ir::Stmt::If {
+                condition: condition.clone(),
+                then_body: stage_nonblocking(then_body, staged, pm),
+                else_body: stage_nonblocking(else_body, staged, pm),
+            }),
+            sv::ir::Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => out.push(sv::ir::Stmt::Case {
+                kind: *kind,
+                selector: selector.clone(),
+                items: items
+                    .iter()
+                    .map(|item| sv::ir::CaseItem {
+                        labels: item.labels.clone(),
+                        body: stage_nonblocking(&item.body, staged, pm),
+                    })
+                    .collect(),
+                default: default
+                    .as_ref()
+                    .map(|body| stage_nonblocking(body, staged, pm)),
+            }),
+            sv::ir::Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => out.push(sv::ir::Stmt::Loop {
+                kind: kind.clone(),
+                init: init.clone(),
+                condition: condition.clone(),
+                step: step.clone(),
+                body: stage_nonblocking(body, staged, pm),
+            }),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// Publish the staged nonblocking values: each variable takes its staging
+/// value in the bits the mask marks, after its blocking value was
+/// committed.
+fn emit_nba_merges(builder: &mut SIRBuilder<Addr>, staged: &[NbaStage], pm: &ProcModule<'_>) {
+    for stage in staged {
+        let _ = &stage.name;
+        let variable = pm.var(stage.id);
+        let width = variable.width;
+        let current = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Load(
+            current,
+            stable(stage.id),
+            SIROffset::Static(0),
+            width,
+        ));
+        let value = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Load(
+            value,
+            working(stage.value),
+            SIROffset::Static(0),
+            width,
+        ));
+        let mask = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Load(
+            mask,
+            working(stage.mask),
+            SIROffset::Static(0),
+            width,
+        ));
+        let keep = builder.alloc_bit(width, false);
+        builder.emit(SIRInstruction::Unary(keep, UnaryOp::BitNot, mask));
+        let kept = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(kept, current, BinaryOp::And, keep));
+        let taken = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(taken, value, BinaryOp::And, mask));
+        let merged = if variable.is_4state {
+            builder.alloc_logic(width)
+        } else {
+            builder.alloc_bit(width, false)
+        };
+        builder.emit(SIRInstruction::Binary(merged, kept, BinaryOp::Or, taken));
+        builder.emit(SIRInstruction::Store(
+            stable(stage.id),
+            SIROffset::Static(0),
+            width,
+            merged,
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 }
 
@@ -2847,29 +3280,9 @@ impl Ff<'_, '_> {
         mut self,
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
-    ) -> Result<ExecutionUnit<Addr>, sv::AnalyzerError> {
-        // A nonblocking update would take effect in a later region of the
-        // time step, after the process has run on.
-        for stmt in body {
-            let mut nonblocking = false;
-            stmt.walk(&mut |stmt| {
-                nonblocking |= matches!(
-                    stmt,
-                    sv::ir::Stmt::Assign {
-                        nonblocking: true,
-                        ..
-                    } | sv::ir::Stmt::AssignConcat {
-                        nonblocking: true,
-                        ..
-                    }
-                );
-            });
-            if nonblocking {
-                return Err(unsupported(
-                    "nonblocking assignment in an initial block that runs as a process",
-                ));
-            }
-        }
+        process: usize,
+    ) -> Result<KernelUnit, sv::AnalyzerError> {
+        self.process = process;
         let mut kernel = ProcessKernelBuilder::new(slots);
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
@@ -2878,8 +3291,436 @@ impl Ff<'_, '_> {
         std::mem::swap(&mut self.b, kernel.builder());
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
-        Ok(unit)
+        Ok(KernelUnit {
+            unit,
+            wait_sites: self.wait_sites,
+            nba_sites: self.nba_sites,
+        })
     }
+
+    /// A nonblocking assignment in a process (IEEE 1800-2023 10.4.2): the
+    /// right-hand side is evaluated now, once, and each target part becomes
+    /// an update the runtime queues for the NBA region.
+    fn nonblocking(
+        &mut self,
+        parts: &[sv::ir::LValue],
+        rhs: &sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        let mut targets = Vec::with_capacity(parts.len());
+        for part in parts {
+            targets.push(self.nba_target(part)?);
+        }
+        let total: usize = targets.iter().map(|(_, _, width)| width).sum();
+        let four_state = targets.iter().any(|(id, _, _)| self.m.var(*id).is_4state);
+        let (_, value_name) = self.m.temp("nba", total, false, four_state);
+        self.assign(&sv::ir::LValue::Ident(value_name.clone()), rhs)?;
+        // The parts, most significant first, take consecutive bits of the
+        // value.
+        let mut high = total;
+        for (id, lsb, width) in targets {
+            let low = high - width;
+            let (staged, staged_name) =
+                self.m
+                    .temp("nba_part", width, false, self.m.var(id).is_4state);
+            self.assign(
+                &sv::ir::LValue::Ident(staged_name),
+                &sv::ir::Expr::Select {
+                    expr: Box::new(sv::ir::Expr::Ident(value_name.clone())),
+                    msb: sv::ir::ConstExpr::Literal((high - 1).to_string()),
+                    lsb: sv::ir::ConstExpr::Literal(low.to_string()),
+                    signed: false,
+                },
+            )?;
+            high = low;
+            let site = NbaSite {
+                process: self.process,
+                target: id,
+                lsb,
+                width,
+                value: staged,
+                offset: None,
+                pending: None,
+            };
+            let index = self.nba_sites.len() as u32;
+            let staged_four_state = self.m.var(staged).is_4state;
+            self.with_kernel(|kernel| {
+                kernel.nonblocking(index, &site, |builder| {
+                    let value = if staged_four_state {
+                        builder.alloc_logic(width)
+                    } else {
+                        builder.alloc_bit(width, false)
+                    };
+                    builder.emit(SIRInstruction::Load(
+                        value,
+                        stable(staged),
+                        SIROffset::Static(0),
+                        width,
+                    ));
+                    Ok::<_, ProcessKernelError>((value, None))
+                })
+            })
+            .map_err(kernel_error)?;
+            self.nba_sites.push(site);
+        }
+        Ok(())
+    }
+
+    /// The variable and the constant bit range a nonblocking assignment in
+    /// a process writes.
+    fn nba_target(
+        &self,
+        lvalue: &sv::ir::LValue,
+    ) -> Result<(SourceVarId, usize, usize), sv::AnalyzerError> {
+        let id = self
+            .m
+            .id(lvalue.name())
+            .ok_or_else(|| unsupported(format!("assignment target `{}`", lvalue.name())))?;
+        let variable = self.m.var(id);
+        if !variable.array_dims.is_empty() {
+            return Err(unsupported(
+                "nonblocking assignment to an unpacked array in a process",
+            ));
+        }
+        match lvalue {
+            sv::ir::LValue::Ident(_) => Ok((id, 0, variable.width)),
+            sv::ir::LValue::Select { msb, lsb, .. } => {
+                let constant = |expr| {
+                    sv::typecheck::eval_const_expr_with_types(
+                        expr,
+                        self.m.constants,
+                        self.m.parameter_types,
+                    )
+                };
+                let (Some(msb), Some(lsb)) = (constant(msb), constant(lsb)) else {
+                    return Err(unsupported(
+                        "nonblocking assignment with a run-time position in a process",
+                    ));
+                };
+                let (Some(msb), Some(lsb)) = (
+                    packed_index_offset(variable, msb),
+                    packed_index_offset(variable, lsb),
+                ) else {
+                    return Err(unsupported("nonblocking assignment outside its target"));
+                };
+                if msb < lsb {
+                    return Err(unsupported(
+                        "nonblocking assignment to a reversed part select in a process",
+                    ));
+                }
+                Ok((id, lsb, msb - lsb + 1))
+            }
+        }
+    }
+
+    /// `#amount` (IEEE 1800-2023 9.4.1). The amount is self-determined and
+    /// read as an unsigned 64-bit time: a negative value as its two's
+    /// complement, and a value with an unknown bit as zero. `#0` resumes in
+    /// the inactive region.
+    fn delay(
+        &mut self,
+        amount: &sv::ir::Expr,
+        ticks_per_unit: u64,
+    ) -> Result<(), sv::AnalyzerError> {
+        let signed = self.expr_signed(amount);
+        let mut arena = SLTNodeArena::new();
+        let node = self.expr_slt(amount, None, &mut arena)?;
+        let original = self.lower_slt(&arena, node)?;
+        let node = coerce_node_width(&mut arena, node, Some(PROCESS_DELAY_WIDTH), signed)
+            .map_err(slt_error)?;
+        let delay = self.lower_slt(&arena, node)?;
+        let mut delay = self.zero_if_unknown(delay, original);
+        if ticks_per_unit > 1 {
+            // Check before multiplying so the 64-bit delay slot cannot wrap.
+            let limit = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b.emit(SIRInstruction::Imm(
+                limit,
+                SIRValue::new(u64::MAX / ticks_per_unit),
+            ));
+            let overflow = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                overflow,
+                delay,
+                BinaryOp::GtU,
+                limit,
+            ));
+            let error = self.b.new_block();
+            let scaled = self.b.new_block();
+            self.b.seal_block(SIRTerminator::Branch {
+                cond: overflow,
+                true_block: (error, Vec::new()),
+                false_block: (scaled, Vec::new()),
+            });
+            self.b.switch_to_block(error);
+            let code = self
+                .m
+                .runtime_error("simulation delay overflows the simulation time range".to_string());
+            self.b.seal_block(SIRTerminator::Error(code));
+            self.b.switch_to_block(scaled);
+            let factor = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b
+                .emit(SIRInstruction::Imm(factor, SIRValue::new(ticks_per_unit)));
+            let product = self.b.alloc_bit(PROCESS_DELAY_WIDTH, false);
+            self.b.emit(SIRInstruction::Binary(
+                product,
+                delay,
+                BinaryOp::Mul,
+                factor,
+            ));
+            delay = product;
+        }
+        self.with_kernel(|kernel| kernel.inactive_delay(delay))
+            .map_err(kernel_error)
+    }
+
+    /// `value` as a two-state register that is zero when `source` has an
+    /// unknown bit.
+    fn zero_if_unknown(&mut self, value: RegisterId, source: RegisterId) -> RegisterId {
+        let width = self.b.register(&value).width();
+        if !matches!(self.b.register(&source), RegisterType::Logic { .. }) {
+            return value;
+        }
+        // The reduction XOR of a value is unknown exactly when a bit is.
+        let reduced = self.b.alloc_logic(1);
+        self.b
+            .emit(SIRInstruction::Unary(reduced, UnaryOp::Xor, source));
+        let zero = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let is_zero = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Binary(
+            is_zero,
+            reduced,
+            BinaryOp::EqCase,
+            zero,
+        ));
+        let is_one = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Binary(
+            is_one,
+            reduced,
+            BinaryOp::EqCase,
+            one,
+        ));
+        let known = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(known, is_zero, BinaryOp::Or, is_one));
+        let value = match *self.b.register(&value) {
+            RegisterType::Logic { width } => {
+                let two_state = self.b.alloc_bit(width, false);
+                self.b
+                    .emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, value));
+                two_state
+            }
+            _ => value,
+        };
+        let zero = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let result = self.b.alloc_bit(width, false);
+        self.b.emit(SIRInstruction::Mux(result, known, value, zero));
+        result
+    }
+
+    /// `@(items)` (IEEE 1800-2023 9.4.2): the process waits for an
+    /// occurrence of any item, which the runtime detects on the watched
+    /// signals themselves, so nothing is left to check when it resumes.
+    fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
+        let mut terms = Vec::new();
+        for item in items {
+            let id = match &item.expr {
+                sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| !self.m.is_hidden(id)),
+                _ => None,
+            }
+            .ok_or_else(|| unsupported("event expression other than a variable"))?;
+            match item.edge {
+                sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
+                sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
+                sv::ir::EventEdge::Neg => terms.push((id, CounterKind::Falls)),
+                sv::ir::EventEdge::Both => {
+                    terms.push((id, CounterKind::Rises));
+                    terms.push((id, CounterKind::Falls));
+                }
+            }
+        }
+        let site = self.wait_site(terms);
+        self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
+            kernel.suspend_wait(site)?;
+            let woken = kernel.builder().alloc_bit(1, false);
+            kernel
+                .builder()
+                .emit(SIRInstruction::Imm(woken, SIRValue::new(1u8)));
+            kernel.wake_if(woken);
+            Ok(())
+        })
+        .map_err(kernel_error)
+    }
+
+    /// `wait (condition)` (IEEE 1800-2023 9.4.3): the process goes on at once
+    /// if the condition holds, and otherwise checks it again whenever a
+    /// variable it reads changes.
+    fn wait_level(&mut self, condition: &sv::ir::Expr) -> Result<(), sv::AnalyzerError> {
+        let mut names = HashSet::default();
+        expr_idents(condition, &mut names);
+        subroutine_reads(self.m, condition, &mut names);
+        let mut ids: Vec<_> = names
+            .iter()
+            .filter_map(|name| self.m.id(name))
+            .filter(|&id| !self.m.is_hidden(id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let site = self.wait_site(
+            ids.into_iter()
+                .map(|id| (id, CounterKind::Changes))
+                .collect(),
+        );
+        // The condition is lowered once per check: before the process
+        // suspends and at every resume.
+        let mut error = None;
+        let mut kernel = self.kernel.take().expect("lowering a process kernel");
+        std::mem::swap(&mut self.b, kernel.builder());
+        // The kernel is out of `self` while it builds the checks; reads go
+        // to stable state all the same.
+        let direct = std::mem::replace(&mut self.direct, true);
+        let result = kernel.wait_level(site, |builder| {
+            std::mem::swap(&mut self.b, builder);
+            let truth = self.eval_truth(condition).map(|(truth, _)| truth);
+            std::mem::swap(&mut self.b, builder);
+            truth.unwrap_or_else(|e| {
+                error = Some(e);
+                let never = builder.alloc_bit(1, false);
+                builder.emit(SIRInstruction::Imm(never, SIRValue::new(0u8)));
+                never
+            })
+        });
+        self.direct = direct;
+        std::mem::swap(&mut self.b, kernel.builder());
+        self.kernel = Some(kernel);
+        result.map_err(kernel_error)?;
+        error.map_or(Ok(()), Err)
+    }
+
+    /// Declare a wait site of the process with the given terms and return
+    /// its local index.
+    fn wait_site(&mut self, terms: Vec<(SourceVarId, CounterKind)>) -> u32 {
+        let index = self.wait_sites.len() as u32;
+        self.wait_sites.push(WaitSite {
+            process: self.process,
+            terms,
+        });
+        index
+    }
+
+    /// The back edge of a kernel loop that may not suspend: count the
+    /// iteration, yield every 2^[`LOOP_YIELD_BITS`] of them, and continue at
+    /// `header`. Returns the block the loop's back edges jump to.
+    fn yielding_back_edge(&mut self, header: BlockId) -> Result<BlockId, sv::AnalyzerError> {
+        let back = self.b.new_block();
+        let (counter, _) = self.m.temp("loop", LOOP_YIELD_BITS, false, false);
+        self.b.switch_to_block(back);
+        let count = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Load(
+            count,
+            stable(counter),
+            SIROffset::Static(0),
+            LOOP_YIELD_BITS,
+        ));
+        let one = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let next = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b
+            .emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+        self.store(counter, SIROffset::Static(0), LOOP_YIELD_BITS, next);
+        let zero = self.b.alloc_bit(LOOP_YIELD_BITS, false);
+        self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let wrapped = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Binary(wrapped, next, BinaryOp::Eq, zero));
+        let yield_block = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: wrapped,
+            true_block: (yield_block, Vec::new()),
+            false_block: (header, Vec::new()),
+        });
+        self.b.switch_to_block(yield_block);
+        self.with_kernel(ProcessKernelBuilder::yield_now)
+            .map_err(kernel_error)?;
+        self.jump(header);
+        Ok(back)
+    }
+}
+
+/// The kernel of a process and its wait and nonblocking assignment sites.
+pub(super) struct KernelUnit {
+    pub unit: ExecutionUnit<Addr>,
+    pub wait_sites: Vec<WaitSite<SourceVarId>>,
+    pub nba_sites: Vec<NbaSite<SourceVarId>>,
+}
+
+/// Iterations, as a power of two, between the yields of a kernel loop that
+/// may not suspend.
+const LOOP_YIELD_BITS: usize = 16;
+
+/// Whether every pass through `stmts` suspends the process.
+fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
+    stmts.iter().any(|stmt| {
+        matches!(
+            stmt,
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_)
+        )
+    })
+}
+
+/// The module variables the subroutines `expr` calls read, directly or
+/// through further calls, besides their own formals and locals.
+fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSet<String>) {
+    let mut pending = Vec::new();
+    collect_call_names(expr, &mut pending);
+    let mut visited = HashSet::default();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        for param in &subroutine.params {
+            if let Some(default) = &param.default {
+                expr_idents(default, names);
+            }
+        }
+        for stmt in &subroutine.body {
+            let mut stmt = stmt.clone();
+            stmt.visit_mut(
+                &mut |expr| {
+                    expr_idents(expr, names);
+                    collect_call_names(expr, &mut pending);
+                },
+                &mut |_| {},
+                &mut |_| {},
+            );
+            stmt.walk(&mut |stmt| {
+                if let sv::ir::Stmt::Call { name, .. } = stmt {
+                    pending.push(name.clone());
+                }
+            });
+        }
+    }
+}
+
+/// The names of the user subroutines `expr` calls.
+fn collect_call_names(expr: &sv::ir::Expr, names: &mut Vec<String>) {
+    let called = std::cell::RefCell::new(Vec::new());
+    expr_calls(expr, &|callee| {
+        if let Some(name) = callee.subroutine() {
+            called.borrow_mut().push(name.to_string());
+        }
+        false
+    });
+    names.extend(called.into_inner());
+}
+
+fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
+    unsupported(error.to_string())
 }
 
 fn seal_drained(mut builder: SIRBuilder<Addr>) -> ExecutionUnit<Addr> {

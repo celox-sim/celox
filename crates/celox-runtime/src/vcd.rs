@@ -117,6 +117,7 @@ pub struct VcdWriter<W: Write = File> {
     descs: Vec<VcdSignalDesc>,
     external_descs: Vec<VcdExternalSignalDesc>,
     timestamp: u64,
+    time_precision: celox_design::TimePrecision,
     header_written: bool,
     initial_values_written: bool,
     external_count: usize,
@@ -137,14 +138,27 @@ struct VcdOutput<W: Write> {
 
 impl VcdWriter<File> {
     pub fn new<P: AsRef<Path>>(path: P, descs: &[VcdSignalDesc]) -> std::io::Result<Self> {
-        Ok(Self::from_writer(File::create(path)?, descs))
+        Self::new_with_time_precision(path, descs, celox_design::TimePrecision::default())
+    }
+
+    /// Create a waveform whose timestamps use the design's global tick precision.
+    pub fn new_with_time_precision<P: AsRef<Path>>(
+        path: P,
+        descs: &[VcdSignalDesc],
+        time_precision: celox_design::TimePrecision,
+    ) -> std::io::Result<Self> {
+        Ok(Self::from_writer_with_time_precision(
+            File::create(path)?,
+            descs,
+            time_precision,
+        ))
     }
 
     /// Finish the current file and continue the waveform, with the same
     /// signals, in a new file at `path`. The first dump there records every
     /// value, and its timestamps start over.
     pub fn restart<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        let mut next = Self::new(path, &self.descs)?;
+        let mut next = Self::new_with_time_precision(path, &self.descs, self.time_precision)?;
         next.add_external_signals(&self.external_descs)?;
         self.flush()?;
         *self = next;
@@ -154,6 +168,15 @@ impl VcdWriter<File> {
 
 impl<W: Write> VcdWriter<W> {
     pub fn from_writer(writer: W, descs: &[VcdSignalDesc]) -> Self {
+        Self::from_writer_with_time_precision(writer, descs, celox_design::TimePrecision::default())
+    }
+
+    /// Create a writer with an explicit physical duration for each timestamp tick.
+    pub fn from_writer_with_time_precision(
+        writer: W,
+        descs: &[VcdSignalDesc],
+        time_precision: celox_design::TimePrecision,
+    ) -> Self {
         let mut plan = TracePlan::default();
         let mut groups: fxhash::FxHashMap<usize, Vec<usize>> = Default::default();
         let headers = descs
@@ -187,6 +210,7 @@ impl<W: Write> VcdWriter<W> {
             descs: descs.to_vec(),
             external_descs: Vec::new(),
             timestamp: 0,
+            time_precision,
             header_written: false,
             initial_values_written: false,
             external_count: 0,
@@ -317,7 +341,8 @@ impl<W: Write> VcdWriter<W> {
         writeln!(self.output.encoded, "$version")?;
         writeln!(self.output.encoded, "  celox")?;
         writeln!(self.output.encoded, "$end")?;
-        writeln!(self.output.encoded, "$timescale 1ns $end")?;
+        let (magnitude, unit) = self.time_precision.vcd_timescale();
+        writeln!(self.output.encoded, "$timescale {magnitude}{unit} $end")?;
 
         let mut scope_order = Vec::<String>::new();
         let mut scope_groups = Vec::<Vec<usize>>::new();
@@ -710,6 +735,33 @@ const BINARY: [[u8; 8]; 256] = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headers_encode_supported_time_precisions() {
+        for (exponent, expected) in [
+            (2, "100s"),
+            (0, "1s"),
+            (-1, "100ms"),
+            (-5, "10us"),
+            (-9, "1ns"),
+            (-12, "1ps"),
+            (-14, "10fs"),
+            (-15, "1fs"),
+        ] {
+            let precision = celox_design::TimePrecision::try_from(exponent).unwrap();
+            let mut writer = VcdWriter::from_writer_with_time_precision(Vec::new(), &[], precision);
+            writer.dump_with_external(123, &[], &[]).unwrap();
+            writer.flush().unwrap();
+            let output = std::str::from_utf8(writer.get_ref()).unwrap();
+            assert!(
+                output.contains(&format!("$timescale {expected} $end")),
+                "{output}"
+            );
+            assert!(output.contains("#123\n"));
+        }
+        assert!(celox_design::TimePrecision::try_from(-16).is_err());
+        assert!(celox_design::TimePrecision::try_from(3).is_err());
+    }
 
     #[test]
     fn appended_external_signals_survive_restart() {

@@ -1788,6 +1788,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                 self.assign_concat(&mut store, frames, parts, rhs)?;
                 Ok(store)
             }
+            // A timing control suspends a process; this lowering has none.
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_) => {
+                Err(unsupported("procedural timing control"))
+            }
             sv::ir::Stmt::Local { name, init } => {
                 let id = self
                     .m
@@ -1912,14 +1916,28 @@ impl<'p, 'a> Comb<'p, 'a> {
             sv::ir::Stmt::SystemTask {
                 task: sv::ir::SystemTask::Readmem(format),
                 args,
+                site,
             } => {
-                self.readmem(&mut store, frames, *format, args)?;
+                self.readmem(&mut store, frames, *format, args, site.as_ref())?;
+                Ok(store)
+            }
+            // IEEE 1800-2023 24.7: `$exit` outside a program block is
+            // ignored, with a warning.
+            sv::ir::Stmt::SystemTask {
+                task: sv::ir::SystemTask::Exit,
+                site,
+                ..
+            } => {
+                self.m.warn(
+                    crate::FrontendWarningKind::ExitOutsideProgram,
+                    site.as_ref(),
+                );
                 Ok(store)
             }
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
-            sv::ir::Stmt::SystemTask { task, args } => {
+            sv::ir::Stmt::SystemTask { task, args, .. } => {
                 self.system_task(&mut store, frames, *task, args)?;
                 Ok(store)
             }
@@ -3021,6 +3039,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format);
         let mut addresses = [None, None];
@@ -3047,7 +3066,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         if self.path_condition()?.is_some() {
             return Err(unsupported(format!("`{name}` under a run-time condition")));
         }
-        let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
+        let (id, words) = self
+            .m
+            .readmem(format, args, addresses[0], addresses[1], site)?;
         for word in words {
             let width = word.access.msb - word.access.lsb + 1;
             let node = self.alloc(SLTNode::Constant(word.value, word.mask, width, false))?;
@@ -3152,7 +3173,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
         let event_kind = match &kind {
             SystemTaskKind::Print(kind, _) => *kind,
-            SystemTaskKind::Finish => RuntimeEventKind::Finish,
+            SystemTaskKind::Control(kind) => *kind,
             SystemTaskKind::Message => RuntimeEventKind::AssertContinue,
             SystemTaskKind::Fatal => RuntimeEventKind::AssertFatal,
             SystemTaskKind::Assertion(kind) => *kind,
@@ -3169,8 +3190,8 @@ impl<'p, 'a> Comb<'p, 'a> {
             })
         } else {
             match (&kind, condition) {
-                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, None) => None,
-                (SystemTaskKind::Print(..) | SystemTaskKind::Finish, Some((node, sources))) => {
+                (SystemTaskKind::Print(..) | SystemTaskKind::Control(_), None) => None,
+                (SystemTaskKind::Print(..) | SystemTaskKind::Control(_), Some((node, sources))) => {
                     observed.extend(sources);
                     Some(node)
                 }
@@ -3199,7 +3220,10 @@ impl<'p, 'a> Comb<'p, 'a> {
             effects.push(SLTForEffect::Event {
                 site_id,
                 guard,
-                emit_on_true: matches!(kind, SystemTaskKind::Print(..) | SystemTaskKind::Finish),
+                emit_on_true: matches!(
+                    kind,
+                    SystemTaskKind::Print(..) | SystemTaskKind::Control(_)
+                ),
                 args: captured.clone(),
                 fatal_error_code: kind.is_fatal().then_some(i64::from(site_id)),
             });

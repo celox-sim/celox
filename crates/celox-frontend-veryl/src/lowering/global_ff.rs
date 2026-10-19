@@ -233,7 +233,7 @@ impl scheduler::ClockFfLowering<FusedRegionedAddr> for SharedClockLowering<'_> {
                     .then_some(recipe.source_to_veryl[&address.var_id])
             })
             .collect::<HashSet<_>>();
-        let mut parser = ff::FfParser::new(recipe.module, self.config)
+        let mut parser = ff::FfParser::new(recipe.module, self.config.clone())
             .with_relocated_runtime_ids(
                 recipe.runtime.error_codes.clone(),
                 recipe.runtime.event_site_base,
@@ -320,7 +320,7 @@ impl FusedFfLoweringFactory for VerylFusedFfFactory<'_> {
                     .map(|reset| source_to_veryl[reset])
                     .collect(),
             };
-            let detector = ff::FfParser::new(module, self.config);
+            let detector = ff::FfParser::new(module, self.config.clone());
             let mut groups = BTreeMap::<TriggerSet<VarId>, Vec<&FfDeclaration>>::new();
             for declaration in &module.declarations {
                 if let Declaration::Ff(ff) = declaration {
@@ -350,6 +350,9 @@ impl FusedFfLoweringFactory for VerylFusedFfFactory<'_> {
                 source_to_veryl,
             });
         }
-        Ok(Box::new(SharedClockLowering::new(recipes, self.config)))
+        Ok(Box::new(SharedClockLowering::new(
+            recipes,
+            self.config.clone(),
+        )))
     }
 }

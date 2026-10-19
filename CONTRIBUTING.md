@@ -233,7 +233,8 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   and dev edges. A `Cargo.lock` diff selects a lane only when a changed lock
   entry is in that lane's lockfile dependency closure, so adding a dependency
   to a Celox crate does not run Lydite. The Nix flake and `ci.yml` do not
-  select Lydite; its jobs use neither.
+  select Lydite; its jobs use neither. Celox's `conformance/sv-tests/` corpus
+  also skips Lydite; Lydite's fixtures live under `lydite/conformance/`.
 - Ordinary `ci.yml` tests exclude `lydite*`, including daily and release runs;
   formatting/lint/build checks remain there. The dedicated workflow tests the
   selected Lydite packages, including doctests, and installs its solver.
@@ -241,10 +242,45 @@ Lydite has its own test cadence (`scripts/ci-lydite-changes.mjs`):
   excludes them, and fails on selected-job failures or cancellations. Repository
   branch protection must require this check to make it a merge gate.
 
-The classifier selects CI jobs, not individual Rust tests. Selected Rust CI
-still runs the Celox workspace suite with CI features, doctests, default-feature
-checks, ARM64 backend checks, and the explicit cocotb test. Local validation
-uses the finer behavior-based matrix above.
+Ordinary PRs also scope Rust compilation and execution:
+
+- Library changes select the crate and its transitive consumers. Backend and
+  SV frontend changes narrow Celox integration tests to the affected variants;
+  shared implementation changes retain all affected variants.
+- Integration test or recognized Insta snapshot changes select only the
+  corresponding test binaries, using Cargo `--test` as well as a nextest
+  filter. Packages needing whole-package coverage and packages needing specific
+  binaries get separate Cargo invocations, so mixed changes do not discard
+  their compilation scope. Shared helpers and unknown fixtures retain the
+  package's tests; runtime changes retain their transitive consumers.
+- A shared `.vtest` case file selects the Celox test binaries that reference
+  its group, along with the suite's catalogue/parser checks and other direct
+  catalogue consumers. Unknown groups retain dependency-based coverage.
+  Case data does not select library API documentation or doctests. Shared
+  harness and emitter changes still reach all consumers.
+- Changes confined to a known SV test module select that module within the
+  `systemverilog` binary, including for shared SV case groups. Changes to the
+  adapter, crate root or an unknown helper retain the whole binary. Celox-only
+  tests do not enable external-simulator features on their suite dependency;
+  tests of the suite itself retain those features.
+- VPI integration test edits select their binaries. The ignored cocotb test
+  and Python setup run only when that binary or VPI's whole-package coverage
+  is selected. Its Celox features match the preceding nextest build.
+- Clippy selects affected crates and test targets, including Lydite. Rust API
+  documentation and doctests select libraries reached through runtime/build
+  dependencies; dev-only consumers still run tests but do not rebuild their
+  API documentation. Test-only changes skip API documentation and doctests.
+- sv-tests conformance runs when the Celox library or its runtime/build
+  dependencies change, or its runner/expectations change. Test infrastructure
+  and downstream consumers do not select this separate release-mode build.
+- Python/cocotb setup runs only when VPI tests are selected.
+
+Queue drafts, merge groups, releases, `ci:full`, and daily/manual full runs
+retain the existing workspace tests, lint, documentation, sv-tests and platform
+coverage. Cargo manifest, lockfile, toolchain, unknown-path and failed scope
+analysis changes fall back to broad validation. Required checks permit skips
+only when explicitly unneeded and still reject failures and cancellations.
+Local validation uses the behavior-based matrix above.
 
 | Cadence | Coverage |
 | --- | --- |

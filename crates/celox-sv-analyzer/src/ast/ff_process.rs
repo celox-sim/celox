@@ -2,43 +2,34 @@
 
 use super::*;
 
-pub(super) fn ff_processes_from_module_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+pub(super) fn ff_processes_from_scope(
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    let active = generate::items(
-        node,
-        syntax_tree,
-        const_env,
-        &packed_dimensions.type_aliases,
-    )?;
+    let active = generate::items(syntax_tree, const_env, &packed_dimensions.type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
-        let ScopeItem::Module(node) = item.node else {
+        let _interface_scope = item.interface_scope();
+        let Some(procedure) = item.procedure(syntax_tree.declarations())? else {
             continue;
         };
-        if !matches!(
-            item.common(),
-            Some(sv_parser::ModuleCommonItem::AlwaysConstruct(_))
-        ) {
-            continue;
-        }
+        let _constant_functions = item.enter();
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
-        ff_processes_from_module_or_generate_item(
-            node,
+        if let Some(process) = ff_process_from_procedure(
+            procedure,
             syntax_tree,
             &item.env,
             literals,
             dimensions,
-            &mut processes,
             state,
-        )?;
+        )? {
+            processes.push(process);
+        }
         for process in &mut processes[start..] {
             process.creation_order = creation_order;
             for event in &mut process.events {
@@ -52,69 +43,22 @@ pub(super) fn ff_processes_from_module_node(
     Ok(processes)
 }
 
-fn ff_processes_from_module_or_generate_item(
-    item: &sv_parser::ModuleOrGenerateItem,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &PackedDimensions,
-    processes: &mut Vec<FfProcess>,
-    state: &mut procedural::BodyState<'_>,
-) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
-        ff_processes_from_module_common_item(
-            &item.nodes.1,
-            syntax_tree,
-            const_env,
-            parameter_literals,
-            packed_dimensions,
-            processes,
-            state,
-        )?;
-    }
-    Ok(())
-}
-
-fn ff_processes_from_module_common_item(
-    item: &sv_parser::ModuleCommonItem,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &PackedDimensions,
-    processes: &mut Vec<FfProcess>,
-    state: &mut procedural::BodyState<'_>,
-) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleCommonItem::AlwaysConstruct(always) = item {
-        if let Some(process) = ff_process_from_always_construct(
-            always,
-            syntax_tree,
-            const_env,
-            parameter_literals,
-            packed_dimensions,
-            state,
-        )? {
-            processes.push(process);
-        }
-    }
-    Ok(())
-}
-
-fn ff_process_from_always_construct(
-    always: &sv_parser::AlwaysConstruct,
-    syntax_tree: &SyntaxTree,
+fn ff_process_from_procedure(
+    procedure: &celox_sv_syntax::Procedure,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
-    if always_kind(always) != AlwaysKind::Ff {
+    if procedure.kind == celox_sv_syntax::ProcedureKind::Initial {
         return Ok(None);
     }
-    let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
-        return Err(AnalyzerError::Unsupported(
-            "always_ff event expression".to_string(),
-        ));
-    };
+    if always_kind(procedure, syntax_tree.declarations())? != AlwaysKind::Ff {
+        return Ok(None);
+    }
+    let root = procedure.body;
+    let (events, body) = ff_event_control_and_body(root, syntax_tree)?;
     let mut local_dimensions = packed_dimensions.clone();
     local_dimensions.const_env = const_env.clone().into();
     let mut builder = procedural::BodyBuilder::new(
@@ -123,66 +67,46 @@ fn ff_process_from_always_construct(
         state,
         system_functions::Body::Always,
     );
-    let mut body = builder.statement_or_null(body)?;
+    let mut body = builder.native_body(&[body], &procedure.authored_statements)?;
     for stmt in &mut body {
-        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(
+            &syntax_tree.state,
+            stmt,
+            const_env,
+            parameter_literals,
+        );
     }
     Ok((!events.is_empty()).then(|| FfProcess::new(events, body)))
 }
 
-fn ff_event_control_and_body<'a>(
-    stmt: &'a sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
-) -> Option<(Vec<FfEvent>, &'a sv_parser::StatementOrNull)> {
-    let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) = &stmt.nodes.2 else {
-        return None;
+fn ff_event_control_and_body(
+    root: celox_sv_syntax::StatementId,
+    tree: &AnalysisContext<'_>,
+) -> Result<(Vec<FfEvent>, celox_sv_syntax::StatementId), AnalyzerError> {
+    use celox_sv_syntax::{EventControl, StatementKind, TimingControlKind, TimingEdge};
+    let unsupported_event = || unsupported("always_ff event expression");
+    let native = tree.declarations();
+    let StatementKind::Timing { control, body } = native.statement(root).kind else {
+        return Err(timing::disagreement());
     };
-    let sv_parser::ProceduralTimingControl::EventControl(event_control) = &timing.nodes.0 else {
-        return None;
+    let TimingControlKind::Event(EventControl::Items(items)) = &native.timing_control(control).kind
+    else {
+        return Err(timing::disagreement());
     };
-    Some((
-        ff_events_from_event_control(event_control, syntax_tree)?,
-        &timing.nodes.1,
-    ))
-}
-
-fn ff_events_from_event_control(
-    control: &sv_parser::EventControl,
-    syntax_tree: &SyntaxTree,
-) -> Option<Vec<FfEvent>> {
-    let sv_parser::EventControl::EventExpression(control) = control else {
-        return None;
-    };
-    ff_events_from_event_expression(&control.nodes.1.nodes.1, syntax_tree)
-}
-
-fn ff_events_from_event_expression(
-    expr: &sv_parser::EventExpression,
-    syntax_tree: &SyntaxTree,
-) -> Option<Vec<FfEvent>> {
-    match expr {
-        sv_parser::EventExpression::Expression(expr) => {
-            let edge = match expr.nodes.0.as_ref()? {
-                sv_parser::EdgeIdentifier::Posedge(_) => FfEdge::Pos,
-                sv_parser::EdgeIdentifier::Negedge(_) => FfEdge::Neg,
-                sv_parser::EdgeIdentifier::Edge(_) => return None,
-            };
-            let signal = expr_ident_name(&expr_from_expression(&expr.nodes.1, syntax_tree).ok()?);
-            signal.map(|signal| vec![FfEvent::new(edge, signal)])
+    let mut events = Vec::with_capacity(items.len());
+    for item in items {
+        if item.iff.is_some() {
+            return Err(unsupported("iff-qualified always_ff event"));
         }
-        sv_parser::EventExpression::Or(expr) => {
-            let mut left = ff_events_from_event_expression(&expr.nodes.0, syntax_tree)?;
-            left.extend(ff_events_from_event_expression(&expr.nodes.2, syntax_tree)?);
-            Some(left)
-        }
-        sv_parser::EventExpression::Comma(expr) => {
-            let mut left = ff_events_from_event_expression(&expr.nodes.0, syntax_tree)?;
-            left.extend(ff_events_from_event_expression(&expr.nodes.2, syntax_tree)?);
-            Some(left)
-        }
-        sv_parser::EventExpression::Paren(expr) => {
-            ff_events_from_event_expression(&expr.nodes.0.nodes.1, syntax_tree)
-        }
-        _ => None,
+        let edge = match item.edge {
+            TimingEdge::Pos => FfEdge::Pos,
+            TimingEdge::Neg => FfEdge::Neg,
+            _ => return Err(unsupported_event()),
+        };
+        let expression =
+            expression_binding::value(item.expression, native, tree, &PackedDimensions::default())?;
+        let signal = expr_ident_name(&expression).ok_or_else(unsupported_event)?;
+        events.push(FfEvent::new(edge, signal));
     }
+    Ok((events, body))
 }

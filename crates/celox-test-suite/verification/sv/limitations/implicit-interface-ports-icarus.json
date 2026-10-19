@@ -1,0 +1,56 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "21b98514d654655819730c7869a27c8f37a3da3377e846fe385a8710943de2c5",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: Errors in port declarations.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_implicit_named_interface_arrays_in_generate_scopes",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792351616
+    },
+    {
+      "case_fingerprint": "61ec85a48df81a2a92d869117264b856735a4c739c606edf486af0e307985636",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: Errors in port declarations.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: Errors in port declarations.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_implicit_named_interface_ports",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792351616
+    }
+  ],
+  "context_fingerprint": "f14e32a145deb4dee8d4cd404f76d831b2a630be50ae5ff4804454304c037cb1",
+  "counts": {
+    "compile_error": 2,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": false,
+  "run_counts": {
+    "fresh": 2,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

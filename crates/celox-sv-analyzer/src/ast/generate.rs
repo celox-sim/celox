@@ -4,6 +4,8 @@
 //! rules used here. Generate-local typedefs and functions in loop-generate
 //! remain unsupported; inactive branches are not lowered.
 use super::*;
+use celox_sv_syntax::ExprId;
+mod elaboration;
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -13,24 +15,29 @@ pub(super) use scope_views::ScopeViews;
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
 // qualified, and never reach the public analyzer IR.
-thread_local! {
-    static ROOT_SUBROUTINES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub(super) fn root_subroutines_only() -> bool {
-    ROOT_SUBROUTINES.with(std::cell::Cell::get)
+pub(super) fn root_subroutines_only(state: &AnalysisState) -> bool {
+    state.root_subroutines.get()
 }
 
 /// Seed module functions before conditions need to call them. The full pass
 /// still selects generate scopes and reports every generate diagnostic.
-pub(super) fn with_root_subroutines<T>(f: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
+pub(super) fn with_root_subroutines<T>(
+    state: &std::rc::Rc<AnalysisState>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore {
+        state: std::rc::Rc<AnalysisState>,
+        previous: bool,
+    }
     impl Drop for Restore {
         fn drop(&mut self) {
-            ROOT_SUBROUTINES.with(|flag| flag.set(self.0));
+            self.state.root_subroutines.set(self.previous);
         }
     }
-    let _restore = Restore(ROOT_SUBROUTINES.with(|flag| flag.replace(true)));
+    let _restore = Restore {
+        state: state.clone(),
+        previous: state.root_subroutines.replace(true),
+    };
     f()
 }
 
@@ -47,36 +54,189 @@ fn scope_component(name: &str) -> String {
 }
 
 #[derive(Clone)]
-pub(super) struct Item<'a> {
-    pub node: ScopeItem<'a>,
+pub(super) struct Item {
+    state: std::rc::Rc<AnalysisState>,
+    pub id: celox_sv_syntax::BodyItemId,
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     names: SharedMap<String>,
+    imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
     scope: String,
 }
 
-impl Item<'_> {
-    pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
-        match self.node {
-            ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(item)) => {
-                Some(&item.nodes.1)
+/// The names the imports of the enclosing generate blocks bind to another
+/// declaration than the module does (see `imports::resolve_imports`), unless
+/// a declaration of an inner block hides them again. The module-wide tables
+/// hold those declarations under their qualified names.
+#[derive(Clone, Copy)]
+struct BlockImports<'s> {
+    state: &'s std::rc::Rc<AnalysisState>,
+    names: &'s HashMap<String, String>,
+    imports: &'s HashMap<String, String>,
+    /// The names the blocks declare or import.
+    shadowed: &'s HashSet<String>,
+}
+
+impl<'s> BlockImports<'s> {
+    fn bindings(self) -> impl Iterator<Item = (&'s String, &'s String)> {
+        self.imports
+            .iter()
+            .filter(move |(name, target)| self.names.get(*name) == Some(*target))
+    }
+
+    /// The type aliases visible here: a name the blocks declare or import
+    /// hides the module's type of that name, and an imported name denotes
+    /// the type of its declaration.
+    fn type_aliases<'m>(
+        self,
+        aliases: &'m HashMap<String, Type>,
+    ) -> Cow<'m, HashMap<String, Type>> {
+        let mut visible = Cow::Borrowed(aliases);
+        let hidden: Vec<&String> = if aliases.len() <= self.shadowed.len() {
+            aliases
+                .keys()
+                .filter(|name| self.shadowed.contains(*name))
+                .collect()
+        } else {
+            self.shadowed
+                .iter()
+                .filter(|name| aliases.contains_key(*name))
+                .collect()
+        };
+        for name in hidden {
+            visible.to_mut().remove(name);
+        }
+        for (name, target) in self.bindings() {
+            if let Some(r#type) = aliases.get(target) {
+                visible.to_mut().insert(name.clone(), r#type.clone());
+            }
+        }
+        visible
+    }
+
+    /// Make each imported name call the constant function of its
+    /// declaration, until the guard is dropped; a name that imports no
+    /// constant function calls none. Calls in the bodies of the functions it
+    /// hides keep their definition-site meaning.
+    fn install_constant_functions(self) -> Option<const_functions::Installed> {
+        let installed = const_functions::installed(&self.state.const_functions);
+        let rebound: Vec<_> = self
+            .bindings()
+            .filter(|(name, target)| installed.contains(name) || installed.contains(target))
+            .collect();
+        if rebound.is_empty() {
+            return None;
+        }
+        let hidden: HashMap<String, String> = rebound
+            .iter()
+            .filter(|(name, _)| installed.contains(name))
+            .map(|(name, _)| ((*name).clone(), format!("{OUTER_BINDING}{name}")))
+            .collect();
+        let rename = scope::Renamer { names: &hidden };
+        let mut visible =
+            installed.renamed(&mut |name| rename.name(name), &mut |stmt| rename.stmt(stmt));
+        for (name, target) in rebound {
+            visible.alias(name, target);
+        }
+        Some(const_functions::install(self.state, visible))
+    }
+}
+
+impl Item {
+    /// Executable ownership is the elaborated native body item.
+    pub fn continuous_assignment<'n>(
+        &self,
+        native: &'n celox_sv_syntax::Declarations,
+    ) -> Converted<Option<&'n celox_sv_syntax::AssignSyntax>> {
+        Ok(match native.body_item(self.id).kind {
+            celox_sv_syntax::BodyItemKind::Assign(id) => {
+                let assignment = native.assign_statement(id);
+                let owner = native.body_item(self.id).tokens;
+                if assignment.tokens.start < owner.start || assignment.tokens.end > owner.end {
+                    return Err(AnalyzerError::Parse(
+                        "native continuous assignment is outside its owner".into(),
+                    ));
+                }
+                Some(assignment)
             }
             _ => None,
+        })
+    }
+
+    pub fn procedure<'n>(
+        &self,
+        native: &'n celox_sv_syntax::Declarations,
+    ) -> Converted<Option<&'n celox_sv_syntax::Procedure>> {
+        Ok(match native.body_item(self.id).kind {
+            celox_sv_syntax::BodyItemKind::Procedure(id) => Some(native.procedure(id)),
+            _ => None,
+        })
+    }
+
+    fn block_imports(&self) -> BlockImports<'_> {
+        BlockImports {
+            state: &self.state,
+            names: &self.names,
+            imports: &self.imports,
+            shadowed: &self.shadowed,
         }
     }
 
-    /// These declarations have already populated the constant environment;
-    /// instance/process/subroutine collectors cannot produce bodies from them.
-    pub fn is_parameter_declaration(&self) -> bool {
-        let Some(declaration) = self.node.declaration() else {
-            return false;
-        };
+    /// The type aliases this item sees, given the module's.
+    pub fn type_aliases<'m>(
+        &self,
+        aliases: &'m HashMap<String, Type>,
+    ) -> Cow<'m, HashMap<String, Type>> {
+        self.block_imports().type_aliases(aliases)
+    }
+
+    /// Make the constant functions this item sees the installed ones, until
+    /// the guard is dropped.
+    pub fn enter(&self) -> Option<const_functions::Installed> {
+        self.block_imports().install_constant_functions()
+    }
+
+    pub fn scope_name(&self) -> &str {
+        &self.scope
+    }
+
+    pub fn interface_scope(&self) -> Option<scope::Installed> {
+        let imported = scope::imported(&self.state);
+        if imported.interface_scopes.is_empty() {
+            return None;
+        }
+        let mut scopes = imported
+            .interface_scopes
+            .iter()
+            .filter(|(name, _)| {
+                self.scope == **name
+                    || self
+                        .scope
+                        .strip_prefix(name.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+            .collect::<Vec<_>>();
+        if scopes.is_empty() {
+            return None;
+        }
+        scopes.sort_by_key(|(name, _)| name.len());
+        let mut local = (*imported).clone();
+        for (_, bindings) in scopes {
+            local.interface_members.extend(bindings.members.clone());
+            local.interface_types.extend(bindings.types.clone());
+            local.interface_arrays.extend(bindings.arrays.clone());
+            local.interface_instances.extend(bindings.instances.clone());
+        }
+        Some(scope::install(&self.state, Arc::new(local)))
+    }
+
+    /// Parameters have already populated the enclosing constant environment.
+    pub fn is_parameter_declaration(&self, native: &celox_sv_syntax::Declarations) -> bool {
         matches!(
-            declaration,
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
-                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)
+            native.body_item(self.id).kind,
+            celox_sv_syntax::BodyItemKind::Parameter(_)
         )
     }
 
@@ -139,6 +299,9 @@ impl Item<'_> {
                 local.function_return_types =
                     self.function_aliases(dimensions.function_return_types.clone());
             }
+        }
+        if let Cow::Owned(aliases) = self.type_aliases(&dimensions.type_aliases) {
+            local.type_aliases = aliases;
         }
         let mut signedness = dimensions.expression_signedness.clone();
         for name in self.shadowed.iter() {
@@ -333,6 +496,7 @@ impl Item<'_> {
 
 #[derive(Clone, Default)]
 struct Scope {
+    state: std::rc::Rc<AnalysisState>,
     path: String,
     in_loop: bool,
     env: SharedMap<i128>,
@@ -340,40 +504,51 @@ struct Scope {
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     names: SharedMap<String>,
+    imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
 }
 
-struct Elaborator<'a, 'b> {
-    tree: &'a SyntaxTree,
-    aliases: &'b HashMap<String, Type>,
-    remaining: usize,
-    functions: HashMap<String, Function>,
-    items: Vec<Item<'a>>,
+impl Scope {
+    fn block_imports(&self) -> BlockImports<'_> {
+        BlockImports {
+            state: &self.state,
+            names: &self.names,
+            imports: &self.imports,
+            shadowed: &self.shadowed,
+        }
+    }
 }
 
-pub(super) fn items<'a>(
-    node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+struct Elaborator<'a, 'b> {
+    tree: &'a AnalysisContext<'a>,
+    module_aliases: &'b HashMap<String, Type>,
+    /// The type aliases of the scope being elaborated.
+    aliases: Cow<'b, HashMap<String, Type>>,
+    remaining: usize,
+    functions: HashMap<String, Function>,
+    items: Vec<Item>,
+}
+
+pub(super) fn items(
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
-) -> Result<Vec<Item<'a>>, AnalyzerError> {
-    items_with_literal_use(node, tree, env, aliases, LiteralUse::All)
+) -> Result<Vec<Item>, AnalyzerError> {
+    items_with_literal_use(tree, env, aliases, LiteralUse::All)
 }
 
 /// Elaborate the same scopes and diagnostics, retaining module parameter
 /// literals needed by subroutines, declarations and generate constructs.
-pub(super) fn subroutine_items<'a>(
-    node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+pub(super) fn subroutine_items(
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
-) -> Result<Vec<Item<'a>>, AnalyzerError> {
+) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(
-        node,
         tree,
         env,
         aliases,
-        if root_subroutines_only() {
+        if root_subroutines_only(&tree.state) {
             LiteralUse::RootSubroutines
         } else {
             LiteralUse::Subroutines
@@ -388,160 +563,122 @@ enum LiteralUse {
     RootSubroutines,
 }
 
-fn items_with_literal_use<'a>(
-    node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+fn items_with_literal_use(
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
-) -> Result<Vec<Item<'a>>, AnalyzerError> {
+) -> Result<Vec<Item>, AnalyzerError> {
     let mut elaborator = Elaborator {
         tree,
-        aliases,
+        module_aliases: aliases,
+        aliases: Cow::Borrowed(aliases),
         remaining: MAX_GENERATE_LOOP_EXPANSION,
         functions: HashMap::default(),
         items: Vec::new(),
     };
-    let parameters =
-        parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
-    let references = parameter_literal_references(node.clone(), tree, literal_use);
+    let parameters = parameters_from_scope(tree, aliases, env, &tree.parameter_overrides)?;
+    let references = parameter_literal_references(tree, literal_use)?;
     let mut literals =
-        parameters::parameter_value_env_for_references(&parameters, env, &references);
-    if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
-        elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
+        parameters::parameter_value_env_for_references(&tree.state, &parameters, env, &references);
+    if elaboration::needs_functions(tree)? {
+        elaborator.functions = module_constant_functions(tree, env, aliases, &literals)?;
     }
     // Numeric values and their type markers are already carried by `env`.
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
+        state: tree.state.clone(),
         env: env.clone().into(),
         literals: literals.into(),
         parameter_dimensions: Arc::new(parameter_packed_dimensions(&parameters)),
         parameters,
         ..Scope::default()
     };
-    let mut ordinal = 0;
-    if let RefNode::PackageDeclaration(package) = node {
-        for declaration in package_declarations(package) {
-            elaborator.push(ScopeItem::Package(declaration), &scope);
+    let is_package = tree
+        .scope_handle()
+        .unit(tree.declarations())
+        .is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
+    if is_package {
+        for id in tree.body_membership()? {
+            elaborator.push(id, &scope);
         }
-        return Ok(elaborator.items);
-    }
-    for item in module_non_port_items(node) {
-        if matches!(literal_use, LiteralUse::RootSubroutines)
-            && RefNode::NonPortModuleItem(item).into_iter().any(|node| {
-                matches!(
-                    node,
-                    RefNode::GenerateRegion(_)
-                        | RefNode::ConditionalGenerateConstruct(_)
-                        | RefNode::LoopGenerateConstruct(_)
-                )
-            })
-        {
-            continue;
-        }
-        match item {
-            sv_parser::NonPortModuleItem::GenerateRegion(region) => {
-                for item in &region.nodes.1 {
-                    elaborator.generate_item(item, &scope, &mut ordinal)?;
-                }
-            }
-            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
-                elaborator.item(item, &scope, &mut ordinal)?
-            }
-            _ => {}
-        }
+    } else {
+        elaborator.elaborate_root(scope, literal_use)?;
     }
     Ok(elaborator.items)
 }
 
-/// All references in executable/type-bearing items, including inactive and
-/// nested generate branches. Direct scalar parameter initializers are accounted
-/// for by the dependency closure rather than expanded as independent roots.
 fn parameter_literal_references(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     literal_use: LiteralUse,
-) -> HashSet<String> {
-    let items: Vec<_> = match node {
-        RefNode::PackageDeclaration(package) => package_declarations(package)
-            .map(RefNode::PackageOrGenerateItemDeclaration)
-            .collect(),
-        node => module_non_port_items(node)
-            .into_iter()
-            .map(RefNode::NonPortModuleItem)
-            .collect(),
-    };
-    let mut references = HashSet::default();
-    for node in items {
-        // Top-level RTL bodies do not contribute to subroutine discovery.
-        // Keep declarations (including signal types queried by functions) and
-        // whole generate constructs, whose conditions, imports and local
-        // declarations participate in elaboration for every collector. Keep
-        // procedural declarations too, as type queries can name their scopes.
+) -> Converted<HashSet<String>> {
+    use celox_sv_syntax::{BodyItemKind, ExprKind, LocalDeclaration, StatementKind};
+    let native = tree.declarations();
+    let mut ranges = Vec::new();
+    for id in tree.body_membership()? {
+        let item = native.body_item(id);
+        // Scalar initializers are already represented by the parameter binding
+        // environment. Array defaults are lowered later and still need literals.
+        if let BodyItemKind::Parameter(id) = item.kind
+            && !native
+                .parameter_declaration(id)
+                .parameters
+                .iter()
+                .any(|parameter| array_parameters::is_array_parameter(parameter, native))
+        {
+            continue;
+        }
         if matches!(
             literal_use,
             LiteralUse::Subroutines | LiteralUse::RootSubroutines
-        ) && let RefNode::NonPortModuleItem(sv_parser::NonPortModuleItem::ModuleOrGenerateItem(
-            item,
-        )) = &node
-            && let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item
-            && matches!(
-                item.nodes.1,
-                sv_parser::ModuleCommonItem::ContinuousAssign(_)
-                    | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
-                    | sv_parser::ModuleCommonItem::InitialConstruct(_)
-            )
-            && !node.clone().into_iter().any(|child| {
-                matches!(
-                    child,
-                    RefNode::DataDeclaration(_) | RefNode::NetDeclaration(_)
-                )
-            })
-        {
-            continue;
-        }
-        let declaration = match node.clone() {
-            RefNode::PackageOrGenerateItemDeclaration(declaration) => Some(declaration),
-            RefNode::NonPortModuleItem(item) => {
-                declarations::package_or_generate_declaration_from_non_port_item(item)
+        ) {
+            match item.kind {
+                BodyItemKind::Assign(_) => continue,
+                BodyItemKind::Procedure(id)
+                    if !native.procedure(id).authored_statements.iter().any(|id| {
+                        matches!(
+                            native.statement(*id).kind,
+                            StatementKind::Declaration(
+                                LocalDeclaration::Variables(_)
+                                    | LocalDeclaration::Constructed(_)
+                                    | LocalDeclaration::Unconverted(_)
+                            )
+                        )
+                    }) =>
+                {
+                    continue;
+                }
+                _ => {}
             }
-            _ => None,
-        };
-        if declaration.is_some_and(|declaration| matches!(declaration,
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
-                | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)))
-            && !node.clone().into_iter().any(|child| matches!(child,
-                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(assignment)))
-        {
+        }
+        // Generate containers retain all authored branches here; elaboration
+        // decides active execution separately. Arena nodes preserve escaped names.
+        ranges.push(item.tokens);
+    }
+    let mut references = HashSet::default();
+    for (_, expression) in native.expression_nodes() {
+        if !ranges.iter().any(|range| {
+            range.start <= expression.tokens.start && expression.tokens.end <= range.end
+        }) {
             continue;
         }
-        references.extend(
-            node.into_iter()
-                .filter(|child| {
-                    matches!(
-                        child,
-                        RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
-                    )
-                })
-                .filter_map(|child| identifier_text(child, tree)),
-        );
+        if let ExprKind::Name(name) | ExprKind::Member { name, .. } = &expression.kind {
+            references.insert(name.spelling.clone());
+        }
     }
-    references
+    Ok(references)
 }
 
 impl<'a> Elaborator<'a, '_> {
     /// A constant expression in this scope, or `None` when it has no
     /// constant value Celox can determine.
-    fn expression(
-        &self,
-        expr: &sv_parser::ConstantExpression,
-        scope: &Scope,
-    ) -> Result<Option<ConstExpr>, AnalyzerError> {
-        let Some(expr) = const_expr_from_ref_node_with_env(
-            RefNode::ConstantExpression(expr),
+    fn expression(&self, root: ExprId, scope: &Scope) -> Result<Option<ConstExpr>, AnalyzerError> {
+        let Some(expr) = constant_binding::expression(
+            root,
+            self.tree.declarations(),
             self.tree,
             &scope.env,
-            self.aliases,
+            &self.aliases,
         )?
         else {
             return Ok(None);
@@ -551,19 +688,37 @@ impl<'a> Elaborator<'a, '_> {
             ..PackedDimensions::default()
         };
         let Some(mut expr) = expr_to_index_const(
+            &self.tree.state,
             substitute_expr_idents(const_expr_to_expr(expr), &scope.literals),
             &dimensions,
         ) else {
             return Ok(None);
         };
-        Ok(self.expand_constant_calls(&mut expr, scope).map(|()| expr))
+        Ok(self
+            .expand_constant_calls(&self.tree.state, &mut expr, scope)
+            .map(|()| expr))
     }
 
-    fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
+    fn expand_constant_calls(
+        &self,
+        state: &AnalysisState,
+        expr: &mut ConstExpr,
+        scope: &Scope,
+    ) -> Option<()> {
         match expr {
             ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
-                    self.expand_constant_calls(arg, scope)?;
+                    self.expand_constant_calls(state, arg, scope)?;
+                }
+                // A block import binds the call to the qualified declaration,
+                // which the installed constant functions evaluate.
+                if let Callee::Subroutine(name) = callee
+                    && let Some(target) = scope
+                        .block_imports()
+                        .bindings()
+                        .find_map(|(imported, target)| (imported == name).then_some(target))
+                {
+                    *name = target.clone();
                 }
                 if let Callee::Subroutine(name) = callee
                     && self.functions.contains_key(name)
@@ -582,66 +737,57 @@ impl<'a> Elaborator<'a, '_> {
                         0,
                         true,
                     );
-                    let expanded = simplify_constant_mux_conditions(expanded, &scope.env);
+                    let expanded = simplify_constant_mux_conditions(state, expanded, &scope.env);
                     // Fold only the call: surrounding case arithmetic still needs
                     // the common comparison width, while function results are self-determined.
-                    *expr = expr_to_const(fold_const_integral_expr_preserving_mask(
-                        expanded, &scope.env,
-                    ))?;
+                    *expr = expr_to_const(
+                        state,
+                        fold_const_integral_expr_preserving_mask(state, expanded, &scope.env),
+                    )?;
                 }
             }
             ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.expand_constant_calls(expr, scope)?
+                self.expand_constant_calls(state, expr, scope)?
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.expand_constant_calls(expr, scope)?;
-                self.expand_constant_calls(msb, scope)?;
-                self.expand_constant_calls(lsb, scope)?;
+                self.expand_constant_calls(state, expr, scope)?;
+                self.expand_constant_calls(state, msb, scope)?;
+                self.expand_constant_calls(state, lsb, scope)?;
             }
             ConstExpr::Select { expr, bit } => {
-                self.expand_constant_calls(expr, scope)?;
-                self.expand_constant_calls(bit, scope)?;
+                self.expand_constant_calls(state, expr, scope)?;
+                self.expand_constant_calls(state, bit, scope)?;
             }
             ConstExpr::Binary { left, right, .. } => {
-                self.expand_constant_calls(left, scope)?;
-                self.expand_constant_calls(right, scope)?;
+                self.expand_constant_calls(state, left, scope)?;
+                self.expand_constant_calls(state, right, scope)?;
             }
             ConstExpr::Mux {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.expand_constant_calls(condition, scope)?;
-                self.expand_constant_calls(then_expr, scope)?;
-                self.expand_constant_calls(else_expr, scope)?;
+                self.expand_constant_calls(state, condition, scope)?;
+                self.expand_constant_calls(state, then_expr, scope)?;
+                self.expand_constant_calls(state, else_expr, scope)?;
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => {}
         }
         Some(())
     }
 
-    fn value(
-        &self,
-        expr: &sv_parser::ConstantExpression,
-        scope: &Scope,
-        detail: &str,
-    ) -> Result<i128, AnalyzerError> {
-        self.expression(expr, scope)?
-            .and_then(|expr| eval_ast_const_expr(&expr, &scope.env))
+    fn value(&self, root: ExprId, scope: &Scope, detail: &str) -> Result<i128, AnalyzerError> {
+        self.expression(root, scope)?
+            .and_then(|expr| eval_ast_const_expr(&self.tree.state, &expr, &scope.env))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
-    fn condition(
-        &self,
-        expr: &sv_parser::ConstantExpression,
-        scope: &Scope,
-        detail: &str,
-    ) -> Result<bool, AnalyzerError> {
+    fn condition(&self, root: ExprId, scope: &Scope, detail: &str) -> Result<bool, AnalyzerError> {
         let types = parameter_types_from_const_env(&scope.env)
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        self.expression(expr, scope)?
+        self.expression(root, scope)?
             .and_then(|expr| {
                 let expr = expr.into();
                 // Preserve four-state truth first (IEEE 1800-2023 12.4).
@@ -650,264 +796,29 @@ impl<'a> Elaborator<'a, '_> {
                 typecheck::eval_const_integral_literal_with_types(&expr, &scope.env, &types)
                     .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
                     .or_else(|| {
-                        typecheck::eval_const_expr_with_types(&expr, &scope.env, &types)
-                            .map(|value| value != 0)
+                        typecheck::eval_const_expr_with_types_in_env(
+                            &expr,
+                            &const_functions::Environment {
+                                constants: &*scope.env,
+                                functions: &self.tree.state.const_functions,
+                            },
+                            &|name| types.get(name).copied(),
+                        )
+                        .map(|value| value != 0)
                     })
             })
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
-    fn generate_item(
-        &mut self,
-        item: &'a sv_parser::GenerateItem,
-        scope: &Scope,
-        ordinal: &mut usize,
-    ) -> Result<(), AnalyzerError> {
-        match item {
-            sv_parser::GenerateItem::ModuleOrGenerateItem(item) => self.item(item, scope, ordinal),
-            _ => Err(AnalyzerError::Unsupported(
-                "non-module generate item".to_string(),
-            )),
-        }
-    }
-
-    fn item(
-        &mut self,
-        item: &'a sv_parser::ModuleOrGenerateItem,
-        scope: &Scope,
-        ordinal: &mut usize,
-    ) -> Result<(), AnalyzerError> {
-        if let sv_parser::ModuleOrGenerateItem::ModuleItem(common) = item {
-            match &common.nodes.1 {
-                sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
-                    *ordinal += 1;
-                    match &**generate {
-                        sv_parser::ConditionalGenerateConstruct::If(generate) => {
-                            let value = self.condition(
-                                &generate.nodes.1.nodes.1,
-                                scope,
-                                "unknown conditional-generate condition",
-                            )?;
-                            let selected = if value {
-                                Some(&generate.nodes.2)
-                            } else {
-                                generate.nodes.3.as_ref().map(|(_, b)| b)
-                            };
-                            if let Some(block) = selected {
-                                self.block(block, scope, *ordinal, None)?;
-                            }
-                        }
-                        sv_parser::ConditionalGenerateConstruct::Case(generate) => {
-                            let selector = self
-                                .expression(&generate.nodes.1.nodes.1, scope)?
-                                .ok_or_else(|| {
-                                    AnalyzerError::Unsupported(
-                                        "unknown case-generate selector".to_string(),
-                                    )
-                                })?;
-                            let types = parameter_types_from_const_env(&scope.env)
-                                .into_iter()
-                                .map(|(name, ty)| (name, (ty.width, ty.signed)))
-                                .collect::<HashMap<_, _>>();
-                            let integral = |expr: &ConstExpr| {
-                                typecheck::eval_const_integral_literal_with_types(
-                                    &expr.clone().into(),
-                                    &scope.env,
-                                    &types,
-                                )
-                                .ok_or_else(|| {
-                                    AnalyzerError::Unsupported(
-                                        "nonconstant case-generate expression".to_string(),
-                                    )
-                                })
-                            };
-                            let selector_value = integral(&selector).map_err(|_| {
-                                AnalyzerError::Unsupported(
-                                    "unknown case-generate selector".to_string(),
-                                )
-                            })?;
-                            let self_width = |expr: &ConstExpr, width| {
-                                if matches!(expr, ConstExpr::Literal(literal) if resize_unbased_fill_literal_for_cast(literal, 1, false).is_some())
-                                {
-                                    1
-                                } else {
-                                    width
-                                }
-                            };
-                            let mut width = self_width(&selector, selector_value.width);
-                            let mut signed = selector_value.signed;
-                            let mut labels = Vec::new();
-                            let mut default = None;
-                            for item in &generate.nodes.2 {
-                                match item {
-                                    sv_parser::CaseGenerateItem::Nondefault(item) => {
-                                        for label in item.nodes.0.contents() {
-                                            let label = self.expression(label, scope)?.ok_or_else(
-                                                || {
-                                                    AnalyzerError::Unsupported(
-                                                        "unknown case-generate label".to_string(),
-                                                    )
-                                                },
-                                            )?;
-                                            let value = integral(&label)?;
-                                            width = width.max(self_width(&label, value.width));
-                                            signed &= value.signed;
-                                            labels.push((label, &item.nodes.2));
-                                        }
-                                    }
-                                    sv_parser::CaseGenerateItem::Default(item) => {
-                                        if default.replace(&item.nodes.2).is_some() {
-                                            return Err(AnalyzerError::Unsupported(
-                                                "duplicate case-generate default".to_string(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            // The selector and every label share one width and signing context.
-                            // Pairwise comparisons would incorrectly sign-extend a narrow signed
-                            // selector when another label makes the overall case unsigned.
-                            let normalize = |expr: ConstExpr| {
-                                typecheck::eval_generate_case_operand(
-                                    &expr.into(),
-                                    &scope.env,
-                                    &types,
-                                    width,
-                                    signed,
-                                )
-                                .ok_or_else(|| {
-                                    AnalyzerError::Unsupported(
-                                        "case-generate comparison".to_string(),
-                                    )
-                                })
-                            };
-                            let selector = normalize(selector)?;
-                            let mut selected = None;
-                            for (label, block) in labels {
-                                let label = normalize(label)?;
-                                if label.value == selector.value
-                                    && label.mask == selector.mask
-                                    && selected.is_none()
-                                {
-                                    selected = Some(block);
-                                }
-                            }
-                            if let Some(block) = selected.or(default) {
-                                self.block(block, scope, *ordinal, None)?;
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-                sv_parser::ModuleCommonItem::LoopGenerateConstruct(generate) => {
-                    *ordinal += 1;
-                    let name = identifier_text(
-                        RefNode::GenvarIdentifier(&generate.nodes.1.nodes.1.0.nodes.1),
-                        self.tree,
-                    )
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported("loop-generate variable".to_string())
-                    })?;
-                    let step_name = RefNode::GenvarIteration(&generate.nodes.1.nodes.1.4)
-                        .into_iter()
-                        .find_map(|node| match node {
-                            RefNode::GenvarIdentifier(name) => {
-                                identifier_text(RefNode::GenvarIdentifier(name), self.tree)
-                            }
-                            _ => None,
-                        });
-                    if step_name.as_deref() != Some(name.as_str()) {
-                        return Err(AnalyzerError::Unsupported(
-                            "genvar update targets a different variable".to_string(),
-                        ));
-                    }
-                    let mut value = self.value(
-                        &generate.nodes.1.nodes.1.0.nodes.3,
-                        scope,
-                        "loop-generate initializer",
-                    )?;
-                    loop {
-                        // Assignment to a genvar truncates and sign-extends to its
-                        // signed 32-bit type, including after every loop update.
-                        value = i128::from(value as i32);
-                        let mut iteration = scope.clone();
-                        // Replace the entire inherited binding, including packed
-                        // bounds and rank, before installing the signed int genvar.
-                        for marker in parameters::binding_keys(&name, &iteration.env, 0) {
-                            iteration.env.remove(&marker);
-                        }
-                        iteration.env.insert(name.clone(), value);
-                        insert_parameter_type_markers(
-                            &mut iteration.env,
-                            &name,
-                            ExprType {
-                                width: 32,
-                                signed: true,
-                            },
-                        );
-                        iteration.env.insert(parameter_rank_marker(&name), 1);
-                        iteration.names.remove(&name);
-                        Arc::make_mut(&mut iteration.shadowed).insert(name.clone());
-                        iteration
-                            .parameters
-                            .retain(|parameter| parameter.name() != name);
-                        iteration.parameter_dimensions =
-                            Arc::new(parameter_packed_dimensions(&iteration.parameters));
-                        iteration.literals.remove(&name);
-                        if !self.condition(
-                            &generate.nodes.1.nodes.1.2.nodes.0,
-                            &iteration,
-                            "loop-generate condition",
-                        )? {
-                            break;
-                        }
-                        self.remaining = self.remaining.checked_sub(1).ok_or_else(|| {
-                            AnalyzerError::Unsupported(
-                                "loop-generate unroll limit exceeded".to_string(),
-                            )
-                        })?;
-                        self.block(
-                            &generate.nodes.2,
-                            &iteration,
-                            *ordinal,
-                            Some((&name, value)),
-                        )?;
-                        value = next_genvar_value(
-                            value,
-                            &generate.nodes.1.nodes.1.4,
-                            self.tree,
-                            &iteration.env,
-                            |expr| self.expression(expr, &iteration),
-                        )?
-                        .ok_or_else(|| {
-                            AnalyzerError::Unsupported("genvar update operator".to_string())
-                        })?;
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-        if scope.in_loop
-            && RefNode::ModuleOrGenerateItem(item)
-                .into_iter()
-                .any(|node| matches!(node, RefNode::FunctionDeclaration(_)))
-        {
-            return Err(AnalyzerError::Unsupported(
-                "function declaration inside loop-generate".to_string(),
-            ));
-        }
-        self.push(ScopeItem::Module(item), scope);
-        Ok(())
-    }
-
-    fn push(&mut self, node: ScopeItem<'a>, scope: &Scope) {
+    fn push(&mut self, id: celox_sv_syntax::BodyItemId, scope: &Scope) {
         self.items.push(Item {
-            node,
+            state: self.tree.state.clone(),
+            id,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
             names: scope.names.clone(),
+            imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
             scope: scope.path.clone(),
         });
@@ -915,71 +826,67 @@ impl<'a> Elaborator<'a, '_> {
 
     fn constants_and_signal_types(
         &self,
-        children: &[&sv_parser::GenerateItem],
+        children: &[celox_sv_syntax::BodyItemId],
         scope: &mut Scope,
         declared: &mut HashSet<String>,
     ) -> Result<(), AnalyzerError> {
+        use celox_sv_syntax::{BodyItemKind, DataDeclaration, ParameterKind};
+        let native = self.tree.declarations();
         let mut signal_declarations = Vec::new();
-        for item in children {
-            let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
-                continue;
-            };
-            let is_signal = match &**item {
-                sv_parser::ModuleOrGenerateItem::Module(module) => identifier_text(
-                    RefNode::ModuleIdentifier(&module.nodes.1.nodes.0), self.tree,
-                ).is_some_and(|name| self.aliases.contains_key(&name)),
-                sv_parser::ModuleOrGenerateItem::ModuleItem(common) => {
-                    if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = &common.nodes.1
-                        && let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) = &**declaration
-                    {
-                        matches!(&**declaration,
-                            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(_)
-                            | sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_))
-                    } else { false }
+        for id in children {
+            let (data_type, variables): (_, Vec<_>) = match native.body_item(*id).kind {
+                BodyItemKind::Data(id) => match native.data_declaration(id) {
+                    DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => (
+                        Some(value.data_type),
+                        value
+                            .variables
+                            .iter()
+                            .filter(|variable| type_binding::ordinary_variable(variable, native))
+                            .map(|variable| (&variable.name, variable.dimensions.as_slice()))
+                            .collect(),
+                    ),
+                    DataDeclaration::Unconverted(_) => continue,
+                },
+                BodyItemKind::Net(id) => {
+                    let value = native.net_declaration(id);
+                    (
+                        Some(value.data_type),
+                        value
+                            .variables
+                            .iter()
+                            .map(|variable| (&variable.name, variable.dimensions.as_slice()))
+                            .collect(),
+                    )
                 }
-                _ => false,
+                BodyItemKind::Instance(id) => {
+                    let value = native.instantiation(id);
+                    if !self
+                        .aliases
+                        .contains_key(&instances::normalize_identifier(&value.name.spelling))
+                    {
+                        continue;
+                    }
+                    (
+                        None,
+                        value
+                            .instances
+                            .iter()
+                            .map(|variable| (&variable.name, variable.dimensions.as_slice()))
+                            .collect(),
+                    )
+                }
+                _ => continue,
             };
-            if !is_signal {
-                continue;
-            }
-            let node = RefNode::ModuleOrGenerateItem(item);
-            let shared_dependencies: HashSet<_> = node
-                .clone()
-                .into_iter()
-                .filter_map(|node| match node {
-                    RefNode::DataDeclaration(sv_parser::DataDeclaration::Variable(variable)) => {
-                        Some(RefNode::DataTypeOrImplicit(&variable.nodes.3))
-                    }
-                    RefNode::NetDeclaration(sv_parser::NetDeclaration::NetType(net)) => {
-                        Some(RefNode::DataTypeOrImplicit(&net.nodes.3))
-                    }
-                    _ => None,
-                })
-                .flat_map(|node| dimension_dependencies(node, self.tree))
-                .collect();
-            let declarators = node.into_iter().filter_map(|node| {
-                let identifier = match node {
-                    RefNode::VariableDeclAssignment(
-                        sv_parser::VariableDeclAssignment::Variable(assignment),
-                    ) => RefNode::VariableIdentifier(&assignment.nodes.0),
-                    RefNode::NetDeclAssignment(assignment) => {
-                        RefNode::NetIdentifier(&assignment.nodes.0)
-                    }
-                    RefNode::HierarchicalInstance(instance) => {
-                        RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0)
-                    }
-                    _ => return None,
-                };
-                identifier_text(identifier, self.tree).map(|name| (name, node))
-            });
-            for (name, declarator) in declarators {
+            let shared_dependencies = data_type
+                .map(|id| native_type_dependencies(id, native))
+                .unwrap_or_default();
+            for (name, dimensions) in variables {
+                let name = instances::normalize_identifier(&name.spelling);
                 if !declared.insert(name.clone()) {
-                    return Err(AnalyzerError::Unsupported(format!(
+                    return Err(unsupported(format!(
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
-                // An inner declaration hides inherited values and type metadata
-                // before any local size query or dimension is evaluated.
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
@@ -998,94 +905,35 @@ impl<'a> Elaborator<'a, '_> {
                     scope.env.remove(&key);
                 }
                 scope.literals.remove(&name);
-                // The packed type is shared, but each declarator owns its
-                // unpacked bounds. A sibling's bounds must not block this type.
                 let mut dependencies = shared_dependencies.clone();
-                dependencies.extend(dimension_dependencies(declarator, self.tree));
-                signal_declarations.push((name, &**item, dependencies));
+                dependencies.extend(native_dimension_dependencies(dimensions, native));
+                signal_declarations.push((name, *id, dependencies));
             }
         }
         let mut pending = Vec::new();
-        for item in children {
-            let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
+        for id in children {
+            let BodyItemKind::Parameter(declaration) = native.body_item(*id).kind else {
                 continue;
             };
-            let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
-                continue;
-            };
-            let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) =
-                &item.nodes.1
-            else {
-                continue;
-            };
-            let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-                declaration,
-            ) = &**declaration
-            else {
-                continue;
-            };
-            // IEEE 1800-2023 6.20.1: parameter declarations in a
-            // generate block are localparams as well.
-            let (node, data_type) = match &**declaration {
-                sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
-                    declaration,
-                ) => {
-                    let sv_parser::LocalParameterDeclaration::Param(parameter) = &declaration.0
-                    else {
-                        return Err(AnalyzerError::Unsupported(
-                            "generate-local type parameter".to_string(),
-                        ));
-                    };
-                    (
-                        RefNode::LocalParameterDeclaration(&declaration.0),
-                        &parameter.nodes.1,
-                    )
-                }
-                sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
-                    let sv_parser::ParameterDeclaration::Param(parameter) = &declaration.0 else {
-                        return Err(AnalyzerError::Unsupported(
-                            "generate-local type parameter".to_string(),
-                        ));
-                    };
-                    (
-                        RefNode::ParameterDeclaration(&declaration.0),
-                        &parameter.nodes.1,
-                    )
-                }
-                _ => continue,
-            };
-            let assignments: Vec<_> = node
-                .clone()
-                .into_iter()
-                .filter_map(|child| match child {
-                    RefNode::ParamAssignment(assignment) => Some(assignment),
-                    _ => None,
-                })
-                .collect();
+            let assignments = &native.parameter_declaration(declaration).parameters;
             let single = assignments.len() == 1;
             for assignment in assignments {
-                let name = parameter_name(RefNode::ParamAssignment(assignment), self.tree)?;
+                let ParameterKind::Value {
+                    data_type, default, ..
+                } = assignment.kind
+                else {
+                    return Err(unsupported("generate-local type parameter"));
+                };
+                let name = instances::normalize_identifier(&assignment.name.spelling);
                 if !declared.insert(name.clone()) {
-                    return Err(AnalyzerError::Unsupported(format!(
+                    return Err(unsupported(format!(
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
-                // Include both initializer and declared range dependencies. Bind all
-                // names before evaluation so a forward local hides an outer parameter.
-                let dependencies: HashSet<_> =
-                    RefNode::DataTypeOrImplicit(data_type)
-                        .into_iter()
-                        .chain(assignment.nodes.2.iter().flat_map(|(_, value)| {
-                            RefNode::ConstantParamExpression(value).into_iter()
-                        }))
-                        .filter(|node| {
-                            matches!(
-                                node,
-                                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
-                            )
-                        })
-                        .filter_map(|node| identifier_text(node, self.tree))
-                        .collect();
+                let mut dependencies = native_type_dependencies(data_type, native);
+                if let Some(root) = default {
+                    dependencies.extend(native_expression_dependencies(root, native));
+                }
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
@@ -1109,7 +957,7 @@ impl<'a> Elaborator<'a, '_> {
                     .retain(|parameter| parameter.name() != name);
                 scope.names.remove(&name);
                 Arc::make_mut(&mut scope.shadowed).insert(name.clone());
-                pending.push((name, node.clone(), dependencies, single));
+                pending.push((name, *id, dependencies, single));
             }
         }
         // Signal dimensions and localparams can depend on each other. Preserve
@@ -1133,14 +981,14 @@ impl<'a> Elaborator<'a, '_> {
                 AnalyzerError::Unsupported("cyclic generate-local parameter dependency".to_string())
             })?;
             if index < signal_count {
-                let (name, item, _) = signal_declarations[index]
+                let (name, id, _) = signal_declarations[index]
                     .take()
                     .expect("ready signal is unbound");
                 let mut signals = Vec::new();
-                signals_from_module_or_generate_item(
-                    item,
+                signals_from_body_item(
+                    id,
                     self.tree,
-                    self.aliases,
+                    &self.aliases,
                     &scope.env,
                     Some(&name),
                     &mut signals,
@@ -1160,7 +1008,7 @@ impl<'a> Elaborator<'a, '_> {
                         )
                     {
                         if parameters::contains_unbounded_operand(bound, &scope.env)
-                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                            && eval_ast_const_expr(&self.tree.state, bound, &scope.env).is_none()
                         {
                             return Err(AnalyzerError::Unsupported(
                                 "numeric use of unbounded parameter in generate signal range"
@@ -1170,6 +1018,7 @@ impl<'a> Elaborator<'a, '_> {
                     }
                 }
                 extend_const_env_with_variable_types(
+                    &self.tree.state,
                     &mut scope.env,
                     signals
                         .iter()
@@ -1185,22 +1034,25 @@ impl<'a> Elaborator<'a, '_> {
                     // publish new type metadata; grouped declarations temporarily
                     // bind siblings. Either ends this run before rebuilding it.
                     let base = scope.env.clone();
-                    let mut environment =
-                        parameters::ParameterEnvironment::new(&scope.parameters, &base);
+                    let mut environment = parameters::ParameterEnvironment::new(
+                        &self.tree.state,
+                        &scope.parameters,
+                        &base,
+                    );
                     let mut types = parameter_types_from_const_env(&base);
                     let mut next = index;
                     loop {
-                        let (name, node, _, _) = pending[next - signal_count]
+                        let (name, id, _, _) = pending[next - signal_count]
                             .take()
                             .expect("ready parameter is unbound");
                         let inherited_count = scope.parameters.len();
-                        parameters::parameters_from_ref_node_with_environment(
-                            node,
+                        parameters::parameters_from_native_with_environment(
+                            &parameters::ownership::body(id, self.tree)?,
                             self.tree,
                             &mut scope.parameters,
                             true,
                             &base,
-                            self.aliases,
+                            &self.aliases,
                             &HashMap::default(),
                             &mut environment,
                         )?;
@@ -1215,6 +1067,7 @@ impl<'a> Elaborator<'a, '_> {
                                 ))
                             })?;
                         constants::bind_generate_parameter_with_types(
+                            &self.tree.state,
                             parameter,
                             &mut scope.env,
                             &mut scope.literals,
@@ -1236,20 +1089,20 @@ impl<'a> Elaborator<'a, '_> {
                     }
                     continue;
                 }
-                let (name, node, _, _) = pending[index - signal_count]
+                let (name, id, _, _) = pending[index - signal_count]
                     .take()
                     .expect("ready parameter is unbound");
                 // The declaration may contain siblings. Temporarily append all
                 // of them for the existing lowering semantics, then keep only
                 // this scheduled parameter, without cloning the inherited prefix.
                 let inherited_count = scope.parameters.len();
-                parameters_from_ref_node(
-                    node,
+                parameters::parameters_from_native(
+                    &parameters::ownership::body(id, self.tree)?,
                     self.tree,
                     &mut scope.parameters,
                     true,
                     &scope.env,
-                    self.aliases,
+                    &self.aliases,
                     &HashMap::default(),
                 )?;
                 let parameter = scope
@@ -1260,7 +1113,12 @@ impl<'a> Elaborator<'a, '_> {
                         AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
                     })?;
                 scope.parameters.push(parameter.clone());
-                bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
+                bind_generate_parameter(
+                    &self.tree.state,
+                    parameter,
+                    &mut scope.env,
+                    &mut scope.literals,
+                );
             }
             order.complete(index);
         }
@@ -1268,65 +1126,12 @@ impl<'a> Elaborator<'a, '_> {
         Ok(())
     }
 
-    fn block(
+    fn prepare_block_contents(
         &mut self,
-        block: &'a sv_parser::GenerateBlock,
-        parent: &Scope,
-        ordinal: usize,
+        children: &[celox_sv_syntax::BodyItemId],
+        mut scope: Scope,
         index: Option<(&str, i128)>,
-    ) -> Result<(), AnalyzerError> {
-        // A directly nested conditional generate does not introduce a scope
-        // (IEEE 1800-2023 27.5). A loop body still always introduces a scope.
-        if index.is_none()
-            && let sv_parser::GenerateBlock::GenerateItem(item) = block
-            && let sv_parser::GenerateItem::ModuleOrGenerateItem(common) = &**item
-            && let sv_parser::ModuleOrGenerateItem::ModuleItem(common) = &**common
-            && matches!(
-                common.nodes.1,
-                sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(_)
-            )
-        {
-            return self.generate_item(item, parent, &mut (ordinal - 1));
-        }
-        let explicit = match block {
-            sv_parser::GenerateBlock::Multiple(block) => block
-                .nodes
-                .2
-                .as_ref()
-                .map(|(_, name)| name)
-                .or_else(|| block.nodes.0.as_ref().map(|(name, _)| name)),
-            _ => None,
-        };
-        let mut name = explicit
-            .and_then(|name| identifier_text(RefNode::GenerateBlockIdentifier(name), self.tree))
-            .unwrap_or_else(|| format!("genblk{ordinal}"));
-        name = scope_component(&name);
-        if let Some((_, index)) = index {
-            name.push_str(&format!("[{index}]"));
-        }
-        let mut scope = parent.clone();
-        scope.in_loop |= index.is_some();
-        scope.path = if parent.path.is_empty() {
-            name
-        } else {
-            format!("{}.{name}", parent.path)
-        };
-        let children: Vec<&sv_parser::GenerateItem> = match block {
-            sv_parser::GenerateBlock::GenerateItem(item) => vec![item],
-            sv_parser::GenerateBlock::Multiple(block) => block.nodes.3.iter().collect(),
-        };
-        // The names the block's imports bind to another declaration than its
-        // module does (see `imports::resolve_imports`), before the block's
-        // declarations are evaluated with them.
-        let imported = scope::imported();
-        if let Some(bindings) = imported
-            .generate_imports
-            .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
-        {
-            for (name, target) in bindings {
-                bind_import(&mut scope, name, target);
-            }
-        }
+    ) -> Result<Scope, AnalyzerError> {
         // Bind all declarations before lowering expressions, including forward references.
         let mut declared = HashSet::default();
         if let Some((genvar, value)) = index {
@@ -1342,77 +1147,45 @@ impl<'a> Elaborator<'a, '_> {
                 Expr::Literal(format_typed_parameter_literal(value, 32, true)),
             );
         }
-        self.constants_and_signal_types(&children, &mut scope, &mut declared)?;
-        for item in &children {
-            let mut signals = Vec::new();
-            if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-                // Do not recurse into nested scopes while gathering direct declarations.
-                match &**item {
-                    sv_parser::ModuleOrGenerateItem::Module(_) => {
-                        signals_from_module_or_generate_item(
-                            item,
-                            self.tree,
-                            self.aliases,
-                            &scope.env,
-                            None,
-                            &mut signals,
-                        )?
+        // Reject unsupported local types before signal precollection tries to
+        // resolve their uses. Native membership owns the declaration class.
+        if children.iter().any(|id| {
+            matches!(
+                self.tree.declarations().body_item(*id).kind,
+                celox_sv_syntax::BodyItemKind::TypeAlias(_)
+            )
+        }) {
+            return Err(unsupported("type declaration inside generate scope"));
+        }
+        self.constants_and_signal_types(children, &mut scope, &mut declared)?;
+        for id in children {
+            if let celox_sv_syntax::BodyItemKind::Subroutine(subroutine) =
+                self.tree.declarations().body_item(*id).kind
+            {
+                let subroutine = self.tree.declarations().subroutine(subroutine);
+                if subroutine.kind == celox_sv_syntax::SubroutineKind::Function {
+                    let name = instances::normalize_identifier(&subroutine.name.spelling);
+                    if !declared.insert(name.clone()) {
+                        return Err(unsupported(format!(
+                            "duplicate generate-local declaration `{name}`"
+                        )));
                     }
-                    sv_parser::ModuleOrGenerateItem::ModuleItem(common)
-                        if matches!(
-                            common.nodes.1,
-                            sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_)
-                        ) =>
-                    {
-                        if RefNode::ModuleOrGenerateItem(item)
-                            .into_iter()
-                            .any(|n| matches!(n, RefNode::TypeDeclaration(_)))
-                        {
-                            return Err(AnalyzerError::Unsupported(
-                                "type declaration inside generate scope".to_string(),
-                            ));
-                        }
-                        for node in RefNode::ModuleOrGenerateItem(item) {
-                            if let RefNode::FunctionDeclaration(function) = node {
-                                let identifier = match &function.nodes.2 {
-                                    sv_parser::FunctionBodyDeclaration::WithPort(body) => {
-                                        &body.nodes.2
-                                    }
-                                    sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
-                                        &body.nodes.2
-                                    }
-                                };
-                                let name = identifier_text(
-                                    RefNode::FunctionIdentifier(identifier),
-                                    self.tree,
-                                )
-                                .ok_or_else(|| {
-                                    AnalyzerError::Unsupported("function name".to_string())
-                                })?;
-                                if !declared.insert(name.clone()) {
-                                    return Err(AnalyzerError::Unsupported(format!(
-                                        "duplicate generate-local declaration `{name}`"
-                                    )));
-                                }
-                                Arc::make_mut(&mut scope.shadowed).insert(name.clone());
-                                scope.names.insert(
-                                    name.clone(),
-                                    format!("{}.{}", scope.path, scope_component(&name)),
-                                );
-                            }
-                        }
-                        signals_from_module_or_generate_item(
-                            item,
-                            self.tree,
-                            self.aliases,
-                            &scope.env,
-                            None,
-                            &mut signals,
-                        )?;
-                    }
-                    _ => {}
+                    Arc::make_mut(&mut scope.shadowed).insert(name.clone());
+                    scope.names.insert(
+                        name.clone(),
+                        format!("{}.{}", scope.path, scope_component(&name)),
+                    );
                 }
             }
+            let mut signals = Vec::new();
+            signals_from_body_item(
+                *id,
+                self.tree,
+                &self.aliases,
+                &scope.env,
+                None,
+                &mut signals,
+            )?;
             for signal in signals {
                 for key in [
                     signal.name.clone(),
@@ -1436,20 +1209,17 @@ impl<'a> Elaborator<'a, '_> {
                 );
             }
         }
-        let mut ordinal = 0;
-        for item in children {
-            self.generate_item(item, &scope, &mut ordinal)?;
-        }
-        Ok(())
+        Ok(scope)
     }
 }
 
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
 fn bind_import(scope: &mut Scope, name: &str, target: &str) {
-    let imported = scope::imported();
+    let imported = scope::imported(&scope.state);
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
+    scope.imports.insert(name.to_string(), target.to_string());
     // The constant value and type markers of the item, under the name.
     let names = |key: &str| -> Option<String> {
         if key == target {
@@ -1496,7 +1266,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
         // The exported literal is already evaluated in the package scope.
         // Keep that snapshot when rebuilding declaration-order environments;
         // the initializer may name a package dependency absent from this scope.
-        if let Some(value) = literal.and_then(expr_to_const) {
+        if let Some(value) = literal.and_then(|expr| expr_to_const(&scope.state, expr)) {
             parameter.value = Some(value);
         }
         scope.parameters.push(parameter);
@@ -1506,80 +1276,148 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
 // Bootstrap only module-scope functions; collecting the full function map would
 // itself elaborate generate blocks and recurse into the conditions being decided.
 fn module_constant_functions(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literals: &HashMap<String, Expr>,
-) -> HashMap<String, Function> {
+) -> Converted<HashMap<String, Function>> {
     let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
     let types = parameter_types_from_const_env(env);
-    let mut functions = HashMap::default();
-    let mut calls = HashMap::default();
-    for item in scope_items(node) {
-        let Some(declaration) = item.declaration() else {
-            continue;
-        };
-        for node in RefNode::PackageOrGenerateItemDeclaration(declaration) {
-            let RefNode::FunctionDeclaration(declaration) = node else {
-                continue;
-            };
-            let Some(mut function) =
-                function_from_declaration(declaration, tree, env, aliases, &dimensions)
-            else {
-                continue;
-            };
-            let mut bindings = HashMap::default();
-            for node in RefNode::FunctionDeclaration(declaration) {
-                if !matches!(
-                    node,
-                    RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
-                ) {
-                    continue;
-                }
-                let Some(name) = identifier_text(node, tree) else {
-                    continue;
-                };
-                if function
-                    .params
-                    .iter()
-                    .any(|parameter| parameter.name == name)
-                {
-                    continue;
-                }
-                let value = literals
-                    .get(&name)
-                    .cloned()
-                    .or_else(|| {
-                        env.get(&name).map(|value| {
-                            Expr::Literal(types.get(&name).map_or_else(
-                                || value.to_string(),
-                                |ty| format_typed_parameter_literal(*value, ty.width, ty.signed),
-                            ))
-                        })
-                    })
-                    .unwrap_or_else(|| Expr::Ident(format!("\0constant_function:{name}")));
-                bindings.insert(name, value);
-            }
-            // Close over definition-site constants. Unresolved module signals must
-            // not become constants just because a generate local shadows them.
-            function.body = function
-                .body
-                .map(|body| substitute_expr_idents(body, &bindings));
-            calls.insert(
-                function.name.clone(),
-                RefNode::FunctionDeclaration(declaration)
-                    .into_iter()
-                    .filter_map(|node| {
-                        let RefNode::TfCall(call) = node else {
-                            return None;
-                        };
-                        reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
-                    })
-                    .collect::<Vec<_>>(),
-            );
-            functions.insert(function.name.clone(), function);
+    let mut roots = Vec::new();
+    let mut pending = tree.body_membership()?;
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native function scope owner".into(),
+            ));
         }
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => {
+                pending.extend(items);
+                continue;
+            }
+            celox_sv_syntax::BodyItemKind::Unit(_)
+            | celox_sv_syntax::BodyItemKind::Conditional { .. }
+            | celox_sv_syntax::BodyItemKind::Case { .. }
+            | celox_sv_syntax::BodyItemKind::Loop { .. } => continue,
+            _ => {}
+        }
+        roots.push(Item {
+            state: tree.state.clone(),
+            id,
+            env: env.clone().into(),
+            literals: literals.clone().into(),
+            parameter_dimensions: Arc::default(),
+            names: SharedMap::default(),
+            imports: SharedMap::default(),
+            shadowed: Arc::default(),
+            scope: String::new(),
+        });
+    }
+    let mut functions = functions::native_functions(
+        &roots,
+        tree,
+        &dimensions,
+        lifetimes::automatic_by_default(tree),
+    )?;
+    let mut calls = HashMap::default();
+    for function in functions.values_mut() {
+        let mut pending = function.body.iter().collect::<Vec<_>>();
+        let mut used = HashSet::default();
+        let mut coordinates = Vec::new();
+        let mut callees = Vec::new();
+        while let Some(expr) = pending.pop() {
+            match expr {
+                Expr::Ident(name) => {
+                    used.insert(name.clone());
+                }
+                Expr::Select { expr, msb, lsb, .. } => {
+                    pending.push(expr);
+                    coordinates.extend([msb, lsb]);
+                }
+                Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => pending.push(expr),
+                Expr::Concat(parts) => pending.extend(parts),
+                Expr::RepeatConcat { count, parts } => {
+                    pending.extend(parts);
+                    coordinates.push(count);
+                }
+                Expr::Binary { left, right, .. } => pending.extend([left.as_ref(), right.as_ref()]),
+                Expr::Mux {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => pending.extend([condition.as_ref(), then_expr.as_ref(), else_expr.as_ref()]),
+                Expr::Call { callee, args, .. } => {
+                    if let Callee::Subroutine(name) = callee {
+                        callees.push(name.clone());
+                    }
+                    pending.extend(args.iter().flatten());
+                }
+                Expr::Inside { expr, items } => {
+                    pending.push(expr);
+                    pending.extend(items.iter().flat_map(|item| item.exprs()));
+                }
+                _ => {}
+            }
+        }
+        while let Some(expr) = coordinates.pop() {
+            match expr {
+                ConstExpr::Ident(name) => {
+                    used.insert(name.clone());
+                }
+                ConstExpr::Select { expr, bit } => {
+                    coordinates.extend([expr.as_ref(), bit.as_ref()])
+                }
+                ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                    coordinates.extend([expr.as_ref(), msb.as_ref(), lsb.as_ref()])
+                }
+                ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                    coordinates.push(expr)
+                }
+                ConstExpr::Binary { left, right, .. } => {
+                    coordinates.extend([left.as_ref(), right.as_ref()])
+                }
+                ConstExpr::Mux {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    coordinates.extend([condition.as_ref(), then_expr.as_ref(), else_expr.as_ref()])
+                }
+                ConstExpr::Function { callee, args, .. } => {
+                    if let Callee::Subroutine(name) = callee {
+                        callees.push(name.clone());
+                    }
+                    coordinates.extend(args);
+                }
+                ConstExpr::Literal(_) => {}
+            }
+        }
+        let mut bindings = HashMap::default();
+        for name in used {
+            if function.params.iter().any(|param| param.name == name) {
+                continue;
+            }
+            let value = literals
+                .get(&name)
+                .cloned()
+                .or_else(|| {
+                    env.get(&name).map(|value| {
+                        Expr::Literal(types.get(&name).map_or_else(
+                            || value.to_string(),
+                            |ty| format_typed_parameter_literal(*value, ty.width, ty.signed),
+                        ))
+                    })
+                })
+                .unwrap_or_else(|| Expr::Ident(format!("\0constant_function:{name}")));
+            bindings.insert(name, value);
+        }
+        function.body = function
+            .body
+            .take()
+            .map(|body| substitute_expr_idents(body, &bindings));
+        calls.insert(function.name.clone(), callees);
     }
     // The existing inliner bounds call depth, but branching recursion would
     // still expand exponentially. Keep recursive call graphs unsupported here.
@@ -1599,29 +1437,94 @@ fn module_constant_functions(
         valid
     }
     functions.retain(|name, _| acyclic(name, &calls, &mut HashSet::default()));
-    functions
+    Ok(functions)
 }
 
 // Inspect dimension expressions only, excluding runtime declaration initializers.
-fn dimension_dependencies(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
-    node.into_iter()
-        .filter(|node| {
-            matches!(
-                node,
-                RefNode::PackedDimension(_)
-                    | RefNode::UnpackedDimension(_)
-                    | RefNode::VariableDimension(_)
-            )
-        })
-        .flat_map(|node| node.into_iter())
-        .filter(|node| {
-            matches!(
-                node,
-                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_)
-            )
-        })
-        .filter_map(|node| identifier_text(node, tree))
-        .collect()
+fn native_expression_dependencies(
+    root: ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> HashSet<String> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    let mut names = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let celox_sv_syntax::ExprKind::Name(name) = &native.expression(id).kind {
+            names.insert(instances::normalize_identifier(&name.spelling));
+        }
+        pending.extend(parameters::skipped::children(id, native));
+    }
+    names
+}
+fn native_dimension_dependencies(
+    dimensions: &[celox_sv_syntax::Dimension],
+    native: &celox_sv_syntax::Declarations,
+) -> HashSet<String> {
+    use celox_sv_syntax::DimensionKind;
+    let mut names = HashSet::default();
+    for dimension in dimensions {
+        let roots = match dimension.kind {
+            DimensionKind::Index(id) | DimensionKind::Queue(Some(id)) => vec![id],
+            DimensionKind::Range { left, right } => vec![left, right],
+            DimensionKind::Indexed { base, width, .. } => vec![base, width],
+            _ => Vec::new(),
+        };
+        for root in roots {
+            names.extend(native_expression_dependencies(root, native));
+        }
+    }
+    names
+}
+fn native_type_dependencies(
+    root: celox_sv_syntax::TypeId,
+    native: &celox_sv_syntax::Declarations,
+) -> HashSet<String> {
+    use celox_sv_syntax::DataTypeKind;
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    let mut names = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let ty = native.data_type(id);
+        names.extend(native_dimension_dependencies(&ty.packed_dimensions, native));
+        match &ty.kind {
+            DataTypeKind::Named(path) => {
+                for part in path {
+                    names.insert(instances::normalize_identifier(&part.name.spelling));
+                    for argument in part.arguments.iter().flatten() {
+                        if let Some(root) = argument.value {
+                            names.extend(native_expression_dependencies(root, native));
+                        }
+                    }
+                }
+            }
+            DataTypeKind::TypeOf(root) => {
+                names.extend(native_expression_dependencies(*root, native))
+            }
+            DataTypeKind::Struct { fields, .. } => {
+                for field in fields {
+                    pending.push(field.data_type);
+                    names.extend(native_dimension_dependencies(&field.dimensions, native));
+                }
+            }
+            DataTypeKind::Enum { base, items } => {
+                pending.extend(base.iter().copied());
+                for item in items {
+                    names.extend(native_dimension_dependencies(&item.dimensions, native));
+                    if let Some(root) = item.value {
+                        names.extend(native_expression_dependencies(root, native));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -1630,7 +1533,8 @@ mod tests {
     use std::path::Path;
 
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
-        let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
+        let tree = crate::source_tree::parse_scope_fixture(source, Path::new("generate.sv"))?;
+        let tree = AnalysisContext::unspecialized(&tree);
         Source::from_syntax(&tree)
     }
 
@@ -1648,15 +1552,14 @@ mod tests {
                 writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
             }
             code.push_str("logic [P0-1:0] data; end endmodule");
-            let tree =
-                crate::syntax::parse_source(&code, Path::new("generate_parameter_prefix.sv"))
-                    .unwrap();
-            let node = tree
-                .into_iter()
-                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-                .unwrap();
+            let tree = crate::source_tree::parse_scope_fixture(
+                &code,
+                Path::new("generate_parameter_prefix.sv"),
+            )
+            .unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
-            let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
             let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
             assert!(
                 bindings <= 3 * count,
@@ -1679,6 +1582,7 @@ mod tests {
 
     #[test]
     fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
+        let state = AnalysisState::default();
         let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
         insert_parameter_type_markers(
             &mut base,
@@ -1717,8 +1621,14 @@ mod tests {
                 width.is_some(),
                 true,
             );
-            bind_generate_parameter(parameter.clone(), &mut rebuilt_env, &mut rebuilt_literals);
+            bind_generate_parameter(
+                &state,
+                parameter.clone(),
+                &mut rebuilt_env,
+                &mut rebuilt_literals,
+            );
             constants::bind_generate_parameter_with_types(
+                &state,
                 parameter,
                 &mut cached_env,
                 &mut cached_literals,
@@ -1732,16 +1642,13 @@ mod tests {
 
     #[test]
     fn generated_items_share_names_but_keep_mutations_in_their_own_snapshot() {
-        let tree = crate::syntax::parse_source(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module Top(); if (1) begin : g logic x; logic y; end endmodule",
             Path::new("generate_name_snapshots.sv"),
         )
         .unwrap();
-        let node = tree
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
-        let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
         assert_eq!(active.len(), 2);
         assert!(std::ptr::eq(&*active[0].names, &*active[1].names));
         assert!(Arc::ptr_eq(&active[0].shadowed, &active[1].shadowed));
@@ -1772,13 +1679,10 @@ mod tests {
             "#
             );
             let tree =
-                crate::syntax::parse_source(&code, Path::new("scheduled_siblings.sv")).unwrap();
-            let node = tree
-                .into_iter()
-                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-                .unwrap();
+                crate::source_tree::parse_scope_fixture(&code, Path::new("scheduled_siblings.sv"))
+                    .unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let active = items(
-                node,
                 &tree,
                 &HashMap::from_iter([("B".into(), 99)]),
                 &HashMap::default(),
@@ -1787,10 +1691,10 @@ mod tests {
             let assignment = active
                 .iter()
                 .find(|item| {
-                    item.node
-                        .node()
-                        .into_iter()
-                        .any(|node| matches!(node, RefNode::ContinuousAssign(_)))
+                    matches!(
+                        tree.declarations().body_item(item.id).kind,
+                        celox_sv_syntax::BodyItemKind::Assign(_)
+                    )
                 })
                 .unwrap();
             for (name, value) in [("A", 4), ("B", 3), ("C", 2), ("X", 255), ("Y", 254)] {
@@ -2006,7 +1910,7 @@ mod tests {
 
     #[test]
     fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
-        let tree = crate::syntax::parse_source(
+        let tree = crate::source_tree::parse_scope_fixture(
             r#"
             module Top();
                 if (1) begin : g
@@ -2017,11 +1921,8 @@ mod tests {
             Path::new("generate_metadata.sv"),
         )
         .unwrap();
-        let module = tree
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
-        let active = items(module, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
             arguments: None,
             width: Some(8),
@@ -2086,16 +1987,12 @@ mod tests {
 
     #[test]
     fn genvar_scopes_discard_all_inherited_packed_bounds() {
-        let tree = crate::syntax::parse_source(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
             Path::new("genvar_packed_bounds.sv"),
         ).unwrap();
-        let node = tree
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
-        let parameters = parameters_from_module_node(
-            node.clone(),
+        let tree = AnalysisContext::unspecialized(&tree);
+        let parameters = parameters_from_scope(
             &tree,
             &HashMap::default(),
             &HashMap::default(),
@@ -2103,9 +2000,9 @@ mod tests {
         )
         .unwrap();
         let mut env = HashMap::default();
-        extend_const_env_with_parameters(&mut env, &parameters);
+        extend_const_env_with_parameters(&tree.state, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
-        let active = items(node, &tree, &env, &HashMap::default()).unwrap();
+        let active = items(&tree, &env, &HashMap::default()).unwrap();
         let iterations: Vec<_> = active
             .iter()
             .filter(|item| !item.scope.is_empty())
@@ -2144,7 +2041,7 @@ mod tests {
                 panic!("{assignment:?}")
             };
             assert_eq!(
-                eval_ast_const_expr(lsb, &HashMap::default()),
+                eval_ast_const_expr(&AnalysisState::default(), lsb, &HashMap::default()),
                 Some(index as i128),
                 "{assignment:?}"
             );
@@ -2360,13 +2257,18 @@ mod tests {
                 function automatic logic f(); return PACKAGE_INPUT; endfunction
             endpackage
         "#;
-        let tree = crate::syntax::parse_source(code, Path::new("literal_references.sv")).unwrap();
-        for node in &tree {
-            if matches!(
-                node,
-                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-            ) {
-                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
+        let tree =
+            crate::source_tree::parse_scope_fixture(code, Path::new("literal_references.sv"))
+                .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        for handle in tree.root_scopes().unwrap() {
+            let selected = tree.scoped(handle).unwrap();
+            if selected.root_unit().unwrap().kind == celox_sv_syntax::UnitKind::Module {
+                let refs = parameter_literal_references(
+                    &AnalysisContext::unspecialized(&selected),
+                    LiteralUse::All,
+                )
+                .unwrap();
                 for name in [
                     "ARRAY_INPUT",
                     "FUNCTION_INPUT",
@@ -2378,8 +2280,12 @@ mod tests {
                     assert!(refs.contains(name), "{name}: {refs:?}");
                 }
                 assert!(!refs.contains("ONLY_INITIALIZER"));
-            } else if matches!(node, RefNode::PackageDeclaration(_)) {
-                let refs = parameter_literal_references(node, &tree, LiteralUse::All);
+            } else if selected.root_unit().unwrap().kind == celox_sv_syntax::UnitKind::Package {
+                let refs = parameter_literal_references(
+                    &AnalysisContext::unspecialized(&selected),
+                    LiteralUse::All,
+                )
+                .unwrap();
                 assert!(refs.contains("PACKAGE_INPUT"));
                 assert!(!refs.contains("only_in_initializer"));
             }
@@ -2412,18 +2318,10 @@ mod tests {
                 }
                 code.push_str("endmodule\n");
                 let tree =
-                    crate::syntax::parse_source(&code, Path::new("unused_chain.sv")).unwrap();
-                let node = (&tree)
-                    .into_iter()
-                    .find(|node| {
-                        matches!(
-                            node,
-                            RefNode::ModuleDeclarationAnsi(_)
-                                | RefNode::ModuleDeclarationNonansi(_)
-                        )
-                    })
-                    .unwrap();
-                let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+                    crate::source_tree::parse_scope_fixture(&code, Path::new("unused_chain.sv"))
+                        .unwrap();
+                let tree = AnalysisContext::unspecialized(&tree);
+                let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2444,23 +2342,14 @@ mod tests {
     #[test]
     fn referenced_four_state_dependencies_keep_their_full_values() {
         let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
-        let tree = crate::syntax::parse_source(code, Path::new("needed_literals.sv")).unwrap();
-        let node = (&tree)
-            .into_iter()
-            .find(|node| {
-                matches!(
-                    node,
-                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-                )
-            })
-            .unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
-        let parameters =
-            parameters_from_module_node(node.clone(), &tree, &aliases, &env, &HashMap::default())
-                .unwrap();
-        let full = parameter_value_env(&parameters, &env);
-        let active = items(node, &tree, &env, &aliases).unwrap();
+        let parameters = parameters_from_scope(&tree, &aliases, &env, &HashMap::default()).unwrap();
+        let full = parameter_value_env(&tree.state, &parameters, &env);
+        let active = items(&tree, &env, &aliases).unwrap();
         for item in active {
             assert_eq!(item.literals.get("B"), full.get("B"));
             assert_eq!(item.literals.get("A"), full.get("A"));
@@ -2495,13 +2384,17 @@ mod tests {
             endpackage
         "#;
         let tree =
-            crate::syntax::parse_source(code, Path::new("subroutine_references.sv")).unwrap();
-        for node in &tree {
-            if matches!(
-                node,
-                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-            ) {
-                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+            crate::source_tree::parse_scope_fixture(code, Path::new("subroutine_references.sv"))
+                .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        for handle in tree.root_scopes().unwrap() {
+            let selected = tree.scoped(handle).unwrap();
+            if selected.root_unit().unwrap().kind == celox_sv_syntax::UnitKind::Module {
+                let refs = parameter_literal_references(
+                    &AnalysisContext::unspecialized(&selected),
+                    LiteralUse::Subroutines,
+                )
+                .unwrap();
                 for name in [
                     "FUNCTION_INPUT",
                     "TASK_WIDTH",
@@ -2523,8 +2416,12 @@ mod tests {
                 ] {
                     assert!(!refs.contains(name), "{name}: {refs:?}");
                 }
-            } else if matches!(node, RefNode::PackageDeclaration(_)) {
-                let refs = parameter_literal_references(node, &tree, LiteralUse::Subroutines);
+            } else if selected.root_unit().unwrap().kind == celox_sv_syntax::UnitKind::Package {
+                let refs = parameter_literal_references(
+                    &AnalysisContext::unspecialized(&selected),
+                    LiteralUse::Subroutines,
+                )
+                .unwrap();
                 assert!(refs.contains("PACKAGE_INPUT"));
                 assert!(!refs.contains("ONLY_INITIALIZER"));
             }
@@ -2548,15 +2445,14 @@ mod tests {
                 assign out = RTL_ONLY;
             endmodule
         "#;
-        let tree = crate::syntax::parse_source(code, Path::new("subroutine_literals.sv")).unwrap();
-        let node = (&tree)
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(code, Path::new("subroutine_literals.sv"))
+                .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
-        let full = items(node.clone(), &tree, &env, &aliases).unwrap();
-        let projected = subroutine_items(node, &tree, &env, &aliases).unwrap();
+        let full = items(&tree, &env, &aliases).unwrap();
+        let projected = subroutine_items(&tree, &env, &aliases).unwrap();
         assert_eq!(projected.len(), full.len());
         for (full, projected) in full.iter().zip(&projected) {
             assert_eq!(projected.env, full.env);
@@ -2603,14 +2499,12 @@ mod tests {
                     writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
                 }
                 writeln!(code, "assign result = P{}; endmodule", count - 1).unwrap();
-                let tree = crate::syntax::parse_source(&code, Path::new("rtl_chain.sv")).unwrap();
-                let node = (&tree)
-                    .into_iter()
-                    .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-                    .unwrap();
-                let active =
-                    subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+                let tree =
+                    crate::source_tree::parse_scope_fixture(&code, Path::new("rtl_chain.sv"))
                         .unwrap();
+                let tree = AnalysisContext::unspecialized(&tree);
+                let active =
+                    subroutine_items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2654,26 +2548,16 @@ mod tests {
             "if (1) begin : g localparam P=Q; localparam Q=P; end",
         ] {
             let code = format!("module Top; {body} endmodule");
-            let tree =
-                crate::syntax::parse_source(&code, Path::new("subroutine_diagnostics.sv")).unwrap();
-            let node = (&tree)
-                .into_iter()
-                .find(|node| {
-                    matches!(
-                        node,
-                        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-                    )
-                })
-                .unwrap();
-            let full = items(
-                node.clone(),
-                &tree,
-                &HashMap::default(),
-                &HashMap::default(),
+            let tree = crate::source_tree::parse_scope_fixture(
+                &code,
+                Path::new("subroutine_diagnostics.sv"),
             )
-            .err()
-            .expect(body);
-            let projected = subroutine_items(node, &tree, &HashMap::default(), &HashMap::default())
+            .unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
+            let full = items(&tree, &HashMap::default(), &HashMap::default())
+                .err()
+                .expect(body);
+            let projected = subroutine_items(&tree, &HashMap::default(), &HashMap::default())
                 .err()
                 .expect(body);
             assert_eq!(projected.to_string(), full.to_string(), "{body}");

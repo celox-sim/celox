@@ -9,7 +9,7 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/a110337465cfb76e3806b81b9db3094c3e6e770a";
+      url = "github:oxalica/rust-overlay/550547cefc67e01a6fd11a09e4096a3c844ca840";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -45,10 +45,13 @@
                 "rust-analyzer"
               ]
             );
-            targets = pkgs.lib.unique ((toolchain.targets or [ ]) ++ [
-              "wasm32-unknown-unknown"
-              "wasm32-wasip1-threads"
-            ]);
+            targets = pkgs.lib.unique (
+              (toolchain.targets or [ ])
+              ++ [
+                "wasm32-unknown-unknown"
+                "wasm32-wasip1-threads"
+              ]
+            );
           };
           mbx = nix-packages.packages.${system}.mbx;
           mergify-cli = pkgs.callPackage ./nix/mergify-cli.nix { };
@@ -58,7 +61,10 @@
             mkdir -p $out/bin
             ln -s ${mbx}/bin/mbx $out/bin/cargo
           '';
-          python = pkgs.python313.withPackages (ps: [ ps.cocotb ]);
+          python = pkgs.python313.withPackages (ps: [
+            ps.cocotb
+            ps.psutil
+          ]);
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
           # Corepack resolves pnpm from package.json at runtime, independently of nixpkgs.
           tools = [

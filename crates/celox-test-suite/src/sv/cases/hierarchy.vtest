@@ -469,3 +469,46 @@
   (eval)
   (assert_eq value 9)
   (assert_eq raw (fourstate 13 6)))
+
+(case parameter_patterns_keep_original_declarations_and_isolated_bindings
+  (source "pattern_binding_isolation.sv" #"
+    `define ORIGINAL_VALUES '{1, 2}
+    module Child #(parameter int N = 9, parameter byte Q [2] = `ORIGINAL_VALUES)
+        (output logic [15:0] y, output logic [7:0] local_y);
+      assign y = {Q[0], Q[1]};
+      always_comb begin
+        localparam byte Q = 7;
+        local_y = Q;
+      end
+    endmodule
+    module Top(output logic [15:0] defaults, repeated, keyed,
+               output logic [7:0] local_default, local_repeated, local_keyed);
+      localparam N = 2;
+      Child a(defaults, local_default);
+      Child #(.Q('{N{-N}})) b(repeated, local_repeated);
+      Child #(.Q('{N-2: -N, default: N+1})) c(keyed, local_keyed);
+    endmodule
+    `undef ORIGINAL_VALUES
+  "#)
+  (top Top)
+  (assert_eq defaults 0x0102)
+  (assert_eq repeated 0xfefe)
+  (assert_eq keyed 0xfe03)
+  (assert_eq local_default 7)
+  (assert_eq local_repeated 7)
+  (assert_eq local_keyed 7))
+
+(case parameter_patterns_preserve_enclosing_expressions
+  (source "pattern_expressions.sv" #"
+    module Child #(parameter logic [15:0] P = 0)(output logic [15:0] y);
+      assign y = P;
+    endmodule
+    module Top(output logic [15:0] added, negated);
+      typedef logic [7:0] byte_t;
+      Child #(.P(byte_t'{default: 1} + 16'd1)) a(added);
+      Child #(.P(~(byte_t'{default: 0} | 16'd0))) b(negated);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq added 256)
+  (assert_eq negated 65535))

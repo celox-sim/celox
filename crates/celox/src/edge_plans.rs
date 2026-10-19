@@ -21,6 +21,10 @@ pub struct EdgePlanSignal {
     /// it in the next byte.
     pub offset: usize,
     pub width: usize,
+    /// The signal keeps unknown bits: its edges follow the four-state rows
+    /// of IEEE 1800-2023 Table 9-2.
+    #[serde(rename = "fourState")]
+    pub four_state: bool,
 }
 
 /// A derived event domain.
@@ -96,6 +100,7 @@ pub fn edge_plans(program: &LaidOutProgram) -> EdgePlans {
     let signal = |address: &AbsoluteAddr| EdgePlanSignal {
         offset: layout.offsets.get(address).copied().unwrap_or_default(),
         width: layout.widths.get(address).copied().unwrap_or(1),
+        four_state: layout.four_state && layout.is_4states.get(address).copied().unwrap_or(false),
     };
     let domain = |address: &AbsoluteAddr| EdgePlanDomain {
         event: program.get_path(address),

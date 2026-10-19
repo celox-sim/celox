@@ -3,7 +3,7 @@
 
 use std::{fmt::Write, path::Path, time::Instant};
 
-use celox_sv_analyzer::{analyze, ast, syntax};
+use celox_sv_analyzer::{ModuleInterfaces, ParsedSource};
 use fxhash::FxHashSet as HashSet;
 
 // Compile the production scheduler without adding a public analyzer API.
@@ -39,7 +39,7 @@ fn main() {
         scheduler_scaling(&counts);
         return;
     }
-    println!("signals,bytes,parse_ms,ast_ms,ir_ms");
+    println!("signals,bytes,parse_index_ms,analysis_ms");
     for count in counts {
         let mut code = String::from("module Top(); if (1) begin : g\n");
         for i in 0..count {
@@ -56,11 +56,15 @@ fn main() {
         let mut samples = Vec::new();
         for _ in 0..3 {
             let start = Instant::now();
-            let tree = syntax::parse_source(&code, Path::new("generate_dependencies.sv")).unwrap();
+            let source = ParsedSource::parse(&code, Path::new("generate_dependencies.sv")).unwrap();
             let parsed = Instant::now();
-            let source = ast::Source::from_syntax(&tree).unwrap();
-            let lowered = Instant::now();
-            let ir = analyze::analyze_source(source).unwrap();
+            let ir = source
+                .analyze_module_with_parameter_expr_overrides(
+                    "Top",
+                    &Default::default(),
+                    &ModuleInterfaces::default(),
+                )
+                .unwrap();
             let finished = Instant::now();
             assert_eq!(ir.modules().len(), 1);
             assert_eq!(ir.modules()[0].signals().len(), count);
@@ -82,24 +86,17 @@ fn main() {
             }
             samples.push([
                 (parsed - start).as_secs_f64() * 1000.0,
-                (lowered - parsed).as_secs_f64() * 1000.0,
-                (finished - lowered).as_secs_f64() * 1000.0,
+                (finished - parsed).as_secs_f64() * 1000.0,
             ]);
         }
-        let medians: Vec<_> = (0..3)
+        let medians: Vec<_> = (0..2)
             .map(|phase| {
                 let mut values: Vec<_> = samples.iter().map(|sample| sample[phase]).collect();
                 values.sort_by(f64::total_cmp);
                 values[1]
             })
             .collect();
-        println!(
-            "{count},{},{:.3},{:.3},{:.3}",
-            code.len(),
-            medians[0],
-            medians[1],
-            medians[2]
-        );
+        println!("{count},{},{:.3},{:.3}", code.len(), medians[0], medians[1]);
     }
 }
 

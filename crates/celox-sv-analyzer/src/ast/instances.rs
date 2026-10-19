@@ -1,29 +1,38 @@
 //! Module instantiations, parameter overrides, and port connections.
 
 use super::*;
+mod connections;
 
-pub(super) fn instances_from_module_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+pub(super) fn instances_from_scope(
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
-    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
-    let active = generate::items(node, syntax_tree, const_env, &type_aliases)?;
+    let type_aliases = type_aliases_from_scope(syntax_tree)?;
+    let active = generate::items(syntax_tree, const_env, &type_aliases)?;
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for item in &active {
-        let ScopeItem::Module(node) = item.node else {
+        let _interface_scope = item.interface_scope();
+        let celox_sv_syntax::BodyItemKind::Instance(native) =
+            syntax_tree.declarations().body_item(item.id).kind
+        else {
             continue;
         };
-        if !matches!(node, sv_parser::ModuleOrGenerateItem::Module(_)) {
+        if scope::imported(&syntax_tree.state)
+            .interface_declarations
+            .contains(&item.id)
+        {
             continue;
         }
+        let native = syntax_tree.declarations().instantiation(native);
+        let _constant_functions = item.enter();
         let start = instances.len();
         let dimensions = views.dimensions(item);
-        instances_from_module_or_generate_item(
-            node,
+        instances_from_native_declaration(
+            item.id,
+            native,
             None,
             syntax_tree,
             &item.env,
@@ -36,6 +45,7 @@ pub(super) fn instances_from_module_node(
             for connection in &mut instance.port_connections {
                 if let Some(expr) = &mut connection.actual_expr {
                     *expr = substitute_expr_constants_with_parameter_literals(
+                        &syntax_tree.state,
                         expr.clone(),
                         &item.env,
                         &item.literals,
@@ -49,51 +59,25 @@ pub(super) fn instances_from_module_node(
     Ok(instances)
 }
 
-fn instances_from_module_or_generate_item(
-    item: &sv_parser::ModuleOrGenerateItem,
+fn instances_from_native_declaration(
+    id: celox_sv_syntax::BodyItemId,
+    native: &celox_sv_syntax::Instantiation,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleOrGenerateItem::Module(module) = item {
-        instances_from_module_instantiation(
-            &module.nodes.1,
-            condition,
-            syntax_tree,
-            const_env,
-            packed_dimensions,
-            interfaces,
-            instances,
-        )?;
-    }
-    Ok(())
-}
-
-fn instances_from_module_instantiation(
-    instantiation: &sv_parser::ModuleInstantiation,
-    condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    packed_dimensions: &PackedDimensions,
-    interfaces: &InterfaceLookup<'_>,
-    instances: &mut Vec<Instance>,
-) -> Result<(), AnalyzerError> {
-    let module_name = identifier_text(
-        RefNode::ModuleIdentifier(&instantiation.nodes.0),
-        syntax_tree,
-    )
-    .ok_or_else(|| {
-        AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
-    })?;
+    validate_native_instances(native)?;
+    let module_name = normalize_identifier(&native.name.spelling);
     let interface = interfaces.get(&module_name);
-    let mut parameter_overrides = parameter_overrides_from_value_assignment(
-        instantiation.nodes.1.as_ref(),
+    let mut parameter_overrides = parameter_overrides(
+        native.parameters.as_deref(),
         syntax_tree,
         interface,
         packed_dimensions,
+        false,
     )?;
     for override_ in &mut parameter_overrides {
         if let Some(value) = override_.value.take() {
@@ -102,10 +86,13 @@ fn instances_from_module_instantiation(
                 const_env,
                 &parameter_types_from_const_env(const_env),
             );
-            let value = expr_to_const(substitute_expr_idents(
-                const_expr_to_expr(value),
-                &packed_dimensions.parameter_values,
-            ))
+            let value = expr_to_const(
+                &syntax_tree.state,
+                substitute_expr_idents(
+                    const_expr_to_expr(value),
+                    &packed_dimensions.parameter_values,
+                ),
+            )
             .ok_or_else(|| {
                 AnalyzerError::Unsupported(format!(
                     "constant module parameter override `{}`",
@@ -123,14 +110,11 @@ fn instances_from_module_instantiation(
         .iter()
         .map(|parameter| parameter.name().to_string())
         .collect();
-    for instance in instantiation.nodes.2.contents() {
-        let name = identifier_text(
-            RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-            syntax_tree,
-        )
-        .ok_or_else(|| AnalyzerError::Unsupported("unsupported instance identifier".to_string()))?;
-        let mut port_connections = port_connections_from_hierarchical_instance(
-            instance,
+    for (index, authored) in native.instances.iter().enumerate() {
+        let name = normalize_identifier(&authored.name.spelling);
+        let mut port_connections = port_connections(
+            (id, index),
+            authored,
             syntax_tree,
             packed_dimensions,
             interface,
@@ -138,6 +122,7 @@ fn instances_from_module_instantiation(
         for connection in &mut port_connections {
             connection.actual_expr = connection.actual_expr.take().map(|expr| {
                 substitute_expr_constants_with_parameter_literals(
+                    &syntax_tree.state,
                     expr,
                     const_env,
                     &HashMap::default(),
@@ -151,37 +136,50 @@ fn instances_from_module_instantiation(
         // `Child c[3:0](...)` is an array of instances: one dimension with
         // constant bounds. `my_t mem [N];` parses the same way but declares a
         // variable of a typedef'd type, and is dropped below.
-        let dimensions = &instance.nodes.0.nodes.1;
-        let array_range =
-            if dimensions.is_empty() || packed_dimensions.type_aliases.contains_key(&module_name) {
-                None
-            } else {
-                let ranges = unpacked_ranges_from_dimensions_with_env(
-                    dimensions,
-                    syntax_tree,
-                    const_env,
-                    &packed_dimensions.type_aliases,
-                )?;
-                let [range] = ranges.as_slice() else {
-                    return Err(AnalyzerError::Unsupported(
-                        "multidimensional module instance array".to_string(),
-                    ));
-                };
-                let left = eval_ast_const_expr(range.left(), const_env);
-                let right = eval_ast_const_expr(range.right(), const_env);
-                let bounds = left
-                    .zip(right)
-                    .filter(|(left, right)| left.abs_diff(*right) < 4096)
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported("module instance array bounds".to_string())
-                    })?;
-                Some(bounds)
+        let array_range = if authored.dimensions.is_empty()
+            || packed_dimensions.type_aliases.contains_key(&module_name)
+        {
+            None
+        } else {
+            let ranges = instance_ranges(
+                authored,
+                syntax_tree,
+                const_env,
+                &packed_dimensions.type_aliases,
+            )?;
+            let [range] = ranges.as_slice() else {
+                return Err(AnalyzerError::Unsupported(
+                    "multidimensional module instance array".to_string(),
+                ));
             };
+            let left = eval_ast_const_expr(&syntax_tree.state, range.left(), const_env);
+            let right = eval_ast_const_expr(&syntax_tree.state, range.right(), const_env);
+            let bounds = left
+                .zip(right)
+                .filter(|(left, right)| left.abs_diff(*right) < 4096)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("module instance array bounds".to_string())
+                })?;
+            Some(bounds)
+        };
+        let imported = scope::imported(&syntax_tree.state);
+        let binding = imported.interface_instances.get(&(id, index));
+        let mut parameter_names = parameter_names.clone();
+        let mut parameter_overrides = parameter_overrides.clone();
+        if let Some(binding) = binding {
+            parameter_names.extend(
+                binding
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone()),
+            );
+            parameter_overrides.extend(binding.parameters.iter().cloned());
+        }
         instances.push(Instance::new(
-            module_name.clone(),
+            binding.map_or_else(|| module_name.clone(), |binding| binding.module.clone()),
             name,
-            parameter_names.clone(),
-            parameter_overrides.clone(),
+            parameter_names,
+            parameter_overrides,
             condition.clone(),
             port_names,
             port_connections,
@@ -191,149 +189,111 @@ fn instances_from_module_instantiation(
     Ok(())
 }
 
-fn parameter_overrides_from_value_assignment(
-    assignment: Option<&sv_parser::ParameterValueAssignment>,
-    syntax_tree: &SyntaxTree,
+pub(super) fn parameter_overrides(
+    native: Option<&[celox_sv_syntax::Argument]>,
+    syntax_tree: &AnalysisContext<'_>,
     interface: Option<&ModuleInterface>,
     packed_dimensions: &PackedDimensions,
+    bind_values: bool,
 ) -> Result<Vec<ParameterOverride>, AnalyzerError> {
-    let Some(assignment) = assignment else {
+    let Some(native) = native else {
         return Ok(Vec::new());
     };
-    let Some(assignments) = assignment.nodes.1.nodes.1.as_ref() else {
+    if native.is_empty() {
         return Ok(Vec::new());
-    };
-    let assignments = match assignments {
-        sv_parser::ListOfParameterAssignments::Named(assignments) => assignments,
-        sv_parser::ListOfParameterAssignments::Ordered(assignments) => {
-            // Positional values bind to the parameters of the instantiated
-            // module's `#(...)` list, in order.
-            let parameters = interface
+    }
+    let ordered = native.iter().all(|argument| argument.name.is_none());
+    if !ordered && native.iter().any(|argument| argument.name.is_none()) {
+        return Err(unsupported("mixed named and ordered parameter assignment"));
+    }
+    let parameters = if ordered {
+        Some(
+            interface
                 .map(|interface| interface.parameters.as_slice())
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported("ordered parameter assignment".to_string())
-                })?;
-            let mut overrides = Vec::new();
-            for (position, assignment) in assignments.nodes.0.contents().into_iter().enumerate() {
-                let name = parameters.get(position).ok_or_else(|| {
-                    AnalyzerError::Unsupported("ordered parameter assignment".to_string())
-                })?;
-                overrides.push(parameter_override(
-                    name.clone(),
-                    &assignment.nodes.0,
-                    syntax_tree,
-                    packed_dimensions,
-                )?);
-            }
-            return Ok(overrides);
-        }
+                .ok_or_else(|| unsupported("ordered parameter assignment"))?,
+        )
+    } else {
+        None
     };
     let mut overrides = Vec::new();
     let mut names = HashSet::default();
-    for assignment in assignments.nodes.0.contents() {
-        let name = identifier_text(
-            RefNode::ParameterIdentifier(&assignment.nodes.1),
-            syntax_tree,
-        )
-        .ok_or_else(|| AnalyzerError::Unsupported("parameter override identifier".to_string()))?;
+    for (position, argument) in native.iter().enumerate() {
+        let name = if let Some(parameters) = parameters {
+            parameters
+                .get(position)
+                .cloned()
+                .ok_or_else(|| unsupported("ordered parameter assignment"))?
+        } else {
+            normalize_identifier(&argument.name.as_ref().expect("named argument").spelling)
+        };
         if !names.insert(name.clone()) {
-            return Err(AnalyzerError::Unsupported(format!(
+            return Err(unsupported(format!(
                 "duplicate parameter override `{name}`"
             )));
         }
-        let Some(expr) = assignment.nodes.2.nodes.1.as_ref() else {
-            return Err(AnalyzerError::Unsupported(format!(
-                "empty parameter override `{name}`"
-            )));
-        };
+        let value = argument
+            .value
+            .ok_or_else(|| unsupported(format!("empty parameter override `{name}`")))?;
         overrides.push(parameter_override(
             name,
-            expr,
+            value,
             syntax_tree,
             packed_dimensions,
+            bind_values,
         )?);
     }
     Ok(overrides)
 }
 
-fn port_connections_from_hierarchical_instance(
-    instance: &sv_parser::HierarchicalInstance,
-    syntax_tree: &SyntaxTree,
+pub(super) fn port_connections(
+    key: interface_binding::InstanceKey,
+    native: &celox_sv_syntax::InstanceDeclarator,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
-        return Ok(Vec::new());
+    connections::connections(key, native, syntax_tree, packed_dimensions, interface)
+}
+
+pub(super) fn declaration_from_item<'a>(
+    id: celox_sv_syntax::BodyItemId,
+    tree: &'a AnalysisContext<'_>,
+) -> Converted<&'a celox_sv_syntax::Instantiation> {
+    let celox_sv_syntax::BodyItemKind::Instance(id) = tree.declarations().body_item(id).kind else {
+        return Err(AnalyzerError::Parse(
+            "native instantiation body item is missing".into(),
+        ));
     };
-    let sv_parser::ListOfPortConnections::Named(connections) = connections else {
-        let sv_parser::ListOfPortConnections::Ordered(connections) = connections else {
-            return Err(AnalyzerError::Unsupported(
-                "ordered port connection".to_string(),
-            ));
-        };
-        let connections = connections.nodes.0.contents();
-        if connections
-            .iter()
-            .all(|connection| connection.nodes.1.is_none())
-        {
-            return Ok(Vec::new());
-        }
-        // Positional connections bind to the ports of the instantiated module,
-        // in declaration order.
-        let ports = interface
-            .map(|interface| interface.ports.as_slice())
-            .ok_or_else(|| AnalyzerError::Unsupported("ordered port connection".to_string()))?;
-        let mut lowered = Vec::new();
-        for (position, connection) in connections.into_iter().enumerate() {
-            let formal = ports
-                .get(position)
-                .ok_or_else(|| AnalyzerError::Unsupported("ordered port connection".to_string()))?;
-            let Some(expr) = connection.nodes.1.as_ref() else {
-                continue;
-            };
-            let actual_expr =
-                expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
-            let actual = expr_ident_name(&actual_expr).unwrap_or_else(|| formal.clone());
-            lowered.push(PortConnection::new(
-                formal.clone(),
-                actual,
-                Some(actual_expr),
-            ));
-        }
-        return Ok(lowered);
-    };
-    let mut lowered = Vec::new();
-    for connection in connections.nodes.0.contents() {
-        match connection {
-            sv_parser::NamedPortConnection::Identifier(connection) => {
-                let formal =
-                    identifier_text(RefNode::PortIdentifier(&connection.nodes.2), syntax_tree)
-                        .ok_or_else(|| {
-                            AnalyzerError::Unsupported(
-                                "named port connection identifier".to_string(),
-                            )
-                        })?;
-                let actual_expr = match connection.nodes.3.as_ref() {
-                    None => Some(Expr::Ident(formal.clone())),
-                    Some(paren) => match paren.nodes.1.as_ref() {
-                        None => None,
-                        Some(expr) => Some(expr_from_expression_with_types(
-                            expr,
-                            syntax_tree,
-                            packed_dimensions,
-                        )?),
-                    },
-                };
-                let actual = actual_expr
-                    .as_ref()
-                    .and_then(expr_ident_name)
-                    .unwrap_or_else(|| formal.clone());
-                lowered.push(PortConnection::new(formal, actual, actual_expr));
-            }
-            sv_parser::NamedPortConnection::Asterisk(_) => {}
-        }
+    Ok(tree.declarations().instantiation(id))
+}
+
+fn validate_native_instances(native: &celox_sv_syntax::Instantiation) -> Converted<()> {
+    let mut ranges = native
+        .instances
+        .iter()
+        .map(|instance| instance.tokens)
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| range.start);
+    if ranges.iter().any(|range| {
+        range.start >= range.end
+            || range.start < native.tokens.start
+            || range.end > native.tokens.end
+    }) || ranges.windows(2).any(|pair| pair[0].end > pair[1].start)
+    {
+        return Err(AnalyzerError::Parse(
+            "native instance membership is invalid".into(),
+        ));
     }
-    Ok(lowered)
+    Ok(())
+}
+
+pub(super) fn instance_ranges(
+    native: &celox_sv_syntax::InstanceDeclarator,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Result<Vec<UnpackedRange>, AnalyzerError> {
+    constant_binding::unpacked_ranges(&native.dimensions, tree, env, aliases)
 }
 
 // Child port directions are resolved by the frontend adapter. Defer its net
@@ -365,61 +325,10 @@ pub(super) fn expr_ident_name(expr: &Expr) -> Option<String> {
     }
 }
 
-pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
-    let locate = identifier_locate(node)?;
-    syntax_tree.get_str(&locate).map(normalize_identifier)
-}
-
-/// The name a reference denotes. A reference through a package scope, such as
-/// `p::x` (IEEE 1800-2023 26.3), names the package item `p::x`; the parser
-/// reads `p::` in an expression as a class scope, which is also a package
-/// scope here since classes are not supported. Otherwise it is the first
-/// identifier, as [`identifier_text`] gives.
-pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
-    let mut package = None;
-    // The package scope precedes the identifier it qualifies, and contains
-    // the package identifier itself.
-    let mut skip = 0;
-    for child in node {
-        match child {
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) if package.is_none() => {
-                package = Some("$unit".to_string());
-            }
-            RefNode::PackageScopePackage(scope) if package.is_none() => {
-                package = Some(identifier_text(
-                    RefNode::PackageIdentifier(&scope.nodes.0),
-                    syntax_tree,
-                )?);
-                skip = 1;
-            }
-            RefNode::ClassScope(scope) if package.is_none() => {
-                package = Some(identifier_text(
-                    RefNode::ClassIdentifier(&scope.nodes.0.nodes.0.nodes.1),
-                    syntax_tree,
-                )?);
-                skip = 1;
-            }
-            RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
-                if skip > 0 {
-                    skip -= 1;
-                    continue;
-                }
-                let name = identifier_text(child, syntax_tree)?;
-                return Some(match package {
-                    Some(package) => scope::qualified_name(&package, &name),
-                    None => name,
-                });
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// An escaped identifier is the same identifier as its text without the
 /// backslash (IEEE 1800-2023 5.6.1): `\a` names `a`. One that cannot be written
 /// without escaping, such as `\a.b`, keeps its backslash.
-pub(super) fn normalize_identifier(text: &str) -> String {
+pub(crate) fn normalize_identifier(text: &str) -> String {
     match text.strip_prefix('\\') {
         Some(name)
             if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
@@ -433,265 +342,110 @@ pub(super) fn normalize_identifier(text: &str) -> String {
     }
 }
 
-/// The source text a node spans, from its first to its last token.
-pub(super) fn node_source_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
-    let mut range: Option<(usize, usize)> = None;
-    for child in node {
-        if let RefNode::Locate(locate) = child {
-            let (start, end) = (locate.offset, locate.offset + locate.len);
-            range = Some(match range {
-                None => (start, end),
-                Some((low, high)) => (low.min(start), high.max(end)),
-            });
-        }
-    }
-    let (start, end) = range?;
-    syntax_tree
-        .get_str(&sv_parser::Locate {
-            offset: start,
-            line: 0,
-            len: end - start,
-        })
-        .map(|text| text.trim().to_string())
-}
-
 /// One `.name(expr)` binding: a `parameter type` when `expr` is a data type or
 /// the name of a type, a value otherwise.
 fn parameter_override(
     name: String,
-    expr: &sv_parser::ParamExpression,
-    syntax_tree: &SyntaxTree,
+    native: celox_sv_syntax::ExprId,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
+    bind_values: bool,
 ) -> Result<ParameterOverride, AnalyzerError> {
-    if let sv_parser::ParamExpression::DataType(data_type) = expr {
-        let text = node_source_text(RefNode::DataType(data_type), syntax_tree)
-            .ok_or_else(|| AnalyzerError::Unsupported("parameter type override".to_string()))?;
-        return Ok(ParameterOverride::type_override(name, text));
+    use celox_sv_syntax::{DimensionKind, ExprKind};
+    let declarations = syntax_tree.declarations();
+    let root = expression_binding::ungroup(native, declarations);
+    if matches!(declarations.expression(root).kind, ExprKind::Type(_)) {
+        let ty = type_binding::argument_type(
+            native,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+        )?
+        .and_then(|ty| {
+            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+        })
+        .ok_or_else(|| unsupported(format!("parameter type override `{name}`")))?;
+        return Ok(ParameterOverride::type_override(name, ty));
     }
-    if RefNode::ParamExpression(expr)
-        .into_iter()
-        .any(|node| matches!(node, RefNode::AssignmentPatternExpression(_)))
+    let mut pending = vec![native];
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if matches!(declarations.expression(id).kind, ExprKind::Pattern { .. }) {
+            let pattern = bound_patterns::from_param(native, syntax_tree, packed_dimensions)?;
+            let mut bound = ParameterOverride::new(name, None);
+            bound.bound_pattern = Some(pattern);
+            return Ok(bound);
+        }
+        pending.extend(parameters::skipped::children(id, declarations));
+    }
+    if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
+        && packed_dimensions.type_aliases.contains_key(&type_name)
+        && !dimensions.is_empty()
     {
-        let text = constant_pattern_text(expr, syntax_tree, packed_dimensions)?;
-        let mut bound = ParameterOverride::new(name, None);
-        bound.pattern_text = Some(text);
-        return Ok(bound);
+        if dimensions
+            .iter()
+            .any(|dimension| !matches!(dimension.kind, DimensionKind::Range { .. }))
+        {
+            return Err(unsupported("indexed range on type parameter argument"));
+        }
+        let ty = type_binding::argument_type(
+            native,
+            syntax_tree,
+            &packed_dimensions.const_env,
+            &packed_dimensions.type_aliases,
+        )?
+        .and_then(|ty| {
+            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+        })
+        .ok_or_else(|| unsupported("type parameter packed bounds"))?;
+        return Ok(ParameterOverride::type_override(name, ty));
     }
-    let value = const_expr_from_param_expression(expr, syntax_tree)?
-        .ok_or_else(|| AnalyzerError::Unsupported("parameter override expression".to_string()))?;
+    if matches!(
+        declarations.expression(root).kind,
+        ExprKind::MinTypMax { .. }
+    ) {
+        return Err(unsupported("parameter override expression"));
+    }
+    let value = if matches!(&declarations.expression(root).kind, ExprKind::Name(name) if name.spelling == "$")
+    {
+        ConstExpr::Literal("$".into())
+    } else if bind_values {
+        if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
+            && dimensions.is_empty()
+            && let Some(ty) = packed_dimensions.type_aliases.get(&type_name)
+        {
+            let ty = type_parameters::resolve(
+                &syntax_tree.state,
+                ty.clone(),
+                &packed_dimensions.const_env,
+            )
+            .ok_or_else(|| unsupported(format!("parameter type override `{name}`")))?;
+            return Ok(ParameterOverride::type_override(name, ty));
+        }
+        expr_to_const(
+            &syntax_tree.state,
+            expression_binding::value(native, declarations, syntax_tree, packed_dimensions)?,
+        )
+        .ok_or_else(|| unsupported("constant interface parameter override"))?
+    } else {
+        constant_binding::value_expression(native, declarations, syntax_tree, packed_dimensions)?
+            .ok_or_else(|| unsupported("parameter override expression"))?
+    };
     // A bare name that denotes a type (a typedef, or the instantiating
     // module's own `parameter type`) is passed on as that type.
     if let ConstExpr::Ident(type_name) = &value
         && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
     {
-        let text = type_source_text(r#type, &packed_dimensions.const_env).ok_or_else(|| {
-            AnalyzerError::Unsupported(format!("parameter type override `{name}`"))
-        })?;
-        return Ok(ParameterOverride::type_override(name, text));
+        let ty = type_parameters::resolve(
+            &syntax_tree.state,
+            r#type.clone(),
+            &packed_dimensions.const_env,
+        )
+        .ok_or_else(|| AnalyzerError::Unsupported(format!("parameter type override `{name}`")))?;
+        return Ok(ParameterOverride::type_override(name, ty));
     }
     Ok(ParameterOverride::new(name, Some(value)))
-}
-
-/// Source text for a plain (possibly signed) packed vector type.
-fn type_source_text(r#type: &Type, const_env: &HashMap<String, i128>) -> Option<String> {
-    if !r#type.unpacked_ranges().is_empty() || !r#type.members.is_empty() {
-        return None;
-    }
-    let mut text = match r#type.kind() {
-        TypeKind::Bit => "bit",
-        _ => "logic",
-    }
-    .to_string();
-    if r#type.is_signed() {
-        text.push_str(" signed");
-    }
-    for range in r#type.packed_ranges() {
-        let left = eval_ast_const_expr(range.left(), const_env)?;
-        let right = eval_ast_const_expr(range.right(), const_env)?;
-        text.push_str(&format!(" [{left}:{right}]"));
-    }
-    Some(text)
-}
-
-fn constant_pattern_literal(
-    mut expression: ConstExpr,
-    dimensions: &PackedDimensions,
-    types: &HashMap<String, (usize, bool)>,
-) -> Converted<typecheck::IntegralLiteral> {
-    fn freeze(expr: &mut ConstExpr, constants: &HashMap<String, i128>) {
-        match expr {
-            ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
-            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => {
-                freeze(expr, constants)
-            }
-            ConstExpr::Select { expr, bit } => {
-                freeze(expr, constants);
-                freeze(bit, constants);
-            }
-            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                freeze(expr, constants);
-                freeze(msb, constants);
-                freeze(lsb, constants);
-            }
-            ConstExpr::Binary { left, right, .. } => {
-                freeze(left, constants);
-                freeze(right, constants);
-            }
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                freeze(condition, constants);
-                freeze(then_expr, constants);
-                freeze(else_expr, constants);
-            }
-            ConstExpr::Function { callee, args, .. } => {
-                for arg in args.iter_mut() {
-                    freeze(arg, constants);
-                }
-                let lowered = args.iter().cloned().map(Into::into).collect::<Vec<_>>();
-                if let Callee::Subroutine(name) = callee
-                    && let Some(literal) =
-                        const_functions::eval_call_literal(name, &lowered, constants)
-                {
-                    *expr = ConstExpr::Literal(typecheck::format_integral_literal_binary(&literal));
-                }
-            }
-        }
-    }
-    // System/literal expressions retain their four-state masks. User functions
-    // run through the installed interpreter, with the caller's constant scope
-    // and their declared result widths, before the leaf is serialized.
-    freeze(&mut expression, &dimensions.const_env);
-    typecheck::eval_const_integral_literal_with_types(
-        &expression.into(),
-        &dimensions.const_env,
-        types,
-    )
-    .ok_or_else(|| unsupported("nonconstant parameter pattern element"))
-}
-
-/// Freeze pattern leaves in the instantiating module's constant environment.
-/// Reparse in the callee to apply the target array/structure shape.
-fn constant_pattern_text(
-    expression: &sv_parser::ParamExpression,
-    tree: &SyntaxTree,
-    dimensions: &PackedDimensions,
-) -> Result<String, AnalyzerError> {
-    let node = RefNode::ParamExpression(expression);
-    let tokens: Vec<_> = node
-        .clone()
-        .into_iter()
-        .filter_map(|node| {
-            if let RefNode::Locate(locate) = node {
-                Some(locate)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let start = tokens
-        .iter()
-        .map(|locate| locate.offset)
-        .min()
-        .ok_or_else(|| unsupported("parameter pattern"))?;
-    let end = tokens
-        .iter()
-        .map(|locate| locate.offset + locate.len)
-        .max()
-        .unwrap();
-    let original = tree
-        .get_str(&sv_parser::Locate {
-            offset: start,
-            line: 0,
-            len: end - start,
-        })
-        .ok_or_else(|| unsupported("parameter pattern text"))?;
-    let types = parameter_types_from_const_env(&dimensions.const_env)
-        .into_iter()
-        .map(|(name, ty)| (name, (ty.width, ty.signed)))
-        .collect();
-    let mut edits = Vec::new();
-    for child in node {
-        let value = match child {
-            RefNode::AssignmentPatternExpression(pattern) if pattern.nodes.0.is_some() => Some(
-                patterns::constant_typed_pattern_text(pattern, tree, dimensions)?,
-            ),
-            RefNode::Primary(primary)
-                if !matches!(
-                    primary,
-                    sv_parser::Primary::PrimaryLiteral(_)
-                        | sv_parser::Primary::MintypmaxExpression(_)
-                        | sv_parser::Primary::AssignmentPatternExpression(_)
-                ) =>
-            {
-                let expr = sv_parser::Expression::Primary(Box::new(primary.clone()));
-                let value = indexed_select_base(RefNode::Expression(&expr), tree, dimensions)?;
-                Some(format!(
-                    "({})",
-                    typecheck::format_integral_literal_binary(&constant_pattern_literal(
-                        value, dimensions, &types
-                    )?,)
-                ))
-            }
-            RefNode::ConstantPrimary(primary)
-                if !matches!(
-                    primary,
-                    sv_parser::ConstantPrimary::PrimaryLiteral(_)
-                        | sv_parser::ConstantPrimary::MintypmaxExpression(_)
-                        | sv_parser::ConstantPrimary::ConstantAssignmentPatternExpression(_)
-                ) =>
-            {
-                let expr =
-                    sv_parser::ConstantExpression::ConstantPrimary(Box::new(primary.clone()));
-                let value =
-                    indexed_select_base(RefNode::ConstantExpression(&expr), tree, dimensions)?;
-                Some(format!(
-                    "({})",
-                    typecheck::format_integral_literal_binary(&constant_pattern_literal(
-                        value, dimensions, &types
-                    )?,)
-                ))
-            }
-            // Retain literals, operators and parentheses for the callee's
-            // assignment context, including unbased fills and wider arithmetic.
-            // Descendant primary references still bind in the caller, also
-            // inside constant-expression repetition counts and index keys.
-            _ => None,
-        };
-        let Some(replacement) = value else {
-            continue;
-        };
-        let tokens: Vec<_> = child
-            .into_iter()
-            .filter_map(|node| {
-                if let RefNode::Locate(locate) = node {
-                    Some(locate)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let low = tokens.iter().map(|locate| locate.offset).min().unwrap();
-        let high = tokens
-            .iter()
-            .map(|locate| locate.offset + locate.len)
-            .max()
-            .unwrap();
-        edits.push((low, high, replacement));
-    }
-    edits.sort_by_key(|(low, high, _)| (*low, std::cmp::Reverse(*high)));
-    let mut result = String::new();
-    let mut cursor = start;
-    for (low, high, replacement) in edits {
-        if low < cursor {
-            continue;
-        }
-        result.push_str(&original[cursor - start..low - start]);
-        result.push_str(&replacement);
-        cursor = high;
-    }
-    result.push_str(&original[cursor - start..]);
-    Ok(result)
 }

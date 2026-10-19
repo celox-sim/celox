@@ -3,6 +3,26 @@
 mod test_utils;
 
 all_backends! {
+    fn test_nested_interface_instance(sim) {
+        // Veryl 0.22 native IR drops interface body assignments and nested
+        // instances: all native arms return 0 for a driven member.
+        @ignore_on(native, cranelift, wasm, interp, veryl);
+        @case "interface::test_nested_interface_instance";
+    }
+    fn test_interface_type_parameter(sim) {
+        @case "interface::test_interface_type_parameter";
+    }
+    fn test_interface_array_direct_function_calls(sim) {
+        // Veryl 0.22 loses the selected interface element in native IR calls:
+        // Celox reads lane 0 for both calls; veryl-simulator panics on lane 1.
+        // The emitted SV preserves the selection and is the regression target.
+        @ignore_on(native, cranelift, wasm, interp, veryl);
+        @case "interface::test_interface_array_direct_function_calls";
+    }
+    fn test_parameterized_interface_header_imports(sim) {
+        @case "interface::test_parameterized_interface_header_imports";
+    }
+
     fn test_interface_connection(sim) {
         @case "interface::test_interface_connection";
     }

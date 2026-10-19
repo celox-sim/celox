@@ -16,7 +16,7 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 use bit_set::BitSet;
 use celox_design::CounterKind;
 
-pub(crate) use batch::event_level;
+pub(crate) use batch::{edge_level, event_level};
 pub use host::{HostBoundary, HostWatch, SimulationExecutor, UnitExecutor};
 pub use nba::NbaUpdate;
 pub use persist::{ScheduleParts, SimulationSnapshot};
@@ -27,7 +27,7 @@ use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
     schedule::ResolvedSchedule,
-    scheduler::Scheduler,
+    scheduler::{Scheduler, SimEvent},
     timing::{Halt, ProcessState},
 };
 
@@ -73,19 +73,40 @@ impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
     }
 }
 
+/// A round suspended by `$stop` in its process phase: the round and the
+/// scheduled events it processes, whose periodic clocks re-arm at its end.
+struct Suspended<B: SimBackend> {
+    round: Box<Round>,
+    events: Vec<SimEvent<B>>,
+    /// Settled event levels before the host can write the suspended state.
+    levels: Vec<u8>,
+}
+
 /// Backend-independent state and execution rules for timed simulation.
 pub struct SimulationState<B: SimBackend> {
     scheduler: Scheduler<B>,
+    /// Events whose signal was high (value bit set) when edge detection last
+    /// sampled it.
     last_clock_values: BitSet,
+    /// Events whose signal was x or z when edge detection last sampled it.
+    /// Empty unless the design is four-state.
+    last_clock_unknown: BitSet,
+    /// The design keeps unknown bits, so edges follow the four-state rows
+    /// of IEEE 1800-2023 Table 9-2.
+    four_state: bool,
     /// The design's scheduling facts, which never change.
     model: ResolvedSchedule<B>,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
     /// The host changed state that the next step must settle at the
-    /// current time: an event signal, or a signal a wait watches.
+    /// current time, including before a suspended process resumes.
     host_pending: bool,
     /// A process requested the end of the simulation.
     finished: bool,
+    /// A process suspended the simulation (`$stop`) in the last step.
+    stopped: bool,
+    /// The round a `$stop` suspended, which the next step continues.
+    suspended: Option<Suspended<B>>,
     /// Buffers of the round in progress, kept between rounds.
     scratch: Option<Box<Round>>,
     /// Rounds and process-phase passes one time slot may run, and kernel
@@ -109,12 +130,6 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Every process of `model` starts at time zero, in list order.
     pub fn new(backend: &B, model: ResolvedSchedule<B>) -> Self {
-        let mut last_clock_values = BitSet::with_capacity(backend.num_events());
-        for (signal, id) in model.topo_signals.iter().copied() {
-            if id != usize::MAX && event_level(backend, signal) != 0 {
-                last_clock_values.insert(id);
-            }
-        }
         let process_state = ProcessState {
             domain_counters: model
                 .counted
@@ -125,9 +140,11 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             ..ProcessState::default()
         };
-        Self {
+        let mut state = Self {
             scheduler: Scheduler::new(),
-            last_clock_values,
+            last_clock_values: BitSet::with_capacity(backend.num_events()),
+            last_clock_unknown: BitSet::new(),
+            four_state: backend.layout().four_state,
             process_wakeups: (0..model.processes.len())
                 .map(|process| Reverse((0, process)))
                 .collect(),
@@ -135,11 +152,15 @@ impl<B: SimBackend> SimulationState<B> {
             process_state,
             host_pending: false,
             finished: false,
+            stopped: false,
+            suspended: None,
             scratch: None,
             round_budget: SLOT_ROUND_BUDGET,
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
-        }
+        };
+        state.synchronize_event_values(backend);
+        state
     }
 
     /// Settle host writes at the current time, then advance to the next time
@@ -164,6 +185,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.stopped = false;
         match self.step_time(executor, limit) {
             Ok(time) => Ok(time),
             Err(Halt::Finish) => {
@@ -172,6 +194,8 @@ impl<B: SimBackend> SimulationState<B> {
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }
+            // The time slot goes on when the simulation continues.
+            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => Err(error),
         }
     }
@@ -188,6 +212,20 @@ impl<B: SimBackend> SimulationState<B> {
     /// Whether a process requested the end of the simulation.
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Whether the last step returned because a process suspended the
+    /// simulation with `$stop` (IEEE 1800-2023 20.2). The simulation is
+    /// suspended in the middle of a time slot, and the next step continues it
+    /// after the `$stop`.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Whether the simulation is suspended in the middle of a time slot, so
+    /// that its scheduling state cannot be captured.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.is_some()
     }
 
     /// Settle externally driven state against the previous edge baseline even
@@ -211,6 +249,7 @@ impl<B: SimBackend> SimulationState<B> {
                 self.finish(executor);
                 Ok(Some(self.scheduler.time))
             }
+            Err(Halt::Stop) => Ok(Some(self.scheduler.time)),
             Err(Halt::Error(error)) => Err(error),
         }
     }
@@ -226,15 +265,19 @@ impl<B: SimBackend> SimulationState<B> {
         // waited or counted signal through combinational logic that has not
         // settled yet; only settling the current time tells. Processes that
         // finished or wait for a time do not see it.
-        if logged || !self.process_state.waiters.is_empty() || !self.model.counted.is_empty() {
+        // A suspended process must also see ordinary raw input writes settled
+        // before its continuation reads combinational results.
+        if self.suspended.is_some()
+            || logged
+            || !self.process_state.waiters.is_empty()
+            || !self.model.counted.is_empty()
+        {
             self.host_pending = true;
             return;
         }
         // Otherwise only an event signal's change needs the current time.
         for (signal, id) in &self.model.topo_signals {
-            if *id != usize::MAX
-                && (event_level(backend, *signal) != 0) != self.last_clock_values.contains(*id)
-            {
+            if *id != usize::MAX && self.level(backend, *signal) != self.last_level(*id) {
                 self.host_pending = true;
                 return;
             }
@@ -245,8 +288,24 @@ impl<B: SimBackend> SimulationState<B> {
         self.scheduler.time
     }
 
-    pub fn set_time(&mut self, time: u64) {
+    /// Set the scheduler time and publish it to the design's time slots.
+    /// This does not evaluate processes or combinational logic.
+    pub fn set_time(&mut self, backend: &mut B, time: u64) {
         self.scheduler.time = time;
+        self.publish_time(backend, time);
+    }
+
+    /// Move to `time` without running anything there, as the end of a run
+    /// to a time without work does. Design code reads the new time.
+    pub fn advance_time(&mut self, backend: &mut B, time: u64) {
+        self.set_time(backend, time);
+    }
+
+    /// Store `time` where design code reads the simulation time (`$time`).
+    fn publish_time(&self, backend: &mut B, time: u64) {
+        for &slot in &self.model.time_slots {
+            backend.set(slot, time);
+        }
     }
 
     /// Time of the next scheduled event or process wakeup. `None` once a

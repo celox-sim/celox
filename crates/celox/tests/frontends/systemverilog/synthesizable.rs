@@ -3,6 +3,9 @@
 use super::*;
 
 sv_backends! {
+    fn type_parameter_bindings_preserve_alias_dimensions(sim) { @case "synthesizable::type_parameter_bindings_preserve_alias_dimensions"; }
+    fn type_parameter_bindings_preserve_packed_members(sim) { @case "synthesizable::type_parameter_bindings_preserve_packed_members"; }
+    fn type_parameter_bindings_use_caller_scope(sim) { @case "synthesizable::type_parameter_bindings_use_caller_scope"; }
     fn casex_ignores_unknown_selector_bits(sim) { @case "synthesizable::casex_ignores_unknown_selector_bits"; }
     fn named_calls_preserve_defaults_and_declaration_scope(sim) { @case "synthesizable::named_calls_preserve_defaults_and_declaration_scope"; }
     fn named_calls_in_constant_contexts(sim) { @case "synthesizable::named_calls_in_constant_contexts"; }

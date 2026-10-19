@@ -674,6 +674,34 @@ fn native_program_image_rejects_v3_before_decoding_changed_schema() {
     ));
 }
 
+/// Version 14 added the domains that commit their blocking results with
+/// their evaluation; a version 13 image lacks them and is rejected.
+#[test]
+fn native_program_image_rejects_v13_before_decoding_changed_schema() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&13u16.to_le_bytes());
+
+    let Err(error) = celox::NativeProgramImage::discover_appended(&encoded) else {
+        panic!("a version 13 image must be rejected");
+    };
+    assert!(
+        matches!(error, NativeImageContainerError::UnsupportedVersion(13)),
+        "{error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "native image container version 13 is unsupported"
+    );
+}
+
 #[test]
 fn native_program_image_writes_an_executable_runtime_file() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();

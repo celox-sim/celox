@@ -35,6 +35,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },
@@ -180,6 +181,7 @@
         "upstream": [],
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },

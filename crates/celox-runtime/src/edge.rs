@@ -13,7 +13,7 @@
 //! so the inactive edge of a clock that only clocks flip-flops costs no
 //! settle on the next active edge.
 
-use celox_design::{DomainKind, EventTopology};
+use celox_design::{DomainKind, EventTopology, edges::LEVEL_UNKNOWN};
 
 use crate::{
     AbsoluteAddr, SignalRef,
@@ -21,7 +21,7 @@ use crate::{
     derived_tick::{
         DerivedTickPlan, DerivedTickPlans, DerivedTickScratch, EdgeRun, EventDomain, TickExecutor,
     },
-    simulation::event_level,
+    simulation::{edge_level, event_level},
     timing::Halt,
 };
 
@@ -133,16 +133,19 @@ fn moved_only(comb_read: bool) -> EdgeOutcome {
     }
 }
 
-/// The level of `signal`, or `None` while it is unknown.
-fn level<B: SimBackend>(backend: &B, signal: SignalRef) -> Option<bool> {
+/// The edge level of `signal` (see [`celox_design::edges`]): 0, 1, or, in a
+/// four-state design, x or z.
+fn level<B: SimBackend>(backend: &B, signal: SignalRef) -> u8 {
     if signal.is_4state && backend.layout().four_state {
-        let (value, mask) = backend.get_four_state(signal);
-        if mask.bit(0) {
-            return None;
-        }
-        return Some(value.bit(0));
+        edge_level::<true, _>(backend, signal)
+    } else {
+        u8::from(event_level(backend, signal) != 0)
     }
-    Some(event_level(backend, signal) != 0)
+}
+
+/// The known value of an edge level, or `None` for x and z.
+fn known(level: u8) -> Option<bool> {
+    (level & LEVEL_UNKNOWN == 0).then_some(level != 0)
 }
 
 /// Writes an event signal's new level: the host's own write of the signal,
@@ -170,11 +173,22 @@ pub fn move_signal<B: SimBackend>(
     backend: &mut B,
     info: &EventEdge,
     edge: Edge,
-    mut write: impl SignalWrite<B>,
+    write: impl SignalWrite<B>,
 ) -> Option<Option<bool>> {
+    move_level(backend, info, edge, write).map(known)
+}
+
+/// [`move_signal`], returning the edge level the signal had: x or z leave
+/// for 1 or 0 like 0 or 1 do (IEEE 1800-2023 Table 9-2).
+fn move_level<B: SimBackend>(
+    backend: &mut B,
+    info: &EventEdge,
+    edge: Edge,
+    mut write: impl SignalWrite<B>,
+) -> Option<u8> {
     let old = level(backend, info.signal);
     let new = edge.level();
-    if old == Some(new != 0) {
+    if old == new {
         return None;
     }
     write.write(backend, info.signal, new);
@@ -201,14 +215,15 @@ where
     X::Backend: SimBackend<Event = E>,
     E: EventHandle,
 {
-    let Some(old) = move_signal(executor.backend_mut(), &info, edge, write) else {
+    let Some(from) = move_level(executor.backend_mut(), &info, edge, write) else {
         return Ok(EdgeOutcome::Unchanged);
     };
     let new = edge.level();
-    let fires = info.fires(old, edge);
+    let fires = info.fires(known(from), edge);
     let settle = dirty || info.comb_read;
     if let Some(plan) = plan {
-        let from = old.map_or(new ^ 1, u8::from);
+        // A gated clock is judged from the lever's real level before the
+        // edge, x and z included.
         let transition = [(from, new)];
         let transitions: &[(u8, u8)] = if plan.lever_signals().next().is_some() {
             &transition
@@ -283,14 +298,14 @@ where
         let info = &edges[id];
         let old = level(executor.backend(), info.signal);
         let new = edge.level();
-        if old == Some(new != 0) || transitions.iter().any(|(signal, _)| *signal == info.signal) {
+        if old == new || transitions.iter().any(|(signal, _)| *signal == info.signal) {
             continue;
         }
         any_moved = true;
         write.write(executor.backend_mut(), info.signal, new);
-        transitions.push((info.signal, (old.map_or(new ^ 1, u8::from), new)));
+        transitions.push((info.signal, (old, new)));
         comb_read |= info.comb_read;
-        if info.fires(old, edge) {
+        if info.fires(known(old), edge) {
             let address = executor.backend().id_to_addr_slice()[id];
             sources.push(EventDomain {
                 eval_apply: event,

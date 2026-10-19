@@ -59,6 +59,13 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
                 }
+                // The process continues after the `$stop`, first, when the
+                // simulation does.
+                Some(ProcessStatus::Stop) => {
+                    self.stopped = true;
+                    self.process_state.ready.insert(process);
+                    return Err(Halt::Stop);
+                }
                 Some(ProcessStatus::Yield) => {
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
@@ -70,8 +77,8 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
-    /// Run the ready processes in declaration order, including those they
-    /// wake, recording the event signals each one changes.
+    /// Resume the stopped process first, then run ready processes in declaration
+    /// order, including those they wake, recording the event signals each changes.
     fn run_ready<E>(
         &mut self,
         executor: &mut E,
@@ -86,12 +93,26 @@ impl<B: SimBackend> SimulationState<B> {
             return Ok(false);
         }
         self.event_values(executor.backend(), &mut round.before);
-        while let Some(process) = self.process_state.ready.pop_first() {
+        let mut resume_process = round.resume_process.take();
+        if let Some(process) = resume_process {
+            self.process_state.ready.remove(&process);
+        }
+        while let Some(process) = resume_process
+            .take()
+            .or_else(|| self.process_state.ready.pop_first())
+        {
             loop {
-                let again = self.run_process(executor, current_time, process, returns)?;
+                let again = self.run_process(executor, current_time, process, returns);
+                if matches!(again, Err(Halt::Stop)) {
+                    round.resume_process = Some(process);
+                }
                 // Each run is a separate update of the event signals, so a
-                // pulse across two runs is an edge.
-                self.record_transitions(executor.backend(), round);
+                // pulse across two runs is an edge. A stop keeps those of its
+                // run for the rest of the round.
+                if matches!(again, Ok(_) | Err(Halt::Stop)) {
+                    self.record_transitions(executor.backend(), round);
+                }
+                let again = again?;
                 // Before the next run, its edges must be seen. After the last
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
@@ -104,6 +125,18 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         Ok(true)
+    }
+
+    /// Mark the edges the processes of a pass caused and settle them.
+    fn settle_pass<E>(&mut self, executor: &mut E, round: &mut Round) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let transitions = std::mem::take(&mut round.transitions);
+        self.mark_scheduled_edges(executor.backend_mut(), round, &transitions);
+        round.transitions = transitions;
+        round.transitions.clear();
+        self.settle_marked(executor, round)
     }
 
     /// The process phase of a round: the active and inactive regions before
@@ -127,14 +160,18 @@ impl<B: SimBackend> SimulationState<B> {
             // and see the state settled at the previous time. The event
             // signals they change are edges of this time, like scheduled
             // events.
-            let ran = self.run_ready(executor, current_time, round, &mut returns)?;
+            let ran = match self.run_ready(executor, current_time, round, &mut returns) {
+                // The host sees the state settled at the stop.
+                Err(Halt::Stop) => {
+                    round.kernels_ran = true;
+                    self.settle_pass(executor, round)?;
+                    return Err(Halt::Stop);
+                }
+                ran => ran?,
+            };
             round.kernels_ran |= ran;
             if first || ran {
-                let transitions = std::mem::take(&mut round.transitions);
-                self.mark_scheduled_edges(executor.backend_mut(), round, &transitions);
-                round.transitions = transitions;
-                round.transitions.clear();
-                self.settle_marked(executor, round)?;
+                self.settle_pass(executor, round)?;
                 first = false;
             }
             if entry {
@@ -155,7 +192,17 @@ impl<B: SimBackend> SimulationState<B> {
             }
             // The active region is empty: the domains it triggered evaluate
             // before the inactive region's processes resume.
-            self.evaluate_before_inactive(executor, current_time, round)?;
+            if self.evaluate_before_inactive(executor, current_time, round)? {
+                // Their blocking results are updates of the active region:
+                // the waits they wake and the domains their edges trigger run
+                // before the inactive region (IEEE 1800-2023 4.5).
+                self.observe_driven(executor.backend());
+                if !self.process_state.ready.is_empty()
+                    || !executor.backend().get_triggered_bits().is_empty()
+                {
+                    continue;
+                }
+            }
             let inactive = std::mem::take(&mut self.process_state.inactive);
             self.process_state.ready.extend(inactive);
         }

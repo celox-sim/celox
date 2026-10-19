@@ -12,7 +12,7 @@ fn truncation_masks_use_one_instruction_for_all_registers() {
                 (0xffff, Code::Movzx_r32_rm16),
                 (0xffff_ffff, Code::Mov_r32_rm32),
             ] {
-                let mut asm = CodeAssembler::new(64).unwrap();
+                let mut asm = EmitAssembler::new(64).unwrap();
                 emit_and_imm(&mut asm, dst, src, mask).unwrap();
                 let code = asm.assemble(0).unwrap();
                 let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);
@@ -52,7 +52,7 @@ fn folded_truncation_loads_read_only_the_required_bytes() {
         (0xffff, Mnemonic::Movzx, MemorySize::UInt16),
         (0xffff_ffff, Mnemonic::Mov, MemorySize::UInt32),
     ] {
-        let mut asm = CodeAssembler::new(64).unwrap();
+        let mut asm = EmitAssembler::new(64).unwrap();
         emit_and_memory_imm(&mut asm, PhysReg::R12, ptr(r15 + 24), mask).unwrap();
         let code = asm.assemble(0).unwrap();
         let mut decoder = Decoder::new(64, &code, DecoderOptions::NONE);

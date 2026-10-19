@@ -446,3 +446,250 @@
     (assert_eq high1 (trunc 8 (+ value 4)))
     (assert_eq lone_low (trunc 8 (+ value 5)))
     (assert_eq lone_high (trunc 8 (+ value 6)))))
+
+(case initializes_interface_array_members_from_their_declarations
+  (source "interface_array_initializers.sv" #"
+        interface Lane #(parameter int K = 3);
+            logic [7:0] value = 8'(K * 2);
+        endinterface
+        module Top(output logic [7:0] first, second);
+            Lane #(.K(5)) lanes[2]();
+            assign first = lanes[0].value;
+            assign second = lanes[1].value;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq first 10)
+  (assert_eq second 10))
+
+(case binds_interface_array_ports_in_declaration_order
+  (source "interface_array_ports.sv" #"
+        interface Lane #(parameter int W = 3);
+            logic [W-1:0] value;
+            modport writer(output value);
+            modport reader(input value);
+        endinterface
+        module Writer #(parameter int N = 1)(Lane.writer lanes[N], input logic [7:0] x);
+            for (genvar i = 0; i < N; i++) begin : g
+                assign lanes[i].value = x + 8'(i);
+            end
+        endmodule
+        module Reader(Lane.reader lanes[5:4], output logic [15:0] y);
+            assign y = {lanes[5].value, lanes[4].value};
+        endmodule
+        module Relay(Lane.reader lanes[8:9], output logic [15:0] y);
+            Reader r(.lanes(lanes), .y(y));
+        endmodule
+        module Top(input logic [7:0] x, output logic [15:0] y);
+            if (1) begin : g
+                Lane #(.W(8)) lanes[3:2]();
+                Writer #(.N(2)) w(.lanes(lanes), .x(x));
+                Relay r(.lanes(lanes), .y(y));
+            end
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y (| (<< value 8) (trunc 8 (+ value 1))))))
+
+(case binds_local_interfaces_before_dependent_declarations
+  (source "interface_dependent_declarations.sv" #"
+        interface Cfg #(parameter N = 3); endinterface
+        module Top(input logic [7:0] x, output logic [7:0] y, output int width);
+            localparam BASE = 5;
+            Cfg #(BASE) cfg();
+            localparam SIZE = cfg.N;
+            Cfg #(SIZE + 1) next_cfg();
+            typedef logic [next_cfg.N-1:0] word_t;
+            word_t data;
+            assign data = x;
+            assign y = data;
+            assign width = $bits(data);
+        endmodule
+    "#)
+  (top Top)
+  (for value (list 0 17 255)
+    (modify (set x value))
+    (assert_eq y (trunc 6 value))
+    (assert_eq width 6)))
+
+(case queries_interface_packed_struct_member_dimensions
+  (source "interface_member_dimensions.sv" #"
+        interface Packet;
+            typedef struct packed { logic [2:0][7:0] field; } payload_t;
+            payload_t payload;
+        endinterface
+        module Top(output int dimensions, output int size, output int selected_dimensions, output int selected_size);
+            Packet i();
+            assign dimensions = $dimensions(i.payload.field);
+            assign size = $size(i.payload.field);
+            assign selected_dimensions = $dimensions(i.payload.field[1]);
+            assign selected_size = $size(i.payload.field[1]);
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq dimensions 2)
+  (assert_eq size 3)
+  (assert_eq selected_dimensions 1)
+  (assert_eq selected_size 8))
+
+(case binds_interfaces_without_declaration_name_dependencies
+  (source "interface_declaration_names.sv" #"
+        interface I #(parameter N = 1); endinterface
+        module Top(output int width);
+            typedef struct packed { logic [16:0] later; } T;
+            I #($bits(T)) first();
+            I later();
+            assign width = first.N;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq width 17))
+
+(case keeps_lexical_names_in_interface_scopes
+  (source "interface_lexical_names.sv" #"
+        interface I;
+            parameter f = 7;
+            typedef struct packed { logic [2:0][7:0] field; } payload_t;
+            payload_t payload;
+        endinterface
+        module Top(output int function_shape, output int block_shape, output int local_names);
+            I i();
+            I h();
+            typedef struct packed { logic [4:0] field; } function_payload_t;
+            typedef struct packed { function_payload_t payload; } function_packet_t;
+            typedef struct packed { logic [6:0] field; } block_payload_t;
+            typedef struct packed { block_payload_t payload; } block_packet_t;
+            function automatic int shape();
+                function_packet_t i;
+                return $dimensions(i.payload.field) * 100 + $size(i.payload.field);
+            endfunction
+            function automatic int echo(input int h$f);
+                return h$f;
+            endfunction
+            function automatic int local_value();
+                int h$f = 11;
+                return h$f;
+            endfunction
+            assign function_shape = shape();
+            assign local_names = echo(9) + local_value();
+            always_comb begin
+                block_packet_t i;
+                block_shape = $dimensions(i.payload.field) * 100 + $size(i.payload.field);
+            end
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq function_shape 105)
+  (assert_eq block_shape 107)
+  (assert_eq local_names 20))
+
+(case propagates_interface_dependent_ports
+  (source "interface_dependent_ports.sv" #"
+        interface Cfg #(parameter N = 5); endinterface
+        module Top(output logic [base.N-1:0] x, y, output logic [$bits(y)-1:0] z, output int width);
+            localparam W = $bits(z);
+            Cfg base();
+            Cfg #(W) next_cfg();
+            assign x = '1;
+            assign y = x;
+            assign z = y;
+            assign width = next_cfg.N;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq x 31)
+  (assert_eq y 31)
+  (assert_eq z 31)
+  (assert_eq width 5))
+
+(case distinguishes_interface_dependency_bindings
+  (source "interface_dependency_bindings.sv" #"
+        package pkg;
+            parameter int later = 7;
+            typedef logic [10:0] word_t;
+        endpackage
+        interface I #(parameter N = 1); endinterface
+        module Top(output int width);
+            localparam W = pkg::later;
+            pkg::word_t data;
+            typedef struct packed { logic [12:0] later; } packet_t;
+            packet_t packet;
+            function automatic int value(input int later);
+                return later + 1;
+            endfunction
+            localparam F = value(4);
+            localparam S = $bits(packet.later);
+            I #(W + F + S + $bits(data)) first();
+            I later();
+            I word_t();
+            assign width = first.N;
+        endmodule
+    "#)
+  (top Top)
+  (eval)
+  (assert_eq width 36))
+
+(case binds_implicit_named_interface_ports
+  (source "implicit_interface_ports.sv" #"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer iface, input logic [7:0] x);
+      assign iface.data = x;
+    endmodule
+    module Reader(Bus.reader iface, output logic [7:0] y);
+      assign y = iface.data;
+    endmodule
+    module Relay(Bus iface, output logic [7:0] y);
+      Reader r(.iface, .y);
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y);
+      Bus iface();
+      Writer w(.iface, .x);
+      Relay r(.iface, .y);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y value)))
+
+(case binds_implicit_named_interface_arrays_in_generate_scopes
+  (source "implicit_interface_arrays.sv" #"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer iface[2], input logic [7:0] x);
+      assign iface[0].data = x;
+      assign iface[1].data = x + 8'd1;
+    endmodule
+    module Reader(Bus.reader iface[2], output logic [7:0] y);
+      assign y = iface[0].data ^ iface[1].data;
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y, z);
+      Bus iface[2]();
+      Writer w(.iface, .x);
+      Reader r(.iface, .y);
+      if (1) begin : inner
+        Bus iface[2]();
+        Writer w(.iface, .x(~x));
+        Reader r(.iface, .y(z));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y (^ value (trunc 8 (+ value 1))))
+    (assert_eq z (^ (trunc 8 (~ value)) (trunc 8 (+ (trunc 8 (~ value)) 1))))))

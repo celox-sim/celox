@@ -1,56 +1,109 @@
 # sv-tests conformance
 
-CI runs the elaboration and simulation tests of
-[sv-tests](https://github.com/chipsalliance/sv-tests) at the commit in
-[`revision`](revision) against the SystemVerilog frontend, and fails when any
-result differs from [`expected.tsv`](expected.tsv).
+CI runs the unmodified [sv-tests `tools/runner`](https://github.com/chipsalliance/sv-tests/blob/c4229f3bd5220e6d3ba8f390e5d09c87e462e9c7/tools/runner)
+at the commit in [`revision`](revision), using the Celox
+[`BaseRunner` adapter](runners/celox.py). [`run.py`](run.py) launches that official
+runner in a subprocess for every `.sv` file, as the upstream Makefile does.
+It compares the official verdicts with [`expected.tsv`](expected.tsv).
+Each test has separate `2state` and `4state` rows (`test`, `state_mode`, `result`).
 
-Each test runs in the mode sv-tests picks for a simulator: simulation when its
-`:type:` includes `simulation`, else elaboration. Preprocessing- and
-parsing-only tests are not run.
-
-- **Elaboration:** Celox succeeds when it builds the top module.
-- **Simulation:** Celox also runs the design until `$finish` or until no event
-  is left, and succeeds when the run ends without a runtime error or `$fatal`.
-
-A test passes when Celox succeeds, or fails if the test is marked
-`:should_fail_because:`. A simulation test additionally passes only if every
-`:assert: <expression>` line it prints (with `$display`, `$error`, ...)
-evaluates true. As in the sv-tests log parser, the expressions are Python and
-are evaluated with `python3`.
+The official runner owns metadata parsing, compatible-runner filtering, mode
+priority, library injection, timeouts, expected failures and simulation
+`:assert:` evaluation. The adapter declares only the driver’s supported
+`parsing`, `elaboration` and `simulation` modes. It forwards source files, include
+directories, defines, an optional explicit top and the selected state mode to
+the Rust driver. Parsing mode stops after preprocessing and syntax parsing; it
+does not build semantic module metadata, select a root, elaborate or simulate.
+The official mode priority still chooses elaboration for default cases and for
+cases that permit both parsing and elaboration. In elaboration and simulation
+modes, sources without a module still undergo preprocessing and parsing; root
+detection then reports the actual no-root diagnostic. The current
+compiler and simulator require a module root, so the driver reports a failure for
+rootless unit, package and interface inputs. The official runner still decides
+the case verdict, including expected failures. There is no `no_top` classification
+or preemptive skip. Without an explicit top, the driver infers a single root from
+parsed declarations and instantiations; multiple roots receive a diagnostic
+because Celox’s simulator requires one root. Each input file is a separate
+compilation unit, so source-defined macros do not leak between files;
+command-line defines apply to each file.
 
 | Result | Meaning |
 | --- | --- |
-| `pass` | succeeded with every `:assert:` true, or failed as the test expects |
-| `fail` | failed a valid test, accepted an invalid one, or printed a false `:assert:` |
-| `no_top` | the sources declare no module (class- and package-only tests) |
-| `crash` | the build or the simulation exited abnormally |
-| `timeout` | the build and simulation took longer than 60 seconds |
+| `pass` | the official runner emitted `PASS` |
+| `fail` | the official runner emitted `FAIL` |
+| `skip` | the official runner skipped an incompatible test or unsupported mode |
 
-A rejection that the test expects may come from an unsupported construct
-rather than from the error the test describes.
+The official runner’s process exit code is separate from the case verdict.
+The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
+rules from tool exit codes or `should_fail` metadata. A negative test may pass
+because of an unsupported language construct rather than its intended error.
+Crashes and timeouts retain the official runner’s verdict and tool return code.
 
-## Known simulation failures
-
-Running `initial` blocks exposes lifetime limitations that a successful
-elaboration does not exercise. The following case is retained as `fail`;
-it still runs and its `:assert:` expressions are checked:
-
-- `chapter-13/13.3.1--task-static.sv`: the task-local counter is initialized on
-  every call, so the later `(1 != 1)` assertions fail. Static task storage is
-  described in IEEE 1800-2023 §13.3.1, with variable lifetime and initialization
-  rules in §6.21.
+A runner infrastructure error, missing driver or missing source/library/include
+directory aborts collection with exit code 2 and cannot update expectations.
+The UVM submodules named by upstream `conf/runners/libs.json` must be available
+before any test runs. Nonempty `simvariants` currently cause an explicit adapter
+preparation error because the Celox driver has no runtime plusarg support;
+variants are never silently ignored.
 
 ## Running locally
+
+Use the locked development shell, which provides Python with `psutil`, or install
+the pinned [`requirements.txt`](requirements.txt) in a Python environment.
 
 ```bash
 git clone https://github.com/chipsalliance/sv-tests.git ../sv-tests
 git -C ../sv-tests checkout "$(cat conformance/sv-tests/revision)"
-cargo run --release -p celox --features systemverilog --example sv_tests -- \
-    ../sv-tests/tests --expected conformance/sv-tests/expected.tsv --report report.tsv
+git -C ../sv-tests submodule update --init --depth 1 \
+    third_party/tests/uvm third_party/tests/uvm-1.2
+cargo build --locked --release -p celox --features systemverilog --example sv_tests
+PYTHONDONTWRITEBYTECODE=1 python3 conformance/sv-tests/run.py ../sv-tests \
+    --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
+    --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv
 ```
 
-`report.tsv` lists each test's tags, mode, top module and the first diagnostic,
-runtime error or false assertion.
-After reviewing a change in the results, add `--update` to rewrite
-`expected.tsv`. Update `revision` and `expected.tsv` together.
+Use the release driver to reproduce CI: upstream time limits also cover compiler
+execution, so slower build profiles can change timeout outcomes.
+
+`--jobs` is a positive integer controlling independent official runner processes
+(default: 1). CI uses 4 jobs to match the public Ubuntu runner’s
+[four CPUs](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). Each case
+and state mode has separate logs, and upstream `BaseRunner` creates unique
+work directories. Reports and expectations are sorted regardless of completion
+order. A runner infrastructure error cancels pending work and cannot update
+expectations.
+
+Both state modes run by default. Use `--state-mode 2state` or
+`--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
+selects the default. After reviewing changed verdicts, add `--update` to rewrite
+expectations. A single-mode update preserves the other mode’s rows. Missing
+cases and changed results are checked independently for each selected mode.
+Update `revision` and the measured expectations together when upgrading upstream.
+
+The native-parser transition reviews twenty expectation rows separately from grammar
+repairs. The six module-level deferred `assert`, `assume`, and `cover` probes
+(`16.2--*0` and `16.2--*-final`) now fail elaboration explicitly: they are legal
+syntax (IEEE 1800-2023 16.4), but their module execution is unsupported. The old
+analyzer dropped these items, producing misleading passes. Parsing these forms
+still succeeds, with a separate analyzer regression checking the support boundary.
+The three anonymous-enum declaration probes now pass because the analyzer creates
+the declared storage. The negative `6.20.5--specparam_inv` probe now passes because
+assigning a specparam to a value parameter is rejected, as required by 6.20.5;
+an unreferenced specparam declaration remains accepted. No other expectation rows
+are changed for these repairs.
+
+The report contains each case’s state mode, verdict, selected execution mode,
+tags, tool return code and path to the official log. The output directory retains
+both the official log and runner diagnostics for each case and state mode.
+
+Run the adapter contract fixtures against the same upstream checkout:
+
+```bash
+SV_TESTS_ROOT=../sv-tests PYTHONDONTWRITEBYTECODE=1 \
+    python3 -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
+```
+
+These fixtures exercise the actual upstream runner with a controlled driver,
+including mode priority, skips, negative tests, assertions, timeouts, library
+injection and missing-environment failures. The Rust example is a single-case
+compiler/simulator driver; it does not parse sv-tests metadata or judge verdicts.

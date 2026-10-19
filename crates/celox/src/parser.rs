@@ -593,6 +593,7 @@ pub fn parse_sv(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
@@ -606,6 +607,7 @@ pub fn parse_sv(
         &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
+        warnings,
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
@@ -633,8 +635,8 @@ pub fn parse_sv(
 /// support stays unsupported, and anything else is an error in the source.
 #[cfg(feature = "systemverilog")]
 pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
-    match error {
-        celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
+    match error.into_error() {
+        error @ celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
             error.tracking_issue(),
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
@@ -662,6 +664,7 @@ pub fn parse_mixed(
     requests: &[celox_frontend_sv::SvModuleRequest],
     sv_interfaces: &[celox_frontend_sv::InterfaceSignature],
     used_names: &mut fxhash::FxHashSet<String>,
+    names: crate::simulator::mixed::EmittedNames,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -681,6 +684,7 @@ pub fn parse_mixed(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    sv_warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -698,9 +702,18 @@ pub fn parse_mixed(
     if !native_top {
         external_roots.insert(top_name.clone());
     }
-    let mut foreign = celox_frontend_veryl::external_signatures(ir, config)?;
-    let authored = celox_frontend_sv::module_interfaces(sv_sources).map_err(sv_analysis_error)?;
-    foreign.roots.retain(|name, _| !authored.contains_key(name));
+    // SV instantiates a Veryl module by its emitted name. The linker binds
+    // that name back to the Veryl body by its position, since modules of
+    // different projects can share a source name; an SV module declaring the
+    // same name is a duplicate the SV analyzer reports.
+    let foreign =
+        celox_frontend_veryl::external_signatures_named(ir, config, |module| names.module(module))?;
+    let mut native_modules = crate::HashMap::default();
+    for (index, component) in ir.components.iter().enumerate() {
+        if let veryl_analyzer::ir::Component::Module(module) = component {
+            native_modules.insert(names.module(module), index);
+        }
+    }
     let sv_top_parameters = (!native_top).then_some((top_name.as_str(), top_parameters));
     let base = ir.clone();
     let mut specializations = Vec::new();
@@ -716,7 +729,12 @@ pub fn parse_mixed(
     // A native specialization can introduce further SV specializations and
     // interface behavior. Analyze the expanded requests until every alternating
     // language boundary has been prepared; cache native elaboration by key.
+    // Each pass lowers every SV module again, so a successful pass replaces
+    // the warnings of the previous one. A failing pass may stop before the
+    // modules that warned, so its warnings join the previous pass's.
+    let mut pass_warnings = Vec::new();
     let external = loop {
+        let mut warnings = Vec::new();
         let borrowed_sources = sources
             .iter()
             .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -743,8 +761,15 @@ pub fn parse_mixed(
                     ));
                 }
                 let mut prepare = || -> Result<_, ParserError> {
+                    let &index = native_modules.get(name).ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "foreign module specialization",
+                            format!("`{name}` is not a Veryl module"),
+                            None,
+                        )
+                    })?;
                     let module = crate::simulator::mixed::specialize_foreign_module(
-                        &base, context, name, parameters, used_names,
+                        &base, context, index, name, parameters, used_names,
                     )?;
                     let mut specialized = veryl_analyzer::ir::Ir {
                         components: vec![veryl_analyzer::ir::Component::Module(module)],
@@ -767,6 +792,7 @@ pub fn parse_mixed(
                         &joint_sources,
                         context,
                         used_names,
+                        names,
                     )?;
                     let exported = celox_frontend_veryl::external_signatures(&specialized, config)?;
                     let signature = exported.modules.values().next().cloned().ok_or_else(|| {
@@ -801,12 +827,26 @@ pub fn parse_mixed(
             Some(&mut resolver),
             sv_top_parameters,
             &requests,
-        )
-        .map_err(|error| match error {
-            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-            celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
-        })?;
+            &mut warnings,
+        );
+        let external = match external {
+            Ok(external) => external,
+            Err(error) => {
+                for warning in warnings {
+                    if !pass_warnings.contains(&warning) {
+                        pass_warnings.push(warning);
+                    }
+                }
+                sv_warnings.extend(pass_warnings);
+                return Err(match error {
+                    celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+                    celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+                });
+            }
+        };
+        pass_warnings = warnings;
         if pending_sources.is_empty() && pending_requests.is_empty() {
+            sv_warnings.extend(pass_warnings);
             break external;
         }
         external_roots.extend(pending_roots);
@@ -818,17 +858,12 @@ pub fn parse_mixed(
                 .map(|source| (source, std::path::PathBuf::from("<sv-interface-behavior>"))),
         );
     };
-    ir.components.extend(specializations);
-    let mut native_modules = foreign.roots.keys().cloned().collect::<HashSet<_>>();
-    native_modules.extend(ir.components.iter().filter_map(|component| {
-        if let veryl_analyzer::ir::Component::Module(module) = component
-            && !authored.contains_key(&module.name.to_string())
-        {
-            Some(module.name.to_string())
-        } else {
-            None
+    for (index, component) in specializations.iter().enumerate() {
+        if let veryl_analyzer::ir::Component::Module(module) = component {
+            native_modules.insert(module.name.to_string(), ir.components.len() + index);
         }
-    }));
+    }
+    ir.components.extend(specializations);
     parse_with_external_hierarchy(
         top,
         ir,
@@ -856,7 +891,7 @@ pub fn parse_with_external_hierarchy(
     ir: &veryl_analyzer::ir::Ir,
     loop_provenance: &loop_provenance::LoopProvenance,
     external: &celox_frontend_core::symbolic::artifact::ExternalHierarchy,
-    native_modules: Option<&HashSet<String>>,
+    native_modules: Option<&crate::HashMap<String, usize>>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),

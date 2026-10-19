@@ -899,6 +899,26 @@ fn applies_unsigned_coercion_to_typed_parameter_comparisons() {
     assert_eq!(sim.get(sim.signal("all_ones")), 1u8.into());
 }
 
+/// Nonblocking assignments in processes whose target bits are not known at
+/// compile time are not lowered yet; they are rejected by name.
+#[test]
+fn rejects_process_nonblocking_assignments_without_a_constant_target() {
+    for (body, construct) in [
+        (
+            "logic [7:0] q; logic [2:0] i; initial #1 q[i] <= 1'b1;",
+            "nonblocking assignment with a run-time position in a process",
+        ),
+        (
+            "logic [7:0] mem [4]; initial #1 mem[1] <= 8'd1;",
+            "nonblocking assignment to an unpacked array in a process",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let error = cranelift_build_error(&source);
+        assert!(error.contains(construct), "`{body}`: {error}");
+    }
+}
+
 #[test]
 fn compile_sv_to_sir_forwards_parameter_overrides() {
     let source = r#"
@@ -5406,7 +5426,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always and always_latch processes",
+            "always_latch process",
             r#"
             module Top(input logic a, output logic y); always_latch y = a; endmodule
         "#,
@@ -5446,21 +5466,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 initial value = 1'b1;
                 Child child(.o(value));
                 assign y = value;
-            endmodule
-        "#,
-        ),
-        (
-            "initializer of member `value` in the interface array `lanes`",
-            r#"
-            interface Lane; logic value = 1'b1; endinterface
-            module Top(output logic y); Lane lanes [2] (); assign y = lanes[0].value; endmodule
-        "#,
-        ),
-        (
-            "non-zero-based multidimensional packed range",
-            r#"
-            module Top(input logic [2:1][7:0] a, output logic [7:0] y);
-                assign y = a[1];
             endmodule
         "#,
         ),
@@ -5644,13 +5649,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "undriven net declaration `w`",
             r#"
             module Top(output logic y); wire w; assign y = (w === 1'bz); endmodule
-        "#,
-        ),
-        (
-            "non-integer module parameter override `P`",
-            r#"
-            module Child #(parameter logic P = 1'b0) (output logic y); assign y = P; endmodule
-            module Top(output logic y); Child #(.P(1'bx)) child(.y(y)); endmodule
         "#,
         ),
         (
@@ -8418,7 +8416,9 @@ fn reemits_run_time_loop_events_when_only_the_bound_changes() {
 #[test]
 fn commits_ff_output_actuals_whose_index_calls_a_function() {
     // `outer` writes `state[inner(k)]` from an always_ff select index; the
-    // write is committed with the process.
+    // write is committed with the process. `state` is cleared by a blocking
+    // assignment: a nonblocking clear would land after the call's write
+    // (IEEE 1800-2023 10.4) and hide it.
     let source = r#"
         module Top(input bit clk, input logic [1:0] k, output logic [3:0] st,
                    output logic [3:0] bits);
@@ -8431,7 +8431,7 @@ fn commits_ff_output_actuals_whose_index_calls_a_function() {
             endfunction
             logic [3:0] state;
             always_ff @(posedge clk) begin
-                state <= 4'd0;
+                state = 4'd0;
                 bits[outer(state[inner(k)])] <= 1'b1;
             end
             assign st = state;
@@ -8524,5 +8524,45 @@ fn runs_processes_sensing_one_signal_at_two_edges_or_roles() {
             (name, u64::try_from(sim.get(signal)).unwrap())
         });
         assert_eq!(observed, expected, "{source}");
+    }
+}
+
+#[test]
+fn rejects_interface_array_port_shape_mismatches() {
+    let error = cranelift_build_error(
+        "interface I; logic x; endinterface module C(I p[3]); endmodule module Top; I a[2](); C c(.p(a)); endmodule",
+    );
+    assert!(
+        error.contains("interface array dimension mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_invalid_implicit_named_interface_connections() {
+    for (source, expected) in [
+        (
+            "interface I; logic x; endinterface module C(I iface); endmodule module Top; C c(.iface); endmodule",
+            "unknown interface handle",
+        ),
+        (
+            "interface I; logic x; endinterface interface J; logic x; endinterface module C(I iface); endmodule module Top; J iface(); C c(.iface); endmodule",
+            "interface type mismatch",
+        ),
+        (
+            "interface I; logic x; endinterface module C(I iface); endmodule module Top; I iface[2](); C c(.iface); endmodule",
+            "whole interface array",
+        ),
+        (
+            "interface I; logic x; endinterface module C(I iface[3]); endmodule module Top; I iface[2](); C c(.iface); endmodule",
+            "interface array dimension mismatch",
+        ),
+        (
+            "interface I; logic x; modport r(input x); modport w(output x); endinterface module C(I.w iface); assign iface.x = 1'b1; endmodule module Relay(I.r iface); C c(.iface); endmodule module Top; I iface(); Relay r(.iface); endmodule",
+            "an input of port",
+        ),
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains(expected), "expected {expected}: {error}");
     }
 }

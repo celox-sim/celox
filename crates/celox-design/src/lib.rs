@@ -67,6 +67,8 @@ pub enum RuntimeEventKind {
     AssertFatal,
     /// `$finish` executed by the design (IEEE 1800-2023 20.2).
     Finish,
+    /// `$stop` executed by the design (IEEE 1800-2023 20.2).
+    Stop,
 }
 
 /// How a runtime event site sizes its formatted arguments.
@@ -244,6 +246,10 @@ pub enum ProcessStatus {
     /// The process returned so the runtime can charge its time-slot budget.
     /// It resumes at once.
     Yield,
+    /// The process suspended the simulation (`$stop`, IEEE 1800-2023 20.2).
+    /// It resumes at the point stored in [`ProcessSlots::resume`] when the
+    /// simulation continues.
+    Stop,
 }
 
 impl ProcessStatus {
@@ -259,6 +265,7 @@ impl ProcessStatus {
             Self::Pending => 6,
             Self::Nba => 7,
             Self::Yield => 8,
+            Self::Stop => 9,
         }
     }
 
@@ -272,6 +279,7 @@ impl ProcessStatus {
             6 => Some(Self::Pending),
             7 => Some(Self::Nba),
             8 => Some(Self::Yield),
+            9 => Some(Self::Stop),
             _ => None,
         }
     }
@@ -514,6 +522,49 @@ pub enum DeadStorePolicy {
     PreserveAllPorts,
 }
 
+/// One simulation tick, expressed as a power of ten seconds.
+/// Valid SystemVerilog/VCD scales range from 1 fs (-15) to 100 s (2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub struct TimePrecision(i32);
+
+impl TimePrecision {
+    pub fn exponent(self) -> i32 {
+        self.0
+    }
+
+    /// The magnitude and physical unit used by a VCD `$timescale` header.
+    pub fn vcd_timescale(self) -> (u8, &'static str) {
+        let magnitude = 10u8.pow(self.0.rem_euclid(3) as u32);
+        let unit = ["s", "ms", "us", "ns", "ps", "fs"][(-self.0.div_euclid(3)) as usize];
+        (magnitude, unit)
+    }
+}
+
+impl Default for TimePrecision {
+    /// Scale-free frontends use the same 1ps tick as the SV implementation default.
+    fn default() -> Self {
+        Self(-12)
+    }
+}
+
+impl TryFrom<i32> for TimePrecision {
+    type Error = &'static str;
+    fn try_from(exponent: i32) -> Result<Self, Self::Error> {
+        if (-15..=2).contains(&exponent) {
+            Ok(Self(exponent))
+        } else {
+            Err("time precision must be between 1fs and 100s")
+        }
+    }
+}
+
+impl From<TimePrecision> for i32 {
+    fn from(precision: TimePrecision) -> Self {
+        precision.0
+    }
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -551,7 +602,18 @@ pub struct RuntimeSchema<A> {
     /// Nonblocking assignment sites of the process kernels, ordered like
     /// `wait_sites`.
     pub nba_sites: Vec<NbaSite<A>>,
+    /// Canonical event domains whose evaluation commits the results of
+    /// their blocking assignments, in the active region; their apply units
+    /// commit only the nonblocking results.
+    pub active_commits: Vec<A>,
+    /// Objects through which design code reads the simulation time, at
+    /// most one per module instance. Before each round a timed scheduler
+    /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
+    pub time_slots: Vec<A>,
 }
+
+/// Width of every [`RuntimeSchema::time_slots`] object.
+pub const TIME_SLOT_WIDTH: usize = 64;
 
 impl<A> Default for RuntimeSchema<A> {
     fn default() -> Self {
@@ -570,6 +632,8 @@ impl<A> Default for RuntimeSchema<A> {
             watches: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            active_commits: Vec::new(),
+            time_slots: Vec::new(),
         }
     }
 }
@@ -732,6 +796,13 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
     }
 }
 
+/// Time unit and rounding precision of one source scope, in powers of ten seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeScale {
+    pub unit: TimePrecision,
+    pub precision: TimePrecision,
+}
+
 /// Backend-neutral semantic design data after hierarchy flattening.
 ///
 /// This is intentionally not a frontend lookup table: every state object is
@@ -743,6 +814,11 @@ impl<A: Copy + Eq + std::hash::Hash> EventTopology<A> {
     deserialize = "A: Deserialize<'de> + Eq + std::hash::Hash + Ord"
 ))]
 pub struct ElaboratedDesign<A> {
+    /// Physical duration of one global simulation tick.
+    #[serde(default)]
+    pub time_precision: TimePrecision,
+    /// Local time units and precisions retained for reflected instance queries.
+    pub instance_time_scales: HashMap<InstanceId, TimeScale>,
     pub state_objects: HashMap<A, VariableMetadata>,
     pub events: EventTopology<A>,
     pub initial_state: Vec<InitialStateValue<A>>,
@@ -751,6 +827,8 @@ pub struct ElaboratedDesign<A> {
 impl<A> Default for ElaboratedDesign<A> {
     fn default() -> Self {
         Self {
+            time_precision: TimePrecision::default(),
+            instance_time_scales: HashMap::default(),
             state_objects: HashMap::default(),
             events: EventTopology::default(),
             initial_state: Vec::new(),

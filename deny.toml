@@ -43,7 +43,7 @@ allow = [
 ignore = true
 
 [bans]
-# Duplicates come from upstream (wasmtime, veryl, sv-parser) and are not
+# Duplicates come from upstream (wasmtime, veryl) and are not
 # actionable here.
 multiple-versions = "allow"
 wildcards = "deny"

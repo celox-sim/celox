@@ -29,6 +29,7 @@ test("Lydite core changes and shared configuration run both lanes", () => {
     "scripts/ci-lydite-changes.mjs",
     "vendor/new/src/lib.rs",
     "crates/new/src/lib.rs",
+    "conformance/new/case.sv",
   ])
     assert.deepEqual(scope(path), both, path);
   assert.deepEqual(lyditeScope(null, packages), both);
@@ -93,6 +94,35 @@ test("PRs run the bridge only for Lydite-owned changes", () => {
   ])
     assert.equal(pr(path).bridge, true, path);
   assert.deepEqual(pullRequestScope(null, packages), both);
+});
+
+test("Celox sv-tests changes skip Lydite without masking other changes", () => {
+  const files = [
+    ".github/workflows/ci.yml",
+    "conformance/sv-tests/README.md",
+    "conformance/sv-tests/expected.tsv",
+    "crates/celox/examples/sv_tests.rs",
+  ];
+  for (const path of [
+    ...files,
+    "conformance/sv-tests/revision",
+    "./conformance/sv-tests/expected.tsv",
+  ]) {
+    assert.deepEqual(scope(path), neither, path);
+    assert.deepEqual(pullRequestScope([path], packages), neither, path);
+  }
+  assert.deepEqual(pullRequestScope(files, packages), neither);
+  for (const path of [
+    "crates/lydite/src/main.rs",
+    "lydite/conformance/veryl/run_ci.sh",
+  ]) {
+    assert.deepEqual(pullRequestScope([...files, path], packages), both, path);
+    assert.deepEqual(pullRequestScope([path, ...files], packages), both, path);
+  }
+  assert.deepEqual(
+    pullRequestScope([...files, "conformance/unknown/case.sv"], packages),
+    { core: true, bridge: false },
+  );
 });
 
 test("Cargo.lock edits select only the lanes that reach the changed entries", () => {

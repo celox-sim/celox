@@ -1,12 +1,15 @@
+use self::arena::SLTNodeArena;
+mod arena;
 mod effect;
 mod expr;
 mod recover_unrolled;
 mod state;
 
 pub(crate) mod node {
+    pub(crate) use super::arena::SLTNodeArena;
     pub use celox_slt::{
         NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
-        SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
+        SLTIndexKind, SLTLoopBound, SLTNode, SLTStepOp,
     };
 }
 
@@ -63,7 +66,7 @@ type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
 pub use node::{
     NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
-    SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
+    SLTIndexKind, SLTLoopBound, SLTNode, SLTStepOp,
 };
 pub use node_facts::SLTNodeFactsError;
 
@@ -702,12 +705,19 @@ fn apply_readmem_writes(
             Some(&call.comptime.token),
         ));
     };
-    let image = crate::module::readmem_image(module, filename, destinations, 16, |dst| {
-        dst.index
-            .expressions()
-            .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
-            .collect()
-    })?;
+    let image = crate::module::readmem_image(
+        module,
+        filename,
+        destinations,
+        &arena.file_dependencies,
+        16,
+        |dst| {
+            dst.index
+                .expressions()
+                .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
+                .collect()
+        },
+    )?;
     let destination = &destinations[0];
     for run in image.runs {
         let node = arena.alloc(SLTNode::Constant(
@@ -2192,7 +2202,7 @@ fn eval_for_with_effects(
         symbolic_store.insert(id, loop_store);
     }
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let _loop_range = LoopRangeScope::enter(for_stmt);
+    let _loop_range = LoopRangeScope::enter(arena, for_stmt);
     let iter_store_before = symbolic_store.fork();
 
     let loop_state = for_stmt.body.iter().try_fold(
@@ -3026,22 +3036,17 @@ fn and_slt_condition(
     })
 }
 
-thread_local! {
-    /// Largest value of each enclosing constant-bounded loop variable.
-    static LOOP_VARIABLE_MAX: std::cell::RefCell<HashMap<VarId, BigUint>> =
-        std::cell::RefCell::new(HashMap::default());
-}
-
 /// Records the value range of a loop variable while its body is lowered, so
 /// an index such as `values[i * 8 +: 8]` in `for i in 0..16` needs no range
 /// check.
 pub(super) struct LoopRangeScope {
+    ranges: std::rc::Rc<std::cell::RefCell<HashMap<VarId, BigUint>>>,
     variable: VarId,
     previous: Option<Option<BigUint>>,
 }
 
 impl LoopRangeScope {
-    pub(super) fn enter(for_stmt: &ForStatement) -> Self {
+    pub(super) fn enter(arena: &SLTNodeArena<VarId>, for_stmt: &ForStatement) -> Self {
         let (start, end, inclusive) = match &for_stmt.range {
             ForRange::Forward {
                 start,
@@ -3075,8 +3080,9 @@ impl LoopRangeScope {
             _ => None,
         };
         match max {
-            Some(max) => Self::with_bound(for_stmt.var_id, max),
+            Some(max) => Self::with_bound(arena, for_stmt.var_id, max),
             None => Self {
+                ranges: arena.loop_ranges.clone(),
                 variable: for_stmt.var_id,
                 previous: None,
             },
@@ -3084,13 +3090,14 @@ impl LoopRangeScope {
     }
 
     /// Record that `variable` takes only values in `0..=max`.
-    pub(super) fn with_max(variable: VarId, max: usize) -> Self {
-        Self::with_bound(variable, BigUint::from(max))
+    pub(super) fn with_max(arena: &SLTNodeArena<VarId>, variable: VarId, max: usize) -> Self {
+        Self::with_bound(arena, variable, BigUint::from(max))
     }
 
-    fn with_bound(variable: VarId, max: BigUint) -> Self {
-        let previous = LOOP_VARIABLE_MAX.with(|ranges| ranges.borrow_mut().insert(variable, max));
+    fn with_bound(arena: &SLTNodeArena<VarId>, variable: VarId, max: BigUint) -> Self {
+        let previous = arena.loop_ranges.borrow_mut().insert(variable, max);
         Self {
+            ranges: arena.loop_ranges.clone(),
             variable,
             previous: Some(previous),
         }
@@ -3102,13 +3109,13 @@ impl Drop for LoopRangeScope {
         let Some(previous) = self.previous.take() else {
             return;
         };
-        LOOP_VARIABLE_MAX.with(|ranges| {
-            let mut ranges = ranges.borrow_mut();
+        {
+            let mut ranges = self.ranges.borrow_mut();
             match previous {
                 Some(previous) => ranges.insert(self.variable, previous),
                 None => ranges.remove(&self.variable),
             };
-        });
+        }
     }
 }
 
@@ -3129,8 +3136,11 @@ fn slt_max_value(arena: &SLTNodeArena<VarId>, node: NodeId) -> BigUint {
             index,
             access,
             ..
-        } if index.is_empty() && access.lsb == 0 => LOOP_VARIABLE_MAX
-            .with(|ranges| ranges.borrow().get(variable).cloned())
+        } if index.is_empty() && access.lsb == 0 => arena
+            .loop_ranges
+            .borrow()
+            .get(variable)
+            .cloned()
             .unwrap_or_else(|| all_ones.clone()),
         SLTNode::Binary(lhs, op, rhs) => {
             let (lhs, rhs) = (*lhs, *rhs);

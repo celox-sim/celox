@@ -1,6 +1,5 @@
 use std::{
-    cell::RefCell,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -12,114 +11,81 @@ pub struct FileDependency {
     pub fixed_location: bool,
 }
 
-pub(crate) type Collector = Arc<Mutex<Vec<FileDependency>>>;
+/// Compilation-owned external file tracking, explicitly passed to workers.
+#[derive(Clone, Debug, Default)]
+pub struct FileDependencyCollector(Arc<Mutex<Vec<FileDependency>>>);
 
-thread_local! {
-    static FILES: RefCell<Option<Collector>> = const { RefCell::new(None) };
-}
-
-/// Capture external file paths consulted by Veryl lowering, including its workers.
-/// Includes absent lookup candidates, so a new file taking precedence invalidates
-/// a cached compilation. Nested captures are independent; panics restore the
-/// enclosing capture. Source files must be tracked separately by the caller.
-pub fn capture_file_dependencies<T>(compile: impl FnOnce() -> T) -> (T, Vec<FileDependency>) {
-    let files = Arc::new(Mutex::new(Vec::new()));
-    let _restore = install(Some(files.clone()));
-    let result = compile();
-    let mut paths = std::mem::take(&mut *files.lock().unwrap());
-    paths.sort();
-    paths.dedup();
-    (result, paths)
-}
-
-pub(crate) fn current() -> Option<Collector> {
-    FILES.with(|files| files.borrow().clone())
-}
-
-pub(crate) fn install(collector: Option<Collector>) -> impl Drop {
-    struct Restore(Option<Collector>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FILES.with(|files| *files.borrow_mut() = self.0.take());
-        }
+impl FileDependencyCollector {
+    pub fn take(&self) -> Vec<FileDependency> {
+        let mut paths = std::mem::take(&mut *self.0.lock().unwrap());
+        paths.sort();
+        paths.dedup();
+        paths
     }
-    Restore(FILES.with(|files| files.replace(collector)))
+
+    pub(crate) fn record(&self, path: &Path, fixed_location: bool) {
+        self.0.lock().unwrap().push(FileDependency {
+            path: path.to_path_buf(),
+            fixed_location,
+        });
+    }
 }
 
-pub(crate) fn record(path: &std::path::Path) {
-    record_lookup(path, false);
-}
-
-pub(crate) fn record_absolute(path: &std::path::Path) {
-    record_lookup(path, true);
-}
-
-fn record_lookup(path: &std::path::Path, fixed_location: bool) {
-    FILES.with(|files| {
-        if let Some(files) = files.borrow().as_ref() {
-            files.lock().unwrap().push(FileDependency {
-                path: path.to_path_buf(),
-                fixed_location,
-            });
-        }
-    });
+/// Capture paths using a collector supplied explicitly to the compilation.
+/// Independent collectors support nested and concurrent compilations.
+pub fn capture_file_dependencies<T>(
+    compile: impl FnOnce(&FileDependencyCollector) -> T,
+) -> (T, Vec<FileDependency>) {
+    let collector = FileDependencyCollector::default();
+    let result = compile(&collector);
+    (result, collector.take())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn dependency(path: &str, fixed_location: bool) -> FileDependency {
-        FileDependency {
-            path: path.into(),
-            fixed_location,
-        }
-    }
-
     #[test]
-    fn distinguishes_fixed_and_relative_lookups() {
-        let ((), paths) = capture_file_dependencies(|| {
-            record(std::path::Path::new("/memory.hex"));
-            record_absolute(std::path::Path::new("/memory.hex"));
-            record_absolute(std::path::Path::new("/memory.hex"));
+    fn explicitly_shared_workers_record_into_one_compilation() {
+        let ((), paths) = capture_file_dependencies(|collector| {
+            std::thread::scope(|scope| {
+                for name in ["a.hex", "b.hex"] {
+                    let collector = collector.clone();
+                    scope.spawn(move || collector.record(Path::new(name), false));
+                }
+            });
         });
         assert_eq!(
-            paths,
-            [
-                dependency("/memory.hex", false),
-                dependency("/memory.hex", true)
-            ]
+            paths
+                .iter()
+                .map(|entry| entry.path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("a.hex"), Path::new("b.hex")]
         );
     }
 
     #[test]
-    fn nested_captures_restore_outer_collector() {
-        let ((), outer) = capture_file_dependencies(|| {
-            record(PathBuf::from("outer").as_path());
-            let (42, inner) = capture_file_dependencies(|| {
-                record(PathBuf::from("inner").as_path());
-                42
-            }) else {
-                panic!("incorrect captured result");
-            };
-            assert_eq!(inner, [dependency("inner", false)]);
-            record(PathBuf::from("outer").as_path());
-        });
-        assert_eq!(outer, [dependency("outer", false)]);
-    }
-
-    #[test]
-    fn panic_restores_outer_collector() {
-        let ((), outer) = capture_file_dependencies(|| {
-            let result = std::panic::catch_unwind(|| {
-                capture_file_dependencies(|| {
-                    record(PathBuf::from("inner").as_path());
-                    panic!("failed compilation");
-                })
+    fn collectors_are_independent_and_deduplicate_fixed_lookups() {
+        let ((), outer) = capture_file_dependencies(|collector| {
+            collector.record(Path::new("/memory.hex"), false);
+            let ((), inner) = capture_file_dependencies(|inner| {
+                inner.record(Path::new("inner"), false);
             });
-            assert!(result.is_err());
-            record(PathBuf::from("outer").as_path());
+            assert_eq!(inner.len(), 1);
+            collector.record(Path::new("/memory.hex"), true);
+            collector.record(Path::new("/memory.hex"), true);
         });
-        assert_eq!(outer, [dependency("outer", false)]);
+        assert_eq!(
+            outer,
+            [
+                FileDependency {
+                    path: "/memory.hex".into(),
+                    fixed_location: false
+                },
+                FileDependency {
+                    path: "/memory.hex".into(),
+                    fixed_location: true
+                }
+            ]
+        );
     }
 }

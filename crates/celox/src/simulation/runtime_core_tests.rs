@@ -1956,7 +1956,7 @@ fn trace<B: SimBackend>(mut sim: Simulation<B>, ops: &[Op], observe: &[&str]) ->
                         }
                     }
                     if !sim.state.is_finished() {
-                        sim.state.set_time(*end_time);
+                        sim.state.set_time(&mut sim.simulator.backend, *end_time);
                         sim.simulator.dump_unless_rewound(*end_time);
                     }
                 }
@@ -2270,10 +2270,69 @@ fn executor_call_traces_of_veryl_clock_domains_are_unchanged() {
 mod sv_traces {
     use super::*;
 
+    /// An `always` without a timing control repeats its statement forever at
+    /// time zero: the slot budget ends the step with an error instead of
+    /// hanging.
+    #[test]
+    fn an_always_without_timing_exhausts_the_slot_budget() {
+        let source = "module Top(output logic x); always x = ~x; endmodule";
+        let mut sim =
+            Simulation::from_sv_sources(vec![(source, std::path::Path::new("spin.sv"))], "Top")
+                .build()
+                .unwrap();
+        sim.state.set_slot_budgets(256, 2);
+        let error = sim.run_until(0).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::RuntimeErrorCode::Runtime { message, .. }
+                    if message.contains("does not suspend")
+            ),
+            "{error}"
+        );
+        assert_eq!(sim.time(), 0);
+    }
+
     /// Clock and reset aliases, a combinationally gated clock, a register
     /// divided clock, both edges of one clock, and the timing suite's cases
     /// that Celox runs.
     const DESIGNS: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            // A domain whose blocking result a process reads after `#0`
+            // commits it in the active region and its nonblocking update in
+            // the NBA region (#1470).
+            "sv_active_commits",
+            "module Top(input logic clk, output logic [7:0] q, output logic [7:0] observed,
+                        output logic [7:0] derived_seen);
+               wire [7:0] derived = q + 8'd1;
+               always @(posedge clk) begin q <= q + 8'd7; q = 8'd2; end
+               initial forever begin
+                 @(posedge clk);
+                 #0;
+                 observed = q;
+                 derived_seen = derived;
+               end
+             endmodule",
+            &["clk"],
+            &["q", "observed", "derived_seen"],
+        ),
+        (
+            // A blocking store of a domain committed in the active region
+            // clocks other domains, directly and through combinational
+            // logic, before the inactive region.
+            "sv_active_commit_edges",
+            "module Top(input logic clk, output logic [7:0] cnt, output logic [7:0] cnt_gated,
+                        output logic [7:0] seen);
+               logic clk2 = 1'b0, en = 1'b1;
+               wire gated = clk2 & en;
+               always @(posedge clk) clk2 = ~clk2;
+               always_ff @(posedge clk2) cnt <= cnt + 8'd1;
+               always_ff @(posedge gated) cnt_gated <= cnt_gated + 8'd1;
+               initial forever begin @(posedge clk); #0; seen = seen + 8'd1; end
+             endmodule",
+            &["clk"],
+            &["cnt", "cnt_gated", "seen"],
+        ),
         (
             "sv_buffered_clock",
             "module Top(input logic clk, output logic [31:0] up, output logic [31:0] down);
@@ -2382,5 +2441,82 @@ mod sv_traces {
                 )
             );
         }
+    }
+}
+
+#[test]
+fn four_state_reads_preserve_wide_unknown_masks_and_simulation_time() {
+    for four_state in [false, true] {
+        let mut d = Design::new("FourStateRead", four_state);
+        let y = d.output("y", 137, 0);
+        // Include both X and Z encodings, across machine-word boundaries.
+        let payload = (crate::BigUint::from(1u8) << 136usize) | crate::BigUint::from(0b1010u8);
+        let mask = (crate::BigUint::from(1u8) << 135usize) | crate::BigUint::from(0b1100u8);
+        let mixed = d
+            .module
+            .constant(Constant::new(payload.clone(), mask.clone(), d.ty(137)));
+        let body = vec![
+            d.assign(y, mixed),
+            d.delay(5),
+            d.set(y, 7),
+            d.delay(1),
+            Statement::Finish,
+        ];
+        d.module.process(body).unwrap();
+        let mut sim = Simulation::from_frontend(d.finish())
+            .four_state(four_state)
+            .build()
+            .unwrap();
+        let signal = sim.signal("y");
+        sim.run_until(0).unwrap();
+        assert_eq!(
+            sim.get_four_state(signal),
+            (
+                payload,
+                if four_state {
+                    mask
+                } else {
+                    crate::BigUint::default()
+                }
+            )
+        );
+        assert_eq!(sim.time(), 0);
+        sim.run_until(5).unwrap();
+        assert_eq!(sim.get_four_state(signal), (7u8.into(), 0u8.into()));
+        assert_eq!(sim.time(), 5);
+        sim.run_until(10).unwrap();
+        assert!(sim.is_finished());
+        assert_eq!(sim.get_four_state(signal), (7u8.into(), 0u8.into()));
+        assert_eq!(sim.time(), 6);
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn public_time_setter_publishes_time_before_design_evaluation() {
+    let source = r#"
+      module Top(input int a, output logic [63:0] y);
+        timeunit 1ns / 1ps;
+        assign y = a + $time;
+      endmodule
+    "#;
+    for four_state in [false, true] {
+        let build = || {
+            Simulator::from_sv_sources(vec![(source, std::path::Path::new("time.sv"))], "Top")
+                .four_state(four_state)
+                .emit_triggers()
+        };
+        on_every_backend!(build(), "Top", |sim| {
+            let a = sim.signal("a");
+            let y = sim.signal("y");
+            sim.state.set_time(&mut sim.simulator.backend, 5_000);
+            assert_eq!(sim.state.time(), 5_000);
+            sim.simulator.modify(|io| io.set(a, 2u32)).unwrap();
+            assert_eq!(sim.get(y), 7u64.into());
+            sim.state.advance_time(&mut sim.simulator.backend, 9_000);
+            assert_eq!(sim.state.time(), 9_000);
+            sim.simulator.modify(|io| io.set(a, 3u32)).unwrap();
+            assert_eq!(sim.get(y), 12u64.into());
+        });
     }
 }
