@@ -36,33 +36,28 @@ const C_PRESERVED_XMMS: u16 = if cfg!(target_os = "windows") {
     0
 };
 
-thread_local! {
-    static ACTIVE_CALL_AREA: Cell<Option<i32>> = const { Cell::new(None) };
-    static ACTIVE_CALLER_SEGMENT: Cell<CallerSegment> = const { Cell::new(CallerSegment::None) };
-    static ACTIVE_PINNED_XMMS: Cell<u16> = const { Cell::new(0) };
-}
-
 /// Set up the extern calls of the function being emitted. Bit `n` of
 /// `pinned_xmms` marks XMMn as holding a value for the whole function.
-pub(super) fn set_active_call_area(
+pub(super) fn set_call_area(
+    asm: &mut EmitAssembler,
     call_area: Option<i32>,
     caller_segment: CallerSegment,
     pinned_xmms: u16,
 ) {
-    ACTIVE_CALL_AREA.with(|area| area.set(call_area));
-    ACTIVE_CALLER_SEGMENT.with(|segment| segment.set(caller_segment));
-    ACTIVE_PINNED_XMMS.with(|pinned| pinned.set(pinned_xmms));
+    asm.context.call_area = call_area;
+    asm.context.caller_segment = caller_segment;
+    asm.context.pinned_xmms = pinned_xmms;
 }
 
 /// The XMM registers a call must save: pinned ones the callee may change.
-fn saved_xmms() -> impl Iterator<Item = usize> {
-    let saved = ACTIVE_PINNED_XMMS.with(Cell::get) & !C_PRESERVED_XMMS;
+fn saved_xmms(context: &EmissionContext) -> impl Iterator<Item = usize> {
+    let saved = context.pinned_xmms & !C_PRESERVED_XMMS;
     (0..16).filter(move |index| saved & (1 << index) != 0)
 }
 
-fn call_area() -> i32 {
-    ACTIVE_CALL_AREA
-        .with(Cell::get)
+fn call_area(context: &EmissionContext) -> i32 {
+    context
+        .call_area
         .expect("a function with extern calls has an extern call area")
 }
 
@@ -74,43 +69,46 @@ fn xmm_register(index: usize) -> AsmRegisterXmm {
 }
 
 /// `[state + call area + 8 * slot]` for an argument or the result.
-fn call_slot(slot: i32) -> AsmMemoryOperand {
-    mem_operand(BaseReg::SimState, call_area() + 8 * slot)
+fn call_slot(context: &EmissionContext, slot: i32) -> AsmMemoryOperand {
+    mem_operand(context, BaseReg::SimState, call_area(context) + 8 * slot)
 }
 
 pub(super) fn emit_extern_arg(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     index: u8,
     src: AsmRegister64,
 ) -> Result<(), IcedError> {
-    asm.mov(qword_ptr(call_slot(i32::from(index))), src)
+    let context = asm.context;
+    asm.mov(qword_ptr(call_slot(&context, i32::from(index))), src)
 }
 
 pub(super) fn emit_extern_result(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: AsmRegister64,
 ) -> Result<(), IcedError> {
-    asm.mov(dst, qword_ptr(call_slot(CALL_AREA_RESULT / 8)))
+    let context = asm.context;
+    asm.mov(dst, qword_ptr(call_slot(&context, CALL_AREA_RESULT / 8)))
 }
 
 pub(super) fn emit_call_extern(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     func: u32,
     arg_count: u8,
 ) -> Result<(), IcedError> {
-    let area = call_area();
-    let strategy = state_base_strategy();
+    let context = asm.context;
+    let area = call_area(&context);
+    let strategy = state_base_strategy(&context);
 
     // RBX is callee-saved in every C ABI and free here: it holds the state
     // pointer while the segment base belongs to C code.
     emit_state_base(asm, rbx)?;
-    for index in saved_xmms() {
+    for index in saved_xmms(&context) {
         asm.movq(
             qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),
             xmm_register(index),
         )?;
     }
-    match ACTIVE_CALLER_SEGMENT.with(Cell::get) {
+    match asm.context.caller_segment {
         CallerSegment::None => {}
         CallerSegment::Xmm15 => asm.movq(rax, xmm15)?,
         CallerSegment::Arena(offset) => asm.mov(rax, qword_ptr(rbx + offset))?,
@@ -159,7 +157,7 @@ pub(super) fn emit_call_extern(
         StateBaseStrategy::Gs => asm.wrgsbase(rbx)?,
         StateBaseStrategy::R15 => {}
     }
-    for index in saved_xmms() {
+    for index in saved_xmms(&context) {
         asm.movq(
             xmm_register(index),
             qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),
