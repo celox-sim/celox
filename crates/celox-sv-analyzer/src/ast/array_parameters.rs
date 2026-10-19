@@ -16,11 +16,14 @@ pub(super) struct ArrayParameter<'a> {
 
 /// Whether a parameter assignment declares an unpacked array, or a value
 /// given by an assignment pattern (a packed structure or array).
-pub(super) fn is_array_parameter(param: &sv_parser::ParamAssignment) -> bool {
+pub(super) fn is_array_parameter(
+    state: &AnalysisState,
+    param: &sv_parser::ParamAssignment,
+) -> bool {
     !param.nodes.1.is_empty()
         || value_pattern(param).is_some()
         || identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).is_some_and(|loc| {
-            scope::imported()
+            scope::imported(state)
                 .pattern_parameter_bindings
                 .contains_key(&loc.offset)
         })
@@ -28,7 +31,7 @@ pub(super) fn is_array_parameter(param: &sv_parser::ParamAssignment) -> bool {
 
 fn declared_type(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -79,7 +82,7 @@ fn value_pattern(
 /// The array parameters declared in the module scope.
 pub(super) fn array_parameters_from_module_node<'a>(
     node: RefNode<'a>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
@@ -114,7 +117,7 @@ pub(super) fn array_parameters_from_module_node<'a>(
 /// Header parameters must be visible before dependent port ranges are lowered.
 pub(super) fn array_parameters_from_parameter_ports<'a>(
     node: RefNode<'a>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     publish: &mut impl FnMut(&ArrayParameter<'a>),
@@ -149,7 +152,7 @@ pub(super) fn array_parameters_from_parameter_ports<'a>(
 /// A scope scan installs each array parameter declaration in source order.
 pub(super) fn array_parameters_from_declaration<'a>(
     declaration: RefNode<'a>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     publish: &mut impl FnMut(&ArrayParameter<'a>),
@@ -161,12 +164,12 @@ pub(super) fn array_parameters_from_declaration<'a>(
         };
         let bound =
             identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).and_then(|loc| {
-                scope::imported()
+                scope::imported(&tree.state)
                     .pattern_parameter_bindings
                     .get(&loc.offset)
                     .cloned()
             });
-        if !is_array_parameter(param) && bound.is_none() {
+        if !is_array_parameter(&tree.state, param) && bound.is_none() {
             continue;
         }
         let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
@@ -202,13 +205,13 @@ impl ArrayParameter<'_> {
     /// The `initial` block that gives the variable its value.
     pub(super) fn initial_process(
         &self,
-        tree: &SyntaxTree,
+        tree: &AnalysisContext<'_>,
         dims: &PackedDimensions,
     ) -> Result<InitialProcess, AnalyzerError> {
         let name = self.signal.name().to_string();
         let shape = procedural::dimensions_from_type(self.signal.r#type());
         let value = if let Some(bound) = &self.bound {
-            bound.lower(&shape, dims)?
+            bound.lower(&tree.state, &shape, dims)?
         } else {
             let pattern = self
                 .pattern

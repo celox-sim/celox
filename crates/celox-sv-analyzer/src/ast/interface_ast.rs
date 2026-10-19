@@ -8,15 +8,16 @@ type ActiveInstance = (
     HashMap<String, ConstExpr>,
     Vec<(String, Type)>,
 );
-thread_local! {
-    static ACTIVE_INSTANCES: std::cell::RefCell<Vec<ActiveInstance>> = const { std::cell::RefCell::new(Vec::new()) };
+#[derive(Default)]
+pub(super) struct State {
+    active_instances: RefCell<Vec<ActiveInstance>>,
 }
-struct InstanceGuard;
+struct InstanceGuard {
+    state: std::rc::Rc<AnalysisState>,
+}
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
-        ACTIVE_INSTANCES.with(|instances| {
-            instances.borrow_mut().pop();
-        });
+        self.state.interfaces.active_instances.borrow_mut().pop();
     }
 }
 
@@ -172,7 +173,7 @@ fn common_item(item: &mut sv_parser::ModuleCommonItem) -> Converted<()> {
 /// source location, including the lexical time scope of processes/functions.
 pub(super) fn analyze(
     declaration: &sv_parser::InterfaceDeclarationAnsi,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     path: &Path,
     packages: &packages::Packages,
     overrides: &HashMap<String, ConstExpr>,
@@ -193,8 +194,8 @@ pub(super) fn analyze(
         overrides.clone(),
         types.to_vec(),
     );
-    ACTIVE_INSTANCES.with(|instances| {
-        let mut instances = instances.borrow_mut();
+    {
+        let mut instances = tree.state.interfaces.active_instances.borrow_mut();
         if instances.len() >= 64 {
             return Err(unsupported("interface instance nesting exceeds 64 levels"));
         }
@@ -204,11 +205,13 @@ pub(super) fn analyze(
             )));
         }
         instances.push(instance);
-        Ok(())
-    })?;
-    let _instance = InstanceGuard;
+    }
+    let _instance = InstanceGuard {
+        state: tree.state.clone(),
+    };
 
-    let _timescales = timescales::install_for_tree(packages.timescales.clone(), tree)?;
+    let _timescales =
+        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
     let empty = ModuleInterfaces::default();
     let lookup = InterfaceLookup {
         local: interfaces,
@@ -281,6 +284,8 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<crate::ir::Module> {
+    let context = AnalysisContext::unspecialized(tree);
+    let tree = &context;
     let mut view = module_view(declaration)?;
     // Publishing a type contract must not require lowering the interface's
     // executable processes. Keep declarations and their original locations.
@@ -295,7 +300,8 @@ pub(super) fn signature(
     });
     let node = RefNode::ModuleDeclarationAnsi(&view);
     let imported = imports::imported_symbols(node.clone(), tree, packages, packages.unit(path))?;
-    let _timescales = timescales::install_for_tree(packages.timescales.clone(), tree)?;
+    let _timescales =
+        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
     let empty = ModuleInterfaces::default();
     let interfaces = InterfaceLookup {
         local: &empty,
@@ -312,10 +318,10 @@ pub(super) fn signature(
     // Internal signal lowering freezes localparam-dependent dimensions for
     // execution. A public declaration must retain those dependencies so its
     // consumers can specialize the interface with different header values.
-    let _scope = scope::install(Arc::new(imported.clone()));
-    let _functions = const_functions::install(module.constant_functions.clone());
+    let _scope = scope::install(&tree.state, Arc::new(imported.clone()));
+    let _functions = const_functions::install(&tree.state, module.constant_functions.clone());
     let mut env = imported.const_env.clone();
-    extend_const_env_with_parameters(&mut env, &module.parameters);
+    extend_const_env_with_parameters(&tree.state, &mut env, &module.parameters);
     let aliases =
         type_aliases_from_module_node_with_env(RefNode::ModuleDeclarationAnsi(&view), tree, &env)?;
     let declarations = declarations::signals_from_module_node_with_declaration_ranges(

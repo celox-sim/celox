@@ -77,6 +77,7 @@ mod tests {
             }
             code.push_str("end endmodule");
             let tree = crate::syntax::parse_source(&code, Path::new("scope_scaling.sv")).unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let node = tree
                 .into_iter()
                 .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -99,6 +100,7 @@ mod tests {
             "module Top(); if (1) begin : g localparam int P=2; logic [P-1:0] x; if (1) begin : inner localparam int P=3; logic [P-1:0] x; end logic y; end if (1) begin : h localparam int P=4; logic [P-1:0] x; end endmodule",
             Path::new("scope_views.sv"),
         ).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
         let node = tree
             .into_iter()

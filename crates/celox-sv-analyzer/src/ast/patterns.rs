@@ -22,18 +22,22 @@ pub(super) fn pattern_expression(
     Some(pattern)
 }
 
-fn eval(expr: &ConstExpr, dims: &PackedDimensions) -> Option<i128> {
-    eval_ast_const_expr(expr, &dims.const_env)
+fn eval(state: &AnalysisState, expr: &ConstExpr, dims: &PackedDimensions) -> Option<i128> {
+    eval_ast_const_expr(state, expr, &dims.const_env)
 }
 
 /// The number of bits of a value of `shape`.
-pub(super) fn shape_width(shape: &VariableDimensions, dims: &PackedDimensions) -> Option<usize> {
+pub(super) fn shape_width(
+    state: &AnalysisState,
+    shape: &VariableDimensions,
+    dims: &PackedDimensions,
+) -> Option<usize> {
     let mut width = 1usize;
     for dimension in &shape.unpacked {
-        width = width.checked_mul(usize::try_from(eval(&dimension.width, dims)?).ok()?)?;
+        width = width.checked_mul(usize::try_from(eval(state, &dimension.width, dims)?).ok()?)?;
     }
     for dimension in &shape.packed {
-        width = width.checked_mul(usize::try_from(eval(&dimension.width, dims)?).ok()?)?;
+        width = width.checked_mul(usize::try_from(eval(state, &dimension.width, dims)?).ok()?)?;
     }
     Some(width)
 }
@@ -41,7 +45,7 @@ pub(super) fn shape_width(shape: &VariableDimensions, dims: &PackedDimensions) -
 /// A typed pattern `T'{...}`: its value as a `T`.
 pub(super) fn typed_pattern(
     pattern: &sv_parser::AssignmentPatternExpression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     let r#type = typed_pattern_type(pattern, tree, dims)?;
@@ -51,7 +55,7 @@ pub(super) fn typed_pattern(
 
 fn typed_pattern_type(
     pattern: &sv_parser::AssignmentPatternExpression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Type> {
     let pattern_type = || unsupported("assignment pattern type");
@@ -93,7 +97,7 @@ fn typed_pattern_type(
 /// literals; only unpacked dimensions need positional patterns.
 pub(super) fn constant_typed_pattern_value(
     pattern: &sv_parser::AssignmentPatternExpression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<bound_patterns::Value> {
     let r#type = typed_pattern_type(pattern, tree, dims)?;
@@ -105,17 +109,24 @@ pub(super) fn constant_typed_pattern_value(
         .filter(|(name, _)| !dims.const_env.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    let value = substitute_expr_constants_with_parameter_literals(value, &dims.const_env, &values);
-    let Expr::Literal(value) = fold_const_integral_expr_preserving_mask(value, &dims.const_env)
+    let value = substitute_expr_constants_with_parameter_literals(
+        &tree.state,
+        value,
+        &dims.const_env,
+        &values,
+    );
+    let Expr::Literal(value) =
+        fold_const_integral_expr_preserving_mask(&tree.state, value, &dims.const_env)
     else {
         return Err(unsupported("nonconstant typed parameter pattern"));
     };
     let value = typecheck::parse_integral_literal(&value)
         .ok_or_else(|| unsupported("typed parameter pattern value"))?;
-    pattern_value(&value, &shape, 0, dims)
+    pattern_value(&tree.state, &value, &shape, 0, dims)
 }
 
 fn pattern_value(
+    state: &AnalysisState,
     value: &typecheck::IntegralLiteral,
     shape: &VariableDimensions,
     offset: usize,
@@ -123,15 +134,16 @@ fn pattern_value(
 ) -> Converted<bound_patterns::Value> {
     let mut parts = Vec::new();
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
-        let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let (_, _, count) = dimension_bounds(state, &dimension.left, &dimension.right, dims)?;
         let element = VariableDimensions {
             unpacked: rest.to_vec(),
             ..shape.clone()
         };
-        let width = shape_width(&element, dims)
+        let width = shape_width(state, &element, dims)
             .ok_or_else(|| unsupported("typed pattern element width"))?;
         for position in 0..count {
             parts.push(pattern_value(
+                state,
                 value,
                 &element,
                 offset + position * width,
@@ -139,8 +151,8 @@ fn pattern_value(
             )?);
         }
     } else {
-        let width =
-            shape_width(shape, dims).ok_or_else(|| unsupported("typed pattern value width"))?;
+        let width = shape_width(state, shape, dims)
+            .ok_or_else(|| unsupported("typed pattern value width"))?;
         let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
         let mut literal = typecheck::IntegralLiteral {
             value: (&value.value >> offset) & &mask,
@@ -163,7 +175,7 @@ fn pattern_value(
 fn element(
     expr: &sv_parser::Expression,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     if let Some(pattern) = pattern_expression(expr) {
@@ -174,8 +186,8 @@ fn element(
         };
     }
     let value = expr_from_expression_with_types(expr, tree, dims)?;
-    let width =
-        shape_width(shape, dims).ok_or_else(|| unsupported("assignment pattern element width"))?;
+    let width = shape_width(&tree.state, shape, dims)
+        .ok_or_else(|| unsupported("assignment pattern element width"))?;
     let signed =
         expr_signedness(&value, &dims.expression_signedness, &dims.functions).unwrap_or(false);
     Ok(Expr::Resize {
@@ -192,7 +204,7 @@ fn element(
 fn default_element(
     expr: &sv_parser::Expression,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     let Some((dimension, rest)) = shape.unpacked.split_first() else {
@@ -202,7 +214,7 @@ fn default_element(
     {
         return element(expr, shape, tree, dims);
     }
-    let (_, _, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+    let (_, _, count) = dimension_bounds(&tree.state, &dimension.left, &dimension.right, dims)?;
     let subarray = VariableDimensions {
         unpacked: rest.to_vec(),
         ..shape.clone()
@@ -218,7 +230,7 @@ fn default_element(
 /// those of a variable that its selects leave unselected.
 fn unpacked_rank(
     expr: &sv_parser::Expression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> usize {
     let sv_parser::Expression::Primary(primary) = expr else {
@@ -276,7 +288,7 @@ fn positional_items<'p>(
     pattern: &'p sv_parser::AssignmentPattern,
     count: usize,
     index_offset: impl Fn(i128) -> Option<usize>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Vec<Item<'p>>> {
     let item_count = |items: usize| {
@@ -300,7 +312,7 @@ fn positional_items<'p>(
                 &dims.const_env,
                 &dims.type_aliases,
             )?
-            .and_then(|times| eval(&times, dims))
+            .and_then(|times| eval(&tree.state, &times, dims))
             .and_then(|times| usize::try_from(times).ok())
             .ok_or_else(|| unsupported("assignment pattern repetition count"))?;
             let items = items.nodes.1.contents();
@@ -326,7 +338,7 @@ fn positional_items<'p>(
                             &dims.const_env,
                             &dims.type_aliases,
                         )?
-                        .and_then(|index| eval(&index, dims))
+                        .and_then(|index| eval(&tree.state, &index, dims))
                         .ok_or_else(|| unsupported("assignment pattern index key"))?;
                         let slot = index_offset(index)
                             .and_then(|offset| slots.get_mut(offset))
@@ -380,13 +392,14 @@ fn positional_items<'p>(
 
 /// The left and right bounds of a dimension and its element count.
 fn dimension_bounds(
+    state: &AnalysisState,
     left: &ConstExpr,
     right: &ConstExpr,
     dims: &PackedDimensions,
 ) -> Converted<(i128, i128, usize)> {
     let bounds = || unsupported("assignment pattern target bounds");
-    let left = eval(left, dims).ok_or_else(bounds)?;
-    let right = eval(right, dims).ok_or_else(bounds)?;
+    let left = eval(state, left, dims).ok_or_else(bounds)?;
+    let right = eval(state, right, dims).ok_or_else(bounds)?;
     let count = usize::try_from(left.abs_diff(right))
         .ok()
         .and_then(|count| count.checked_add(1))
@@ -398,12 +411,13 @@ fn dimension_bounds(
 pub(super) fn expr_from_pattern(
     pattern: &sv_parser::AssignmentPattern,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         // An unpacked array: element 0 is the left bound, in the low bits.
-        let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let (left, right, count) =
+            dimension_bounds(&tree.state, &dimension.left, &dimension.right, dims)?;
         let element_shape = VariableDimensions {
             packed: shape.packed.clone(),
             unpacked: rest.to_vec(),
@@ -462,7 +476,8 @@ pub(super) fn expr_from_pattern(
         && !rest.is_empty()
     {
         // A packed array: the left bound is the most significant element.
-        let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+        let (left, right, count) =
+            dimension_bounds(&tree.state, &dimension.left, &dimension.right, dims)?;
         // An element of a signed named type is signed (IEEE 1800-2023 7.4.1).
         let element_shape = VariableDimensions {
             packed: rest.to_vec(),
@@ -495,8 +510,8 @@ pub(super) fn expr_from_pattern(
         return Ok(Expr::Concat(parts));
     }
     // A vector: `'{default: v}` gives every bit the value `v`.
-    let width =
-        shape_width(shape, dims).ok_or_else(|| unsupported("assignment pattern target width"))?;
+    let width = shape_width(&tree.state, shape, dims)
+        .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = VariableDimensions {
         packed: Vec::new(),
         unpacked: Vec::new(),
@@ -598,7 +613,7 @@ fn struct_pattern_values<'p>(
 fn struct_pattern(
     pattern: &sv_parser::AssignmentPattern,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     let members = &shape.members;

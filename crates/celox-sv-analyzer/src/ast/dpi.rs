@@ -14,7 +14,7 @@ const MAX_DPI_ARGUMENTS: usize = 16;
 /// Every DPI-C import of the active generate items.
 pub(super) fn dpi_imports_from_module_node(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<DpiImport>, AnalyzerError> {

@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 pub(in crate::ast) fn array_query_call(
     call: &sv_parser::SystemTfCall,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -21,7 +21,7 @@ pub(in crate::ast) fn array_query_call(
                 }
                 _ => type_from_ref_node_with_env(RefNode::DataType(data_type), tree, env, aliases),
             }?;
-            let (bounds, unpacked) = type_bounds(&ty, env)?;
+            let (bounds, unpacked) = type_bounds(&tree.state, &ty, env)?;
             let context = PackedDimensions::new(HashMap::default(), env, aliases);
             let dimension = match dimension {
                 Some((_, expr)) => Some(
@@ -84,8 +84,8 @@ pub(in crate::ast) fn array_query_call(
         })
     };
     let dimension = dimension.unwrap_or_else(|| integer(1));
-    if let Some(index) =
-        expr_to_const(dimension.clone()).and_then(|expr| eval_ast_const_expr(&expr, env))
+    if let Some(index) = expr_to_const(&tree.state, dimension.clone())
+        .and_then(|expr| eval_ast_const_expr(&tree.state, &expr, env))
     {
         return Some(
             usize::try_from(index)
@@ -101,7 +101,7 @@ pub(in crate::ast) fn array_query_call(
     // the sign bit. The dimension appears once, preserving function effects.
     // Widen the index so a large dimension cannot wrap into a valid slot.
     let index_width = dimensions
-        .and_then(|context| expr_static_width(&dimension, context))
+        .and_then(|context| expr_static_width(&tree.state, &dimension, context))
         .unwrap_or(32)
         .max(32)
         .checked_add(6)?;
@@ -146,7 +146,7 @@ pub(in crate::ast) fn array_query_call(
 
 type Bounds = (Vec<(i128, i128)>, usize);
 
-fn type_bounds(ty: &Type, env: &HashMap<String, i128>) -> Option<Bounds> {
+fn type_bounds(state: &AnalysisState, ty: &Type, env: &HashMap<String, i128>) -> Option<Bounds> {
     let bounds = ty
         .unpacked_ranges()
         .iter()
@@ -158,8 +158,8 @@ fn type_bounds(ty: &Type, env: &HashMap<String, i128>) -> Option<Bounds> {
         )
         .map(|(left, right)| {
             Some((
-                eval_ast_const_expr(left, env)?,
-                eval_ast_const_expr(right, env)?,
+                eval_ast_const_expr(state, left, env)?,
+                eval_ast_const_expr(state, right, env)?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -168,7 +168,7 @@ fn type_bounds(ty: &Type, env: &HashMap<String, i128>) -> Option<Bounds> {
 
 fn expression_bounds(
     argument: &sv_parser::Expression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     context: &PackedDimensions,
@@ -188,7 +188,10 @@ fn expression_bounds(
                     .map(|d| (&d.left, &d.right))
                     .chain(shape.packed.iter().map(|d| (&d.left, &d.right)))
                     .map(|(l, r)| {
-                        Some((eval_ast_const_expr(l, env)?, eval_ast_const_expr(r, env)?))
+                        Some((
+                            eval_ast_const_expr(&tree.state, l, env)?,
+                            eval_ast_const_expr(&tree.state, r, env)?,
+                        ))
                     })
                     .collect::<Option<Vec<_>>>()?;
                 let removed = id.nodes.2.nodes.1.nodes.0.len();
@@ -204,13 +207,13 @@ fn expression_bounds(
                 return Some((bounds, unpacked));
             }
             if let Some(ty) = aliases.get(&name) {
-                return type_bounds(ty, env);
+                return type_bounds(&tree.state, ty, env);
             }
             if let Some(count) = env.get(&parameter_dimensions_marker(&name)) {
                 if id.nodes.2.nodes.2.is_some() {
                     let expression =
                         expr_from_expression_with_types(argument, tree, context).ok()?;
-                    let width = expr_static_width(&expression, context)?;
+                    let width = expr_static_width(&tree.state, &expression, context)?;
                     return Some((vec![(width as i128 - 1, 0)], 0));
                 }
                 let count = usize::try_from(*count).ok()?;
@@ -234,7 +237,7 @@ fn expression_bounds(
         }
     }
     let expr = expr_from_expression_with_types(argument, tree, context).ok()?;
-    let width = expr_static_width(&expr, context)?;
+    let width = expr_static_width(&tree.state, &expr, context)?;
     Some((
         if width > 1 {
             vec![(width as i128 - 1, 0)]
