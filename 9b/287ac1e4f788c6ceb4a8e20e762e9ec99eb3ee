@@ -1,0 +1,1 @@
+Fix CI catalogue validation: additions must preserve unique stable names, not a frozen total.
