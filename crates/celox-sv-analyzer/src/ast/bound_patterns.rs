@@ -2,6 +2,8 @@
 //! keys and repetition counts bind in the caller; element sizing happens in
 //! the receiving declaration's assignment context (IEEE 1800-2023 10.9).
 use super::*;
+mod native;
+pub(super) use native::{Kind as NativeKind, prepare_native};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundPattern {
@@ -17,7 +19,7 @@ enum Items {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
+pub(super) enum Key {
     Index(i128),
     Member(String),
     Default,
@@ -30,17 +32,11 @@ pub(super) enum Value {
 }
 
 pub(super) fn from_param(
-    expression: &sv_parser::ParamExpression,
+    root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<BoundPattern> {
-    let sv_parser::ParamExpression::MintypmaxExpression(expression) = expression else {
-        return Err(unsupported("parameter assignment pattern"));
-    };
-    let sv_parser::MintypmaxExpression::Expression(expression) = expression.as_ref() else {
-        return Err(unsupported("parameter pattern mintypmax expression"));
-    };
-    match value(expression, tree, dims)? {
+    match native::value(root, tree, dims)? {
         Value::Pattern(pattern) => Ok(pattern),
         Value::Expression(value) => Ok(BoundPattern {
             items: Items::Value(value),
@@ -118,106 +114,6 @@ fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Convert
             folded
         }
     })
-}
-
-fn value(
-    expr: &sv_parser::Expression,
-    tree: &AnalysisContext<'_>,
-    dims: &PackedDimensions,
-) -> Converted<Value> {
-    if let Some(pattern) = patterns::pattern_expression(expr) {
-        value_pattern(pattern, tree, dims)
-    } else {
-        Ok(Value::Expression(frozen(
-            &tree.state,
-            expr_from_expression_with_types(expr, tree, dims)?,
-            dims,
-        )?))
-    }
-}
-
-fn value_pattern(
-    pattern: &sv_parser::AssignmentPatternExpression,
-    tree: &AnalysisContext<'_>,
-    dims: &PackedDimensions,
-) -> Converted<Value> {
-    if pattern.nodes.0.is_some() {
-        return patterns::constant_typed_pattern_value(pattern, tree, dims);
-    }
-    let integer = |expr: &sv_parser::ConstantExpression| {
-        const_expr_from_ref_node_with_env(
-            RefNode::ConstantExpression(expr),
-            tree,
-            &dims.const_env,
-            &dims.type_aliases,
-        )?
-        .and_then(|expr| eval_ast_const_expr(&tree.state, &expr, &dims.const_env))
-        .ok_or_else(|| unsupported("nonconstant assignment pattern key or count"))
-    };
-    let values = |items: Vec<&sv_parser::Expression>| {
-        items
-            .into_iter()
-            .map(|expr| value(expr, tree, dims))
-            .collect::<Converted<Vec<_>>>()
-    };
-    let default_key = |key: &sv_parser::AssignmentPatternKey| match key {
-        sv_parser::AssignmentPatternKey::Default(_) => Ok(Key::Default),
-        _ => Err(unsupported("assignment pattern type key")),
-    };
-    let items = match &pattern.nodes.1 {
-        sv_parser::AssignmentPattern::List(list) => {
-            Items::List(values(list.nodes.0.nodes.1.contents())?)
-        }
-        sv_parser::AssignmentPattern::Repeat(repeat) => {
-            let (count, items) = &repeat.nodes.0.nodes.1;
-            let count = usize::try_from(integer(count)?)
-                .map_err(|_| unsupported("assignment pattern repetition count"))?;
-            let values = values(items.nodes.1.contents())?;
-            Items::Repeat(count, values)
-        }
-        sv_parser::AssignmentPattern::Array(array) => Items::Keyed(
-            array
-                .nodes
-                .0
-                .nodes
-                .1
-                .contents()
-                .into_iter()
-                .map(|(key, _, expr)| {
-                    let key = match key {
-                        sv_parser::ArrayPatternKey::ConstantExpression(index) => {
-                            Key::Index(integer(index)?)
-                        }
-                        sv_parser::ArrayPatternKey::AssignmentPatternKey(key) => default_key(key)?,
-                    };
-                    Ok((key, value(expr, tree, dims)?))
-                })
-                .collect::<Converted<_>>()?,
-        ),
-        sv_parser::AssignmentPattern::Structure(structure) => Items::Keyed(
-            structure
-                .nodes
-                .0
-                .nodes
-                .1
-                .contents()
-                .into_iter()
-                .map(|(key, _, expr)| {
-                    let key = match key {
-                        sv_parser::StructurePatternKey::MemberIdentifier(member) => Key::Member(
-                            identifier_text(RefNode::MemberIdentifier(member), tree)
-                                .ok_or_else(|| unsupported("assignment pattern member name"))?,
-                        ),
-                        sv_parser::StructurePatternKey::AssignmentPatternKey(key) => {
-                            default_key(key)?
-                        }
-                    };
-                    Ok((key, value(expr, tree, dims)?))
-                })
-                .collect::<Converted<_>>()?,
-        ),
-    };
-    Ok(Value::Pattern(BoundPattern { items }))
 }
 
 impl Value {

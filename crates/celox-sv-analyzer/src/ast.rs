@@ -1,8 +1,6 @@
 //! SystemVerilog frontend AST.
 //!
-//! This AST is intentionally smaller and more semantic than the raw
-//! `sv-parser` CST, but it is still a language frontend structure rather than
-//! Celox runtime IR.
+//! This semantic language frontend is separate from Celox runtime IR.
 //!
 //! Public AST types and module construction live here. Child modules collect
 //! declarations and processes, resolve types and constants, expand functions,
@@ -17,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
+use crate::migration::ValidatedSyntax as SyntaxTree;
 
 /// State owned by one analysis session, shared explicitly with nested scopes.
 #[derive(Default)]
@@ -92,15 +90,6 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
-impl<'a> IntoIterator for &'a AnalysisContext<'_> {
-    type Item = <&'a SyntaxTree as IntoIterator>::Item;
-    type IntoIter = <&'a SyntaxTree as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.syntax_tree.into_iter()
-    }
-}
-
 pub use crate::system_functions::{ArrayQuery, Callee, SystemFunction, SystemTask};
 use crate::{AnalyzerError, system_functions, typecheck};
 
@@ -130,10 +119,16 @@ mod interface_ast;
 pub mod interfaces;
 mod lifetimes;
 pub(crate) mod module_index;
+mod native_constants;
+mod native_expressions;
 mod native_interfaces;
+mod native_types;
+mod package_owners;
 pub mod packages;
 mod packed_structs;
 mod parameters;
+mod port_owners;
+mod timing;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
@@ -142,103 +137,69 @@ mod scoped_map;
 mod selects;
 mod shared_map;
 mod statements;
+mod subroutine_owners;
 mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
 pub(crate) mod warnings;
 
-use array_compatibility::{
-    check_unpacked_array_assignment, net_lvalue_unpacked_shape, selected_unpacked_shape,
-    variable_lvalue_unpacked_shape,
-};
+use array_compatibility::selected_unpacked_shape;
 use assignment_analysis::two_state_conditions_are_complements;
 use case::expr_is_two_state;
 use casts::{
-    cast_is_supported, constant_cast_const_expr, constant_cast_is_supported, expr_type_from_type,
-    resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast, runtime_cast_expr,
-    runtime_constant_cast_const_expr,
+    expr_type_from_type, resize_integral_literal_for_cast, resize_unbased_fill_literal_for_cast,
 };
-use comb_process::comb_processes_from_module_node;
+use comb_process::comb_processes_from_scope;
 use comb_rewrite::{expr_static_width, whole_packed_lvalue};
 use constant_folding::{
     fold_const_integral_expr_preserving_mask, simplify_constant_mux_conditions,
 };
 use constants::{
-    binary_op_from_symbol, bind_generate_parameter, const_expr_from_constant_param_with_env,
-    const_expr_from_expr, const_expr_from_param_expression, const_expr_from_ref_node,
-    const_expr_from_ref_node_with_env, eval_ast_const_expr, expr_to_const, expr_to_index_const,
-    left_associate_expr_binary, next_genvar_value, primary_literal_text,
+    bind_generate_parameter, eval_ast_const_expr, expr_to_const, expr_to_index_const,
     substitute_assignment_constants_with_parameter_literals, substitute_const_expr_constants,
     substitute_const_expr_constants_preserving_enum_types, substitute_dimension_constants,
     substitute_expr_constants_with_parameter_literals, substitute_lvalue_constants,
     substitute_process_constants, substitute_process_constants_with_parameter_literals,
-    unary_expr_from_symbol,
 };
 use declarations::{
-    ScopeItem, identifier_locate, module_interface_from_node, module_name_from_node,
-    module_non_port_items, module_parameter_port_list, package_declarations, parameter_name,
-    parameters_from_module_node, ports_from_module_node, scope_declarations, scope_items,
-    scope_name_from_node, signals_from_data_declaration, signals_from_module_node,
-    signals_from_module_or_generate_item, type_alias_from_ref_node,
+    module_interface_from_scope, parameters_from_scope, ports_from_scope, signals_from_body_item,
+    signals_from_scope,
 };
 use dimensions::{
     enum_marker, extend_const_env_with_variable_types, function_packed_dimension_widths,
-    function_param_packed_dimensions, insert_parameter_type_markers, local_parameter_marker,
+    insert_parameter_type_markers, local_parameter_marker,
     packed_dimensions_from_ports_and_signals, parameter_dimension_marker,
     parameter_dimensions_marker, parameter_marker, parameter_packed_dimensions,
     parameter_rank_marker, parameter_signed_element_marker, parameter_signed_marker,
     parameter_type_from_const_env, parameter_types_from_const_env, parameter_width_marker,
-    size_system_function_expr_type, unpacked_dimension_widths, variable_bits_marker,
-    variable_dimensions_marker, variable_signed_marker, variable_size_function_width,
-    variable_size_marker, variable_unpacked_dimensions_marker,
+    unpacked_dimension_widths, variable_bits_marker, variable_dimensions_marker,
+    variable_signed_marker, variable_size_function_width, variable_size_marker,
+    variable_unpacked_dimensions_marker,
 };
-use expressions::{
-    called_system_function, called_system_task, expr_from_expression,
-    expr_from_expression_for_lvalue, expr_from_expression_with_types,
-    expr_from_function_subroutine_call, expr_from_primary, expr_from_subroutine_call,
-    expr_from_tf_call, expression_is_grouped, guard_zero_divisions, system_tf_call_parts,
-};
-use ff_process::ff_processes_from_module_node;
-use functions::{
-    function_from_declaration, function_local_packed_dimensions_from_block_item_iter,
-    function_local_packed_dimensions_from_block_items, function_return_dimensions,
-    function_return_first_packed_dimension_width, function_return_is_2state, function_return_type,
-    function_type_from_ref_node, functions_from_module_node, integer_atom_expr_type,
-    procedural_truth_condition,
-};
+use expressions::guard_zero_divisions;
+use ff_process::ff_processes_from_scope;
+use functions::{functions_from_scope, procedural_truth_condition};
 use inlining::{
     expand_expr_calls, expr_signedness, expr_signedness_with_return_types, substitute_expr_idents,
 };
-use instances::{
-    collect_connected_nets, expr_ident_name, identifier_text, instances_from_module_node,
-    node_source_text, reference_name,
-};
+pub(crate) use instances::normalize_identifier;
+use instances::{collect_connected_nets, expr_ident_name, instances_from_scope};
 use parameters::{
     apply_parameter_overrides, coerce_const_parameter_value, const_env_from_parameters,
-    const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_module_node,
+    const_expr_from_i128, const_expr_to_expr, enum_member_constants_from_scope,
     extend_const_env_with_parameters, format_typed_parameter_literal, infer_const_expr_type,
     infer_parameter_value_type, parameter_element_literal, parameter_value_env,
-    parameters_from_ref_node, substitute_typed_parameter_literals,
+    substitute_typed_parameter_literals,
 };
 use scoped_map::{ScopedMap, Signedness};
-use selects::{
-    add_expr, expr_select_from_select, indexed_select_base, net_lvalue_from_node,
-    part_select_bounds, product_expr, variable_lvalue_from_node,
-};
+use selects::{add_expr, product_expr};
 use shared_map::SharedMap;
 use statements::{
-    assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_cond_predicate,
-    expr_from_lvalue, lvalue_expr_type,
+    assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
 };
 use types::{
-    direction_from_port_direction, direction_from_ref_node, is_signed_from_ref_node,
-    packed_ranges_from_ref_node_with_env, signed_element_depth_from_ref_node,
-    type_alias_from_data_type, type_alias_from_data_type_or_implicit,
-    type_aliases_from_module_node, type_aliases_from_module_node_with_env,
-    type_from_net_port_header, type_from_ref_node, type_from_ref_node_with_env,
-    type_from_variable_port_header, type_with_fallback_ranges_with_env, type_with_unpacked_ranges,
-    unpacked_ranges_from_dimensions_with_env, unpacked_ranges_from_variable_dimensions_with_env,
+    type_aliases_from_scope, type_aliases_from_scope_with_env, type_with_unpacked_ranges,
     validate_unpacked_dimension_sizes,
 };
 use validation::{AlwaysKind, always_comb_body, always_kind, reject_silently_ignored_constructs};
@@ -294,11 +255,11 @@ pub(crate) struct ModuleParameterBindings<'a> {
 }
 
 impl Source {
-    pub fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
+    pub(crate) fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
         Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &HashMap::default())
     }
 
-    pub fn from_syntax_with_module_parameter_overrides(
+    pub(crate) fn from_syntax_with_module_parameter_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
         parameter_overrides: &HashMap<String, i128>,
@@ -317,17 +278,22 @@ impl Source {
             syntax_tree,
         )?;
         let mut modules = Vec::new();
-        for node in syntax_tree {
-            match node {
-                RefNode::ModuleDeclarationAnsi(module) => {
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let scoped_context = context.child(&scoped, &parameter_overrides);
+            let syntax_tree = &scoped_context;
+            let unit = syntax_tree.root_unit()?;
+            if unit.kind != celox_sv_syntax::UnitKind::Module {
+                continue;
+            }
+            match unit.port_style {
+                celox_sv_syntax::PortStyle::Ansi => {
                     let imported = imports::imported_symbols(
-                        RefNode::ModuleDeclarationAnsi(module),
                         syntax_tree,
                         &packages,
                         packages.unit(Path::new("")),
                     )?;
-                    modules.push(Module::from_module_node_with_parameter_overrides(
-                        module,
+                    modules.push(Module::from_scope_with_parameter_overrides(
                         syntax_tree,
                         module_name,
                         &parameter_overrides,
@@ -338,7 +304,7 @@ impl Source {
                         Arc::new(imported),
                     )?);
                 }
-                RefNode::ModuleDeclarationNonansi(_) => {
+                celox_sv_syntax::PortStyle::NonAnsi => {
                     return Err(AnalyzerError::Unsupported(
                         "non-ANSI module port declarations".to_string(),
                     ));
@@ -350,7 +316,7 @@ impl Source {
         Ok(Self { modules })
     }
 
-    pub fn from_syntax_module_with_parameter_overrides(
+    pub(crate) fn from_syntax_module_with_parameter_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
         parameter_overrides: &HashMap<String, i128>,
@@ -369,7 +335,7 @@ impl Source {
 
     /// `extra_interfaces` describes modules declared in other sources; the
     /// modules of `syntax_tree` are always known.
-    pub fn from_syntax_module_with_parameter_expr_overrides(
+    pub(crate) fn from_syntax_module_with_parameter_expr_overrides(
         syntax_tree: &SyntaxTree,
         module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
@@ -419,16 +385,13 @@ impl Source {
         let mut modules = Vec::new();
         let interface_plan = packages.interface_plan.modules.get(module_name);
         let original_name = interface_plan.map_or(module_name, |plan| plan.original.as_str());
-        for node in index.nodes(syntax_tree, original_name) {
-            match node {
-                RefNode::ModuleDeclarationAnsi(module) => {
-                    let node = RefNode::ModuleDeclarationAnsi(module);
-                    let mut imported = imports::imported_symbols(
-                        node.clone(),
-                        syntax_tree,
-                        packages,
-                        packages.unit(path),
-                    )?;
+        for scope_tree in index.scopes(original_name) {
+            let scope_context = context.child(scope_tree, bindings.values);
+            let syntax_tree = &scope_context;
+            match syntax_tree.root_unit()?.port_style {
+                celox_sv_syntax::PortStyle::Ansi => {
+                    let mut imported =
+                        imports::imported_symbols(syntax_tree, packages, packages.unit(path))?;
                     imported.declarations_only = bindings.declarations_only;
                     let own_types = bindings
                         .types
@@ -443,14 +406,10 @@ impl Source {
                         .cloned()
                         .collect::<Vec<_>>();
                     imported.type_parameter_bindings =
-                        type_parameters::bind(node.clone(), syntax_tree, &own_types)?;
-                    imported.pattern_parameter_bindings = type_parameters::bind_patterns(
-                        node.clone(),
-                        syntax_tree,
-                        bindings.patterns,
-                    )?;
+                        type_parameters::bind(syntax_tree, &own_types)?;
+                    imported.pattern_parameter_bindings =
+                        type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
                     if let Some(mut module) = native_interfaces::analyze_module(
-                        module,
                         syntax_tree,
                         path,
                         packages,
@@ -467,8 +426,7 @@ impl Source {
                         modules.push(module);
                         continue;
                     }
-                    modules.push(Module::from_module_node_with_parameter_overrides(
-                        node,
+                    modules.push(Module::from_scope_with_parameter_overrides(
                         syntax_tree,
                         module_name,
                         bindings.values,
@@ -476,13 +434,10 @@ impl Source {
                         Arc::new(imported),
                     )?);
                 }
-                RefNode::ModuleDeclarationNonansi(module) => {
-                    let node = RefNode::ModuleDeclarationNonansi(module);
-                    if module_name_from_node(node, syntax_tree)? == module_name {
-                        return Err(AnalyzerError::Unsupported(
-                            "non-ANSI module port declarations".to_string(),
-                        ));
-                    }
+                celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI module port declarations".to_string(),
+                    ));
                 }
                 _ => {}
             }
@@ -490,36 +445,38 @@ impl Source {
         Ok(Self { modules })
     }
 
-    pub fn module_names_from_syntax(
+    pub(crate) fn module_names_from_syntax(
         syntax_tree: &SyntaxTree,
     ) -> Result<Vec<String>, AnalyzerError> {
         let mut names = Vec::new();
-        for node in syntax_tree {
-            match node {
-                RefNode::ModuleDeclarationAnsi(module) => names.push(module_name_from_node(
-                    RefNode::ModuleDeclarationAnsi(module),
-                    syntax_tree,
-                )?),
-                RefNode::ModuleDeclarationNonansi(module) => names.push(module_name_from_node(
-                    RefNode::ModuleDeclarationNonansi(module),
-                    syntax_tree,
-                )?),
-                _ => {}
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let syntax_tree = &scoped;
+            let unit = syntax_tree.root_unit()?;
+            if unit.kind == celox_sv_syntax::UnitKind::Module
+                && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
+            {
+                names.push(syntax_tree.root_name()?);
             }
         }
         Ok(names)
     }
 
     /// The positional interface of every ANSI module declared in `syntax_tree`.
-    pub fn module_interfaces_from_syntax(
+    pub(crate) fn module_interfaces_from_syntax(
         syntax_tree: &SyntaxTree,
     ) -> Result<ModuleInterfaces, AnalyzerError> {
         let mut interfaces = ModuleInterfaces::default();
-        for node in syntax_tree {
-            if let RefNode::ModuleDeclarationAnsi(module) = node {
-                let node = RefNode::ModuleDeclarationAnsi(module);
-                let name = module_name_from_node(node.clone(), syntax_tree)?;
-                interfaces.insert(name, module_interface_from_node(node, syntax_tree)?);
+        for handle in syntax_tree.root_scopes()? {
+            let scoped = syntax_tree.scoped(handle)?;
+            let syntax_tree = &scoped;
+            let unit = syntax_tree.root_unit()?;
+            if unit.kind == celox_sv_syntax::UnitKind::Module
+                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
+            {
+                let name = syntax_tree.root_name()?;
+                let context = AnalysisContext::unspecialized(syntax_tree);
+                interfaces.insert(name, module_interface_from_scope(&context)?);
             }
         }
         Ok(interfaces)
@@ -596,16 +553,14 @@ impl Module {
 
     /// Analyze a module or a package. The scope starts from the `imported`
     /// symbols of the packages it uses.
-    fn from_module_node_with_parameter_overrides<'a>(
-        node: impl Into<RefNode<'a>>,
+    fn from_scope_with_parameter_overrides(
         syntax_tree: &AnalysisContext<'_>,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
         imported: Arc<scope::ScopeSymbols>,
     ) -> Result<Self, AnalyzerError> {
-        Self::from_scope_node_with_parameter_overrides(
-            node,
+        Self::from_scope_with_symbols(
             syntax_tree,
             override_module_name,
             parameter_overrides,
@@ -615,8 +570,7 @@ impl Module {
         )
     }
 
-    fn from_scope_node_with_parameter_overrides<'a>(
-        node: impl Into<RefNode<'a>>,
+    fn from_scope_with_symbols(
         syntax_tree: &AnalysisContext<'_>,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
@@ -624,37 +578,60 @@ impl Module {
         imported: Arc<scope::ScopeSymbols>,
         export_symbols: bool,
     ) -> Result<Self, AnalyzerError> {
-        let node = node.into();
-        let is_package = matches!(node, RefNode::PackageDeclaration(_));
-        let name = scope_name_from_node(node.clone(), syntax_tree)?;
+        Self::from_selected_scope(
+            syntax_tree,
+            override_module_name,
+            parameter_overrides,
+            interfaces,
+            imported,
+            export_symbols,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_selected_scope(
+        syntax_tree: &AnalysisContext<'_>,
+        override_module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &InterfaceLookup<'_>,
+        imported: Arc<scope::ScopeSymbols>,
+        export_symbols: bool,
+        header_ports: Option<&port_owners::Selection<'_>>,
+    ) -> Result<Self, AnalyzerError> {
+        let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
+        let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
+        let name = unit.map_or_else(
+            || packages::UNIT.to_string(),
+            |unit| instances::normalize_identifier(&unit.name.spelling),
+        );
         let empty_parameter_overrides = HashMap::default();
         let applicable_parameter_overrides = if name == override_module_name {
             parameter_overrides
         } else {
             &empty_parameter_overrides
         };
-        let context = syntax_tree.child(syntax_tree, applicable_parameter_overrides);
-        let syntax_tree = &context;
+        let specialization =
+            syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
+        let syntax_tree = &specialization;
         let _imported = scope::install(&syntax_tree.state, imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
             functions
         };
-        let mut type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree)?;
+        let mut type_aliases = type_aliases_from_scope(syntax_tree)?;
         // Constant functions see the module constants known so far; they are
         // collected again once the parameters are known.
         let _constant_functions = const_functions::install(
             &syntax_tree.state,
             with_imported(const_functions::module_constant_functions(
-                node.clone(),
                 syntax_tree,
                 &imported.const_env,
                 &type_aliases,
                 &imported.parameter_values,
             )),
         );
-        let mut parameters = parameters_from_module_node(
-            node.clone(),
+        let mut parameters = parameters_from_scope(
             syntax_tree,
             &type_aliases,
             &imported.const_env,
@@ -675,10 +652,8 @@ impl Module {
         }
         let mut const_env = imported.const_env.clone();
         const_env.extend(const_env_from_parameters(&syntax_tree.state, &parameters));
-        type_aliases =
-            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
-        let mut enum_constants = enum_member_constants_from_module_node(
-            node.clone(),
+        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
+        let mut enum_constants = enum_member_constants_from_scope(
             syntax_tree,
             &const_env,
             &type_aliases,
@@ -694,16 +669,14 @@ impl Module {
         enum_constants.extend_missing(&imported.enum_constants);
         // Alias ranges may themselves contain casts sized by enum members.
         // Rebuild them before assigning declared parameter widths.
-        type_aliases =
-            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
         // Constant casts are evaluated while parameter syntax is lowered.
         // Repeat that lowering after enum constants become available so a
         // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
         // discarded during the initial pass. Materialize only enum-member
         // references so exported parameter expressions retain dependencies
         // on other parameters for later specialization.
-        parameters = parameters_from_module_node(
-            node.clone(),
+        parameters = parameters_from_scope(
             syntax_tree,
             &type_aliases,
             &const_env,
@@ -722,8 +695,7 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
-        type_aliases =
-            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &const_env)?;
+        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
         // Contract dependency analysis must see module parameter references
         // before the normal procedural lowering substitutes default literals.
         let symbolic_parameters = parameters
@@ -732,7 +704,6 @@ impl Module {
             .collect();
         let declaration_subroutines =
             with_imported(const_functions::symbolic_module_constant_functions(
-                node.clone(),
                 syntax_tree,
                 &const_env,
                 &type_aliases,
@@ -743,7 +714,6 @@ impl Module {
         const_functions::replace(
             &syntax_tree.state.const_functions,
             with_imported(const_functions::module_constant_functions(
-                node.clone(),
                 syntax_tree,
                 &const_env,
                 &type_aliases,
@@ -757,12 +727,8 @@ impl Module {
         );
         extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
 
-        let mut array_parameters = array_parameters::array_parameters_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
+        let mut array_parameters =
+            array_parameters::array_parameters_from_scope(syntax_tree, &const_env, &type_aliases)?;
         for parameter in &array_parameters {
             const_env.insert(
                 parameters::unbounded_parameter_marker(&parameter.signal.name),
@@ -772,7 +738,6 @@ impl Module {
 
         if !imported.declarations_only {
             match reject_silently_ignored_constructs(
-                node.clone(),
                 syntax_tree,
                 &const_env,
                 &type_aliases,
@@ -792,18 +757,10 @@ impl Module {
                 Err(AnalyzerError::Unsupported(construct))
                     if construct == "constant cast expression" =>
                 {
-                    let preliminary_ports = ports_from_module_node(
-                        node.clone(),
-                        syntax_tree,
-                        &const_env,
-                        &type_aliases,
-                    )?;
-                    let preliminary_signals = signals_from_module_node(
-                        node.clone(),
-                        syntax_tree,
-                        &const_env,
-                        &type_aliases,
-                    )?;
+                    let preliminary_ports =
+                        ports_from_scope(syntax_tree, &const_env, &type_aliases, header_ports)?;
+                    let preliminary_signals =
+                        signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
                     extend_const_env_with_variable_types(
                         &syntax_tree.state,
                         &mut const_env,
@@ -816,8 +773,7 @@ impl Module {
                                     .map(|signal| (signal.name(), signal.r#type())),
                             ),
                     );
-                    parameters = parameters_from_module_node(
-                        node.clone(),
+                    parameters = parameters_from_scope(
                         syntax_tree,
                         &type_aliases,
                         &const_env,
@@ -840,19 +796,13 @@ impl Module {
                         &mut const_env,
                         &parameters,
                     );
-                    type_aliases = type_aliases_from_module_node_with_env(
-                        node.clone(),
-                        syntax_tree,
-                        &const_env,
-                    )?;
-                    array_parameters = array_parameters::array_parameters_from_module_node(
-                        node.clone(),
+                    type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
+                    array_parameters = array_parameters::array_parameters_from_scope(
                         syntax_tree,
                         &const_env,
                         &type_aliases,
                     )?;
                     reject_silently_ignored_constructs(
-                        node.clone(),
                         syntax_tree,
                         &const_env,
                         &type_aliases,
@@ -868,8 +818,7 @@ impl Module {
                 Err(error) => return Err(error),
             }
         }
-        let mut ports =
-            ports_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+        let mut ports = ports_from_scope(syntax_tree, &const_env, &type_aliases, header_ports)?;
         ports.extend(imported.ports.iter().cloned());
         let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
@@ -884,8 +833,7 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
-        let mut signals =
-            signals_from_module_node(node.clone(), syntax_tree, &const_env, &type_aliases)?;
+        let mut signals = signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
         signals.extend(
             array_parameters
                 .iter()
@@ -936,12 +884,7 @@ impl Module {
         // Instance connections may call subroutines, of the module or of the
         // packages it uses, with untyped assignment patterns.
         let (mut subroutine_params, mut subroutine_shapes, mut subroutine_directions) =
-            procedural::subroutine_argument_names(
-                node.clone(),
-                syntax_tree,
-                &const_env,
-                &type_aliases,
-            )?;
+            procedural::subroutine_argument_names(syntax_tree, &const_env, &type_aliases)?;
         for (name, params) in &imported.subroutine_params {
             subroutine_params
                 .entry(name.clone())
@@ -972,12 +915,8 @@ impl Module {
                     .or_insert(directions);
             }
         }
-        let mut dpi_imports = dpi::dpi_imports_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-        )?;
+        let dpi_items = generate::items(syntax_tree, &const_env, &type_aliases)?;
+        let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree.declarations())?;
         for import in &dpi_imports {
             subroutine_params.insert(
                 import.name().to_string(),
@@ -994,13 +933,8 @@ impl Module {
         }
         packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
         packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
-        let mut instances = instances_from_module_node(
-            node.clone(),
-            syntax_tree,
-            &const_env,
-            &packed_dimensions,
-            interfaces,
-        )?;
+        let mut instances =
+            instances_from_scope(syntax_tree, &const_env, &packed_dimensions, interfaces)?;
         let mut instance_names = HashSet::default();
         if let Some(instance) = instances
             .iter()
@@ -1064,8 +998,7 @@ impl Module {
                 .into_iter()
                 .map(|(name, r#type)| (name, r#type.signed)),
         );
-        let mut functions =
-            functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        let mut functions = functions_from_scope(syntax_tree, &const_env, &packed_dimensions)?;
         for (name, function) in &imported.functions {
             functions
                 .entry(name.clone())
@@ -1135,23 +1068,21 @@ impl Module {
             counter: &mut local_counter,
             subroutine_params: &subroutine_params,
             subroutine_directions: &subroutine_directions,
-            automatic: lifetimes::automatic_by_default(&node),
+            automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
         };
         let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
             if imported.declarations_only {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             } else {
-                let subroutines = procedural::subroutines_from_module_node(
-                    node.clone(),
+                let subroutines = procedural::subroutines_from_scope(
                     syntax_tree,
                     &const_env,
                     &packed_dimensions,
                     &parameter_values,
                     &mut body_state,
                 )?;
-                let mut comb_processes = comb_processes_from_module_node(
-                    node.clone(),
+                let mut comb_processes = comb_processes_from_scope(
                     syntax_tree,
                     &const_env,
                     &packed_dimensions,
@@ -1168,8 +1099,7 @@ impl Module {
                     )
                 })
                 .collect::<Vec<_>>();
-                let mut ff_processes = ff_processes_from_module_node(
-                    node.clone(),
+                let mut ff_processes = ff_processes_from_scope(
                     syntax_tree,
                     &const_env,
                     &parameter_values,
@@ -1184,8 +1114,7 @@ impl Module {
                         .push(parameter.initial_process(syntax_tree, &packed_dimensions)?);
                 }
                 initial_processes.extend(imported.initial_processes.iter().cloned());
-                initial_processes.extend(procedural::initial_processes_from_module_node(
-                    node.clone(),
+                initial_processes.extend(procedural::initial_processes_from_scope(
                     syntax_tree,
                     &const_env,
                     &packed_dimensions,
@@ -1487,13 +1416,6 @@ impl Module {
     pub fn dpi_imports(&self) -> &[crate::ir::DpiImport] {
         &self.dpi_imports
     }
-}
-
-pub(crate) fn component_identifier(
-    identifier: &sv_parser::InterfaceIdentifier,
-    tree: &SyntaxTree,
-) -> Option<String> {
-    identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
 }
 
 pub(crate) fn generated_time_declarations(
@@ -2439,18 +2361,6 @@ impl ParamDirection {
     /// Whether the call writes the actual argument back.
     fn is_written(self) -> bool {
         !matches!(self, ParamDirection::Input)
-    }
-
-    fn from_tf_port(direction: &sv_parser::TfPortDirection) -> Option<Self> {
-        match direction {
-            sv_parser::TfPortDirection::PortDirection(direction) => match &**direction {
-                sv_parser::PortDirection::Input(_) => Some(ParamDirection::Input),
-                sv_parser::PortDirection::Output(_) => Some(ParamDirection::Output),
-                sv_parser::PortDirection::Inout(_) => Some(ParamDirection::Inout),
-                sv_parser::PortDirection::Ref(_) => None,
-            },
-            sv_parser::TfPortDirection::ConstRef(_) => None,
-        }
     }
 }
 

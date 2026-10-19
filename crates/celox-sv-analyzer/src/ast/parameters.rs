@@ -1,6 +1,9 @@
 //! Parameter environments, enum constants, and typed parameter substitution.
 
 use super::*;
+mod native;
+pub(super) mod ownership;
+pub(super) mod skipped;
 
 /// Presence also distinguishes a bounded value parameter from a variable or
 /// enum constant; the payload is 1 for `$` and 0 for a bounded value.
@@ -96,96 +99,7 @@ pub(super) fn contains_unbounded_operand(value: &ConstExpr, env: &HashMap<String
     }
 }
 
-/// 6.20.7 permits a `$` parameter only in the symbolic-value contexts it
-/// lists; `$isunbounded` is the query provided for that value. Other data
-/// queries do not admit a bare unbounded value, even without evaluation.
-pub(super) fn reject_unbounded_data_query(
-    call: &sv_parser::SystemTfCall,
-    tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    complete: bool,
-) -> Result<(), AnalyzerError> {
-    let Some(function) = called_system_function(call, tree) else {
-        return Ok(());
-    };
-    if !function.is_data_query() {
-        return Ok(());
-    }
-    let sv_parser::SystemTfCall::ArgExpression(call) = call else {
-        return Ok(());
-    };
-    if let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first() {
-        let mut query_depth = 0usize;
-        for event in RefNode::Expression(argument).into_iter().event() {
-            let (entering, child) = match event {
-                sv_parser::NodeEvent::Enter(child) => (true, child),
-                sv_parser::NodeEvent::Leave(child) => (false, child),
-            };
-            if let RefNode::SystemTfCall(nested) = &child
-                && called_system_function(nested, tree) == Some(SystemFunction::Isunbounded)
-            {
-                if entering {
-                    if complete && isunbounded_call(nested, tree, env)?.is_none() {
-                        return Err(AnalyzerError::InvalidSystemTfCall {
-                            name: SystemFunction::Isunbounded.name().into(),
-                            detail: "argument must name a value parameter".into(),
-                        });
-                    }
-                    query_depth += 1;
-                } else {
-                    query_depth -= 1;
-                }
-                continue;
-            }
-            if !entering || query_depth != 0 {
-                continue;
-            }
-            let unbounded = match child {
-                RefNode::Primary(sv_parser::Primary::Dollar(_))
-                | RefNode::ConstantPrimary(sv_parser::ConstantPrimary::Dollar(_)) => true,
-                RefNode::Primary(sv_parser::Primary::Hierarchical(primary)) => {
-                    reference_name(RefNode::PrimaryHierarchical(primary), tree)
-                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
-                }
-                RefNode::PsParameterIdentifier(identifier) => {
-                    reference_name(RefNode::PsParameterIdentifier(identifier), tree)
-                        .is_some_and(|name| env.get(&unbounded_parameter_marker(&name)) == Some(&1))
-                }
-                _ => false,
-            };
-            if unbounded {
-                return Err(AnalyzerError::InvalidSystemTfCall {
-                    name: function.name().into(),
-                    detail: "unbounded parameter is not valid in this data query".into(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Query the parameter binding, without evaluating its value. An unavailable
-/// binding is deferred by preliminary declaration collection; expression
-/// lowering requires a resolved parameter. The result is a one-bit unsigned
-/// value, including when the enclosing expression requests a wider type.
-pub(super) fn isunbounded_call(
-    call: &sv_parser::SystemTfCall,
-    tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-) -> Converted<Option<ConstExpr>> {
-    let argument = expressions::single_expression_argument(call)
-        .and_then(|arg| const_expr_from_expr(arg, tree).ok().flatten());
-    let Some(ConstExpr::Ident(name)) = argument else {
-        return Err(AnalyzerError::InvalidSystemTfCall {
-            name: SystemFunction::Isunbounded.name().into(),
-            detail: "argument must name a value parameter".into(),
-        });
-    };
-    Ok(env
-        .get(&unbounded_parameter_marker(&name))
-        .map(|value| ConstExpr::Literal(format!("1'b{}", usize::from(*value == 1)))))
-}
-
+/// Apply explicit parameter overrides by declaration name.
 pub(super) fn apply_parameter_overrides(
     parameters: &mut [Parameter],
     overrides: &HashMap<String, ConstExpr>,
@@ -222,8 +136,8 @@ pub(super) fn const_expr_from_i128(value: i128) -> ConstExpr {
     }
 }
 
-pub(super) fn parameters_from_ref_node(
-    node: RefNode<'_>,
+pub(super) fn parameters_from_native(
+    authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
@@ -232,8 +146,8 @@ pub(super) fn parameters_from_ref_node(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
     let mut environment = ParameterEnvironment::new(&syntax_tree.state, parameters, base_const_env);
-    parameters_from_ref_node_with_environment(
-        node,
+    parameters_from_native_with_environment(
+        authored,
         syntax_tree,
         parameters,
         is_local,
@@ -353,8 +267,8 @@ impl<'a> ParameterEnvironment<'a> {
     }
 }
 
-pub(super) fn parameters_from_ref_node_with_environment(
-    node: RefNode<'_>,
+pub(super) fn parameters_from_native_with_environment(
+    authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
@@ -363,89 +277,35 @@ pub(super) fn parameters_from_ref_node_with_environment(
     parameter_overrides: &HashMap<String, ConstExpr>,
     environment: &mut ParameterEnvironment<'_>,
 ) -> Result<(), AnalyzerError> {
-    // Restrict declaration-type queries to the header. Walking the complete
-    // declaration also visits data types and ranges nested in initializers,
-    // including the target of a size-function cast.
-    let declaration_node = match node.clone() {
-        RefNode::ParameterPortDeclaration(
-            sv_parser::ParameterPortDeclaration::ParameterDeclaration(declaration),
-        ) => RefNode::ParameterDeclaration(declaration),
-        RefNode::ParameterPortDeclaration(
-            sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(declaration),
-        ) => RefNode::LocalParameterDeclaration(declaration),
-        RefNode::ParameterPortDeclaration(sv_parser::ParameterPortDeclaration::ParamList(
-            declaration,
-        )) => RefNode::DataType(&declaration.nodes.0),
-        node => node,
-    };
-    let type_node = match declaration_node {
-        RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(declaration)) => {
-            RefNode::DataTypeOrImplicit(&declaration.nodes.1)
-        }
-        RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(
-            declaration,
-        )) => RefNode::DataTypeOrImplicit(&declaration.nodes.1),
-        node => node,
-    };
-    if type_node.clone().into_iter().any(|child| {
-        matches!(
-            child,
-            RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(data_type))
-                if !matches!(
-                    &**data_type,
-                    sv_parser::DataType::Vector(_)
-                        | sv_parser::DataType::Atom(_)
-                        | sv_parser::DataType::Type(_)
-                        | sv_parser::DataType::ClassType(_)
-                )
-        )
-    }) {
-        return Err(AnalyzerError::Unsupported(
-            "unsupported parameter data type".to_string(),
-        ));
+    if authored.is_empty() {
+        return Ok(());
     }
-    let declared_alias = type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
+    let native_prefix = native::prefix(authored.first().copied(), syntax_tree, type_aliases)?
+        .ok_or_else(|| AnalyzerError::Parse("native parameter type is missing".into()))?;
+    let declared_alias = native_prefix.alias.clone();
     let parameter_width = parameter_declared_width(
-        type_node.clone(),
+        authored,
         syntax_tree,
         base_const_env,
         environment,
         type_aliases,
         parameter_overrides,
-    );
+        &native_prefix,
+    )?;
     // Check the source width before normalizing fill literals or building
     // declaration-order value environments, even for a narrow later select.
     validate_parameter_materialization_width(parameter_width)?;
-    let has_declared_type = type_node.clone().into_iter().any(|child| {
-        matches!(
-            child,
-            RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(_))
-                | RefNode::DataType(_)
-        )
-    });
-    // IEEE 1800-2023 7.4.1: a packed array is signed only when declared so,
-    // whatever its elements; a type name takes no signing of its own.
-    let alias_has_use_site_dimensions = declared_alias.is_some()
-        && type_node
-            .clone()
-            .into_iter()
-            .any(|child| matches!(child, RefNode::PackedDimension(_)));
+    let has_declared_type = native_prefix.has_declared_type();
+    let alias_has_use_site_dimensions =
+        declared_alias.is_some() && !native_prefix.data.packed_dimensions.is_empty();
     let parameter_signed = parameter_width.map(|_| {
         declared_alias
             .as_ref()
             .map(|alias| alias.is_signed() && !alias_has_use_site_dimensions)
-            .unwrap_or_else(|| {
-                integer_atom_expr_type(type_node.clone())
-                    .map(|r#type| r#type.signed)
-                    .unwrap_or_else(|| is_signed_from_ref_node(type_node.clone()).unwrap_or(false))
-            })
+            .unwrap_or_else(|| native_prefix.signed())
     });
-    let parameter_signed_element_depth =
-        signed_element_depth_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
-    let parameter_ranges =
-        function_type_from_ref_node(type_node.clone(), syntax_tree, base_const_env, type_aliases)
-            .map(|ty| ty.packed_ranges().to_vec())
-            .unwrap_or_default();
+    let parameter_signed_element_depth = native_prefix.signed_element_depth();
+    let parameter_ranges = native_prefix.ranges(syntax_tree, base_const_env, type_aliases)?;
     let simple_bit_vector = parameter_ranges.len() <= 1
         && declared_alias
             .as_ref()
@@ -454,159 +314,181 @@ pub(super) fn parameters_from_ref_node_with_environment(
         .as_ref()
         .map(|ty| ty.members.clone())
         .unwrap_or_default();
-    let parameter_is_2state = declared_alias
-        .or_else(|| type_from_ref_node(type_node, syntax_tree))
-        .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
-    for child in node {
-        if let RefNode::ParamAssignment(param) = child {
-            // An unpacked array parameter is a constant variable, not a value.
-            if array_parameters::is_array_parameter(&syntax_tree.state, param) {
-                let name =
-                    parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
-                let marker = unbounded_parameter_marker(&name);
-                environment.values.insert(marker.clone(), 0);
-                environment.constants.insert(marker, 0);
-                continue;
+    let parameter_is_2state = native_prefix.is_2state();
+    for &native in authored {
+        // An unpacked array parameter is a constant variable, not a value.
+        if array_parameters::is_array_parameter(native, syntax_tree.declarations())
+            || scope::imported(&syntax_tree.state)
+                .pattern_parameter_bindings
+                .contains_key(&native.id)
+        {
+            let name = instances::normalize_identifier(&native.name.spelling);
+            let marker = unbounded_parameter_marker(&name);
+            environment.values.insert(marker.clone(), 0);
+            environment.constants.insert(marker, 0);
+            continue;
+        }
+        let name = instances::normalize_identifier(&native.name.spelling);
+        // The declaration already binds its name while its initializer is
+        // analyzed. Neither an imported value nor an earlier projection
+        // of this binding may resolve a self-reference.
+        for key in binding_keys(&name, &environment.constants, parameter_ranges.len()) {
+            environment.constants.remove(&key);
+        }
+        environment.literals.remove(&name);
+        let const_env = &environment.constants;
+        let mut value = if ownership::default(native).is_some() {
+            let imported = scope::imported(&syntax_tree.state);
+            let mut proof_context = PackedDimensions::new(
+                parameter_packed_dimensions_with_imported(parameters, &imported),
+                const_env,
+                type_aliases,
+            );
+            // Preliminary collection must not expand unresolved initializer
+            // chains merely to validate a shape. Only resolved prefix values
+            // are available here; imported bindings remain shadowed by locals.
+            proof_context.parameter_values = imported.parameter_values.clone().into();
+            for parameter in parameters.iter() {
+                proof_context.parameter_values.remove(parameter.name());
             }
-            let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
-            // The declaration already binds its name while its initializer is
-            // analyzed. Neither an imported value nor an earlier projection
-            // of this binding may resolve a self-reference.
-            for key in binding_keys(&name, &environment.constants, parameter_ranges.len()) {
-                environment.constants.remove(&key);
-            }
-            environment.literals.remove(&name);
-            let const_env = &environment.constants;
-            let mut value = if let Some((_, expr)) = &param.nodes.2 {
-                let imported = scope::imported(&syntax_tree.state);
-                if let Some(value) = validate_parameter_initializer_literal_widths(
-                    expr,
+            proof_context.parameter_values.remove(&name);
+            proof_context.remove(&name);
+            let resolved_numeric = parameters
+                .iter()
+                .filter(|parameter| environment.values.contains_key(parameter.name()))
+                .map(|parameter| parameter.name().to_string())
+                .collect();
+            proof_context
+                .parameter_values
+                .extend(parameter_value_env_filtered(
+                    &syntax_tree.state,
+                    parameters,
+                    const_env,
+                    Some(&resolved_numeric),
+                ));
+            proof_context.parameter_values.extend(
+                environment
+                    .literals
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            if let Some(value) = skipped::literal_widths(
+                ownership::default(native).ok_or_else(|| {
+                    AnalyzerError::Parse("native parameter default is missing".into())
+                })?,
+                syntax_tree,
+                &proof_context,
+            )? {
+                Some(value)
+            } else if skipped::needs_selected(
+                &syntax_tree.state,
+                ownership::default(native)
+                    .ok_or_else(|| unsupported("native parameter default is missing"))?,
+                syntax_tree.declarations(),
+            ) {
+                let mut dimensions = PackedDimensions::new(
+                    parameter_packed_dimensions_with_imported(parameters, &imported),
+                    const_env,
+                    type_aliases,
+                );
+                dimensions.parameter_values = parameter_value_env_with_imported(
+                    &syntax_tree.state,
+                    parameters,
+                    const_env,
+                    &imported,
+                )
+                .into();
+                // Enum constants are unavailable during preliminary collection.
+                // Leave unresolved values for the subsequent lowering pass;
+                // final validation rejects anything that still cannot be lowered.
+                match selects::selected_parameter_initializer(
+                    ownership::default(native).ok_or_else(|| {
+                        AnalyzerError::Parse("native parameter default is missing".into())
+                    })?,
+                    syntax_tree,
+                    &dimensions,
+                    parameter_width,
+                ) {
+                    Ok(value) => Some(value),
+                    // Deferred name/type resolution may be completed by a
+                    // later collection pass. Native shape/identity errors
+                    // are final and must not disappear with that deferral.
+                    Err(error @ AnalyzerError::Parse(_)) => return Err(error),
+                    Err(_) => None,
+                }
+            } else {
+                native_constants::expression(
+                    ownership::default(native).ok_or_else(|| {
+                        AnalyzerError::Parse("native parameter default is missing".into())
+                    })?,
+                    syntax_tree.declarations(),
                     syntax_tree,
                     const_env,
                     type_aliases,
-                    &|reference| {
-                        environment.literals.get(reference).cloned().or_else(|| {
-                            // An unresolved local binding still shadows imports.
-                            (reference != name
-                                && !parameters
-                                    .iter()
-                                    .any(|parameter| parameter.name() == reference))
-                            .then(|| imported.parameter_values.get(reference).cloned())
-                            .flatten()
-                        })
-                    },
-                    &|primary| {
-                        let mut dimensions = PackedDimensions::new(
-                            parameter_packed_dimensions_with_imported(parameters, &imported),
-                            const_env,
-                            type_aliases,
-                        );
-                        dimensions.parameter_values = parameter_value_env_with_imported(
-                            &syntax_tree.state,
-                            parameters,
-                            const_env,
-                            &imported,
-                        )
-                        .into();
-                        dimensions.parameter_values.remove(&name);
-                        dimensions.remove(&name);
-                        selects::bounded_parameter_selection(primary, syntax_tree, &dimensions)
-                    },
-                )? {
-                    Some(value)
-                } else if selects::parameter_initializer_needs_typed_lowering(expr) {
-                    let mut dimensions = PackedDimensions::new(
-                        parameter_packed_dimensions_with_imported(parameters, &imported),
-                        const_env,
-                        type_aliases,
-                    );
-                    dimensions.parameter_values = parameter_value_env_with_imported(
-                        &syntax_tree.state,
-                        parameters,
-                        const_env,
-                        &imported,
-                    )
-                    .into();
-                    // Enum constants are unavailable during preliminary collection.
-                    // Leave unresolved values for the subsequent lowering pass;
-                    // final validation rejects anything that still cannot be lowered.
-                    selects::selected_parameter_initializer(
-                        expr,
-                        syntax_tree,
-                        &dimensions,
-                        parameter_width,
-                    )
-                    .ok()
-                } else {
-                    const_expr_from_constant_param_with_env(
-                        expr,
-                        syntax_tree,
-                        const_env,
-                        type_aliases,
-                    )?
-                }
-            } else {
-                None
-            };
-            value =
-                normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
-            // Apply overrides as each declaration is collected so later
-            // parameter initializers (including casts) are evaluated from the
-            // specialized values rather than defaults that will be replaced
-            // only after collection has finished.
-            if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
-                value = Some(override_value.clone());
+                )?
             }
-            if value
-                .as_ref()
-                .is_some_and(|expression| is_unbounded(expression, const_env))
-                && !simple_bit_vector
-            {
+        } else {
+            None
+        };
+        value = normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
+        // Apply overrides as each declaration is collected so later
+        // parameter initializers (including casts) are evaluated from the
+        // specialized values rather than defaults that will be replaced
+        // only after collection has finished.
+        if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
+            value = Some(override_value.clone());
+        }
+        if value
+            .as_ref()
+            .is_some_and(|expression| is_unbounded(expression, const_env))
+            && !simple_bit_vector
+        {
+            return Err(AnalyzerError::Unsupported(format!(
+                "unbounded parameter `{name}` requires a simple bit vector type"
+            )));
+        }
+        if let Some(expression) = &value
+            && !is_unbounded(expression, const_env)
+            && contains_unbounded_operand(expression, const_env)
+        {
+            let lowered = substitute_expr_idents(
+                const_expr_to_expr(expression.clone()),
+                &environment.literals,
+            );
+            if !matches!(
+                fold_const_integral_expr_preserving_mask(&syntax_tree.state, lowered, const_env),
+                Expr::Literal(_)
+            ) {
                 return Err(AnalyzerError::Unsupported(format!(
-                    "unbounded parameter `{name}` requires a simple bit vector type"
+                    "numeric use of unbounded parameter in `{name}`"
                 )));
             }
-            if let Some(expression) = &value
-                && !is_unbounded(expression, const_env)
-                && contains_unbounded_operand(expression, const_env)
-            {
-                let lowered = substitute_expr_idents(
-                    const_expr_to_expr(expression.clone()),
-                    &environment.literals,
-                );
-                if !matches!(
-                    fold_const_integral_expr_preserving_mask(
-                        &syntax_tree.state,
-                        lowered,
-                        const_env
-                    ),
-                    Expr::Literal(_)
-                ) {
-                    return Err(AnalyzerError::Unsupported(format!(
-                        "numeric use of unbounded parameter in `{name}`"
-                    )));
-                }
-            }
-            let mut parameter = Parameter::new(
-                name,
-                value,
-                parameter_width,
-                parameter_signed,
-                parameter_is_2state,
-                has_declared_type,
-                is_local,
-            );
-            parameter.packed_ranges = parameter_ranges.clone();
-            parameter.members = parameter_members.clone();
-            parameter.signed_element_depth = parameter_signed_element_depth;
-            validate_parameter_materialization_width(
-                parameter
-                    .resolved_type(&environment.types)
-                    .map(|ty| ty.width),
-            )?;
-            environment.append(&syntax_tree.state, &parameter);
-            parameters.push(parameter);
         }
+        if value
+            .as_ref()
+            .is_some_and(|value| is_unbounded(value, const_env))
+        {
+            value = Some(ConstExpr::Literal("$".into()));
+        }
+        let mut parameter = Parameter::new(
+            name,
+            value,
+            parameter_width,
+            parameter_signed,
+            parameter_is_2state,
+            has_declared_type,
+            is_local,
+        );
+        parameter.packed_ranges = parameter_ranges.clone();
+        parameter.members = parameter_members.clone();
+        parameter.signed_element_depth = parameter_signed_element_depth;
+        validate_parameter_materialization_width(
+            parameter
+                .resolved_type(&environment.types)
+                .map(|ty| ty.width),
+        )?;
+        environment.append(&syntax_tree.state, &parameter);
+        parameters.push(parameter);
     }
     Ok(())
 }
@@ -623,317 +505,30 @@ fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn validate_parameter_initializer_literal_widths(
-    initializer: &sv_parser::ConstantParamExpression,
-    tree: &AnalysisContext<'_>,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-    parameter_literal: &impl Fn(&str) -> Option<Expr>,
-    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
-) -> Result<Option<ConstExpr>, AnalyzerError> {
-    let mut query_operands = HashSet::<*const sv_parser::Expression>::default();
-    let mut evaluated_expressions = HashSet::<*const sv_parser::Expression>::default();
-    let mut evaluated_constants = HashSet::<*const sv_parser::ConstantExpression>::default();
-    let mut evaluation_stack = vec![true];
-    let mut shape_stack = vec![false];
-    let mut oversized_value = None;
-    let mut has_replication_value = false;
-    for event in initializer.into_iter().event() {
-        let (entering, node) = match event {
-            sv_parser::NodeEvent::Enter(node) => (true, node),
-            sv_parser::NodeEvent::Leave(node) => (false, node),
-        };
-        if !entering {
-            evaluation_stack.pop();
-            shape_stack.pop();
-            continue;
-        }
-        if let RefNode::SystemTfCall(call) = node
-            && called_system_function(call, tree).is_some_and(SystemFunction::is_data_query)
-            && let sv_parser::SystemTfCall::ArgExpression(call) = call
-            && let Some(Some(argument)) = call.nodes.1.nodes.1.0.contents().first()
-        {
-            query_operands.insert(argument as *const sv_parser::Expression);
-            // Dimension arguments are values, even when the query itself
-            // occurs inside another query's unevaluated operand.
-            for argument in call
-                .nodes
-                .1
-                .nodes
-                .1
-                .0
-                .contents()
-                .into_iter()
-                .skip(1)
-                .flatten()
-            {
-                evaluated_expressions.insert(argument as *const sv_parser::Expression);
-            }
-        }
-        match node {
-            RefNode::MultipleConcatenation(concat) => {
-                evaluated_expressions
-                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::Expression);
-            }
-            RefNode::ConstantMultipleConcatenation(concat) => {
-                evaluated_constants
-                    .insert(&concat.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
-            }
-            RefNode::AssignmentPatternRepeat(pattern) => {
-                evaluated_constants
-                    .insert(&pattern.nodes.0.nodes.1.0 as *const sv_parser::ConstantExpression);
-            }
-            _ => {}
-        }
-        let evaluated_operand = match node {
-            RefNode::Expression(expression) => {
-                evaluated_expressions.contains(&(expression as *const sv_parser::Expression))
-            }
-            RefNode::ConstantExpression(expression) => {
-                evaluated_constants.contains(&(expression as *const sv_parser::ConstantExpression))
-            }
-            _ => false,
-        };
-        let query_operand = matches!(node, RefNode::Expression(expression)
-            if query_operands.contains(&(expression as *const sv_parser::Expression)));
-        let shape_operand = evaluated_operand
-            || matches!(
-                node,
-                RefNode::ConstantRange(_)
-                    | RefNode::ConstantIndexedRange(_)
-                    | RefNode::IndexedRange(_)
-                    | RefNode::BitSelect(_)
-                    | RefNode::ConstantBitSelect(_)
-                    | RefNode::CastingType(_)
-                    | RefNode::SliceSize(_)
-                    | RefNode::ArrayRangeExpression(_)
-                    | RefNode::ArrayPatternKey(_)
-            );
-        let evaluated = if let RefNode::Expression(expression) = node
-            && query_operands.contains(&(expression as *const sv_parser::Expression))
-        {
-            false
-        } else if shape_operand {
-            // Type queries do not evaluate the value, but selecting its type
-            // still evaluates bounds, widths, counts and cast sizes. A nested
-            // type query can in turn exempt its own first operand.
-            true
-        } else {
-            *evaluation_stack.last().unwrap()
-        };
-        let shape = !query_operand && (shape_operand || *shape_stack.last().unwrap());
-        evaluation_stack.push(evaluated);
-        shape_stack.push(shape);
-        // A replication can be enormous without any oversized Size token.
-        // Give the bounded proof a chance before ordinary concatenation lowering.
-        has_replication_value |= evaluated
-            && !shape
-            && matches!(
-                node,
-                RefNode::MultipleConcatenation(_) | RefNode::ConstantMultipleConcatenation(_)
-            );
-        // Inspect a sized literal's prefix without parsing its payload.
-        // Query operands are types; trailing dimension arguments are values.
-        if evaluated && let RefNode::Size(size) = node {
-            let width = tree
-                .get_str(&size.nodes.0.nodes.0)
-                .and_then(|size| size.replace('_', "").parse::<usize>().ok())
-                .ok_or_else(|| unsupported("parameter literal width"))?;
-            if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
-                if shape {
-                    validate_parameter_materialization_width(Some(width))?;
-                }
-                oversized_value.get_or_insert(width);
-            }
-        }
-    }
-    if oversized_value.is_some() || has_replication_value {
-        // Build a bounded proof, preserving precedence and associativity.
-        // Oversized/unsupported operands cannot produce a proof value, but
-        // logical short circuiting can skip them without parsing their bits.
-        if let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(initializer) =
-            initializer
-            && let sv_parser::ConstantMintypmaxExpression::Unary(expression) = &**initializer
-            && let Some(proof) = expr_to_const(
-                &tree.state,
-                bounded_parameter_proof(expression, tree, parameter_literal, parameter_selection),
-            )
-            && let Some(ty) = infer_const_expr_type_inner(
-                &proof,
-                &parameter_types_from_const_env(const_env),
-                true,
-            )
-            && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
-            && let Some(value) = eval_ast_const_expr(&tree.state, &proof, const_env)
-        {
-            for node in initializer.into_iter() {
-                // Short circuiting skips evaluation, not catalogue/site/arity
-                // validation. Inspect calls without materializing arguments.
-                if let RefNode::SystemTfCall(call) = node {
-                    let (name, args) = system_tf_call_parts(call, tree)
-                        .ok_or_else(|| unsupported("system call in parameter operand"))?;
-                    system_functions::check_call(
-                        name,
-                        args.as_deref(),
-                        system_functions::CallSite::Expression,
-                    )?;
-                }
-                let target = match node {
-                    RefNode::Cast(cast) => Some(&cast.nodes.0),
-                    RefNode::ConstantCast(cast) => Some(&cast.nodes.0),
-                    _ => None,
-                };
-                if let Some(target) = target
-                    && !casts::cast_target_is_supported(target, tree, const_env, type_aliases)
-                {
-                    return Err(unsupported(
-                        "cast target type in short-circuited parameter operand",
-                    ));
-                }
-            }
-            return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
-                value, ty.width, ty.signed,
-            ))));
-        }
-        validate_parameter_materialization_width(oversized_value)?;
-    }
-    Ok(None)
-}
-
-fn bounded_parameter_proof(
-    expression: &sv_parser::ConstantExpression,
-    tree: &AnalysisContext<'_>,
-    parameter_literal: &impl Fn(&str) -> Option<Expr>,
-    parameter_selection: &impl Fn(&sv_parser::ConstantPrimary) -> Option<Expr>,
-) -> Expr {
-    // NUL cannot occur in an HDL binding. The unresolved proof operand is
-    // never published: it either stays unevaluated or makes the proof fail.
-    let unknown = || Expr::Ident("\0unmaterialized-parameter-operand".into());
-    let binding = |name: String| parameter_literal(&name).unwrap_or(Expr::Ident(name));
-    let primary = |primary: &sv_parser::ConstantPrimary| match primary {
-        sv_parser::ConstantPrimary::PrimaryLiteral(literal) => {
-            let text = tree.get_str(literal).unwrap_or_default();
-            if typecheck::integral_literal_type_metadata(text)
-                .is_some_and(|(width, _)| width <= constant_folding::MAX_CONSTANT_CONCAT_BITS)
-            {
-                Expr::Literal(text.to_string())
-            } else {
-                unknown()
-            }
-        }
-        sv_parser::ConstantPrimary::PsParameter(parameter)
-            if parameter.nodes.1.nodes.0.is_none()
-                && parameter.nodes.1.nodes.1.nodes.0.is_empty()
-                && parameter.nodes.1.nodes.2.is_none() =>
-        {
-            reference_name(RefNode::PsParameterIdentifier(&parameter.nodes.0), tree)
-                .map(binding)
-                .unwrap_or_else(unknown)
-        }
-        sv_parser::ConstantPrimary::PsParameter(_) => {
-            parameter_selection(primary).unwrap_or_else(unknown)
-        }
-        sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
-            // The parser also represents bare parameter names as TfCall nodes.
-            if let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0.nodes.0
-                && call.nodes.2.is_none()
-            {
-                reference_name(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0), tree)
-                    .map(binding)
-                    .unwrap_or_else(unknown)
-            } else {
-                unknown()
-            }
-        }
-        sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {
-            if let sv_parser::ConstantMintypmaxExpression::Unary(expression) =
-                &grouped.nodes.0.nodes.1
-            {
-                bounded_parameter_proof(expression, tree, parameter_literal, parameter_selection)
-            } else {
-                unknown()
-            }
-        }
-        _ => unknown(),
-    };
-    match expression {
-        sv_parser::ConstantExpression::ConstantPrimary(value) => primary(value),
-        sv_parser::ConstantExpression::Unary(value) => unary_expr_from_symbol(
-            &value.nodes.0.nodes.0.nodes.0,
-            primary(&value.nodes.2),
-            tree,
-        )
-        .unwrap_or_else(unknown),
-        sv_parser::ConstantExpression::Binary(value) => {
-            let Some(op) = binary_op_from_symbol(&value.nodes.1.nodes.0.nodes.0, tree) else {
-                return unknown();
-            };
-            let expression = Expr::Binary {
-                left: Box::new(bounded_parameter_proof(
-                    &value.nodes.0,
-                    tree,
-                    parameter_literal,
-                    parameter_selection,
-                )),
-                op,
-                right: Box::new(bounded_parameter_proof(
-                    &value.nodes.3,
-                    tree,
-                    parameter_literal,
-                    parameter_selection,
-                )),
-            };
-            if matches!(&value.nodes.3, sv_parser::ConstantExpression::ConstantPrimary(primary)
-                if matches!(&**primary, sv_parser::ConstantPrimary::MintypmaxExpression(_)))
-            {
-                expression
-            } else {
-                left_associate_expr_binary(expression)
-            }
-        }
-        _ => unknown(),
-    }
-}
-
 fn parameter_declared_width(
-    node: RefNode<'_>,
+    authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
     base_const_env: &HashMap<String, i128>,
     environment: &ParameterEnvironment<'_>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-) -> Option<usize> {
-    let declared_alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    // Scalar headers have no bounds to evaluate. Avoid copying the growing
-    // environment for the common int/implicit/vector-without-range cases.
-    if declared_alias.is_none()
-        && !node
-            .clone()
-            .into_iter()
-            .any(|child| matches!(child, RefNode::PackedDimension(_)))
-    {
-        return integer_atom_expr_type(node.clone())
-            .map(|ty| ty.width)
-            .or_else(|| unwrap_node!(node, IntegerVectorType).is_some().then_some(1));
+    native: &native::Prefix<'_>,
+) -> Converted<Option<usize>> {
+    let declared_alias = native.alias.clone();
+    if declared_alias.is_none() && native.data.packed_dimensions.is_empty() {
+        return Ok(native.scalar_width(&syntax_tree.state));
     }
     // With the same immutable base and no inherited numeric value shadowed
     // by a nonnumeric literal, both former copies have exactly the contents
     // of `constants`. A pure type header has no sibling assignments to seed
     // or self-values to mask.
-    if std::ptr::eq(environment.base, base_const_env)
-        && !environment.has_inherited_literal_shadow
-        && !node
-            .clone()
-            .into_iter()
-            .any(|child| matches!(child, RefNode::ParamAssignment(_)))
-    {
+    if std::ptr::eq(environment.base, base_const_env) && !environment.has_inherited_literal_shadow {
         return parameter_width_from_environments(
-            node,
             syntax_tree,
             type_aliases,
-            declared_alias.as_ref(),
             &environment.constants,
             &environment.constants,
+            native,
         );
     }
     #[cfg(test)]
@@ -943,23 +538,16 @@ fn parameter_declared_width(
     // earlier assignment in the same parameter-port list. Seed range lowering
     // from those assignments while retaining the separate environment below
     // for evaluating the resulting symbolic ranges without stale self-values.
-    for child in node.clone() {
-        let RefNode::ParamAssignment(parameter) = child else {
-            continue;
-        };
-        let Ok(name) = parameter_name(
-            RefNode::ParameterIdentifier(&parameter.nodes.0),
-            syntax_tree,
-        ) else {
-            continue;
-        };
+    for &native in authored {
+        let name = instances::normalize_identifier(&native.name.spelling);
         let value = parameter_overrides
             .get(&name)
             .cloned()
             .or_else(|| {
-                parameter.nodes.2.as_ref().and_then(|(_, expr)| {
-                    const_expr_from_constant_param_with_env(
-                        expr,
+                ownership::default(native).and_then(|_| {
+                    native_constants::expression(
+                        ownership::default(native)?,
+                        syntax_tree.declarations(),
                         syntax_tree,
                         &range_env,
                         type_aliases,
@@ -978,15 +566,8 @@ fn parameter_declared_width(
     // environment. Do not let stale values for parameters declared by this
     // same syntax node resolve its declaration ranges; only constants from
     // outside the declaration (such as enum members) belong here.
-    for child in node.clone() {
-        if let RefNode::ParamAssignment(parameter) = child
-            && let Ok(name) = parameter_name(
-                RefNode::ParameterIdentifier(&parameter.nodes.0),
-                syntax_tree,
-            )
-        {
-            env.remove(&name);
-        }
+    for native in authored {
+        env.remove(&instances::normalize_identifier(&native.name.spelling));
     }
     env.extend(
         environment
@@ -994,45 +575,40 @@ fn parameter_declared_width(
             .iter()
             .map(|(name, value)| (name.clone(), *value)),
     );
-    parameter_width_from_environments(
-        node,
-        syntax_tree,
-        type_aliases,
-        declared_alias.as_ref(),
-        &range_env,
-        &env,
-    )
+    parameter_width_from_environments(syntax_tree, type_aliases, &range_env, &env, native)
 }
 
 fn parameter_width_from_environments(
-    node: RefNode<'_>,
     syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
-    declared_alias: Option<&Type>,
     range_env: &HashMap<String, i128>,
     env: &HashMap<String, i128>,
-) -> Option<usize> {
-    let mut ranges =
-        packed_ranges_from_ref_node_with_env(node.clone(), syntax_tree, range_env, type_aliases);
-    if let Some(alias) = declared_alias {
-        // Use-site dimensions enclose the aliased packed type, just as they
-        // do for ports, signals, and function types.
-        ranges.extend(alias.packed_ranges.iter().cloned());
-    }
+    native: &native::Prefix<'_>,
+) -> Converted<Option<usize>> {
+    let prefix = native;
+    let ranges = prefix.ranges(syntax_tree, range_env, type_aliases)?;
     if ranges.is_empty() {
-        if declared_alias.is_some() {
-            return Some(1);
-        }
-        if let Some(r#type) = integer_atom_expr_type(node.clone()) {
-            return Some(r#type.width);
-        }
-        return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
+        return Ok(if prefix.alias.is_some() {
+            Some(1)
+        } else {
+            prefix.scalar_width(&syntax_tree.state)
+        });
     }
-    ranges.iter().try_fold(1usize, |acc, range| {
-        let left = eval_ast_const_expr(&syntax_tree.state, range.left(), env)?;
-        let right = eval_ast_const_expr(&syntax_tree.state, range.right(), env)?;
-        acc.checked_mul(left.abs_diff(right) as usize + 1)
-    })
+    let mut width = 1usize;
+    for range in ranges {
+        let (Some(left), Some(right)) = (
+            eval_ast_const_expr(&syntax_tree.state, range.left(), env),
+            eval_ast_const_expr(&syntax_tree.state, range.right(), env),
+        ) else {
+            return Ok(None);
+        };
+        width = usize::try_from(left.abs_diff(right))
+            .ok()
+            .and_then(|width| width.checked_add(1))
+            .and_then(|part| width.checked_mul(part))
+            .ok_or_else(|| unsupported("parameter width exceeds constant materialization limit"))?;
+    }
+    Ok(Some(width))
 }
 
 fn normalize_unbased_unsized_parameter_value(
@@ -1294,120 +870,90 @@ fn enum_initializer_fits_base_type(value: i128, value_type: ExprType, base_type:
 }
 
 /// Collect enum member constants declared by module-level `typedef enum`
-/// declarations. Members must carry explicit values, matching what Veryl
-/// emits; each initializer may reference previously declared members of the
-/// same module scope.
-pub(super) fn enum_member_constants_from_module_node(
-    node: RefNode<'_>,
+/// declarations. Native initializer nodes may reference preceding members;
+/// implicit successors and type coercion retain the existing semantic kernel.
+pub(super) fn enum_member_constants_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
-    if !scope_declarations(node.clone())
-        .into_iter()
-        .any(|declaration| {
-            let sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) = declaration
-            else {
-                return false;
-            };
-            let sv_parser::DataDeclaration::TypeDeclaration(declaration) = &**data else {
-                return false;
-            };
-            matches!(&**declaration, sv_parser::TypeDeclaration::DataType(declaration)
-            if matches!(declaration.nodes.1, sv_parser::DataType::Enum(_)))
-        })
-    {
+    use celox_sv_syntax::{BodyItemKind, DataTypeKind, TypeAliasTarget};
+    let native = syntax_tree.declarations();
+    let declarations = syntax_tree.native_body_membership()?;
+    let enum_type = |id| {
+        let BodyItemKind::TypeAlias(alias) = native.body_item(id).kind else {
+            return None;
+        };
+        let TypeAliasTarget::DataType(id) = native.type_alias(alias).target else {
+            return None;
+        };
+        matches!(native.data_type(id).kind, DataTypeKind::Enum { .. }).then_some(id)
+    };
+    if !declarations.iter().any(|id| enum_type(*id).is_some()) {
         return Ok(EnumMemberConstants::default());
     }
     let mut constants = EnumMemberConstants::default();
     let mut eval_env = base_const_env.clone();
     let mut resolved_type_aliases = type_aliases.clone();
     let mut parameters = Vec::new();
-    for declaration in scope_declarations(node.clone()) {
-        let data = match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
-                parameters_from_ref_node(
-                    RefNode::LocalParameterDeclaration(&localparam.0),
-                    syntax_tree,
-                    &mut parameters,
-                    true,
-                    &eval_env,
-                    &resolved_type_aliases,
-                    &HashMap::default(),
-                )?;
-                extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
-                resolved_type_aliases =
-                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
-                continue;
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                parameters_from_ref_node(
-                    RefNode::ParameterDeclaration(&parameter.0),
-                    syntax_tree,
-                    &mut parameters,
-                    false,
-                    &eval_env,
-                    &resolved_type_aliases,
-                    parameter_overrides,
-                )?;
-                extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
-                resolved_type_aliases =
-                    type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
-                continue;
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => data,
-            _ => continue,
-        };
-        let sv_parser::DataDeclaration::TypeDeclaration(type_declaration) = &**data else {
+    let no_overrides = HashMap::default();
+    for id in declarations {
+        if let BodyItemKind::Parameter(_) = native.body_item(id).kind {
+            let authored = ownership::body(id, syntax_tree)?;
+            let local = authored.first().is_some_and(|parameter| parameter.local);
+            parameters_from_native(
+                &authored,
+                syntax_tree,
+                &mut parameters,
+                local,
+                &eval_env,
+                &resolved_type_aliases,
+                if local {
+                    &no_overrides
+                } else {
+                    parameter_overrides
+                },
+            )?;
+            extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
+            resolved_type_aliases = type_aliases_from_scope_with_env(syntax_tree, &eval_env)?;
+            continue;
+        }
+        let Some(id) = enum_type(id) else {
             continue;
         };
-        let sv_parser::TypeDeclaration::DataType(type_declaration) = &**type_declaration else {
-            continue;
+        let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
+            unreachable!();
         };
-        let sv_parser::DataType::Enum(r#enum) = &type_declaration.nodes.1 else {
-            continue;
-        };
-        let member_type = match &r#enum.nodes.1 {
-            Some(base) => type_from_ref_node_with_env(
-                RefNode::EnumBaseType(base),
+        let member_type = match base {
+            Some(id) => native_types::enum_constant_base(
+                *id,
                 syntax_tree,
                 &eval_env,
                 &resolved_type_aliases,
-            )
-            .or_else(|| {
-                type_alias_from_ref_node(
-                    RefNode::EnumBaseType(base),
-                    syntax_tree,
-                    &resolved_type_aliases,
-                )
-            })
-            .and_then(|r#type| expr_type_from_type(&syntax_tree.state, &r#type, &eval_env)),
+            )?
+            .and_then(|ty| expr_type_from_type(&syntax_tree.state, &ty, &eval_env)),
             None => Some(ExprType {
                 width: 32,
                 signed: true,
             }),
         }
-        .ok_or_else(|| AnalyzerError::Unsupported("enum base type".to_string()))?;
+        .ok_or_else(|| unsupported("enum base type"))?;
         let mut next_enum_value = 0i128;
-        for member in r#enum.nodes.2.nodes.1.contents() {
-            let name = identifier_text(RefNode::Identifier(&member.nodes.0.nodes.0), syntax_tree)
-                .ok_or_else(|| {
-                AnalyzerError::Unsupported("enum member identifier".to_string())
-            })?;
-            if member.nodes.1.is_some() {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "ranged enum member `{name}`"
-                )));
+        for new in items {
+            let name = instances::normalize_identifier(&new.name.spelling);
+            if !new.dimensions.is_empty() {
+                return Err(unsupported(format!("ranged enum member `{name}`")));
             }
-            let value = match &member.nodes.2 {
-                Some((_, value)) => const_expr_from_ref_node_with_env(
-                    RefNode::ConstantExpression(value),
+            let value = match new.value {
+                Some(id) => native_constants::expression(
+                    id,
+                    syntax_tree.declarations(),
                     syntax_tree,
                     &eval_env,
                     &resolved_type_aliases,
                 )?
-                .ok_or_else(|| AnalyzerError::Unsupported(format!("enum member `{name}` value")))?,
+                .ok_or_else(|| unsupported(format!("enum member `{name}` value")))?,
                 // An unvalued member follows its predecessor (the first is 0).
                 None => ConstExpr::Literal(format_typed_parameter_literal(
                     next_enum_value,
@@ -1459,8 +1005,7 @@ pub(super) fn enum_member_constants_from_module_node(
         // A later typedef may use a cast or range that depends on this
         // enum's members. Rebuild aliases from the enriched environment
         // before resolving a subsequent enum base through that typedef.
-        resolved_type_aliases =
-            type_aliases_from_module_node_with_env(node.clone(), syntax_tree, &eval_env)?;
+        resolved_type_aliases = type_aliases_from_scope_with_env(syntax_tree, &eval_env)?;
     }
     Ok(constants)
 }

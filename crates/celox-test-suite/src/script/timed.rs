@@ -13,25 +13,46 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
     if !design.timed {
         return Ok(());
     }
-    let texts = active_texts(design, names)?;
-    if !names.is_empty() && texts != active_texts(design, &[])? {
+    let sources = active_sources(design, names)?;
+    // Preserve the existing conservative contract: tool predefines must not
+    // change any active text, including comments and whitespace.
+    if !names.is_empty()
+        && sources
+            .iter()
+            .map(|source| source.inspection_text())
+            .collect::<Vec<_>>()
+            != active_sources(design, &[])?
+                .iter()
+                .map(|source| source.inspection_text())
+                .collect::<Vec<_>>()
+    {
         return Err(
             "timed shared sources cannot depend on the simulator's predefined macros".into(),
         );
     }
-    for text in &texts {
-        if sv_words(text).iter().any(|(start, _, word)| {
-            matches!(*word, "timeunit" | "timeprecision")
-                || (matches!(*word, "timescale" | "resetall") && text[..*start].ends_with('`'))
-        }) {
-            return Err(
-                "explicit time scales and resetall are not supported in timed shared cases".into(),
-            );
-        }
-        // Final procedures run in an unspecified order relative to the
-        // testbench's checks after run_to_finish (IEEE 1800-2023 9.2.3).
-        if sv_words(text).iter().any(|(_, _, word)| *word == "final") {
-            return Err("final procedures are not supported in timed shared cases".into());
+    for source in &sources {
+        let mut previous = "";
+        for token in source
+            .observations
+            .iter()
+            .filter(|token| !token.is_trivia())
+        {
+            if token.kind == celox_sv_syntax::TokenKind::Identifier {
+                if matches!(token.text.as_str(), "timeunit" | "timeprecision")
+                    || (previous == "`" && matches!(token.text.as_str(), "timescale" | "resetall"))
+                {
+                    return Err(
+                        "explicit time scales and resetall are not supported in timed shared cases"
+                            .into(),
+                    );
+                }
+                // Final procedures run in an unspecified order relative to the
+                // checks after run_to_finish (IEEE 1800-2023 9.2.3).
+                if token.text == "final" {
+                    return Err("final procedures are not supported in timed shared cases".into());
+                }
+            }
+            previous = &token.text;
         }
     }
     Ok(())
@@ -39,88 +60,22 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
 
 /// The active text of each source, preprocessed in order with `names`
 /// defined.
-fn active_texts(design: &Design, names: &[&str]) -> Result<Vec<String>> {
-    let mut defines: sv_parser::Defines = Default::default();
+fn active_sources(design: &Design, names: &[&str]) -> Result<Vec<celox_sv_syntax::Preprocessed>> {
+    let mut preprocessor = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
+        includes: celox_sv_syntax::IncludePolicy::Ignore,
+        ..Default::default()
+    });
     for name in names {
-        defines.insert(
-            (*name).to_owned(),
-            Some(sv_parser::Define::new((*name).to_owned(), Vec::new(), None)),
-        );
+        preprocessor.define(*name);
     }
-    let includes: Vec<&std::path::Path> = Vec::new();
     let mut texts = Vec::new();
     for source in &design.sources {
-        let (active, next_defines) = sv_parser::preprocess_str(
-            &source.text,
-            &source.path,
-            &defines,
-            &includes,
-            true,
-            false,
-            0,
-            0,
-        )
-        .map_err(|error| format!("timed source preprocessing: {error}"))?;
-        defines = next_defines;
-        texts.push(active.text().to_owned());
+        let active = preprocessor
+            .preprocess(&source.text, &source.path)
+            .map_err(|error| format!("timed source preprocessing: {error}"))?;
+        texts.push(active);
     }
     Ok(texts)
-}
-
-fn sv_words(source: &str) -> Vec<(usize, usize, &str)> {
-    let bytes = source.as_bytes();
-    let mut words = Vec::new();
-    let mut at = 0;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'/' if bytes.get(at + 1) == Some(&b'/') => {
-                at += 2;
-                while at < bytes.len() && bytes[at] != b'\n' {
-                    at += 1;
-                }
-            }
-            b'/' if bytes.get(at + 1) == Some(&b'*') => {
-                at += 2;
-                while at + 1 < bytes.len() && &bytes[at..at + 2] != b"*/" {
-                    at += 1;
-                }
-                at = (at + 2).min(bytes.len());
-            }
-            b'"' => {
-                at += 1;
-                while at < bytes.len() {
-                    match bytes[at] {
-                        b'\\' => at = (at + 2).min(bytes.len()),
-                        b'"' => {
-                            at += 1;
-                            break;
-                        }
-                        _ => at += 1,
-                    }
-                }
-            }
-            b'\\' => {
-                let start = at;
-                at += 1;
-                while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
-                    at += 1;
-                }
-                words.push((start, at, &source[start..at]));
-            }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
-                let start = at;
-                at += 1;
-                while at < bytes.len()
-                    && (bytes[at].is_ascii_alphanumeric() || matches!(bytes[at], b'_' | b'$'))
-                {
-                    at += 1;
-                }
-                words.push((start, at, &source[start..at]));
-            }
-            _ => at += 1,
-        }
-    }
-    words
 }
 
 #[cfg(test)]
@@ -212,5 +167,63 @@ module Top;endmodule"#) (top Top)(run_until 0))"##,
         assert!(validate_timed_design(&design(source)).is_ok());
         let source = "module Top; endmodule";
         assert!(validate_timed_design_with_defines(&design(source), &["VERILATOR"]).is_ok());
+    }
+
+    #[test]
+    fn macro_generated_scales_and_escaped_identifiers_use_native_tokens() {
+        let source =
+            "`define SCALE(x) timeunit x;\n`define ALIAS `SCALE\nmodule Top; `ALIAS(1ns) endmodule";
+        assert!(validate_timed_design(&design(source)).is_err());
+        let source = "module Top; bit \\timeunit ; bit \\final ; bit \\resetall ; endmodule";
+        assert!(validate_timed_design(&design(source)).is_ok());
+        let source = "`include \"missing.svh\"\nmodule Top; endmodule";
+        assert!(validate_timed_design(&design(source)).is_ok());
+    }
+
+    #[test]
+    fn unused_active_definitions_keep_conservative_timed_source_policy() {
+        for body in [
+            "timeunit 1ns;",
+            "timeprecision 1ps;",
+            "`timescale 1ns/1ps",
+            "`resetall",
+            "final done = 1;",
+        ] {
+            let source = format!("`define UNUSED {body}\nmodule Top; endmodule");
+            assert!(validate_timed_design(&design(&source)).is_err(), "{body}");
+        }
+        let source =
+            "`ifdef TOOL\n`define UNUSED 1\n`else\n`define UNUSED 2\n`endif\nmodule Top; endmodule";
+        assert!(
+            validate_timed_design_with_defines(&design(source), &["TOOL"])
+                .unwrap_err()
+                .to_string()
+                .contains("predefined macros")
+        );
+        assert!(validate_timed_design(&design(source)).is_ok());
+    }
+
+    #[test]
+    fn shared_simulation_sources_preprocess_with_the_native_frontend() {
+        for case in
+            crate::sv::cases().filter(|case| case.expectation == crate::Expectation::Simulation)
+        {
+            let mut pp = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
+                includes: celox_sv_syntax::IncludePolicy::Ignore,
+                ..Default::default()
+            });
+            for source in case.design().sources {
+                pp.preprocess(&source.text, &source.path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+            }
+        }
+    }
+
+    #[test]
+    fn words_inside_macro_quoted_strings_are_not_time_declarations() {
+        let source = "`define Q(x) `\"timeunit timeprecision final x`\"\nmodule Top; initial $display(`Q(world)); endmodule";
+        assert!(validate_timed_design(&design(source)).is_ok());
+        let source = "`define UNUSED `\"unclosed\nmodule Top; timeunit 1ns; endmodule";
+        assert!(validate_timed_design(&design(source)).is_err());
     }
 }
