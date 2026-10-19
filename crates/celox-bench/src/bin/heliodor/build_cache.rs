@@ -377,7 +377,11 @@ impl BuildCache {
         match self.try_load() {
             Ok(image) => image,
             Err(error) => {
-                eprintln!("build cache ignored {}: {error}", self.path.display());
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "build cache ignored {}: {error}",
+                    self.path.display()
+                );
                 None
             }
         }
@@ -423,7 +427,11 @@ impl BuildCache {
 
     pub(super) fn store(&self, image: &NativeProgramImage, dependencies: &[FileDependency]) {
         if let Err(error) = self.try_store(image, dependencies) {
-            eprintln!("build cache write skipped {}: {error}", self.path.display());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "build cache write skipped {}: {error}",
+                self.path.display()
+            );
         }
     }
 
