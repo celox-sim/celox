@@ -247,10 +247,25 @@ Ordinary PRs also scope Rust compilation and execution:
 - Library changes select the crate and its transitive consumers. Backend and
   SV frontend changes narrow Celox integration tests to the affected variants;
   shared implementation changes retain all affected variants.
-- A single package's integration test or recognized Insta snapshot changes
-  select only the corresponding test binaries, using Cargo `--test` as well
-  as a nextest filter. Shared helpers and fixtures retain the package's tests;
-  mixed library/test changes combine their requirements.
+- Integration test or recognized Insta snapshot changes select only the
+  corresponding test binaries, using Cargo `--test` as well as a nextest
+  filter. Packages needing whole-package coverage and packages needing specific
+  binaries get separate Cargo invocations, so mixed changes do not discard
+  their compilation scope. Shared helpers and unknown fixtures retain the
+  package's tests; runtime changes retain their transitive consumers.
+- A shared `.vtest` case file selects the Celox test binaries that reference
+  its group, along with the suite's catalogue/parser checks and other direct
+  catalogue consumers. Unknown groups retain dependency-based coverage.
+  Case data does not select library API documentation or doctests. Shared
+  harness and emitter changes still reach all consumers.
+- Changes confined to a known SV test module select that module within the
+  `systemverilog` binary, including for shared SV case groups. Changes to the
+  adapter, crate root or an unknown helper retain the whole binary. Celox-only
+  tests do not enable external-simulator features on their suite dependency;
+  tests of the suite itself retain those features.
+- VPI integration test edits select their binaries. The ignored cocotb test
+  and Python setup run only when that binary or VPI's whole-package coverage
+  is selected. Its Celox features match the preceding nextest build.
 - Clippy selects affected crates and test targets, including Lydite. Rust API
   documentation and doctests select libraries reached through runtime/build
   dependencies; dev-only consumers still run tests but do not rebuild their
