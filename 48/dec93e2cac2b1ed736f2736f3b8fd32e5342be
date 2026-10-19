@@ -1,0 +1,1 @@
+Use O2 by default for Veryl native testbenches as well as SystemVerilog, as requested; add Veryl observability coverage and simplify option parsing.
