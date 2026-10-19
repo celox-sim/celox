@@ -564,6 +564,8 @@ struct InterfaceDecl {
     /// Whether the declaration refers to compilation-unit items of its file.
     uses_unit_items: bool,
     parameters: Vec<InterfaceParameter>,
+    type_parameters: Vec<String>,
+    parameter_order: Vec<String>,
     items: Vec<Item>,
     members: Vec<Member>,
     functions: Vec<Function>,
@@ -2385,11 +2387,6 @@ impl InterfaceDecl {
                 "ports of interface `{interface_name}`"
             )));
         }
-        if !header.nodes.4.is_empty() {
-            return Err(unsupported(format!(
-                "package import in the header of interface `{interface_name}`"
-            )));
-        }
         // Enumerators are declared in the enclosing scope and would not be
         // renamed per instance.
         if unwrap_node!(
@@ -2412,6 +2409,8 @@ impl InterfaceDecl {
                 file.text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?),
             ),
             parameters: Vec::new(),
+            type_parameters: Vec::new(),
+            parameter_order: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
             functions: Vec::new(),
@@ -2420,6 +2419,20 @@ impl InterfaceDecl {
             references: Vec::new(),
             lvalues: HashSet::default(),
         };
+        // IEEE 1800-2023 26.4: header imports are visible throughout the
+        // interface, including its parameter declarations. Keep them before
+        // parameters when cloning the interface declarations into each scope.
+        for import in &header.nodes.4 {
+            interface.items.push(Item::Constant {
+                span: file.span(RefNode::PackageImportDeclaration(import))?,
+                header: HeaderForm::Import {
+                    imports: imported_items(
+                        RefNode::PackageImportDeclaration(import),
+                        syntax_tree,
+                    )?,
+                },
+            });
+        }
         if let Some(list) = &header.nodes.5 {
             interface.collect_parameter_port_list(list, file)?;
         }
@@ -2602,11 +2615,11 @@ impl InterfaceDecl {
                                 self.add_parameter(assignment, data_type, file)?;
                             }
                         }
-                        sv_parser::ParameterDeclaration::Type(_) => {
-                            return Err(unsupported(format!(
-                                "type parameter of interface `{}`",
-                                self.name
-                            )));
+                        sv_parser::ParameterDeclaration::Type(parameter) => {
+                            self.collect_type_parameters(
+                                RefNode::ParameterDeclarationType(parameter),
+                                file,
+                            )?;
                         }
                     }
                 }
@@ -2620,12 +2633,31 @@ impl InterfaceDecl {
                     let item_span = file.span(RefNode::LocalParameterDeclaration(declaration))?;
                     self.add_constant((item_span.0, item_span.1), declaration, file)?;
                 }
-                sv_parser::ParameterPortDeclaration::TypeList(_) => {
-                    return Err(unsupported(format!(
-                        "type parameter of interface `{}`",
-                        self.name
-                    )));
+                sv_parser::ParameterPortDeclaration::TypeList(list) => {
+                    self.collect_type_parameters(
+                        RefNode::ParameterPortDeclarationTypeList(list),
+                        file,
+                    )?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_type_parameters(
+        &mut self,
+        root: RefNode<'_>,
+        file: &File<'_>,
+    ) -> Result<(), AnalyzerError> {
+        for node in root {
+            if let RefNode::TypeAssignment(assignment) = node {
+                let name = name(
+                    RefNode::TypeIdentifier(&assignment.nodes.0),
+                    &file.syntax_tree,
+                )?;
+                self.declare(name.clone())?;
+                self.parameter_order.push(name.clone());
+                self.type_parameters.push(name);
             }
         }
         Ok(())
@@ -2648,6 +2680,7 @@ impl InterfaceDecl {
             &file.syntax_tree,
         )?;
         self.declare(parameter_name.clone())?;
+        self.parameter_order.push(parameter_name.clone());
         self.items.push(Item::Parameter(self.parameters.len()));
         self.parameters.push(InterfaceParameter {
             name: parameter_name,
@@ -2732,6 +2765,12 @@ impl InterfaceDecl {
         let common = &item.nodes.1;
         let common_span = file.span(RefNode::ModuleCommonItem(common))?;
         match common {
+            sv_parser::ModuleCommonItem::InterfaceInstantiation(instantiation) => {
+                for instance in instantiation.nodes.2.contents() {
+                    self.declare(name(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0), syntax_tree)?)?;
+                }
+                self.items.push(Item::Process(common_span));
+            }
             sv_parser::ModuleCommonItem::ContinuousAssign(_)
             | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
             | sv_parser::ModuleCommonItem::InitialConstruct(_)
@@ -3265,6 +3304,7 @@ pub struct NativePortPlan {
     pub interface: String,
     pub members: Vec<(String, PortDirection)>,
     pub parameters: Vec<String>,
+    pub type_parameters: Vec<String>,
 }
 
 pub fn plan_interfaces(
@@ -3416,6 +3456,7 @@ pub fn plan_interfaces(
                         )
                     })
                     .collect(),
+                type_parameters: design.interfaces[interface].type_parameters.clone(),
                 parameters: design.interfaces[interface]
                     .parameters
                     .iter()
@@ -3442,14 +3483,10 @@ pub fn plan_interfaces(
                 continue;
             }
             let span = file.span(RefNode::ModuleInstantiation(instantiation))?;
-            let parameter_names = design.interfaces[&interface]
-                .parameters
-                .iter()
-                .map(|parameter| parameter.name.clone())
-                .collect::<Vec<_>>();
+            let parameter_names = &design.interfaces[&interface].parameter_order;
             let mut supplied = HashSet::default();
             for (name, _) in
-                parameter_overrides(instantiation.nodes.1.as_ref(), &parameter_names, file)?
+                parameter_overrides(instantiation.nodes.1.as_ref(), parameter_names, file)?
             {
                 if !parameter_names.contains(&name) {
                     return Err(AnalyzerError::UnknownInterfaceParameter {
@@ -3504,10 +3541,11 @@ pub fn plan_interfaces(
                 && design.interfaces[&handle.interface]
                     .function(&member)
                     .is_some()
-                && (handle.arrayed || reference.selects.is_some())
+                && handle.arrayed
+                && reference.selects.is_none()
             {
                 return Err(unsupported(format!(
-                    "call of a function of the interface array `{}`",
+                    "call of a function of the unselected interface array `{}`",
                     reference.handle
                 )));
             }

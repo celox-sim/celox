@@ -18,7 +18,7 @@ outline: [2, 3]
 | モジュール | ANSI ポート、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
-| interface | パラメータ、メンバー、内部ロジックと関数、インスタンス配列、modport 付き・なしのポート、generic interface ポート、interface ポート配列。明示・暗黙の名前付き接続（`.bus(bus)` / `.bus`）、`input` / `output` modport と imported function。詳しい制約は下記参照 |
+| interface | 値・型パラメータ、ヘッダーの package import、メンバー、内部ロジックと関数、入れ子の interface インスタンス、インスタンス配列、定数添字で選ぶ配列要素の関数呼び出し、modport 付き・なしのポート、generic interface ポート、interface ポート配列。明示・暗黙の名前付き接続（`.bus(bus)` / `.bus`）、`input` / `output` modport と imported function。詳しい制約は下記参照 |
 
 ### データと式
 
@@ -62,7 +62,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 - クラス、タイミング制御を持つ task。
 - interface のポート、`inout` / `ref` / 式を使う modport、virtual interface など。
-  interface 自体は対応しています。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
+  interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
+  再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：タイミング制御を持つ `initial` ブロック、プロセスとして
   実行される `initial` ブロック内のノンブロッキング代入、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
   並行アサーション、`force` / `release`。
