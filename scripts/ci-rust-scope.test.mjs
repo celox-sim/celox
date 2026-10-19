@@ -94,6 +94,8 @@ test("a test file change runs only that binary and nothing downstream", () => {
     packages: ["celox"],
     features: ["celox/systemverilog"],
     filter: "binary_id(celox::flip_flop)",
+    targets: ["flip_flop"],
+    builds: [{ packages: ["celox"], targets: ["flip_flop"], features: ["celox/systemverilog"] }],
     libraries: [],
     libraryFeatures: [],
   });
@@ -127,6 +129,8 @@ test("lydite's shared folder runs every lydite package", () => {
 test("changes outside the workspace graph run every test", () => {
   for (const path of [
     "Cargo.lock",
+    "crates/celox/Cargo.toml",
+    "crates/celox/tests/fixtures/custom/Cargo.lock",
     "Cargo.toml",
     "testdata/verilator/adder.sv",
     "rust-toolchain.toml",
@@ -180,4 +184,115 @@ test("variant crates reach celox only through crates of the same variant", () =>
       assert.deepEqual(VARIANT_CRATES.get(pkg.name)?.variants, scope.variants, `${pkg.name} -> ${name}`);
     }
   }
+});
+
+
+test("test-only changes narrow Cargo compilation as well as nextest execution", () => {
+  const scope = rustTestScope([
+    "crates/celox/tests/flip_flop.rs",
+    "crates/celox/tests/snapshots/flip_flop__optimized.snap",
+    "crates/celox/tests/frontends/systemverilog/operators.rs",
+  ], workspace);
+  assert.deepEqual(scope.targets, ["flip_flop", "systemverilog"]);
+  assert.deepEqual(scope.libraries, []);
+  assert.deepEqual(rustTestScope([
+    "crates/celox/tests/flip_flop.rs", "crates/lib/src/lib.rs",
+  ], workspace).targets, []);
+  assert.deepEqual(rustTestScope([
+    "crates/celox/tests/flip_flop.rs", "crates/consumer/tests/e2e.rs",
+  ], workspace).targets, []);
+  for (const path of [
+    "crates/celox/tests/test_utils/mod.rs",
+    "crates/celox/tests/snapshots/unknown__result.snap",
+    "crates/celox/tests/fixtures/design.veryl",
+  ]) {
+    const shared = rustTestScope([path], workspace);
+    assert.deepEqual(shared.targets, [], path);
+    assert.equal(shared.filter, "package(celox)", path);
+  }
+});
+
+test("a dev dependency affects consumer tests but not consumer documentation", () => {
+  const packages = workspace.map((pkg) => ({
+    ...pkg,
+    libraryDependencies: pkg.dependencies.filter((name) => name !== "lib"),
+  }));
+  const scope = rustTestScope(["crates/lib/src/lib.rs"], packages);
+  assert.ok(scope.packages.includes("celox"));
+  assert.deepEqual(scope.libraries, ["lib"]);
+});
+
+test("shared case data selects its real harness instead of every library consumer", () => {
+  const packages = readWorkspace(root);
+  const scope = rustTestScope([
+    "crates/celox-test-suite/src/veryl/cases/param_override.vtest",
+  ], packages);
+  assert.equal(scope.full, false);
+  assert.deepEqual(scope.libraries, []);
+  assert.equal(scope.filter, "package(celox-test-suite) | package(lydite-celox) | binary_id(celox::param_override)");
+  const celox = scope.builds.find((build) => build.packages.includes("celox"));
+  assert.deepEqual(celox.targets, ["param_override"]);
+  assert.ok(scope.builds.some((build) => build.packages.includes("celox-test-suite")));
+  for (const unrelated of ["celox-vpi", "celox-napi", "celox-bench"])
+    assert.ok(!scope.packages.includes(unrelated), unrelated);
+
+  // An accompanying runtime change must retain every affected consumer.
+  const mixed = rustTestScope([
+    "crates/celox-test-suite/src/veryl/cases/param_override.vtest",
+    "crates/celox/src/lib.rs",
+  ], packages);
+  assert.ok(mixed.filter.includes("package(celox)"));
+  assert.ok(mixed.packages.includes("celox-vpi"));
+  assert.deepEqual(mixed.builds.find((build) => build.packages.includes("celox")).targets, []);
+  const unknown = rustTestScope([
+    "crates/celox-test-suite/src/veryl/cases/new_unknown.vtest",
+  ], packages);
+  assert.ok(unknown.filter.includes("package(celox)"));
+});
+
+test("SV module and case edits select the referenced module; adapters retain the binary", () => {
+  const packages = readWorkspace(root);
+  for (const file of [
+    "crates/celox/tests/frontends/systemverilog/operators.rs",
+    "crates/celox-test-suite/src/sv/cases/operators.vtest",
+  ]) {
+    const scope = rustTestScope([file], packages);
+    assert.match(scope.filter, /binary_id\(celox::systemverilog\) & test\(\/\^\(operators\)::\/\)/);
+    assert.deepEqual(scope.builds.find((b) => b.packages.includes("celox")).targets, ["systemverilog"]);
+  }
+  for (const shared of ["frontends/systemverilog/suite.rs", "systemverilog.rs"]) {
+    const scope = rustTestScope([
+      "crates/celox/tests/frontends/systemverilog/operators.rs",
+      `crates/celox/tests/${shared}`,
+    ], packages);
+    assert.equal(scope.filter, "binary_id(celox::systemverilog)");
+  }
+  const scope = rustTestScope([
+    "crates/celox/tests/frontends/systemverilog/operators.rs",
+    "crates/celox/tests/frontends/systemverilog/literals.rs",
+  ], packages);
+  assert.match(scope.filter, /\(literals\|operators\)/);
+});
+
+test("multiple packages keep their own Cargo test targets and omit unused adapters", () => {
+  const scope = rustTestScope([
+    "crates/celox/tests/flip_flop.rs", "crates/consumer/tests/e2e.rs",
+  ], workspace);
+  assert.deepEqual(scope.builds.map((b) => [b.packages, b.targets]), [
+    [["celox"], ["flip_flop"]], [["consumer"], ["e2e"]],
+  ]);
+  const real = rustTestScope(["crates/celox/tests/param_override.rs"], readWorkspace(root));
+  assert.deepEqual(real.features, ["celox/systemverilog"]);
+});
+
+test("a shared case does not turn a simultaneous SV fix into every backend", () => {
+  const scope = rustTestScope([
+    "crates/celox-frontend-sv/src/lowering.rs",
+    "crates/celox-sv-analyzer/src/ast.rs",
+    "crates/celox-test-suite/src/veryl/cases/param_override.vtest",
+  ], readWorkspace(root));
+  assert.ok(!scope.filter.startsWith("package(celox) |"), scope.filter);
+  assert.ok(scope.filter.includes("test(/::(sv)$/)"), scope.filter);
+  assert.ok(scope.filter.includes("binary_id(celox::param_override)"), scope.filter);
+  assert.ok(scope.filter.includes("binary_id(celox::systemverilog)"), scope.filter);
 });

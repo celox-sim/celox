@@ -1,208 +1,157 @@
-//! `parameter type` overrides, applied to the source text of a module.
+//! Declaration-scoped parameter bindings.
 
 use super::*;
 
-/// A source text edit: replace `start..end` with `replacement`.
-struct Edit {
-    start: usize,
-    end: usize,
-    replacement: String,
-}
-
-/// The span of `node` in the original source text. Token offsets refer to
-/// the preprocessed text, which can differ from the source (the preprocessor
-/// widens the space after `"DPI-C"`), so each token is mapped back and text
-/// the preprocessor inserted is skipped.
-pub(super) fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(usize, usize)> {
-    let origin = |offset| {
-        syntax_tree.get_origin(&sv_parser::Locate {
-            offset,
-            line: 0,
-            len: 1,
-        })
-    };
-    let mut range: Option<(usize, usize)> = None;
-    for child in node {
-        if let RefNode::Locate(locate) = child
-            && locate.len > 0
-            && let Some((_, start)) = origin(locate.offset)
-            && let Some((_, last)) = origin(locate.offset + locate.len - 1)
-        {
-            let end = last + 1;
-            range = Some(match range {
-                None => (start, end),
-                Some((low, high)) => (low.min(start), high.max(end)),
-            });
-        }
-    }
-    range
-}
-
-/// Apply the edits that fall inside `text[range]`, dropping any edit nested in
-/// an earlier (outer) one.
-fn apply_edits(text: &str, range: (usize, usize), mut edits: Vec<Edit>) -> String {
-    edits.retain(|edit| edit.start >= range.0 && edit.end <= range.1);
-    edits.sort_by_key(|edit| (edit.start, std::cmp::Reverse(edit.end)));
-    let mut result = String::new();
-    let mut cursor = range.0;
-    for edit in edits {
-        if edit.start < cursor {
-            continue;
-        }
-        result.push_str(&text[cursor..edit.start]);
-        result.push_str(&edit.replacement);
-        cursor = edit.end;
-    }
-    result.push_str(&text[cursor..range.1]);
-    result
-}
-
-/// `code` with the `parameter type` defaults of `module_name` replaced by the
-/// data types an instantiation binds them to, or `None` when `overrides` names
-/// no type parameter of the module.
-pub(crate) fn apply_type_parameter_overrides(
-    code: &str,
-    syntax_tree: &SyntaxTree,
-    module_name: &str,
-    overrides: &[(String, String)],
-) -> Result<Option<String>, AnalyzerError> {
-    for node in syntax_tree {
-        let RefNode::ModuleDeclarationAnsi(module) = node else {
-            continue;
-        };
-        if module_name_from_node(RefNode::ModuleDeclarationAnsi(module), syntax_tree)?
-            != module_name
-        {
-            continue;
-        }
-        let mut edits = Vec::new();
-        for child in RefNode::ModuleDeclarationAnsi(module) {
-            let RefNode::TypeAssignment(assignment) = child else {
-                continue;
-            };
-            let Some(name) =
-                identifier_text(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
-            else {
-                continue;
-            };
-            let Some((_, bound)) = overrides.iter().find(|(parameter, _)| *parameter == name)
-            else {
-                continue;
-            };
-            match &assignment.nodes.1 {
-                Some((_, default)) => {
-                    if let Some((start, end)) = node_span(RefNode::DataType(default), syntax_tree) {
-                        edits.push(Edit {
-                            start,
-                            end,
-                            replacement: bound.clone(),
-                        });
-                    }
-                }
-                None => {
-                    if let Some((_, end)) =
-                        node_span(RefNode::TypeIdentifier(&assignment.nodes.0), syntax_tree)
-                    {
-                        edits.push(Edit {
-                            start: end,
-                            end,
-                            replacement: format!(" = {bound}"),
-                        });
-                    }
-                }
-            }
-        }
-        if edits.is_empty() {
-            return Ok(None);
-        }
-        let Some((start, end)) = node_span(RefNode::ModuleDeclarationAnsi(module), syntax_tree)
-        else {
-            return Ok(None);
-        };
-        let module_text = apply_edits(code, (start, end), edits);
-        return Ok(Some(format!(
-            "{}{}{}",
-            &code[..start],
-            module_text,
-            &code[end..]
-        )));
-    }
-    Ok(None)
-}
-
-/// Override array/structure value parameters before their target shapes are
-/// lowered. Only overridable module parameters may be rebound, never locals.
-pub(crate) fn apply_pattern_parameter_overrides(
-    code: &str,
+/// Bind native declarations in this module's parameter scope by stable ID.
+/// A nested local type named T must not inherit the module parameter's binding.
+pub(super) fn bind(
     tree: &SyntaxTree,
-    module_name: &str,
-    overrides: &[(String, String)],
-) -> Result<Option<String>, AnalyzerError> {
-    if overrides.is_empty() {
-        return Ok(None);
+    overrides: &[(String, Type)],
+) -> Result<HashMap<celox_sv_syntax::ParameterId, Type>, AnalyzerError> {
+    let mut declarations = HashMap::default();
+    let unit = tree.root_unit()?;
+    let has_port_list = unit.parameters.is_some();
+    for parameter in unit.parameters.iter().flatten() {
+        if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+            declarations.insert(
+                instances::normalize_identifier(&parameter.name.spelling),
+                (parameter.id, parameter.local),
+            );
+        }
     }
-    for node in tree {
-        if !matches!(
-            node,
-            RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-        ) {
-            continue;
-        }
-        if module_name_from_node(node.clone(), tree)? != module_name {
-            continue;
-        }
-        let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
-        let mut edits = Vec::new();
-        let mut found = HashSet::default();
-        let mut declarations = module_parameter_port_list(node.clone())
-            .into_iter()
-            .collect::<Vec<_>>();
-        declarations.extend(scope_declarations(node.clone()).into_iter().filter_map(
-            |declaration| {
-                if let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(
-                    declaration,
-                ) = declaration
+    let mut pending = tree
+        .body_membership()?
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items.iter().rev()),
+            celox_sv_syntax::BodyItemKind::Parameter(id) => {
+                for parameter in tree
+                    .declarations()
+                    .parameter_declaration(*id)
+                    .parameters
+                    .iter()
                 {
-                    Some(RefNode::ParameterDeclaration(&declaration.0))
-                } else {
-                    None
+                    if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+                        declarations.insert(
+                            instances::normalize_identifier(&parameter.name.spelling),
+                            (parameter.id, parameter.local || has_port_list),
+                        );
+                    }
                 }
-            },
-        ));
-        for child in declarations.into_iter().flat_map(|node| node.into_iter()) {
-            let RefNode::ParamAssignment(param) = child else {
-                continue;
-            };
-            let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
-            let Some((_, bound)) = overrides.iter().find(|(candidate, _)| *candidate == name)
-            else {
-                continue;
-            };
-            if !allowed.contains(&name) {
-                return Err(unsupported(format!(
-                    "pattern override of non-overridable parameter `{name}`"
-                )));
             }
-            let Some((_, value)) = &param.nodes.2 else {
-                return Err(unsupported(format!(
-                    "array parameter `{name}` without a default"
-                )));
-            };
-            let (start, end) = node_span(RefNode::ConstantParamExpression(value), tree)
-                .ok_or_else(|| unsupported("array parameter source span"))?;
-            edits.push(Edit {
-                start,
-                end,
-                replacement: bound.clone(),
-            });
-            found.insert(name);
+            _ => {}
         }
-        for (name, _) in overrides {
-            if !found.contains(name) {
-                return Err(unsupported(format!("unknown array parameter `{name}`")));
-            }
-        }
-        return Ok(Some(apply_edits(code, (0, code.len()), edits)));
     }
-    Err(unsupported(format!("module `{module_name}`")))
+    let mut bindings = HashMap::default();
+    for (name, ty) in overrides {
+        let &(offset, local) = declarations
+            .get(name)
+            .ok_or_else(|| AnalyzerError::UnknownParameterOverride { name: name.clone() })?;
+        if local {
+            return Err(AnalyzerError::Unsupported(format!(
+                "localparam override `{name}`"
+            )));
+        }
+        if bindings.insert(offset, ty.clone()).is_some() {
+            return Err(AnalyzerError::Unsupported(format!(
+                "duplicate parameter override `{name}`"
+            )));
+        }
+    }
+    Ok(bindings)
+}
+
+/// Freeze every dimension in the caller's environment before crossing the
+/// instance boundary. A child's parameters must not reinterpret caller names.
+pub(super) fn resolve(
+    state: &AnalysisState,
+    mut ty: Type,
+    env: &HashMap<String, i128>,
+) -> Option<Type> {
+    fn bound(
+        state: &AnalysisState,
+        expr: &ConstExpr,
+        env: &HashMap<String, i128>,
+    ) -> Option<ConstExpr> {
+        let value = eval_ast_const_expr(state, expr, env)?;
+        Some(if value >= 0 {
+            ConstExpr::Literal(value.to_string())
+        } else {
+            ConstExpr::Literal(format_typed_parameter_literal(value, 128, true))
+        })
+    }
+    for range in &mut ty.packed_ranges {
+        range.left = bound(state, &range.left, env)?;
+        range.right = bound(state, &range.right, env)?;
+    }
+    for range in &mut ty.unpacked_ranges {
+        range.left = bound(state, &range.left, env)?;
+        range.right = bound(state, &range.right, env)?;
+        if let Some(size) = &range.size {
+            range.size = Some(bound(state, size, env)?);
+        }
+    }
+    let mut members = Vec::new();
+    for member in ty.members {
+        let resolved = resolve(state, member.r#type().clone(), env)?;
+        members.push(member.with_type(|_| resolved));
+    }
+    ty.members = members;
+    Some(ty)
+}
+
+/// Locate value-pattern bindings by declaration, so nested names stay local.
+pub(super) fn bind_patterns(
+    tree: &SyntaxTree,
+    overrides: &[(String, BoundPattern)],
+) -> Converted<HashMap<celox_sv_syntax::ParameterId, BoundPattern>> {
+    let unit = tree.root_unit()?;
+    let mut declarations = HashMap::default();
+    for parameter in unit.parameters.iter().flatten() {
+        if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. }) {
+            declarations.insert(
+                instances::normalize_identifier(&parameter.name.spelling),
+                (parameter.id, parameter.local),
+            );
+        }
+    }
+    let mut pending = tree.body_membership()?;
+    while let Some(id) = pending.pop() {
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items),
+            celox_sv_syntax::BodyItemKind::Parameter(id) => {
+                for parameter in &tree.declarations().parameter_declaration(*id).parameters {
+                    if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. }) {
+                        declarations.insert(
+                            instances::normalize_identifier(&parameter.name.spelling),
+                            (parameter.id, parameter.local || unit.parameters.is_some()),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut bindings = HashMap::default();
+    for (name, value) in overrides {
+        let &(key, local) = declarations.get(name).ok_or_else(|| {
+            unsupported(format!(
+                "pattern override of non-overridable parameter `{name}`"
+            ))
+        })?;
+        if local {
+            return Err(unsupported(format!(
+                "pattern override of non-overridable parameter `{name}`"
+            )));
+        }
+        if bindings.insert(key, value.clone()).is_some() {
+            return Err(unsupported(format!(
+                "duplicate parameter override `{name}`"
+            )));
+        }
+    }
+    Ok(bindings)
 }

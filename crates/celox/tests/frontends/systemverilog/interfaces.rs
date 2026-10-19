@@ -1,4 +1,31 @@
+use super::*;
+
 sv_backends! {
+    fn binds_implicit_named_interface_ports(sim) {
+        @case "interfaces::binds_implicit_named_interface_ports";
+    }
+    fn binds_implicit_named_interface_arrays_in_generate_scopes(sim) {
+        @case "interfaces::binds_implicit_named_interface_arrays_in_generate_scopes";
+    }
+    fn propagates_interface_dependent_ports(sim) {
+        @case "interfaces::propagates_interface_dependent_ports";
+    }
+    fn keeps_lexical_names_in_interface_scopes(sim) {
+        @case "interfaces::keeps_lexical_names_in_interface_scopes";
+    }
+    fn binds_interfaces_without_declaration_name_dependencies(sim) {
+        @case "interfaces::binds_interfaces_without_declaration_name_dependencies";
+    }
+    fn binds_local_interfaces_before_dependent_declarations(sim) {
+        @case "interfaces::binds_local_interfaces_before_dependent_declarations";
+    }
+    fn queries_interface_packed_struct_member_dimensions(sim) {
+        @case "interfaces::queries_interface_packed_struct_member_dimensions";
+    }
+
+    fn binds_interface_array_ports_in_declaration_order(sim) {
+        @case "interfaces::binds_interface_array_ports_in_declaration_order";
+    }
     fn infers_directions_of_ports_without_modport(sim) {
         @case "interfaces::infers_directions_of_ports_without_modport";
     }
@@ -49,5 +76,49 @@ sv_backends! {
 
     fn initializes_interface_members_from_their_declarations(sim) {
         @case "interfaces::initializes_interface_members_from_their_declarations";
+    }
+    fn initializes_interface_array_members_from_their_declarations(sim) {
+        @case "interfaces::initializes_interface_array_members_from_their_declarations";
+    }
+    fn distinguishes_interface_dependency_bindings(sim) {
+        @case "interfaces::distinguishes_interface_dependency_bindings";
+    }
+
+}
+
+// Verilator 5.052 faults internally on this generic interface relay; keep the
+// generic binding regression in the Celox harness and the concrete form shared.
+sv_backends! {
+    fn binds_implicit_named_generic_interface_ports(sim) {
+        @setup {
+            let source = r#"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer iface, input logic [7:0] x);
+      assign iface.data = x;
+    endmodule
+    module Reader(interface iface, output logic [7:0] y);
+      assign y = iface.data;
+    endmodule
+    module Relay(Bus iface, output logic [7:0] y);
+      Reader r(.iface, .y);
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y);
+      Bus iface();
+      Writer w(.iface, .x);
+      Relay r(.iface, .y);
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("implicit_generic_interface.sv"))], "Top");
+        let x = sim.signal("x");
+        let y = sim.signal("y");
+        for value in [0u8, 0x41, 0xff] {
+            sim.modify(|io| io.set(x, value)).unwrap();
+            assert_eq!(u64::try_from(sim.get(y)).unwrap(), u64::from(value));
+        }
     }
 }

@@ -5,23 +5,26 @@ use celox_test_suite::{Backend, CompilationRejected, Design, Result, SignalPath}
 
 struct CeloxBackend<B: SimBackend>(Simulator<B>);
 
+/// Simulation time units in one time unit of a timed case. A case names
+/// times in the design's time unit, which is the default 1 ns because timed
+/// cases declare no scale, and a `Simulation` counts the global precision,
+/// the default 1 ps.
+const UNIT: u64 = 1000;
+
 /// A timed case: the design's own processes and clocks run in a
 /// [`Simulation`]. A host write is settled at the current time by the next
-/// run operation. A timed simulation offers no four-state read; the cases
-/// that need it are excluded in `timing.rs`.
+/// run operation, read, eval or output collection.
 struct TimedBackend<B: SimBackend> {
     sim: Simulation<B>,
-    four_state: bool,
     /// Runtime events not yet taken as output.
     events: Vec<RuntimeEvent>,
     finished: bool,
 }
 
 impl<B: SimBackend> TimedBackend<B> {
-    fn new(sim: Simulation<B>, four_state: bool) -> Self {
+    fn new(sim: Simulation<B>) -> Self {
         Self {
             sim,
-            four_state,
             events: Vec::new(),
             finished: false,
         }
@@ -61,6 +64,20 @@ impl<B: SimBackend> TimedBackend<B> {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+
+    /// Settle host writes and the work they wake at the current time, as
+    /// the reference simulators do before a read, then capture events.
+    fn settled(&mut self, operation: &str) -> Result<()> {
+        let finished = self.finished;
+        if !finished {
+            self.sim.run_until(self.sim.time())?;
+        }
+        self.capture_events()?;
+        if !finished && self.finished {
+            return Err(format!("the design finished during {operation}").into());
+        }
+        Ok(())
     }
 
     /// Capture events after an operation that does not advance time.
@@ -107,17 +124,14 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn read(&mut self, path: &SignalPath) -> Result<(BigUint, BigUint)> {
-        if self.four_state {
-            return Err("a timed simulation has no four-state read".into());
-        }
-        self.checked("a read")?;
+        self.settled("a read")?;
         let signal = self.signal(path);
-        Ok((self.sim.get(signal), BigUint::default()))
+        Ok(self.sim.get_four_state(signal))
     }
 
     fn eval_comb(&mut self) -> Result<()> {
         self.sim.eval_comb()?;
-        self.checked("eval")
+        self.settled("eval")
     }
 
     fn tick(&mut self, _event: &str) -> Result<()> {
@@ -125,21 +139,21 @@ impl<B: SimBackend> Backend for TimedBackend<B> {
     }
 
     fn take_output(&mut self) -> Result<Vec<u8>> {
-        self.checked("output collection")?;
+        self.settled("output collection")?;
         collect_output(std::mem::take(&mut self.events))
     }
 
     fn run_until(&mut self, time: u64) -> Result<()> {
-        let now = self.sim.time();
+        let now = self.sim.time() / UNIT;
         if time < now {
             return Err(format!("run_until {time}: the simulation is already at {now}").into());
         }
-        self.sim.run_until(time)?;
+        self.sim.run_until(time * UNIT)?;
         self.capture_events()?;
         if self.finished {
             return Err(format!(
                 "run_until {time}: the design finished the simulation at {}",
-                self.sim.time()
+                self.sim.time() / UNIT
             )
             .into());
         }
@@ -227,18 +241,28 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .map(|source| (source.text.as_str(), source.path.as_path()))
         .collect::<Vec<_>>();
     if design.timed {
-        // `Simulation` builds only the default backend.
-        if backend != "native" {
-            return Err(format!("no timed simulation for the {backend} backend").into());
-        }
         let builder = design.parameters.iter().fold(
             Simulation::from_sv_sources(sources, &design.top).four_state(design.four_state),
             |builder, (name, value)| builder.param(name, *value),
         );
-        return Ok(Box::new(TimedBackend::new(
-            builder.build()?,
-            design.four_state,
-        )));
+        return Ok(match backend {
+            "native" => Box::new(TimedBackend::new(builder.build_native()?)),
+            "cranelift" => Box::new(TimedBackend::new(builder.build_cranelift()?)),
+            "native-parallel" => Box::new(TimedBackend::new(
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_native()?,
+            )),
+            "cranelift-parallel" => Box::new(TimedBackend::new(
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+                    .build_cranelift()?,
+            )),
+            "wasm" => Box::new(TimedBackend::new(builder.build_wasm()?)),
+            _ => return Err(format!("unknown backend: {backend}").into()),
+        });
     }
     let builder = design.parameters.iter().fold(
         Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),

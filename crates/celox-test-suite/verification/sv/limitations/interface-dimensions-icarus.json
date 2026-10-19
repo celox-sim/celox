@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "20e017a5ac191050ac2a0720307057eebac26bbba4bf31fbb41bdc3c5b1ebcfb",
+      "category": "Hierarchy",
+      "detail": "interfaces::queries_interface_packed_struct_member_dimensions at 534:3: assert_eq dimensions: expected 0x2, got 0x0",
+      "expectation": "Simulation",
+      "name": "interfaces::queries_interface_packed_struct_member_dimensions",
+      "phase": "execute",
+      "reused": false,
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792288582
+    }
+  ],
+  "context_fingerprint": "0185e667b610d070b52cfb6c885fe5fc0f345fa82bf93a5673889554ef891bc4",
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 1,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 1,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

@@ -1,0 +1,57 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "46e32699a44c76e09e170464362d07224abb6770e1a7e061babfe855a66dfbf4",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:3: sorry: unpacked array parameters are not supported yet.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:15: error: Invalid module instantiation\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:16: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792281566
+    },
+    {
+      "case_fingerprint": "b0224fd8ab450a706e01b2fb34f41f5218e61c9d7f04558216838fb4ecad6270",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Syntax error in parameter value assignment list.\n<case>/source_0.sv:8: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "hierarchy::parameter_patterns_preserve_enclosing_expressions",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792281566
+    }
+  ],
+  "context_fingerprint": "210520fad7d12ef78257b83bd11d81ddda693f68bfdae0ee9de0cae78a0ab483",
+  "counts": {
+    "compile_error": 2,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 2,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "retained_selection": "The two newly added parameter-pattern regressions from the local parameter_patterns run; existing ignored cases are omitted."
+}

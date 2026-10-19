@@ -3,10 +3,11 @@
 //! their publication.
 
 use bit_set::BitSet;
+use celox_design::edges::settled_edge;
 
 use super::host::SimulationExecutor;
 use super::nba::{restore_working_image, working_image};
-use super::{EventInfo, SimulationState, event_level};
+use super::{EventInfo, SimulationState, Suspended};
 use crate::{
     SimulatorErrorCode,
     backend::SimBackend,
@@ -17,6 +18,8 @@ use crate::{
 /// Bookkeeping of one round of a time slot.
 #[derive(Default)]
 pub(super) struct Round {
+    /// The stopped process resumes before any newly woken ready processes.
+    pub(super) resume_process: Option<usize>,
     /// Event ids whose trigger survives the settling filter.
     pub(super) scheduled_trigger_ids: BitSet,
     pub(super) track_stable_edges: bool,
@@ -31,10 +34,10 @@ pub(super) struct Round {
     /// Kernels ran in this round, so pending nonblocking flags may be set.
     pub(super) kernels_ran: bool,
     pub(super) nba_published: bool,
-    /// Event-signal values scheduled or written by processes, not yet
-    /// marked.
-    pub(super) transitions: Vec<(usize, bool)>,
-    /// Event-signal values before and after a process run.
+    /// Event-signal levels (see [`super::edge_level`]) scheduled or written
+    /// by processes, not yet marked.
+    pub(super) transitions: Vec<(usize, u8)>,
+    /// Event-signal levels before and after a process run.
     pub(super) before: Vec<u8>,
     pub(super) after: Vec<u8>,
     /// Event ids a pulse of several publications triggered; like counted
@@ -53,7 +56,7 @@ pub(super) struct Round {
     /// since the baseline (`last_clock_values`) was last taken, valid where
     /// the stamp equals `generation`: a value written in one wave of the
     /// active region is the previous value of the next wave's write.
-    latest: Vec<(u32, bool)>,
+    latest: Vec<(u32, u8)>,
     generation: u32,
 }
 
@@ -62,24 +65,19 @@ impl Round {
     /// baseline.
     fn begin_scan(&mut self, events: usize) {
         if self.latest.len() < events {
-            self.latest.resize(events, (0, false));
+            self.latest.resize(events, (0, 0));
         }
         self.generation = self.generation.wrapping_add(1);
         if self.generation == 0 {
             // Stamps of an earlier wrap must not match.
-            self.latest.fill((0, false));
+            self.latest.fill((0, 0));
             self.generation = 1;
         }
     }
 
-    /// The value event `id` had before this transition: its latest value in
+    /// The level event `id` had before this transition: its latest level in
     /// the scan, or `baseline`; records `value` as its latest.
-    pub(super) fn previous(
-        &mut self,
-        id: usize,
-        value: bool,
-        baseline: impl FnOnce() -> bool,
-    ) -> bool {
+    pub(super) fn previous(&mut self, id: usize, value: u8, baseline: impl FnOnce() -> u8) -> u8 {
         let (stamp, latest) = std::mem::replace(&mut self.latest[id], (self.generation, value));
         if stamp == self.generation {
             latest
@@ -92,6 +90,7 @@ impl Round {
 impl Round {
     /// Start a round, keeping the buffers of earlier ones.
     fn reset(&mut self, track_stable_edges: bool) {
+        self.resume_process = None;
         self.scheduled_trigger_ids.make_empty();
         self.track_stable_edges = track_stable_edges;
         self.counted_triggered.make_empty();
@@ -149,6 +148,50 @@ impl<B: SimBackend> SimulationState<B> {
         Ok(())
     }
 
+    /// Host-created edges are valid independently of the suspended round's
+    /// pending source edges. Keep them through subsequent process settles,
+    /// including when an inactive region advances the edge baselines.
+    pub(super) fn settle_host_resume<E>(
+        &mut self,
+        executor: &mut E,
+        round: &mut Round,
+        before_host: &[u8],
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        self.settle_marked(executor, round)?;
+        for (index, &was) in before_host.iter().enumerate() {
+            let (signal, id) = self.model.topo_signals[index];
+            if id == usize::MAX {
+                continue;
+            }
+            let is = self.level(executor.backend(), signal);
+            // The global baseline may precede a pre-stop transition, including
+            // one deliberately filtered until its scheduled source commits.
+            // Only changes from the stopped state belong to this host settle.
+            round.previous(id, is, || was);
+            if was == is {
+                continue;
+            }
+            let kind = self.model.domain_kinds[id];
+            let triggered = if self.four_state {
+                settled_edge::<true>(kind, was, is)
+            } else {
+                settled_edge::<false>(kind, was, is)
+            };
+            if triggered {
+                round.edge_approved.insert(id);
+                executor.backend_mut().mark_triggered_bit(id);
+            }
+            // Opposite-edge aliases also need the intermediate level for a
+            // reversal by the continuation. Unchanged pre-stop levels retain
+            // their baseline until the pending source domains commit.
+            self.record_level(id, is);
+        }
+        Ok(())
+    }
+
     /// Clocks computed from a changed scheduled or process-driven signal,
     /// such as `clk & enable`, change at the same instant, in the active
     /// region before any nonblocking update (IEEE 1800-2023 4.4.2, 4.5):
@@ -159,42 +202,48 @@ impl<B: SimBackend> SimulationState<B> {
     /// edge) gives a further edge, as the update events of the NBA region do.
     fn judge_derived_edges(&mut self, backend: &mut B, round: &mut Round) {
         for source in std::mem::take(&mut round.gating_sources) {
-            for &id in self.model.combinational_derived[source].iter() {
+            for index in 0..self.model.combinational_derived[source].len() {
+                let id = self.model.combinational_derived[source][index];
                 if self.stable_edge_triggered(backend, id) {
                     backend.mark_triggered_bit(id);
                     round.edge_approved.insert(id);
                 }
-                let Some((signal, _)) = self
+                let Some(&(signal, _)) = self
                     .model
                     .topo_signals
                     .get(self.model.signal_index_by_id[id])
                 else {
                     continue;
                 };
-                if event_level(backend, *signal) != 0 {
-                    self.last_clock_values.insert(id);
-                } else {
-                    self.last_clock_values.remove(id);
-                }
+                let level = self.level(backend, signal);
+                self.record_level(id, level);
             }
         }
     }
 
     /// Evaluate the triggered domains before an inactive region runs. Their
     /// nonblocking assignments stay in the working state until the NBA
-    /// region.
+    /// region. A domain that commits its blocking results does so now, in
+    /// the active region: combinational logic follows them and the domains
+    /// their edges trigger are marked. Returns whether a domain committed
+    /// its blocking results.
     pub(super) fn evaluate_before_inactive<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,
         round: &mut Round,
-    ) -> Result<(), Halt>
+    ) -> Result<bool, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
         let marked = executor.backend().get_triggered_bits();
         executor.backend_mut().clear_triggered_bits();
+        if !self.model.active_commits.is_empty() {
+            // The levels before any blocking result is committed.
+            self.event_values(executor.backend(), &mut round.before);
+        }
         let mut evaluated = BitSet::new();
+        let mut committed = false;
         let mut unsplit = Vec::new();
         for id in marked.iter() {
             let info = self.model.event_info[id];
@@ -216,7 +265,29 @@ impl<B: SimBackend> SimulationState<B> {
                 continue;
             }
             round.edge_approved.remove(id);
+            committed |= self.model.active_commits.contains(info.canonical_id);
             self.evaluate_deferred(executor, current_time, round, info)?;
+        }
+        // Edges the committed blocking results give, directly or through
+        // combinational logic, are occurrences of this active region.
+        let mut occurred = Vec::new();
+        if committed {
+            let pending = executor.backend().get_triggered_bits();
+            executor.eval_comb()?;
+            // The settle's own trigger marks are replaced by the edges judged
+            // against the levels before the commits.
+            executor.backend_mut().clear_triggered_bits();
+            self.record_transitions(executor.backend(), round);
+            let transitions = std::mem::take(&mut round.transitions);
+            round.begin_scan(self.model.domain_kinds.len());
+            self.mark_occurrences(executor.backend_mut(), round, &transitions);
+            occurred.extend(executor.backend().get_triggered_bits().iter());
+            executor.backend_mut().clear_triggered_bits();
+            for id in pending.iter() {
+                executor.backend_mut().mark_triggered_bit(id);
+            }
+            round.transitions = transitions;
+            round.transitions.clear();
         }
         // The edges are consumed: later rounds compare against the values
         // they were evaluated at.
@@ -224,13 +295,13 @@ impl<B: SimBackend> SimulationState<B> {
         round.begin_scan(self.model.domain_kinds.len());
         round.scheduled_trigger_ids.make_empty();
         round.counted_triggered.make_empty();
-        for id in unsplit {
+        for id in unsplit.into_iter().chain(occurred) {
             // The edge stays approved: the new baseline no longer shows it.
             executor.backend_mut().mark_triggered_bit(id);
             round.scheduled_trigger_ids.insert(id);
             round.edge_approved.insert(id);
         }
-        Ok(())
+        Ok(committed)
     }
 
     fn evaluate_deferred<E>(
@@ -344,6 +415,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        self.publish_time(executor.backend_mut(), current_time);
         if !self.model.timed {
             return self.batch_round(executor, current_time, events_to_process);
         }
@@ -354,7 +426,6 @@ impl<B: SimBackend> SimulationState<B> {
             self.observe_host_write(signal, &value);
         }
 
-        let num_events = executor.backend().num_events();
         for (index, event) in events_to_process.iter().enumerate() {
             let signal = event.signal;
             let value = event.next_val;
@@ -397,13 +468,48 @@ impl<B: SimBackend> SimulationState<B> {
                 self.model
                     .signal_to_id
                     .get(&event.signal)
-                    .map(|&id| (id, event.next_val != 0))
+                    .map(|&id| (id, u8::from(event.next_val != 0)))
             }));
 
         // The check after the batch already saw every signal.
         let entry = entry && events_to_process.is_empty();
-        self.process_phase(executor, current_time, &mut round, entry)?;
+        self.continue_round(executor, current_time, round, events_to_process, entry)
+    }
 
+    /// The rest of a round from its process phase. A `$stop` there suspends
+    /// the round, and the next step continues it here.
+    pub(super) fn continue_round<E>(
+        &mut self,
+        executor: &mut E,
+        current_time: u64,
+        mut round: Box<Round>,
+        events_to_process: Vec<SimEvent<B>>,
+        entry: bool,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match self.process_phase(executor, current_time, &mut round, entry) {
+            Ok(()) => {}
+            Err(Halt::Stop) => {
+                // Preserve the settle's accepted triggers, not its filtered
+                // transient levels, if host writes require another settle.
+                round
+                    .edge_approved
+                    .union_with(&executor.backend().get_triggered_bits());
+                let mut levels = Vec::new();
+                self.event_values(executor.backend(), &mut levels);
+                self.suspended = Some(Suspended {
+                    round,
+                    events: events_to_process,
+                    levels,
+                });
+                return Err(Halt::Stop);
+            }
+            Err(halt) => return Err(halt),
+        }
+
+        let num_events = executor.backend().num_events();
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
         let mut comb_already_done = false;

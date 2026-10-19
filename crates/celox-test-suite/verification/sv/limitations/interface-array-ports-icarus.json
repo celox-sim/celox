@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "e4adb487bbb619854efc99c4794dca463aca2dd045d328a058d6ae378445a6f5",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: Errors in port declarations.\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: Errors in port declarations.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: Errors in port declarations.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::binds_interface_array_ports_in_declaration_order",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792287025
+    }
+  ],
+  "context_fingerprint": "99991430801310848b705899eff4503221e70f6f9cb76623c673b05709cb8330",
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 1,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

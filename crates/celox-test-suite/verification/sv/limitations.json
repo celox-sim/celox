@@ -96,6 +96,7 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/pattern-bindings-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -111,7 +112,8 @@
         "review_regressions::default_pattern_fills_each_element_of_unpacked_subarrays",
         "hierarchy::parameter_patterns_transfer_packed_values",
         "hierarchy::parameter_patterns_override_scalar_defaults",
-        "hierarchy::parameter_patterns_preserve_packed_member_states"
+        "hierarchy::parameter_patterns_preserve_packed_member_states",
+        "hierarchy::parameter_patterns_preserve_enclosing_expressions"
       ]
     }
   },
@@ -145,6 +147,7 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/pattern-bindings-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -158,6 +161,7 @@
         "system_functions::isunbounded_reports_bounded_array_parameters",
         "hierarchy::parameter_patterns_evaluate_caller_constant_functions",
         "hierarchy::parameter_patterns_override_body_declarations",
+        "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings",
         "system_functions::unpacked_dimensions_publishes_array_parameters_before_declarations",
         "system_functions::unpacked_dimensions_resolves_package_array_constants",
         "system_functions::unpacked_dimensions_resolves_types_and_constant_scopes",
@@ -599,11 +603,16 @@
     "upstream": [],
     "evidence": [
       "verification/sv/limitations/icarus.json",
+      "verification/sv/limitations/interface-array-ports-icarus.json",
+      "verification/sv/limitations/implicit-interface-ports-icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
       "icarus": [
         "interfaces::binds_generic_interface_ports_per_interface",
+        "interfaces::binds_implicit_named_interface_arrays_in_generate_scopes",
+        "interfaces::binds_implicit_named_interface_ports",
+        "interfaces::binds_interface_array_ports_in_declaration_order",
         "interfaces::binds_positional_connections_and_parameter_values",
         "interfaces::calls_functions_and_reads_parameters_through_instances_and_ports",
         "interfaces::clocks_interface_processes_from_member_clocks",
@@ -1370,6 +1379,59 @@
       "verilator": [
         "system_functions::random_follows_annex_n_and_updates_its_seed",
         "system_functions::random_without_a_seed_continues_its_stream"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_parameter_declarations",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects hierarchical interface parameter references in constant declarations, including localparam initializers and port dimensions. Celox and Verilator 5.052 pass the dependent declarations and subsequent instance overrides.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/interface-declarations-icarus.json",
+      "verification/sv/limitations/interface-dependent-ports-icarus.json"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::binds_local_interfaces_before_dependent_declarations",
+        "interfaces::propagates_interface_dependent_ports"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_struct_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of a packed structure field, both through an interface member and through a local structure shadowing the interface handle. Celox and Verilator 5.052 return the declared packed dimension count, consistent with IEEE 1800-2023 20.7. The shared cases also check $size and lexical name resolution.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/interface-dimensions-icarus.json",
+      "verification/sv/limitations/interface-shadowing-icarus.json"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::queries_interface_packed_struct_member_dimensions",
+        "interfaces::keeps_lexical_names_in_interface_scopes"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_time_in_combinational_logic",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 evaluates an always_comb that reads $time again when the clocking event of the suite testbench fires, although no variable it reads has changed: at 3 ns y is 3 instead of 0. IEEE 1800-2023 9.2.2.2.1 makes always_comb sensitive to the variables it reads, and $time (20.3.1) is none. A standalone probe prints y=0 in Icarus 13.0 and Verilator without a clocking block, and y=3 in Verilator with one.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_time.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::time_functions_report_the_time_in_the_caller_unit"
       ]
     }
   }

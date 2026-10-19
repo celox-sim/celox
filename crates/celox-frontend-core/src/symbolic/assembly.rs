@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
-    FfPart, RelocationModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    FfPart, RelocationModule, SimModule, SplitCommit, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
 };
 use crate::{
     FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
@@ -26,6 +26,10 @@ use celox_slt::{
 
 type AbsoluteAddr = SourceAddr;
 type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<SourceVarId>;
+
+/// Per canonical event, the split commit of each of its apply units, in
+/// their order; `None` for a unit whose frontend does not split it.
+type SplitCommits = HashMap<AbsoluteAddr, Vec<Option<SplitCommit<RegionedAbsoluteAddr>>>>;
 type RegionedVarAddr = celox_design::RegionedVarAddrBase<SourceVarId>;
 
 /// Runtime IDs assigned while a module instance is relocated into the global
@@ -572,6 +576,11 @@ pub fn schedule_symbolic_rtl(
         root_id,
         packages,
     } = symbolic;
+    let time_precision = modules
+        .values()
+        .filter_map(|module| module.time_precision)
+        .min()
+        .unwrap_or_default();
     let flatten_timing = trace_opts.phase_timing;
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
@@ -603,6 +612,10 @@ pub fn schedule_symbolic_rtl(
         instance_modules.insert(id, *module_id);
         package_instances.insert(*module_id, id);
     }
+    let instance_time_scales = instance_modules
+        .iter()
+        .map(|(&instance, module)| (instance, modules[module].time_scale))
+        .collect::<HashMap<_, _>>();
     let bindings = &PackageBindings::new(&instance_modules, &modules, &package_instances)?;
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
@@ -632,6 +645,7 @@ pub fn schedule_symbolic_rtl(
         unify_clock_domains(bindings, &expanded, &instance_modules, &modules)
     );
     let mut parallel_ff_units = HashMap::default();
+    let mut split_commits = SplitCommits::default();
     let (
         mut global_arena,
         mut eval_apply_ffs,
@@ -659,6 +673,7 @@ pub fn schedule_symbolic_rtl(
             &unpacked_element_widths,
             &clock_domains,
             parallel.enabled().then_some(&mut parallel_ff_units),
+            &mut split_commits,
             trace_opts,
             &mut trace,
         )
@@ -696,6 +711,8 @@ pub fn schedule_symbolic_rtl(
             &mut comb_blocks,
         )
     };
+    // Combinational values and the variables they are computed from.
+    let comb_sources = comb_sources(&comb_blocks, &global_arena);
     check_package_variable_drivers(
         bindings,
         &instance_modules,
@@ -1219,6 +1236,31 @@ pub fn schedule_symbolic_rtl(
             eval_apply_ffs,
         }
     });
+    // With process kernels, a domain whose blocking results another unit
+    // observes commits them with its evaluation, in the active region, and
+    // only its nonblocking results in the NBA region (IEEE 1800-2023 4.5,
+    // 10.4). Every other domain commits both together, as before.
+    let mut active_commits = Vec::new();
+    if !processes.is_empty() {
+        let events: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .keys()
+            .copied()
+            .chain(clock_domains.keys().copied())
+            .collect();
+        active_commits = split_observed_commits(
+            &mut eval_only_ffs,
+            &mut apply_ffs,
+            split_commits,
+            &comb_sources,
+            processes.iter().map(|process| &process.kernel),
+            timing
+                .wait_sites
+                .iter()
+                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+            &events,
+            &clock_domains,
+        );
+    }
     let (eval_only_ffs, apply_ffs) = if needs_split_path {
         (eval_only_ffs, apply_ffs)
     } else {
@@ -1280,6 +1322,7 @@ pub fn schedule_symbolic_rtl(
     let TimingMetadata {
         wait_sites,
         nba_sites,
+        time_slots,
         ..
     } = timing;
     let source_sir = SirProgram {
@@ -1479,6 +1522,8 @@ pub fn schedule_symbolic_rtl(
         .collect();
     let watches: Vec<EventWatch<StateAddr>> = {
         let event_kinds = ElaboratedDesign {
+            time_precision,
+            instance_time_scales: HashMap::default(),
             state_objects: state_objects.clone(),
             events: events.clone(),
             initial_state: Vec::new(),
@@ -1512,6 +1557,8 @@ pub fn schedule_symbolic_rtl(
         wait_sites.iter().map(|site| site.map(project)).collect();
     let nba_sites: Vec<NbaSite<StateAddr>> =
         nba_sites.iter().map(|site| site.map(project)).collect();
+    let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
+    let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
     let timing_read_roots = watches
@@ -1546,6 +1593,8 @@ pub fn schedule_symbolic_rtl(
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
+            time_precision,
+            instance_time_scales,
             state_objects,
             events,
             initial_state,
@@ -1577,6 +1626,8 @@ pub fn schedule_symbolic_rtl(
             watches,
             wait_sites,
             nba_sites,
+            active_commits,
+            time_slots,
         },
     };
 
@@ -2278,6 +2329,7 @@ fn relocate_units(
     parallel_ff_units: Option<
         &mut HashMap<AbsoluteAddr, Vec<(InstanceId, FfPart<RegionedAbsoluteAddr>)>>,
     >,
+    split_commits: &mut SplitCommits,
     trace_opts: &crate::FrontendTraceOptions,
     trace: &mut Option<&mut crate::FrontendTrace>,
 ) -> Result<
@@ -2627,6 +2679,42 @@ fn relocate_units(
                 .get(&clock_addr)
                 .copied()
                 .unwrap_or(clock_addr);
+            // The split commit of each apply unit, in the same order.
+            let split = sim_module
+                .split_commit_ff_blocks
+                .get(trigger_set)
+                .map(|split| SplitCommit {
+                    active: relocate_executation_unit_with_errors(
+                        &split.active,
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                        &extern_function_map,
+                    ),
+                    nba: relocate_executation_unit_with_errors(
+                        &split.nba,
+                        &|addr| bindings.locate_regioned(addr.region, *id, addr.var_id),
+                        &runtime_error_codes,
+                        &runtime_event_site_map,
+                        &extern_function_map,
+                    ),
+                });
+            // Pushed like the apply units below: the clock, then each reset.
+            split_commits
+                .entry(canonical_addr)
+                .or_default()
+                .push(split.clone());
+            for &reset in &trigger_set.resets {
+                let reset_addr = bindings.locate(*id, reset);
+                let canonical_addr = clock_domains
+                    .get(&reset_addr)
+                    .copied()
+                    .unwrap_or(reset_addr);
+                split_commits
+                    .entry(canonical_addr)
+                    .or_default()
+                    .push(split.clone());
+            }
             apply_ffs.entry(canonical_addr).or_default().push(
                 relocate_executation_unit_with_errors(
                     eu,
@@ -2711,11 +2799,146 @@ struct RelocatedProcess {
     key: (InstanceId, usize),
 }
 
-/// Counter slots, wait sites and nonblocking sites of the whole design.
+/// Counter slots, wait sites, nonblocking sites and time slots of the whole
+/// design.
 struct TimingMetadata {
     counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
     wait_sites: Vec<WaitSite<AbsoluteAddr>>,
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
+    time_slots: Vec<AbsoluteAddr>,
+}
+
+/// For every combinational value, the variables it is computed from.
+fn comb_sources(
+    comb_blocks: &[celox_slt::LogicPath<AbsoluteAddr>],
+    arena: &SLTNodeArena<AbsoluteAddr>,
+) -> HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> {
+    let mut sources: HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> = HashMap::default();
+    for path in comb_blocks {
+        let Some(target) = path.target.var() else {
+            continue;
+        };
+        let mut inputs = HashSet::default();
+        if matches!(path.target, celox_slt::LogicPathTarget::Process { .. }) {
+            inputs.extend(path.sources.iter().cloned());
+        } else {
+            crate::flattening::collect_inputs(path.expr, arena, &mut inputs);
+        }
+        sources
+            .entry(target.id)
+            .or_default()
+            .extend(inputs.into_iter().map(|atom| atom.id));
+    }
+    sources
+}
+
+/// The variables `unit` loads.
+fn unit_loads(unit: &ExecutionUnit<RegionedAbsoluteAddr>, loads: &mut HashSet<AbsoluteAddr>) {
+    for block in unit.blocks.values() {
+        for instruction in &block.instructions {
+            if let SIRInstruction::Load(_, addr, ..) = instruction {
+                loads.insert(addr.absolute_addr());
+            }
+        }
+    }
+}
+
+/// `reads` closed over combinational logic: with a value, the variables it
+/// is computed from.
+fn through_comb(
+    mut reads: HashSet<AbsoluteAddr>,
+    comb_sources: &HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>>,
+) -> HashSet<AbsoluteAddr> {
+    let mut pending: Vec<AbsoluteAddr> = reads.iter().copied().collect();
+    while let Some(read) = pending.pop() {
+        for source in comb_sources.get(&read).into_iter().flatten() {
+            if reads.insert(*source) {
+                pending.push(*source);
+            }
+        }
+    }
+    reads
+}
+
+/// Move the commits of the blocking results of every observed domain from
+/// its apply units to its evaluation: a blocking result is observed when
+/// it, or a combinational value computed from it, is read by a process
+/// kernel or by another domain's evaluation, is a wait term, or is another
+/// domain's event signal. Domains whose apply units the frontend did not
+/// split keep them.
+#[allow(clippy::too_many_arguments)]
+fn split_observed_commits<'k>(
+    eval_only_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    apply_ffs: &mut HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    split_commits: SplitCommits,
+    comb_sources: &HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>>,
+    kernels: impl Iterator<Item = &'k ExecutionUnit<RegionedAbsoluteAddr>>,
+    wait_terms: impl Iterator<Item = AbsoluteAddr>,
+    events: &HashSet<AbsoluteAddr>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+) -> Vec<AbsoluteAddr> {
+    let mut split = Vec::new();
+    let mut shared: HashSet<AbsoluteAddr> = wait_terms.collect();
+    for kernel in kernels {
+        unit_loads(kernel, &mut shared);
+    }
+    let evaluation_loads: HashMap<AbsoluteAddr, HashSet<AbsoluteAddr>> = eval_only_ffs
+        .iter()
+        .map(|(event, units)| {
+            let mut loads = HashSet::default();
+            for unit in units {
+                unit_loads(unit, &mut loads);
+            }
+            (*event, loads)
+        })
+        .collect();
+    let canonical = |event: &AbsoluteAddr| clock_domains.get(event).copied().unwrap_or(*event);
+    for (domain, splits) in split_commits {
+        let Some(splits) = splits.into_iter().collect::<Option<Vec<_>>>() else {
+            continue;
+        };
+        if apply_ffs.get(&domain).map_or(0, Vec::len) != splits.len() {
+            continue;
+        }
+        let mut blocking = HashSet::default();
+        for split in &splits {
+            for block in split.active.blocks.values() {
+                for instruction in &block.instructions {
+                    if let SIRInstruction::Commit(_, dst, ..) = instruction {
+                        blocking.insert(dst.absolute_addr());
+                    }
+                }
+            }
+        }
+        if blocking.is_empty() {
+            continue;
+        }
+        let mut reads = shared.clone();
+        reads.extend(
+            events
+                .iter()
+                .filter(|event| canonical(event) != domain)
+                .copied(),
+        );
+        for (event, loads) in &evaluation_loads {
+            if *event != domain {
+                reads.extend(loads.iter().copied());
+            }
+        }
+        let reads = through_comb(reads, comb_sources);
+        if blocking.is_disjoint(&reads) {
+            continue;
+        }
+        let (active, nba): (Vec<_>, Vec<_>) = splits
+            .into_iter()
+            .map(|split| (split.active, split.nba))
+            .unzip();
+        eval_only_ffs.entry(domain).or_default().extend(active);
+        apply_ffs.insert(domain, nba);
+        split.push(domain);
+    }
+    split.sort_unstable();
+    split
 }
 
 /// Place the timing metadata of every instance. Sites name the global index
@@ -2738,6 +2961,7 @@ fn relocate_timing(
         counter_slots: Vec::new(),
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
+        time_slots: Vec::new(),
     };
     for (&instance, module) in instances {
         let module = &modules[module];
@@ -2757,6 +2981,7 @@ fn relocate_timing(
                 process: process_index[&(instance, site.process)],
                 ..site.map(locate)
             }));
+        metadata.time_slots.extend(module.time_slot.map(locate));
     }
     metadata
 }
@@ -2976,7 +3201,10 @@ fn build_comb_observer_capture_paths(
         };
         let emit_on_true = matches!(
             sites[observer.site_id as usize].kind,
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+            RuntimeEventKind::Display
+                | RuntimeEventKind::Write
+                | RuntimeEventKind::Finish
+                | RuntimeEventKind::Stop
         );
         let fatal_error_code = matches!(
             sites[observer.site_id as usize].kind,
@@ -3029,7 +3257,10 @@ fn build_comb_observer_capture_paths(
                 let member = &observers[member_idx];
                 let member_emit_on_true = matches!(
                     sites[member.site_id as usize].kind,
-                    RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                    RuntimeEventKind::Display
+                        | RuntimeEventKind::Write
+                        | RuntimeEventKind::Finish
+                        | RuntimeEventKind::Stop
                 );
                 let member_fatal_error_code = matches!(
                     sites[member.site_id as usize].kind,

@@ -7,13 +7,10 @@ mod selects;
 #[cfg(test)]
 mod tests;
 
-pub(super) use layout::{declaration, parse_type};
-pub(super) use selects::{
-    has_member_access, member_dimension_count, member_first_dimension_width, net_member,
-    variable_member,
-};
+pub(super) use layout::native_type;
+pub(super) use selects::{select_member, whole_member};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PackedMember {
     name: String,
     offset: usize,

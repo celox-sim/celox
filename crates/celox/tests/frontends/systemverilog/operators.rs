@@ -1,4 +1,8 @@
 sv_backends! {
+    fn multidimensional_packed_declared_ranges_four_state(sim) { @case "operators::multidimensional_packed_declared_ranges_four_state"; }
+    fn multidimensional_packed_declared_ranges(sim) { @case "operators::multidimensional_packed_declared_ranges"; }
+    fn multidimensional_packed_declared_range_writes(sim) { @case "operators::multidimensional_packed_declared_range_writes"; }
+
     fn nested_operands_extend_before_context_operations(sim) { @case "operators::nested_operands_extend_before_context_operations"; }
 
     fn wide_arithmetic_shift_preserves_unknown_sign(sim) { @case "operators::wide_arithmetic_shift_preserves_unknown_sign"; }

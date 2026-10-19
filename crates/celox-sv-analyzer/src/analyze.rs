@@ -8,10 +8,15 @@ use crate::{
 };
 
 pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
+    let warnings = source.warnings();
+    crate::finish_analysis(analyze_source_impl(source), warnings)
+}
+
+fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
     for module in source.modules() {
-        let _constant_functions = module.install_constant_functions();
+        let state = module.constant_function_state();
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
@@ -37,6 +42,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let (resolved_value, literal) = parameter.resolved_value_and_literal(
+                &state,
                 &constants,
                 &parameter_types,
                 &parameter_literals,
@@ -71,19 +77,21 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 parameter.declared_signed(),
             )
             .with_declaration(
-                parameter
-                    .value()
-                    .map(|value| module.declaration_expr(value, &parameter_signedness).into()),
+                parameter.value().map(|value| {
+                    module
+                        .declaration_expr(&state, value, &parameter_signedness)
+                        .into()
+                }),
                 parameter
                     .packed_ranges()
                     .iter()
                     .map(|range| {
                         ir::PackedRange::new(
                             module
-                                .declaration_expr(range.left(), &parameter_signedness)
+                                .declaration_expr(&state, range.left(), &parameter_signedness)
                                 .into(),
                             module
-                                .declaration_expr(range.right(), &parameter_signedness)
+                                .declaration_expr(&state, range.right(), &parameter_signedness)
                                 .into(),
                         )
                     })
@@ -103,7 +111,13 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             ports.push(ir::Port::new(
                 port.name().to_string(),
                 port.direction().into(),
-                ir::Type::from_ast(port.r#type().clone(), &constants),
+                ir::Type::from_ast(
+                    port.r#type().clone(),
+                    &ast::const_functions::Environment {
+                        constants: &constants,
+                        functions: &state.const_functions,
+                    },
+                ),
                 port.is_net(),
             ));
         }
@@ -113,7 +127,13 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .map(|signal| {
                 ir::Signal::new(
                     signal.name().to_string(),
-                    ir::Type::from_ast(signal.r#type().clone(), &constants),
+                    ir::Type::from_ast(
+                        signal.r#type().clone(),
+                        &ast::const_functions::Environment {
+                            constants: &constants,
+                            functions: &state.const_functions,
+                        },
+                    ),
                     signal.is_net(),
                 )
                 .with_package_variable(signal.package_variable())
@@ -134,8 +154,8 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                             ir::ParameterOverride::new(
                                 parameter.name().to_string(),
                                 parameter.value().cloned().map(Into::into),
-                                parameter.type_text().map(str::to_string),
-                                parameter.pattern_text().map(str::to_string),
+                                parameter.bound_type().cloned(),
+                                parameter.bound_pattern().cloned(),
                             )
                         })
                         .collect(),

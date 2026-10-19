@@ -39,23 +39,43 @@ pub(super) struct FunctionErrors {
     by_name: HashMap<String, AnalyzerError>,
 }
 
-thread_local! {
-    static FUNCTIONS: RefCell<Arc<ConstantFunctionTable>> = RefCell::new(Arc::default());
-    static LOCALS: RefCell<Arc<HashMap<String, crate::ir::Type>>> = RefCell::new(Arc::default());
-    static ERRORS: RefCell<Arc<FunctionErrors>> = RefCell::new(Arc::default());
-    static DEPTH: Cell<usize> = const { Cell::new(0) };
-    // Reuse signatures without copying every function for each initializer.
-    static ARGUMENT_NAMES: RefCell<(Arc<ConstantFunctionTable>, Arc<HashMap<String, Vec<String>>>)> = RefCell::new((Arc::default(), Arc::default()));
+/// Constant evaluator state owned by one explicit analysis session.
+#[derive(Default)]
+pub(crate) struct State {
+    functions: RefCell<ConstantFunctions>,
+    depth: Cell<usize>,
+    argument_names: RefCell<(
+        Arc<ConstantFunctionTable>,
+        Arc<HashMap<String, Vec<String>>>,
+    )>,
 }
 
-/// Restores the previously installed functions when dropped.
 pub(super) struct Installed {
     previous: ConstantFunctions,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        replace(std::mem::take(&mut self.previous));
+        replace(
+            &self.state.const_functions,
+            std::mem::take(&mut self.previous),
+        );
+    }
+}
+
+/// A numeric environment together with the functions visible at its call site.
+pub(crate) struct Environment<'a> {
+    pub(crate) constants: &'a dyn ConstantEnvironment,
+    pub(crate) functions: &'a State,
+}
+
+impl ConstantEnvironment for Environment<'_> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        self.constants.get(name)
+    }
+    fn function_state(&self) -> Option<&State> {
+        Some(self.functions)
     }
 }
 
@@ -70,61 +90,88 @@ pub(super) struct ConstantFunctions {
 }
 
 /// Make `functions` the constant functions until the guard is dropped.
-pub(super) fn install(functions: ConstantFunctions) -> Installed {
-    let previous = installed();
-    replace(functions);
-    Installed { previous }
-}
-
-/// Replace the installed functions; the guard of the enclosing [`install`]
-/// still restores the ones before it.
-pub(super) fn replace(functions: ConstantFunctions) {
-    FUNCTIONS.with(|current| *current.borrow_mut() = functions.functions);
-    LOCALS.with(|current| *current.borrow_mut() = functions.locals);
-    ERRORS.with(|current| *current.borrow_mut() = functions.errors);
-}
-
-pub(super) fn installed() -> ConstantFunctions {
-    ConstantFunctions {
-        functions: FUNCTIONS.with(|current| current.borrow().clone()),
-        locals: LOCALS.with(|current| current.borrow().clone()),
-        errors: ERRORS.with(|current| current.borrow().clone()),
+pub(super) fn install(
+    state: &std::rc::Rc<AnalysisState>,
+    functions: ConstantFunctions,
+) -> Installed {
+    let previous = installed(&state.const_functions);
+    replace(&state.const_functions, functions);
+    Installed {
+        previous,
+        state: state.clone(),
     }
 }
 
-/// Why the function `name` of the installed module could not be converted,
-/// if it could not.
-pub(super) fn conversion_error(name: &str) -> Option<AnalyzerError> {
-    ERRORS.with(|current| {
-        let errors = current.borrow();
-        errors.by_name.get(name).or(errors.all.as_ref()).cloned()
-    })
+pub(super) fn replace(state: &State, functions: ConstantFunctions) {
+    *state.functions.borrow_mut() = functions;
 }
 
-/// Source formal names used to bind named calls in constant syntax.
-pub(super) fn argument_names() -> Arc<HashMap<String, Vec<String>>> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
-    ARGUMENT_NAMES.with(|cached| {
-        let mut cached = cached.borrow_mut();
-        if !Arc::ptr_eq(&cached.0, &functions) {
-            let names = functions
-                .iter()
-                .map(|(name, function)| (name.clone(), function.argument_names.clone()))
-                .collect();
-            *cached = (functions, Arc::new(names));
-        }
-        cached.1.clone()
-    })
+/// Why an installed function could not be converted for constant evaluation.
+pub(super) fn installed(state: &State) -> ConstantFunctions {
+    state.functions.borrow().clone()
 }
 
-pub(super) fn is_constant_function(name: &str) -> bool {
-    FUNCTIONS.with(|current| current.borrow().contains_key(name))
+pub(super) fn conversion_error(state: &State, name: &str) -> Option<AnalyzerError> {
+    let functions = state.functions.borrow();
+    functions
+        .errors
+        .by_name
+        .get(name)
+        .or(functions.errors.all.as_ref())
+        .cloned()
+}
+
+pub(super) fn argument_names(state: &State) -> Arc<HashMap<String, Vec<String>>> {
+    let functions = state.functions.borrow().functions.clone();
+    let mut cached = state.argument_names.borrow_mut();
+    if !Arc::ptr_eq(&cached.0, &functions) {
+        let names = functions
+            .iter()
+            .map(|(name, function)| (name.clone(), function.argument_names.clone()))
+            .collect();
+        *cached = (functions, Arc::new(names));
+    }
+    cached.1.clone()
+}
+
+pub(super) fn is_constant_function(state: &State, name: &str) -> bool {
+    state.functions.borrow().functions.contains_key(name)
 }
 
 /// The module-scope functions of a module, for constant evaluation. When
 /// their bodies cannot be converted, there are none, and the reason is kept
 /// for the calls of them.
 impl ConstantFunctions {
+    pub(crate) fn warnings(&self) -> Vec<super::warnings::AnalyzerWarning> {
+        let mut warnings = Vec::new();
+        for function in self.functions.values() {
+            for statement in &function.body {
+                statement.walk(&mut |statement| {
+                    if let Stmt::SystemTask {
+                        task: crate::system_functions::SystemTask::Exit,
+                        site,
+                        ..
+                    } = statement
+                    {
+                        super::warnings::append(
+                            &mut warnings,
+                            [super::warnings::AnalyzerWarning::ExitOutsideProgram {
+                                site: site.clone(),
+                            }],
+                        );
+                    }
+                });
+            }
+        }
+        warnings.sort_by(|left, right| match (left, right) {
+            (
+                super::warnings::AnalyzerWarning::ExitOutsideProgram { site: left },
+                super::warnings::AnalyzerWarning::ExitOutsideProgram { site: right },
+            ) => left.cmp(right),
+        });
+        warnings
+    }
+
     fn unconverted(error: AnalyzerError) -> Self {
         Self {
             errors: Arc::new(FunctionErrors {
@@ -168,6 +215,10 @@ impl ConstantFunctions {
         Arc::make_mut(&mut self.errors)
             .by_name
             .retain(|name, _| keep(name));
+    }
+
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.functions.contains_key(name) || self.errors.by_name.contains_key(name)
     }
 
     /// Make the function `target` callable as `name` too.
@@ -280,15 +331,54 @@ impl ConstantFunctions {
     }
 }
 
+fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
+    use celox_sv_syntax::{BodyItemKind, SubroutineKind};
+    let native = tree.declarations();
+    let mut pending = tree.body_membership().unwrap_or_default();
+    let mut seen = HashSet::default();
+    let (mut functions, mut controls) = (false, false);
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match &native.body_item(id).kind {
+            BodyItemKind::Subroutine(id) => {
+                functions |= native.subroutine(*id).kind == SubroutineKind::Function
+            }
+            BodyItemKind::Region(items)
+            | BodyItemKind::Block { items, .. }
+            | BodyItemKind::Unconverted { items, .. } => pending.extend(items),
+            BodyItemKind::Unit(id) => pending.extend(&native.unit(*id).items),
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                controls = true;
+                pending.push(*then_body);
+                pending.extend(otherwise);
+            }
+            BodyItemKind::Case { arms, .. } => {
+                controls = true;
+                pending.extend(arms.iter().map(|arm| arm.body));
+            }
+            BodyItemKind::Loop { body, .. } => {
+                controls = true;
+                pending.push(*body);
+            }
+            _ => {}
+        }
+    }
+    (functions, controls)
+}
+
 pub(super) fn module_constant_functions(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
-        node,
         tree,
         const_env,
         type_aliases,
@@ -298,30 +388,19 @@ pub(super) fn module_constant_functions(
 }
 
 pub(super) fn symbolic_module_constant_functions(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
-    if !node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::FunctionDeclaration(_)))
-    {
+    let (has_functions, has_controls) = scope_flags(tree);
+    if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !generate::root_subroutines_only()
-        && node.clone().into_iter().any(|child| {
-            matches!(
-                child,
-                RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
-            )
-        });
+    let needs_bootstrap = !generate::root_subroutines_only(&tree.state) && has_controls;
     if !needs_bootstrap {
         return collect_module_constant_functions(
-            node,
             tree,
             const_env,
             type_aliases,
@@ -329,9 +408,8 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         );
     }
-    let mut roots = generate::with_root_subroutines(|| {
+    let mut roots = generate::with_root_subroutines(&tree.state, || {
         collect_module_constant_functions(
-            node.clone(),
             tree,
             const_env,
             type_aliases,
@@ -339,10 +417,9 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         )
     });
-    roots.extend_missing(&scope::imported().constant_functions);
-    let _installed = install(roots);
+    roots.extend_missing(&scope::imported(&tree.state).constant_functions);
+    let _installed = install(&tree.state, roots);
     collect_module_constant_functions(
-        node,
         tree,
         const_env,
         type_aliases,
@@ -352,17 +429,13 @@ pub(super) fn symbolic_module_constant_functions(
 }
 
 fn collect_module_constant_functions(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
-    let has_functions = node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::FunctionDeclaration(_)));
+    let (has_functions, _) = scope_flags(tree);
     if !has_functions {
         return ConstantFunctions::default();
     }
@@ -377,15 +450,14 @@ fn collect_module_constant_functions(
             .filter(|(name, _)| !symbolic_parameters.contains(*name))
             .map(|(name, value)| (name.clone(), *value))
             .collect();
-        symbolic_aliases =
-            match type_aliases_from_module_node_with_env(node.clone(), tree, &constants) {
-                Ok(aliases) => aliases,
-                Err(error) => return ConstantFunctions::unconverted(error),
-            };
+        symbolic_aliases = match type_aliases_from_scope_with_env(tree, &constants) {
+            Ok(aliases) => aliases,
+            Err(error) => return ConstantFunctions::unconverted(error),
+        };
         &symbolic_aliases
     };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
-        match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
+        match procedural::subroutine_argument_names(tree, const_env, type_aliases) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
@@ -399,12 +471,11 @@ fn collect_module_constant_functions(
         counter: &mut counter,
         subroutine_params: &subroutine_params,
         subroutine_directions: &subroutine_directions,
-        automatic: lifetimes::automatic_by_default(&node),
+        automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
-        node,
         tree,
         const_env,
         &dimensions,
@@ -416,7 +487,8 @@ fn collect_module_constant_functions(
         Ok(subroutines) => subroutines,
         Err(error) => return ConstantFunctions::unconverted(error),
     };
-    let functions = subroutines
+    let readers = simulation_state_readers(&subroutines);
+    let functions: ConstantFunctionTable = subroutines
         .into_iter()
         .filter(|subroutine| !subroutine.is_task)
         .filter_map(|subroutine| {
@@ -449,6 +521,11 @@ fn collect_module_constant_functions(
             ))
         })
         .collect();
+    let mut functions = functions;
+    for (name, error) in readers {
+        functions.remove(&name);
+        rejected.entry(name).or_insert(error);
+    }
     ConstantFunctions {
         errors: Arc::new(FunctionErrors {
             all: None,
@@ -464,9 +541,195 @@ fn collect_module_constant_functions(
     }
 }
 
+/// The functions among `functions` that are no constant functions because
+/// they call a system function that reads the state of the simulation, such
+/// as `$time`, in their bodies or argument defaults, or call a function that
+/// does (IEEE 1800-2023 13.4.3), whether the call is reached or not. Each
+/// comes with the error a constant call of it reports.
+fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, AnalyzerError> {
+    let mut readers: HashMap<String, AnalyzerError> = HashMap::default();
+    let mut callees: HashMap<&str, Vec<&str>> = HashMap::default();
+    for function in functions.iter().filter(|function| !function.is_task) {
+        let name = &function.name;
+        let mut exprs: Vec<&Expr> = function
+            .params
+            .iter()
+            .filter_map(|param| param.default.as_ref())
+            .collect();
+        let mut calls = Vec::new();
+        let mut selectors = Vec::new();
+        // Constant-folded branches still constrain whether a declaration is
+        // a constant function. Void callees also matter for discarded calls.
+        for stmt in function.body.iter().chain(&function.sensitivity_body) {
+            // A constant function ignores its system task calls (13.4.3), so
+            // their arguments call nothing.
+            stmt.walk(&mut |stmt| {
+                if let Stmt::Call { name, .. } = stmt {
+                    calls.push(name.as_str());
+                }
+                let targets = match stmt {
+                    Stmt::Assign { lhs, .. } => std::slice::from_ref(lhs),
+                    Stmt::AssignConcat { parts, .. } => parts.as_slice(),
+                    _ => &[],
+                };
+                for lhs in targets {
+                    if let LValue::Select {
+                        msb,
+                        lsb,
+                        array_slice_width,
+                        ..
+                    } = lhs
+                    {
+                        selectors.extend([msb, lsb]);
+                        selectors.extend(array_slice_width);
+                    }
+                }
+                if !matches!(stmt, Stmt::SystemTask { .. }) {
+                    exprs.extend(lifetimes::stmt_exprs(stmt));
+                }
+            });
+        }
+        let mut callees_in_exprs = Vec::new();
+        for expr in exprs {
+            visit_expr_callees(expr, &mut |callee| callees_in_exprs.push(callee));
+        }
+        for selector in selectors {
+            visit_const_callees(selector, &mut |callee| callees_in_exprs.push(callee));
+        }
+        let mut reads = None;
+        for callee in callees_in_exprs {
+            match callee {
+                Callee::System(system) if system.reads_simulation_state() => {
+                    reads.get_or_insert(*system);
+                }
+                Callee::System(_) => {}
+                Callee::Subroutine(callee) => calls.push(callee.as_str()),
+            }
+        }
+        if let Some(system) = reads {
+            readers.insert(
+                name.clone(),
+                AnalyzerError::InvalidSystemTfCall {
+                    name: system.name().into(),
+                    detail: format!("not permitted in constant function `{name}`"),
+                },
+            );
+        }
+        callees.insert(name, calls);
+    }
+    // The callers of a reader read the state too.
+    loop {
+        let found: Vec<(String, AnalyzerError)> = callees
+            .iter()
+            .filter(|(name, _)| !readers.contains_key(**name))
+            .filter_map(|(name, calls)| {
+                let error = calls.iter().find_map(|callee| readers.get(*callee))?;
+                Some((name.to_string(), error.clone()))
+            })
+            .collect();
+        if found.is_empty() {
+            return readers;
+        }
+        readers.extend(found);
+    }
+}
+
+/// Calls in an expression, including the index expressions represented by
+/// ConstExpr. Those indices can contain runtime calls in procedural code.
+fn visit_expr_callees<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Callee)) {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call { callee, args, .. } => {
+            f(callee);
+            for arg in args.iter().flatten() {
+                visit_expr_callees(arg, f);
+            }
+        }
+        Expr::Select { expr, msb, lsb, .. } => {
+            visit_expr_callees(expr, f);
+            visit_const_callees(msb, f);
+            visit_const_callees(lsb, f);
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => visit_expr_callees(expr, f),
+        Expr::Concat(parts) => {
+            for part in parts {
+                visit_expr_callees(part, f);
+            }
+        }
+        Expr::RepeatConcat { count, parts } => {
+            visit_const_callees(count, f);
+            for part in parts {
+                visit_expr_callees(part, f);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            visit_expr_callees(left, f);
+            visit_expr_callees(right, f);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_expr_callees(condition, f);
+            visit_expr_callees(then_expr, f);
+            visit_expr_callees(else_expr, f);
+        }
+        Expr::Inside { expr, items } => {
+            visit_expr_callees(expr, f);
+            for item in items {
+                for expr in item.exprs() {
+                    visit_expr_callees(expr, f);
+                }
+            }
+        }
+    }
+}
+
+fn visit_const_callees<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee)) {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        ConstExpr::Function { callee, args, .. } => {
+            f(callee);
+            for arg in args {
+                visit_const_callees(arg, f);
+            }
+        }
+        ConstExpr::Select { expr, bit } => {
+            visit_const_callees(expr, f);
+            visit_const_callees(bit, f);
+        }
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            visit_const_callees(expr, f);
+            visit_const_callees(msb, f);
+            visit_const_callees(lsb, f);
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            visit_const_callees(expr, f)
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            visit_const_callees(left, f);
+            visit_const_callees(right, f);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            visit_const_callees(condition, f);
+            visit_const_callees(then_expr, f);
+            visit_const_callees(else_expr, f);
+        }
+    }
+}
+
 /// Fill defaults in the declaration's bound scope; runtime IR keeps its holes.
-pub(super) fn resolved_arguments(callee: &Callee, args: &[Option<Expr>]) -> Option<Vec<Expr>> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+pub(super) fn resolved_arguments(
+    state: &State,
+    callee: &Callee,
+    args: &[Option<Expr>],
+) -> Option<Vec<Expr>> {
+    let functions = state.functions.borrow().functions.clone();
     let Some(function) = callee.subroutine().and_then(|name| functions.get(name)) else {
         return args.iter().cloned().collect();
     };
@@ -484,9 +747,14 @@ pub(super) fn resolved_arguments(callee: &Callee, args: &[Option<Expr>]) -> Opti
 }
 
 /// Check arity and defaults without evaluating any actual argument.
-pub(super) fn validate_argument_bindings(name: &str, present: &[bool]) -> Converted<()> {
-    FUNCTIONS.with(|functions| {
-        let functions = functions.borrow();
+pub(super) fn validate_argument_bindings(
+    state: &State,
+    name: &str,
+    present: &[bool],
+) -> Converted<()> {
+    {
+        let functions = state.functions.borrow();
+        let functions = &functions.functions;
         let Some(function) = functions.get(name) else {
             // The raw syntax validator reports functions that cannot be used
             // in constant expressions, including conversion errors.
@@ -504,11 +772,12 @@ pub(super) fn validate_argument_bindings(name: &str, present: &[bool]) -> Conver
             }
         }
         Ok(())
-    })
+    }
 }
 
 /// A named constant call can be folded only when its body and actuals evaluate.
 pub(super) fn eval_expression_literal(
+    state: &State,
     expr: &Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
@@ -519,7 +788,12 @@ pub(super) fn eval_expression_literal(
     else {
         return None;
     };
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let env = Environment {
+        constants,
+        functions: state,
+    };
+    let constants: &dyn ConstantEnvironment = &env;
+    let functions = state.functions.borrow().functions.clone();
     let (_, ty) = functions.get(name)?.return_var.as_ref()?;
     let width = ty
         .resolved_width()
@@ -545,29 +819,41 @@ pub(crate) fn eval_call(
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let functions = FUNCTIONS.with(|current| current.borrow().clone());
+    let state = constants.function_state()?;
+    let functions = state.functions.borrow().functions.clone();
     let function = functions.get(name)?;
     let values = args
         .iter()
         .map(|arg| crate::typecheck::eval_const_expr_in_env(arg, constants))
         .collect::<Option<Vec<_>>>()?;
-    let depth = DEPTH.with(Cell::get);
+    let depth = state.depth.get();
     if depth >= MAX_DEPTH {
         return None;
     }
-    DEPTH.with(|current| current.set(depth + 1));
-    let result = call(function, &values, constants);
-    DEPTH.with(|current| current.set(depth));
-    result
+    struct DepthGuard<'a>(&'a Cell<usize>, usize);
+    impl Drop for DepthGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.1);
+        }
+    }
+    state.depth.set(depth + 1);
+    let _depth = DepthGuard(&state.depth, depth);
+    call(function, &values, constants)
 }
 
 /// Preserve the declared result type when freezing a caller's function value.
 pub(super) fn eval_call_literal(
+    state: &State,
     name: &str,
     args: &[crate::ir::ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let env = Environment {
+        constants,
+        functions: state,
+    };
+    let constants: &dyn ConstantEnvironment = &env;
+    let functions = state.functions.borrow().functions.clone();
     let (_, ty) = functions.get(name)?.return_var.as_ref()?;
     let width = ty
         .resolved_width()
@@ -655,6 +941,9 @@ fn fit(value: i128, width: usize, signed: bool) -> i128 {
 }
 
 impl ConstantEnvironment for Frame<'_> {
+    fn function_state(&self) -> Option<&State> {
+        self.constants.function_state()
+    }
     fn get(&self, name: &str) -> Option<&i128> {
         self.values.get(name).or_else(|| self.constants.get(name))
     }
@@ -758,7 +1047,7 @@ impl Frame<'_> {
             }
             Expr::Call { callee, args, .. } => ConstExpr::Function {
                 callee: callee.clone(),
-                args: resolved_arguments(callee, args)?
+                args: resolved_arguments(self.constants.function_state()?, callee, args)?
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,
@@ -823,7 +1112,14 @@ impl Frame<'_> {
         match lhs {
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
-                    let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
+                    let r#type = self
+                        .constants
+                        .function_state()?
+                        .functions
+                        .borrow()
+                        .locals
+                        .get(name)
+                        .cloned()?;
                     self.declare(name, &r#type)?;
                 }
                 self.set(name, value);
@@ -852,7 +1148,14 @@ impl Frame<'_> {
                 self.assign(lhs, value)?;
             }
             Stmt::Local { name, init } => {
-                let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
+                let r#type = self
+                    .constants
+                    .function_state()?
+                    .functions
+                    .borrow()
+                    .locals
+                    .get(name)
+                    .cloned()?;
                 self.declare(name, &r#type)?;
                 let value = match init {
                     Some(init) => self.eval(init)?,
@@ -967,8 +1270,12 @@ impl Frame<'_> {
                 self.eval(expr)?;
             }
             // Messages have no effect on the value. Unknown and unsupported
-            // system tasks are rejected before elaboration.
+            // system tasks are rejected before elaboration. `$exit` is
+            // ignored outside a program block (IEEE 1800-2023 24.7). Its
+            // diagnostic belongs to the declaration, not to evaluation.
             Stmt::SystemTask { .. } => {}
+            // A function has no timing controls (IEEE 1800-2023 13.4).
+            Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,
             Stmt::AssignConcat { .. } | Stmt::Call { .. } => return None,
         }
         Some(Flow::Next)

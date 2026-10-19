@@ -1,11 +1,8 @@
 //! SystemVerilog analyzer for Celox.
 //!
-//! This crate intentionally mirrors the role of `veryl-analyzer`: it owns
-//! SystemVerilog syntax parsing, semantic analysis, elaboration, and analyzer
-//! IR. It does not depend on `celox` and must not know about SLT or SIR.
-
-// Rustdoc's auto-trait analysis traverses sv-parser's deeply nested syntax tree.
-#![recursion_limit = "512"]
+//! Native syntax and source storage belong to [`celox_sv_syntax`]. This crate
+//! owns semantic binding, elaboration and analyzer IR over native syntax.
+//! It does not depend on `celox` and must not know about SLT or SIR.
 
 use std::path::Path;
 
@@ -17,17 +14,14 @@ pub mod ast;
 pub mod ir;
 mod parsed;
 pub mod procedural;
+mod source_tree;
 pub mod symbol;
 pub mod syntax;
 pub mod system_functions;
 pub mod typecheck;
 
-pub use ast::interfaces::elaborate_interfaces_with_bindings;
-pub use ast::interfaces::{
-    InterfaceElaboration, elaborate_interfaces_with_metadata,
-    elaborate_interfaces_with_metadata_and_roots,
-};
-pub use ast::interfaces::{InterfacePrototype, interface_prototypes};
+pub use ast::interfaces::{InterfacePrototype, interface_prototypes, interface_prototypes_for};
+pub use ast::interfaces::{NativeInterfacePlan, plan_interfaces};
 pub use ast::packages::Packages;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
@@ -40,10 +34,25 @@ pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 /// Errors reported by the SystemVerilog analyzer.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AnalyzerError {
+    /// Diagnostics discovered before a later analysis failure.
+    #[error("{error}")]
+    WithWarnings {
+        #[source]
+        error: Box<AnalyzerError>,
+        warnings: Vec<ir::AnalyzerWarning>,
+    },
     #[error("SystemVerilog parse error: {0}")]
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// A delay, event control or wait statement in a function, an
+    /// `always_comb` or an `always_ff` body (IEEE 1800-2023 9.2.2.2,
+    /// 9.2.2.4, 13.4).
+    #[error("{construct} in {context}: only `initial` and `always` processes may suspend")]
+    TimingControlOutsideProcess {
+        construct: &'static str,
+        context: &'static str,
+    },
     /// A memory file read by `$readmemh` or `$readmemb` is missing or invalid.
     #[error("Invalid memory file input: {0}")]
     MemoryFile(String),
@@ -130,8 +139,7 @@ pub const SV_FRONTEND_TRACKING_ISSUE: u32 = 88;
 const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("non-ANSI module port declarations", 426),
     ("ref port direction", 427),
-    ("always and always_latch processes", 431),
-    ("non-zero-based multidimensional packed range", 438),
+    ("always_latch process", 431),
     (
         "unpacked struct, union, or unsupported packed struct member",
         440,
@@ -142,6 +150,7 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
     ("streaming concatenation", 447),
     ("loop-generate unroll limit exceeded", 448),
     ("iff-qualified always_ff event", 452),
+    ("iff-qualified event", 1444),
     ("nonblocking assignment inside always_comb", 453),
     ("genvar update operator", 455),
     ("reduction operator in parameter expression", 456),
@@ -153,8 +162,46 @@ const UNSUPPORTED_CONSTRUCT_ISSUES: &[(&str, u32)] = &[
 ];
 
 impl AnalyzerError {
+    pub(crate) fn with_warnings(self, found: Vec<ir::AnalyzerWarning>) -> Self {
+        if found.is_empty() {
+            return self;
+        }
+        match self {
+            Self::WithWarnings {
+                error,
+                mut warnings,
+            } => {
+                ast::warnings::append(&mut warnings, found);
+                Self::WithWarnings { error, warnings }
+            }
+            error => Self::WithWarnings {
+                error: Box::new(error),
+                warnings: found,
+            },
+        }
+    }
+
+    /// Diagnostics retained when semantic analysis failed.
+    pub fn warnings(&self) -> &[ir::AnalyzerWarning] {
+        match self {
+            Self::WithWarnings { warnings, .. } => warnings,
+            _ => &[],
+        }
+    }
+
+    /// The underlying source error, without its separately reported diagnostics.
+    pub fn into_error(self) -> Self {
+        match self {
+            Self::WithWarnings { error, .. } => error.into_error(),
+            error => error,
+        }
+    }
+
     /// GitHub issue that tracks support for the construct this error rejects.
     pub fn tracking_issue(&self) -> u32 {
+        if let Self::WithWarnings { error, .. } = self {
+            return error.tracking_issue();
+        }
         let Self::Unsupported(construct) = self else {
             return SV_FRONTEND_TRACKING_ISSUE;
         };
@@ -163,23 +210,6 @@ impl AnalyzerError {
             .find(|(prefix, _)| construct.starts_with(prefix))
             .map_or(SV_FRONTEND_TRACKING_ISSUE, |&(_, issue)| issue)
     }
-}
-
-/// Rewrite `sources` so that they no longer declare or use interfaces, or
-/// return `None` when no source declares one. See [`ast::interfaces`].
-pub fn elaborate_interfaces(
-    sources: &[(&str, &Path)],
-) -> Result<Option<Vec<String>>, AnalyzerError> {
-    ast::interfaces::elaborate_interfaces(sources)
-}
-
-/// Expand interfaces using the design roots selected by the hierarchy
-/// elaborator when resolving queries before flattening.
-pub fn elaborate_interfaces_with_roots(
-    sources: &[(&str, &Path)],
-    roots: &[&str],
-) -> Result<Option<Vec<String>>, AnalyzerError> {
-    ast::interfaces::elaborate_interfaces_with_roots(sources, Some(roots))
 }
 
 /// Time declarations for synthetic foreign declaration files, preserving the
@@ -193,8 +223,16 @@ pub fn generated_time_declarations(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
+    let warnings = ast::warnings::source(&syntax_tree);
+    collecting_warnings(warnings, || {
+        if syntax_tree.declarations().all_units().any(|unit| {
+            unit.kind == celox_sv_syntax::UnitKind::Interface
+                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
+                && !unit.external
+        }) {
+            return analyze_interface_source(code, path, "", &HashMap::default());
+        }
         let source = ast::Source::from_syntax(&syntax_tree)?;
         analyze::analyze_source(source)
     })
@@ -208,8 +246,16 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
+    let warnings = ast::warnings::source(&syntax_tree);
+    collecting_warnings(warnings, || {
+        if syntax_tree.declarations().all_units().any(|unit| {
+            unit.kind == celox_sv_syntax::UnitKind::Interface
+                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
+                && !unit.external
+        }) {
+            return analyze_interface_source(code, path, module_name, parameter_overrides);
+        }
         let source = ast::Source::from_syntax_with_module_parameter_overrides(
             &syntax_tree,
             module_name,
@@ -219,10 +265,99 @@ pub fn analyze_source_with_module_parameter_overrides(
     })
 }
 
+fn analyze_interface_source(
+    code: &str,
+    path: &Path,
+    override_module: &str,
+    overrides: &HashMap<String, i128>,
+) -> Result<Ir, AnalyzerError> {
+    let source = ParsedSource::parse(code, path)?;
+    let packages = ParsedSource::analyze_packages(&[&source])?;
+    let plan = &packages.interface_plan;
+    let mut names = source
+        .module_names()
+        .iter()
+        .filter(|name| {
+            plan.modules.contains_key(*name)
+                || !plan
+                    .modules
+                    .values()
+                    .any(|binding| binding.original == **name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    names.extend(
+        plan.modules
+            .keys()
+            .filter(|name| !source.module_names().contains(name))
+            .cloned(),
+    );
+    let mut modules = Vec::new();
+    let mut warnings = packages.warnings().to_vec();
+    for name in names {
+        let values = if name == override_module
+            || plan
+                .modules
+                .get(&name)
+                .is_some_and(|binding| binding.original == override_module)
+        {
+            overrides
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        if *value < 0 {
+                            ir::ConstExpr::Unary {
+                                op: ir::UnaryOp::Minus,
+                                expr: Box::new(ir::ConstExpr::Literal(
+                                    value.unsigned_abs().to_string(),
+                                )),
+                            }
+                        } else {
+                            ir::ConstExpr::Literal(value.to_string())
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::default()
+        };
+        let ir = source.analyze_module(
+            &name,
+            &values,
+            &[],
+            &[],
+            &ModuleInterfaces::default(),
+            &packages,
+        )?;
+        modules.extend(ir.modules().iter().cloned());
+        warnings.extend(ir.warnings().iter().cloned());
+    }
+    Ok(Ir::new(modules).with_warnings(warnings))
+}
+
+/// Publish diagnostics as owned result data, on either exit path.
+fn collecting_warnings(
+    warnings: Vec<ir::AnalyzerWarning>,
+    analysis: impl FnOnce() -> Result<Ir, AnalyzerError>,
+) -> Result<Ir, AnalyzerError> {
+    finish_analysis(analysis(), warnings)
+}
+
+pub(crate) fn finish_analysis(
+    result: Result<Ir, AnalyzerError>,
+    warnings: Vec<ir::AnalyzerWarning>,
+) -> Result<Ir, AnalyzerError> {
+    match result {
+        Ok(ir) => Ok(ir.with_warnings(warnings)),
+        Err(error) => Err(error.with_warnings(warnings)),
+    }
+}
+
 /// Return the module names declared in a SystemVerilog source without
 /// performing semantic lowering of their bodies or port declarations.
 pub fn source_module_names(code: &str, path: &Path) -> Result<Vec<String>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
     ast::Source::module_names_from_syntax(&syntax_tree)
 }
 
@@ -243,8 +378,11 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
+    let warnings = ast::warnings::components(&syntax_tree)
+        .remove(module_name)
+        .unwrap_or_default();
+    collecting_warnings(warnings, || {
         let source = ast::Source::from_syntax_module_with_parameter_overrides(
             &syntax_tree,
             module_name,
@@ -279,10 +417,7 @@ pub fn source_module_interfaces(
     code: &str,
     path: &Path,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
-        ast::Source::module_interfaces_from_syntax(&syntax_tree)
-    })
+    Ok(ParsedSource::parse(code, path)?.module_interfaces().clone())
 }
 
 #[cfg(test)]
@@ -327,20 +462,8 @@ pub fn analyze_source_module_with_packages(
         module_name,
         &overrides,
         &[],
+        &[],
         &ModuleInterfaces::default(),
         packages,
     )
-}
-
-/// The source of `module_name` with each `parameter type` in `overrides`
-/// (`(name, data type text)`) bound to its data type, or `None` when it has no
-/// such parameter.
-pub fn apply_module_type_parameters(
-    code: &str,
-    path: &Path,
-    module_name: &str,
-    overrides: &[(String, String)],
-) -> Result<Option<String>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::type_parameters::apply_type_parameter_overrides(code, &syntax_tree, module_name, overrides)
 }

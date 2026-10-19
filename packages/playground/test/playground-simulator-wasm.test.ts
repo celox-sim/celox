@@ -3,7 +3,7 @@
  * explicit edges and timed steps fire derived and gated clocks as the
  * native simulator does. The expected counts are the native simulator's.
  */
-import { loadNativeAddon, Simulator } from "@celox-sim/celox";
+import { loadNativeAddon, Simulator, X } from "@celox-sim/celox";
 import { describe, expect, test } from "vitest";
 import {
 	type CompilerHandle,
@@ -52,15 +52,27 @@ type WasmAddon = {
 	) => CompilerHandle & { dispose(): void };
 };
 
-function compile(source: string, top: string) {
+// A gated clock with a reset, so that its counter is known in four-state
+// simulation.
+const GATED_RESET = `module GatedReset (
+    clk: input clock,
+    rst: input reset_async_low,
+    en: input logic,
+    count: output logic<8>,
+) {
+    let gated: '_ clock = clk & en;
+    always_ff (gated, rst) { if_reset { count = 0; } else { count += 1; } }
+}`;
+
+function compile(source: string, top: string, fourState = false) {
 	const addon = loadNativeAddon() as unknown as WasmAddon;
 	const handle = new addon.NativeSimulatorHandle(
 		[{ content: source, path: "top.veryl" }],
 		top,
-		{ fourState: false },
+		{ fourState },
 	);
 	try {
-		return compiledFromHandle(handle, false);
+		return compiledFromHandle(handle, fourState);
 	} finally {
 		handle.dispose();
 	}
@@ -147,5 +159,26 @@ describe.skipIf(!isWasm)("playground runtime (WASM)", () => {
 		expect(dumps).toHaveLength(1);
 		expect(dumps[0]?.timestamp).toBe(7);
 		expect(dumps[0]?.names).toEqual(expect.arrayContaining(["en", "count"]));
+	});
+
+	test("four-state edges judge a gated clock from x (IEEE 1800-2023 Table 9-2)", () => {
+		const sim = createPlaygroundSimulator(
+			compile(GATED_RESET, "GatedReset", true),
+		);
+		const clk = sim.event("clk");
+		const rst = sim.event("rst");
+		sim.negedge(rst);
+		sim.posedge(rst);
+		expect(sim.dut.count).toBe(0n);
+		// The clock rises from x with `en` at x: `x & x` stays x, no edge.
+		// The DUT is typed for two-state values; its setter takes X too.
+		(sim.dut as Record<string, unknown>).en = X;
+		sim.posedge(clk);
+		expect(sim.dut.count).toBe(0n);
+		// From a known 0, `0 & 1` -> `1 & 1` rises.
+		sim.negedge(clk);
+		sim.dut.en = 1n;
+		sim.posedge(clk);
+		expect(sim.dut.count).toBe(1n);
 	});
 });

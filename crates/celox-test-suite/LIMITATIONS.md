@@ -389,7 +389,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_mixed_state_struct_members` | execute | icarus | 1 | Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values. |
 | `sv_icarus_unary_plus_unknown` | execute | icarus | 1 | Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values. |
 | `sv_icarus_runtime_packed_subselect` | compile | icarus | 3 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: "Array index expressions must be constant here"). Verilator passes the two-state case; the four-state one is outside what it checks. |
-| `sv_icarus_interfaces` | compile | icarus | 11 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. |
+| `sv_icarus_interfaces` | compile | icarus | 14 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
@@ -437,6 +437,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_urandom_seed_expression` | execute | icarus | 3 | Icarus 13.0 requires the $urandom seed to be a writable integer/time variable or register and terminates simulation for a constant or input-net operand. IEEE 1800-2023 18.13.1 accepts any integral expression and gives a literal seed as an example. A standalone literal-seed probe compiles but vvp exits with the seed-must-be-a-variable error; variable seeds reproduce their streams. |
 | `sv_icarus_urandom_narrow_seed` | execute | icarus | 1 | Icarus 13.0 terminates for an 8-bit $urandom seed variable with 'seed variable is less than 32 bits (8)'. IEEE 1800-2023 18.13.1 accepts any integral expression, converted to the int seed formal. A standalone signed/unsigned 8-bit seed probe compiles, then vvp exits with this width error; Verilator passes the same nonzero-seed extension checks. |
 | `sv_verilator_random_algorithm` | execute | verilator | 2 | Verilator 5.052 does not compute $random with the Annex N algorithm: seeding with 0 returns 1631467331 instead of 303379748, and an unseeded $random draws from its own RNG. IEEE 1800-2023 20.14.1 and Annex N define $random as rtl_dist_uniform(seed, LONG_MIN, LONG_MAX) so that implementations repeat the same values. A standalone probe prints the Annex N sequence in Icarus 13.0 and different values in Verilator. |
+| `sv_verilator_time_in_combinational_logic` | execute | verilator | 1 | Verilator 5.052 evaluates an always_comb that reads $time again when the clocking event of the suite testbench fires, although no variable it reads has changed: at 3 ns y is 3 instead of 0. IEEE 1800-2023 9.2.2.2.1 makes always_comb sensitive to the variables it reads, and $time (20.3.1) is none. A standalone probe prints y=0 in Icarus 13.0 and Verilator without a clocking block, and y=3 in Verilator with one. |
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -444,3 +445,11 @@ Verilator user coverage so pass actions execute; this adds no coverage-report
 contract to Celox. The readmem corroboration passes Icarus, which warns for
 both short and long files. Verilator 5.052 aborts on the negative-index memory
 in that reproducer; it is not counted as a successful comparison.
+
+### Icarus nested interfaces
+
+Icarus 13.0 reports `Module instantiations are not allowed in interfaces` for
+`interface::test_nested_interface_instance`, whose instantiated target is an
+interface. Verilator 5.052 executes the same emitted Veryl design successfully.
+The [retained diagnostic](verification/repros/interface_nested_icarus.json)
+records this compile limitation.

@@ -4,11 +4,13 @@ use super::*;
 
 #[test]
 fn unresolved_local_parameter_masks_imported_bindings() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module C #(parameter logic [7:0] W, parameter N = W[3:0]); endmodule",
         Path::new("required_local_parameter.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let imported = scope::ScopeSymbols {
         const_env: [("W".into(), 18)].into_iter().collect(),
         parameter_values: [("W".into(), Expr::Literal("8'd18".into()))]
@@ -16,9 +18,8 @@ fn unresolved_local_parameter_masks_imported_bindings() {
             .collect(),
         ..Default::default()
     };
-    let _scope = scope::install(Arc::new(imported.clone()));
-    let parameters = parameters_from_module_node(
-        module_node(&tree),
+    let _scope = scope::install(&tree.state, Arc::new(imported.clone()));
+    let parameters = parameters_from_scope(
         &tree,
         &HashMap::default(),
         &imported.const_env,
@@ -30,43 +31,38 @@ fn unresolved_local_parameter_masks_imported_bindings() {
         parameters[1].value().is_none(),
         "required W must not use an imported default"
     );
-    let values = parameter_value_env_with_imported(&parameters, &imported.const_env, &imported);
+    let values =
+        parameter_value_env_with_imported(state, &parameters, &imported.const_env, &imported);
     assert!(!values.contains_key("W"));
     let mut numeric = imported.const_env.clone();
-    extend_const_env_with_parameters(&mut numeric, &parameters);
+    extend_const_env_with_parameters(state, &mut numeric, &parameters);
     assert!(!numeric.contains_key("W"));
     let overrides = [("W".into(), ConstExpr::Literal("21".into()))]
         .into_iter()
         .collect();
-    let specialized = parameters_from_module_node(
-        module_node(&tree),
-        &tree,
-        &HashMap::default(),
-        &imported.const_env,
-        &overrides,
-    )
-    .unwrap();
-    let values = const_env_from_parameters(&specialized);
+    let specialized =
+        parameters_from_scope(&tree, &HashMap::default(), &imported.const_env, &overrides).unwrap();
+    let values = const_env_from_parameters(state, &specialized);
     assert_eq!(values["W"], 21);
     assert_eq!(values["N"], 5);
 }
 
 #[test]
 fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module C #(parameter logic FLAG, parameter N = FLAG && 1000000000'd0); endmodule",
         Path::new("required_short_circuit_flag.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let imported = scope::ScopeSymbols {
         parameter_values: [("FLAG".into(), Expr::Literal("1'b0".into()))]
             .into_iter()
             .collect(),
         ..Default::default()
     };
-    let _scope = scope::install(Arc::new(imported));
-    let error = parameters_from_module_node(
-        module_node(&tree),
+    let _scope = scope::install(&tree.state, Arc::new(imported));
+    let error = parameters_from_scope(
         &tree,
         &HashMap::default(),
         &HashMap::default(),
@@ -170,17 +166,6 @@ fn typed_constant_lookup_matches_full_tables_and_visits_only_referenced_names() 
     }
 }
 
-fn module_node(tree: &SyntaxTree) -> RefNode<'_> {
-    tree.into_iter()
-        .find(|node| {
-            matches!(
-                node,
-                RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-            )
-        })
-        .unwrap()
-}
-
 #[test]
 fn incremental_collection_binds_each_prefix_entry_once() {
     let mut code = String::from("module Top;\n");
@@ -193,10 +178,12 @@ fn incremental_collection_binds_each_prefix_entry_once() {
         writeln!(code, "localparam int P{i} = {value};").unwrap();
     }
     code.push_str("endmodule\n");
-    let tree = crate::syntax::parse_source(&code, Path::new("parameter_prefix.sv")).unwrap();
+    let tree =
+        crate::source_tree::parse_scope_fixture(&code, Path::new("parameter_prefix.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     PARAMETER_BINDINGS.with(|count| count.set(0));
-    let parameters = parameters_from_module_node(
-        module_node(&tree),
+    let parameters = parameters_from_scope(
         &tree,
         &HashMap::default(),
         &HashMap::default(),
@@ -205,10 +192,9 @@ fn incremental_collection_binds_each_prefix_entry_once() {
     .unwrap();
     assert_eq!(PARAMETER_BINDINGS.with(|count| count.get()), 128);
     assert_eq!(parameters.len(), 128);
-    assert_eq!(const_env_from_parameters(&parameters)["P127"], 128);
+    assert_eq!(const_env_from_parameters(state, &parameters)["P127"], 128);
     PARAMETER_BINDINGS.with(|count| count.set(0));
-    let enums = enum_member_constants_from_module_node(
-        module_node(&tree),
+    let enums = enum_member_constants_from_scope(
         &tree,
         &HashMap::default(),
         &HashMap::default(),
@@ -221,7 +207,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
 
 #[test]
 fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top;
             typedef logic signed [3:0] nibble_t;
@@ -239,7 +225,7 @@ fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
         Path::new("parameter_prefix_equivalence.sv"),
     )
     .unwrap();
-    let node = module_node(&tree);
+    let tree = AnalysisContext::unspecialized(&tree);
     let mut base =
         HashMap::from_iter([("N".into(), 99), ("MASK".into(), 255), ("LATER".into(), 9)]);
     insert_parameter_type_markers(
@@ -250,20 +236,20 @@ fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
             signed: false,
         },
     );
-    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &base).unwrap();
+    let aliases = type_aliases_from_scope_with_env(&tree, &base).unwrap();
     for n in [8, 3, 16, 8] {
         let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
-        let incremental =
-            parameters_from_module_node(node.clone(), &tree, &aliases, &base, &overrides).unwrap();
+        let incremental = parameters_from_scope(&tree, &aliases, &base, &overrides).unwrap();
         let mut rebuilt = Vec::new();
-        for declaration in scope_declarations(node.clone()) {
-            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
-                declaration
-            else {
+        for id in tree.body_membership().unwrap() {
+            if !matches!(
+                tree.declarations().body_item(id).kind,
+                celox_sv_syntax::BodyItemKind::Parameter(_)
+            ) {
                 continue;
-            };
-            parameters_from_ref_node(
-                RefNode::ParameterDeclaration(&parameter.0),
+            }
+            parameters_from_native(
+                &ownership::body(id, &tree).unwrap(),
                 &tree,
                 &mut rebuilt,
                 false,
@@ -337,39 +323,27 @@ fn collects_the_declarations_of_a_package() {
                 typedef enum logic [1:0] { IDLE, RUN = 2 } state_t;\n\
                 function automatic int twice(int x); return x * 2; endfunction\n\
                 endpackage\n";
-    let tree = crate::syntax::parse_source(code, Path::new("package.sv")).unwrap();
-    let package = tree
-        .into_iter()
-        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
-        .unwrap();
-    let parameters = parameters_from_module_node(
-        package.clone(),
+    let tree = crate::source_tree::parse_scope_fixture(code, Path::new("package.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
+    let parameters = parameters_from_scope(
         &tree,
         &HashMap::default(),
         &HashMap::default(),
         &HashMap::default(),
     )
     .unwrap();
-    let env = const_env_from_parameters(&parameters);
+    let env = const_env_from_parameters(state, &parameters);
     assert_eq!((env["W"], env["N"]), (4, 8));
-    let aliases = type_aliases_from_module_node_with_env(package.clone(), &tree, &env).unwrap();
+    let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
     assert_eq!(aliases["word_t"].packed_ranges().len(), 1);
-    let enums = enum_member_constants_from_module_node(
-        package.clone(),
-        &tree,
-        &env,
-        &aliases,
-        &HashMap::default(),
-    )
-    .unwrap();
+    let enums =
+        enum_member_constants_from_scope(&tree, &env, &aliases, &HashMap::default()).unwrap();
     assert_eq!((enums.numbers["IDLE"], enums.numbers["RUN"]), (0, 2));
-    let items = generate::items(package, &tree, &env, &aliases).unwrap();
+    let items = generate::items(&tree, &env, &aliases).unwrap();
     assert_eq!(items.len(), 5);
-    assert!(
-        items
-            .iter()
-            .all(|item| matches!(item.node, ScopeItem::Package(_)))
-    );
+    let membership = tree.body_membership().unwrap();
+    assert!(items.iter().all(|item| membership.contains(&item.id)));
 }
 
 #[test]
@@ -385,10 +359,12 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
             writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
         }
         code.push_str("endmodule");
-        let tree = crate::syntax::parse_source(&code, Path::new("ranged_prefix.sv")).unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(&code, Path::new("ranged_prefix.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let state = tree.state.as_ref();
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
-        let parameters = parameters_from_module_node(
-            module_node(&tree),
+        let parameters = parameters_from_scope(
             &tree,
             &HashMap::default(),
             &HashMap::default(),
@@ -403,7 +379,7 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
                 .all(|parameter| parameter.declared_width() == Some(32))
         );
         assert_eq!(
-            const_env_from_parameters(&parameters)[&format!("P{}", count - 1)],
+            const_env_from_parameters(state, &parameters)[&format!("P{}", count - 1)],
             count as i128
         );
     }
@@ -411,31 +387,33 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
 
 #[test]
 fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); parameter N=4; typedef logic signed [3:0] word_t; parameter word_t [N-1:0] A='1; parameter logic [N-1:0] B=A+1; parameter logic [N-1:0] C=LATER+1; parameter LATER=7; endmodule",
         Path::new("borrowed_ranges.sv"),
     ).unwrap();
-    let node = module_node(&tree);
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let base = HashMap::from_iter([("N".into(), 99), ("LATER".into(), 17)]);
     let copied_base = base.clone();
-    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &base).unwrap();
+    let aliases = type_aliases_from_scope_with_env(&tree, &base).unwrap();
     for n in [3, 8, 2, 3] {
         let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(&borrowed, &base);
+        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base);
         // The same contents at a different address deliberately select the
         // former copy-and-mask path, providing an independent width context.
-        let mut copied_env = ParameterEnvironment::new(&copied, &copied_base);
+        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
-        for declaration in scope_declarations(node.clone()) {
-            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
-                declaration
-            else {
+        for id in tree.body_membership().unwrap() {
+            if !matches!(
+                tree.declarations().body_item(id).kind,
+                celox_sv_syntax::BodyItemKind::Parameter(_)
+            ) {
                 continue;
-            };
-            parameters_from_ref_node_with_environment(
-                RefNode::ParameterDeclaration(&parameter.0),
+            }
+            parameters_from_native_with_environment(
+                &ownership::body(id, &tree).unwrap(),
                 &tree,
                 &mut borrowed,
                 false,
@@ -447,14 +425,15 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
             .unwrap();
         }
         assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
-        for declaration in scope_declarations(node.clone()) {
-            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) =
-                declaration
-            else {
+        for id in tree.body_membership().unwrap() {
+            if !matches!(
+                tree.declarations().body_item(id).kind,
+                celox_sv_syntax::BodyItemKind::Parameter(_)
+            ) {
                 continue;
-            };
-            parameters_from_ref_node_with_environment(
-                RefNode::ParameterDeclaration(&parameter.0),
+            }
+            parameters_from_native_with_environment(
+                &ownership::body(id, &tree).unwrap(),
                 &tree,
                 &mut copied,
                 false,
@@ -472,24 +451,20 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
 
 #[test]
 fn four_state_prefix_keeps_the_separate_range_projection() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); localparam logic [3:0] P='x; localparam logic [7:0] Q='1; endmodule",
         Path::new("four_state_ranges.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let base = HashMap::from_iter([("P".into(), 99)]);
     DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
-    let parameters = parameters_from_module_node(
-        module_node(&tree),
-        &tree,
-        &HashMap::default(),
-        &base,
-        &HashMap::default(),
-    )
-    .unwrap();
+    let parameters =
+        parameters_from_scope(&tree, &HashMap::default(), &base, &HashMap::default()).unwrap();
     assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 2);
     assert_eq!(parameters[1].declared_width(), Some(8));
-    assert_eq!(const_env_from_parameters(&parameters)["Q"], 255);
+    assert_eq!(const_env_from_parameters(state, &parameters)["Q"], 255);
 }
 
 #[test]
@@ -505,13 +480,22 @@ fn four_state_parameter_chains_do_not_copy_growing_environments() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("endmodule");
-        let tree =
-            crate::syntax::parse_source(&code, Path::new("four_state_prefix_scaling.sv")).unwrap();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &code,
+            Path::new("four_state_prefix_scaling.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let state = tree.state.as_ref();
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
         LITERAL_ENV_COPIES.with(|copies| copies.set(0));
         let source = Source::from_syntax(&tree).unwrap();
         let parameters = source.modules()[0].parameters();
-        let values = parameter_value_env(parameters, &const_env_from_parameters(parameters));
+        let values = parameter_value_env(
+            state,
+            parameters,
+            &const_env_from_parameters(state, parameters),
+        );
         assert_eq!(values.len(), count);
         for parameter in parameters {
             assert_eq!(parameter.declared_width(), Some(32));
@@ -537,10 +521,12 @@ fn four_state_parameter_chains_do_not_copy_growing_environments() {
 
 #[test]
 fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_shadows() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); parameter logic [3:0] P='x; parameter logic [P:0] Q='0; parameter logic [129:0] W='z; parameter logic [7:0] R='1; endmodule",
         Path::new("literal_prefix_projection.sv"),
     ).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     for inherited_p in [None, Some(2)] {
         let base = inherited_p
             .map(|value| HashMap::from_iter([("P".into(), value)]))
@@ -548,16 +534,17 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
         let copied_base = base.clone();
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(&borrowed, &base);
-        let mut copied_env = ParameterEnvironment::new(&copied, &copied_base);
-        for declaration in scope_declarations(module_node(&tree)) {
-            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) =
-                declaration
-            else {
+        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base);
+        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
+        for id in tree.body_membership().unwrap() {
+            if !matches!(
+                tree.declarations().body_item(id).kind,
+                celox_sv_syntax::BodyItemKind::Parameter(_)
+            ) {
                 continue;
-            };
-            parameters_from_ref_node_with_environment(
-                RefNode::ParameterDeclaration(&declaration.0),
+            }
+            parameters_from_native_with_environment(
+                &ownership::body(id, &tree).unwrap(),
                 &tree,
                 &mut borrowed,
                 false,
@@ -567,8 +554,8 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut borrowed_env,
             )
             .unwrap();
-            parameters_from_ref_node_with_environment(
-                RefNode::ParameterDeclaration(&declaration.0),
+            parameters_from_native_with_environment(
+                &ownership::body(id, &tree).unwrap(),
                 &tree,
                 &mut copied,
                 false,
@@ -578,7 +565,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut copied_env,
             )
             .unwrap();
-            let rebuilt = ParameterEnvironment::new(&borrowed, &base);
+            let rebuilt = ParameterEnvironment::new(state, &borrowed, &base);
             assert_eq!(
                 borrowed_env.has_inherited_literal_shadow,
                 rebuilt.has_inherited_literal_shadow
@@ -600,6 +587,7 @@ fn copied_resolved_literal(
     types: &HashMap<String, ExprType>,
     literals: &HashMap<String, Expr>,
 ) -> Option<Expr> {
+    let state = &crate::ast::AnalysisState::default();
     let mut evaluation_constants = constants.clone();
     evaluation_constants.remove(parameter.name());
     let mut substituted = parameter.clone();
@@ -611,15 +599,20 @@ fn copied_resolved_literal(
         substituted.declared_width = Some(ty.width);
         substituted.declared_signed = Some(ty.signed);
     }
-    let value = parameter_value_env(std::slice::from_ref(&substituted), &evaluation_constants)
-        .remove(parameter.name())?;
+    let value = parameter_value_env(
+        state,
+        std::slice::from_ref(&substituted),
+        &evaluation_constants,
+    )
+    .remove(parameter.name())?;
     let value = substitute_expr_idents(value, literals);
-    let value = fold_const_integral_expr_preserving_mask(value, &evaluation_constants);
+    let value = fold_const_integral_expr_preserving_mask(state, value, &evaluation_constants);
     matches!(value, Expr::Literal(_)).then_some(value)
 }
 
 #[test]
 fn borrowed_literal_environment_matches_self_masked_copy_with_types_and_unknowns() {
+    let state = &crate::ast::AnalysisState::default();
     let mut constants =
         HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
@@ -678,7 +671,7 @@ fn borrowed_literal_environment_matches_self_masked_copy_with_types_and_unknowns
                     false,
                 );
                 LITERAL_ENV_COPIES.with(|copies| copies.set(0));
-                let borrowed = parameter.resolved_literal(&env, &types, &literals);
+                let borrowed = parameter.resolved_literal(state, &env, &types, &literals);
                 assert_eq!(
                     LITERAL_ENV_COPIES.with(|copies| copies.get()),
                     usize::from(stale_self.is_some())
@@ -706,9 +699,12 @@ fn reverse_generate_literal_chains_borrow_width_and_initializer_environments() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("logic [$bits(P0)-1:0] s; assign s=P0; end endmodule");
-        let tree =
-            crate::syntax::parse_source(&code, Path::new("generate_literal_prefix_scaling.sv"))
-                .unwrap();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &code,
+            Path::new("generate_literal_prefix_scaling.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
         LITERAL_ENV_COPIES.with(|copies| copies.set(0));
         let source = Source::from_syntax(&tree).unwrap();
@@ -733,14 +729,17 @@ fn separately_resolved_value_and_literal(
     types: &HashMap<String, ExprType>,
     literals: &HashMap<String, Expr>,
 ) -> (Option<i128>, Option<Expr>) {
+    let state = &crate::ast::AnalysisState::default();
     // The former two-stage caller: numeric fallback discards its literal,
     // then a nonnumeric result requires literal resolution again.
-    let value = parameter.resolved_value(constants, types).or_else(|| {
-        let literal = parameter.resolved_literal(constants, types, literals)?;
-        eval_ast_const_expr(&expr_to_const(literal)?, constants)
-    });
+    let value = parameter
+        .resolved_value(state, constants, types)
+        .or_else(|| {
+            let literal = parameter.resolved_literal(state, constants, types, literals)?;
+            eval_ast_const_expr(state, &expr_to_const(state, literal)?, constants)
+        });
     let literal = if value.is_none() {
-        parameter.resolved_literal(constants, types, literals)
+        parameter.resolved_literal(state, constants, types, literals)
     } else {
         None
     };
@@ -749,6 +748,7 @@ fn separately_resolved_value_and_literal(
 
 #[test]
 fn retained_parameter_literals_match_separate_resolution_across_types_and_dependencies() {
+    let state = &crate::ast::AnalysisState::default();
     let mut constants =
         HashMap::from_iter([("A".into(), -2), (unbounded_parameter_marker("U"), 1)]);
     insert_parameter_type_markers(
@@ -809,7 +809,7 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
                     false,
                 );
                 LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
-                let retained = parameter.resolved_value_and_literal(&env, &types, &literals);
+                let retained = parameter.resolved_value_and_literal(state, &env, &types, &literals);
                 assert!(LITERAL_RESOLUTIONS.with(|calls| calls.get()) <= 1);
                 assert!(!(retained.0.is_some() && retained.1.is_some()));
                 assert_eq!(
@@ -831,7 +831,7 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
     );
     LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
     assert_eq!(
-        numeric.resolved_value_and_literal(&constants, &types, &literals),
+        numeric.resolved_value_and_literal(state, &constants, &types, &literals),
         (Some(7), None)
     );
     assert_eq!(LITERAL_RESOLUTIONS.with(|calls| calls.get()), 0);
@@ -846,7 +846,7 @@ fn retained_parameter_literals_match_separate_resolution_across_types_and_depend
     );
     LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
     assert_eq!(
-        two_state.resolved_value_and_literal(&constants, &types, &literals),
+        two_state.resolved_value_and_literal(state, &constants, &types, &literals),
         (Some(-125), None)
     );
     assert_eq!(LITERAL_RESOLUTIONS.with(|calls| calls.get()), 1);
@@ -865,8 +865,12 @@ fn module_parameter_bindings_and_ir_resolve_each_unknown_literal_once() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("endmodule");
-        let tree = crate::syntax::parse_source(&code, Path::new("single_parameter_resolution.sv"))
-            .unwrap();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &code,
+            Path::new("single_parameter_resolution.sv"),
+        )
+        .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
         PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
         let source = Source::from_syntax(&tree).unwrap();
@@ -888,6 +892,7 @@ fn module_parameter_bindings_and_ir_resolve_each_unknown_literal_once() {
 
 #[test]
 fn generate_bindings_keep_numeric_literals_and_unresolved_fallback_order() {
+    let state = &crate::ast::AnalysisState::default();
     for (initializer, two_state, expected_value) in
         [("X", false, 91), ("X", true, -125), ("missing", false, 91)]
     {
@@ -905,6 +910,7 @@ fn generate_bindings_keep_numeric_literals_and_unresolved_fallback_order() {
         );
         LITERAL_RESOLUTIONS.with(|calls| calls.set(0));
         constants::bind_generate_parameter_with_types(
+            state,
             parameter,
             &mut env,
             &mut literals,
@@ -941,6 +947,7 @@ fn compare_retained_and_repeated_parameter_resolution() {
     use std::time::Instant;
 
     fn replay(parameters: &[Parameter], repeated: bool) {
+        let state = &crate::ast::AnalysisState::default();
         let mut env = HashMap::default();
         let mut types = HashMap::default();
         let mut literals = HashMap::default();
@@ -948,7 +955,7 @@ fn compare_retained_and_repeated_parameter_resolution() {
             let (value, literal) = if repeated {
                 separately_resolved_value_and_literal(parameter, &env, &types, &literals)
             } else {
-                parameter.resolved_value_and_literal(&env, &types, &literals)
+                parameter.resolved_value_and_literal(state, &env, &types, &literals)
             };
             assert!(value.is_none());
             let ty = parameter.resolved_type(&types).unwrap();
@@ -1014,6 +1021,7 @@ fn compare_retained_and_repeated_parameter_resolution() {
 
 #[test]
 fn referenced_value_projection_matches_full_environment() {
+    let state = &crate::ast::AnalysisState::default();
     let p = |name: &str, value: ConstExpr, width: Option<usize>, two_state: bool| {
         Parameter::new(
             name.into(),
@@ -1103,10 +1111,10 @@ fn referenced_value_projection_matches_full_environment() {
         HashMap::default(),
         HashMap::from_iter([("B".into(), -3), ("typed_known".into(), -1)]),
     ] {
-        let full = parameter_value_env(&parameters, &env);
+        let full = parameter_value_env(state, &parameters, &env);
         for parameter in &parameters {
             let wanted = HashSet::from_iter([parameter.name().to_string()]);
-            let projected = parameter_value_env_for_references(&parameters, &env, &wanted);
+            let projected = parameter_value_env_for_references(state, &parameters, &env, &wanted);
             assert_eq!(
                 projected.get(parameter.name()),
                 full.get(parameter.name()),
@@ -1120,6 +1128,7 @@ fn referenced_value_projection_matches_full_environment() {
         PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(0));
         assert!(
             parameter_value_env_for_references(
+                state,
                 &parameters,
                 &env,
                 &HashSet::from_iter(["not_a_parameter".into()])
@@ -1132,6 +1141,7 @@ fn referenced_value_projection_matches_full_environment() {
 
 #[test]
 fn numeric_projection_does_not_expand_initializer_dependencies() {
+    let state = &crate::ast::AnalysisState::default();
     let parameters = vec![
         Parameter::new(
             "A".into(),
@@ -1154,11 +1164,18 @@ fn numeric_projection_does_not_expand_initializer_dependencies() {
     ];
     let env = HashMap::from_iter([("B".into(), 3)]);
     PARAMETER_VALUE_MATERIALIZATIONS.with(|count| count.set(0));
-    let projected =
-        parameter_value_env_for_references(&parameters, &env, &HashSet::from_iter(["B".into()]));
+    let projected = parameter_value_env_for_references(
+        state,
+        &parameters,
+        &env,
+        &HashSet::from_iter(["B".into()]),
+    );
     PARAMETER_VALUE_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
     assert_eq!(projected.len(), 1);
-    assert_eq!(projected["B"], parameter_value_env(&parameters, &env)["B"]);
+    assert_eq!(
+        projected["B"],
+        parameter_value_env(state, &parameters, &env)["B"]
+    );
 }
 
 #[test]
@@ -1168,6 +1185,7 @@ fn compare_full_and_referenced_parameter_values() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
+            let state = &crate::ast::AnalysisState::default();
             use std::{hint::black_box, time::Instant};
             println!("parameters,full_ms,referenced_ms,full_values,referenced_values");
             for count in [32, 128, 512] {
@@ -1194,13 +1212,14 @@ fn compare_full_and_referenced_parameter_values() {
                     .collect();
                 let env = HashMap::default();
                 let references = HashSet::from_iter(["P0".into()]);
-                let expected = parameter_value_env(&parameters[..1], &env)["P0"].clone();
+                let expected = parameter_value_env(state, &parameters[..1], &env)["P0"].clone();
                 let run = |full: bool| {
                     let start = Instant::now();
                     let values = if full {
-                        parameter_value_env(black_box(&parameters), &env)
+                        parameter_value_env(state, black_box(&parameters), &env)
                     } else {
                         parameter_value_env_for_references(
+                            state,
                             black_box(&parameters),
                             &env,
                             &references,
@@ -1234,6 +1253,7 @@ fn compare_full_and_referenced_parameter_values() {
 
 #[test]
 fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
+    let state = &crate::ast::AnalysisState::default();
     let mut env = HashMap::default();
     let mut types = HashMap::default();
     let mut literals = HashMap::default();
@@ -1248,6 +1268,7 @@ fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
             false,
         );
         assert!(bind_parameter(
+            state,
             &mut env,
             &mut types,
             &mut literals,
@@ -1264,6 +1285,7 @@ fn unbounded_binding_keeps_declared_rank_without_a_numeric_value() {
 
 #[test]
 fn unbounded_generate_binding_clears_inherited_numeric_values() {
+    let state = &crate::ast::AnalysisState::default();
     let parameter = Parameter::new(
         "P".into(),
         Some(ConstExpr::Literal("$".into())),
@@ -1280,7 +1302,7 @@ fn unbounded_generate_binding_clears_inherited_numeric_values() {
         (unbounded_parameter_marker("P"), 0),
     ]);
     let mut literals = HashMap::default();
-    bind_generate_parameter(parameter, &mut env, &mut literals);
+    bind_generate_parameter(state, parameter, &mut env, &mut literals);
     assert_eq!(env.get(&unbounded_parameter_marker("P")), Some(&1));
     for key in [
         "P".to_string(),
@@ -1294,6 +1316,7 @@ fn unbounded_generate_binding_clears_inherited_numeric_values() {
 
 #[test]
 fn unbounded_projection_keeps_requested_aliases_and_omits_unused_dollars() {
+    let state = &crate::ast::AnalysisState::default();
     let parameters = vec![
         Parameter::new(
             "U".into(),
@@ -1327,9 +1350,10 @@ fn unbounded_projection_keeps_requested_aliases_and_omits_unused_dollars() {
         HashMap::default(),
         HashMap::from_iter([(unbounded_parameter_marker("U"), 1), ("U".into(), 99)]),
     ] {
-        let full = parameter_value_env(&parameters, &env);
+        let full = parameter_value_env(state, &parameters, &env);
         for name in ["U", "ALIAS", "NUMBER"] {
             let projected = parameter_value_env_for_references(
+                state,
                 &parameters,
                 &env,
                 &HashSet::from_iter([name.into()]),

@@ -2,8 +2,9 @@
 
 use crate::{ast, symbol::ModuleId, typecheck};
 
+pub use crate::ast::warnings::AnalyzerWarning;
 pub use crate::procedural::{
-    CaseKind, CaseLabel, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
@@ -12,6 +13,7 @@ pub use crate::system_functions::{
 /// A procedural statement of the analyzed IR.
 pub type Stmt = StmtBase<Expr, LValue>;
 pub type CaseItem = crate::procedural::CaseItemBase<Expr, LValue>;
+pub type EventItem = crate::procedural::EventItemBase<Expr>;
 pub type LocalVariable = crate::procedural::LocalVariableBase<Type>;
 pub type Subroutine = crate::procedural::SubroutineBase<Expr, LValue, Type>;
 pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;
@@ -19,15 +21,35 @@ pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ir {
     modules: Vec<Module>,
+    warnings: Vec<AnalyzerWarning>,
 }
 
 impl Ir {
     pub(crate) fn new(modules: Vec<Module>) -> Self {
-        Self { modules }
+        Self {
+            modules,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Merge warnings from nested analyses, reporting each source call once.
+    pub(crate) fn with_warnings(mut self, warnings: Vec<AnalyzerWarning>) -> Self {
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self
     }
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    /// Source diagnostics of the analyzed declarations, including functions
+    /// whose bodies disappear during constant elaboration.
+    pub fn warnings(&self) -> &[AnalyzerWarning] {
+        &self.warnings
     }
 }
 
@@ -417,28 +439,28 @@ impl Instance {
 pub struct ParameterOverride {
     name: String,
     value: Option<ConstExpr>,
-    type_text: Option<String>,
-    pattern_text: Option<String>,
+    bound_type: Option<crate::ast::Type>,
+    bound_pattern: Option<crate::ast::BoundPattern>,
 }
 
 impl ParameterOverride {
     pub(crate) fn new(
         name: String,
         value: Option<ConstExpr>,
-        type_text: Option<String>,
-        pattern_text: Option<String>,
+        bound_type: Option<crate::ast::Type>,
+        bound_pattern: Option<crate::ast::BoundPattern>,
     ) -> Self {
         Self {
             name,
             value,
-            type_text,
-            pattern_text,
+            bound_type,
+            bound_pattern,
         }
     }
 
     /// A constant assignment pattern, evaluated in the caller scope.
-    pub fn pattern_text(&self) -> Option<&str> {
-        self.pattern_text.as_deref()
+    pub fn bound_pattern(&self) -> Option<&crate::ast::BoundPattern> {
+        self.bound_pattern.as_ref()
     }
 
     pub fn name(&self) -> &str {
@@ -449,9 +471,9 @@ impl ParameterOverride {
         self.value.as_ref()
     }
 
-    /// The source text of the data type bound to a `parameter type`.
-    pub fn type_text(&self) -> Option<&str> {
-        self.type_text.as_deref()
+    /// The data type resolved in the instantiating scope.
+    pub fn bound_type(&self) -> Option<&crate::ast::Type> {
+        self.bound_type.as_ref()
     }
 }
 
@@ -535,14 +557,37 @@ impl Type {
         self.resolved_width
     }
 
-    pub(crate) fn has_symbolic_ranges(&self) -> bool {
-        let constants = fxhash::FxHashMap::default();
+    /// Preserve resolved layout while rebinding names in declaration contracts.
+    pub(crate) fn map_range_expressions(
+        mut self,
+        mut map: impl FnMut(ConstExpr) -> ConstExpr,
+    ) -> Self {
+        for range in &mut self.packed_ranges {
+            range.left = map(range.left.clone());
+            range.right = map(range.right.clone());
+        }
+        for range in &mut self.unpacked_ranges {
+            range.left = map(range.left.clone());
+            range.right = map(range.right.clone());
+        }
+        self
+    }
+
+    pub(crate) fn has_symbolic_ranges(
+        &self,
+        functions: &crate::ast::const_functions::State,
+    ) -> bool {
+        let values = fxhash::FxHashMap::default();
+        let constants = crate::ast::const_functions::Environment {
+            constants: &values,
+            functions,
+        };
         self.packed_ranges.iter().any(|range| {
-            typecheck::eval_const_expr(range.left(), &constants).is_none()
-                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+            typecheck::eval_const_expr_in_env(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr_in_env(range.right(), &constants).is_none()
         }) || self.unpacked_ranges.iter().any(|range| {
-            typecheck::eval_const_expr(range.left(), &constants).is_none()
-                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+            typecheck::eval_const_expr_in_env(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr_in_env(range.right(), &constants).is_none()
         })
     }
 }
@@ -556,7 +601,10 @@ pub enum TypeKind {
 }
 
 impl Type {
-    pub(crate) fn from_ast(r#type: ast::Type, constants: &fxhash::FxHashMap<String, i128>) -> Self {
+    pub(crate) fn from_ast(
+        r#type: ast::Type,
+        constants: &dyn typecheck::ConstantEnvironment,
+    ) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
@@ -572,7 +620,7 @@ impl Type {
 
 fn convert_type(
     r#type: ast::Type,
-    constants: &fxhash::FxHashMap<String, i128>,
+    constants: &dyn typecheck::ConstantEnvironment,
 ) -> (Vec<PackedRange>, Vec<UnpackedRange>, Option<usize>) {
     let packed_ranges: Vec<_> = r#type
         .packed_ranges()
@@ -584,10 +632,10 @@ fn convert_type(
         .iter()
         .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
         .collect();
-    let packed_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
+    let packed_width = typecheck::resolve_packed_width_in_env(&packed_ranges, constants);
     let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
-        let left = typecheck::eval_const_expr(range.left(), constants)?;
-        let right = typecheck::eval_const_expr(range.right(), constants)?;
+        let left = typecheck::eval_const_expr_in_env(range.left(), constants)?;
+        let right = typecheck::eval_const_expr_in_env(range.right(), constants)?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     });
@@ -877,6 +925,8 @@ pub struct InitialProcess {
     body: Vec<Stmt>,
     initializer: bool,
     synthetic: bool,
+    /// An `always` process: its body runs forever.
+    repeats: bool,
 }
 
 impl InitialProcess {
@@ -892,6 +942,7 @@ impl InitialProcess {
             body,
             initializer,
             synthetic: false,
+            repeats: false,
         }
     }
 
@@ -904,6 +955,12 @@ impl InitialProcess {
     /// run before every `initial` and `always` procedure.
     pub fn is_initializer(&self) -> bool {
         self.initializer
+    }
+
+    /// Whether this is an `always` process, which runs its body forever and
+    /// never finishes on its own.
+    pub fn repeats(&self) -> bool {
+        self.repeats
     }
 
     /// The condition of the enclosing conditional generate block, if any.
@@ -1025,6 +1082,18 @@ impl From<ast::InsideItem> for InsideItem {
         match item {
             ast::InsideItem::Value(value) => InsideItem::Value(value.into()),
             ast::InsideItem::Range { low, high } => InsideItem::Range {
+                low: low.into(),
+                high: high.into(),
+            },
+        }
+    }
+}
+
+impl From<InsideItem> for ast::InsideItem {
+    fn from(item: InsideItem) -> Self {
+        match item {
+            InsideItem::Value(value) => ast::InsideItem::Value(value.into()),
+            InsideItem::Range { low, high } => ast::InsideItem::Range {
                 low: low.into(),
                 high: high.into(),
             },
@@ -1244,6 +1313,7 @@ impl From<ast::InitialProcess> for InitialProcess {
         );
         result.creation_order = process.creation_order();
         result.synthetic = process.is_synthetic();
+        result.repeats = process.repeats();
         result
     }
 }
@@ -1321,6 +1391,71 @@ impl From<ast::Expr> for Expr {
                 args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
             },
             ast::Expr::Inside { expr, items } => Expr::Inside {
+                expr: Box::new((*expr).into()),
+                items: items.into_iter().map(Into::into).collect(),
+            },
+        }
+    }
+}
+
+impl From<Expr> for ast::Expr {
+    fn from(expr: Expr) -> Self {
+        match expr {
+            Expr::Ident(name) => ast::Expr::Ident(name),
+            Expr::Literal(value) => ast::Expr::Literal(value),
+            Expr::Select {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ast::Expr::Select {
+                expr: Box::new((*expr).into()),
+                msb: msb.into(),
+                lsb: lsb.into(),
+                signed,
+            },
+            Expr::Concat(parts) => ast::Expr::Concat(parts.into_iter().map(Into::into).collect()),
+            Expr::RepeatConcat { count, parts } => ast::Expr::RepeatConcat {
+                count: count.into(),
+                parts: parts.into_iter().map(Into::into).collect(),
+            },
+            Expr::Resize {
+                expr,
+                width,
+                signed,
+            } => ast::Expr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
+            },
+            Expr::Unary { op, expr } => ast::Expr::Unary {
+                op: op.into(),
+                expr: Box::new((*expr).into()),
+            },
+            Expr::Binary { left, op, right } => ast::Expr::Binary {
+                left: Box::new((*left).into()),
+                op: op.into(),
+                right: Box::new((*right).into()),
+            },
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ast::Expr::Mux {
+                condition: Box::new((*condition).into()),
+                then_expr: Box::new((*then_expr).into()),
+                else_expr: Box::new((*else_expr).into()),
+            },
+            Expr::Call {
+                callee,
+                args,
+                arg_order,
+            } => ast::Expr::Call {
+                arg_order: arg_order.clone(),
+                callee,
+                args: args.into_iter().map(|arg| arg.map(Into::into)).collect(),
+            },
+            Expr::Inside { expr, items } => ast::Expr::Inside {
                 expr: Box::new((*expr).into()),
                 items: items.into_iter().map(Into::into).collect(),
             },

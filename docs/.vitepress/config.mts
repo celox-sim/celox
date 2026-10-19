@@ -46,6 +46,12 @@ export default defineConfig({
                 {
                   text: "SystemVerilog サポート",
                   link: "/ja/guide/systemverilog",
+                  items: [
+                    {
+                      text: "SystemVerilog リファレンス",
+                      link: "/ja/guide/systemverilog-reference",
+                    },
+                  ],
                 },
                 {
                   text: "外部フロントエンド",
@@ -162,6 +168,12 @@ export default defineConfig({
             {
               text: "SystemVerilog Support",
               link: "/guide/systemverilog",
+              items: [
+                {
+                  text: "SystemVerilog Reference",
+                  link: "/guide/systemverilog-reference",
+                },
+              ],
             },
             {
               text: "External Frontends",

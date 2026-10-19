@@ -15,7 +15,7 @@ sv_backends! {
     fn reserves_authored_interface_names_for_generated_modules(sim) {
         @setup {
             let veryl = "module Child #(param K: u32 = 1)(a: input logic<8>, y: output logic<8>) { inst bus: $sv::Bus; assign bus.req = a; assign y = bus.rsp + K; }";
-            let sv = "interface __celox_sv_interface_0; logic x; endinterface interface __celox_foreign_Child_0; logic x; endinterface interface Bus; logic [7:0] req, rsp; assign rsp = req + 1; endinterface module Top(input logic [7:0] a, output logic [7:0] y); Child #(.K(3)) child(a,y); endmodule";
+            let sv = "interface __celox_sv_interface_0; logic x; endinterface interface __celox_foreign_Child_0; logic x; endinterface interface Bus; logic [7:0] req, rsp; assign rsp = req + 1; endinterface module Top(input logic [7:0] a, output logic [7:0] y); prj_Child #(.K(3)) child(a,y); endmodule";
         }
         @build Simulator::from_mixed_sources(vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top");
         let a = sim.signal("a");
@@ -46,10 +46,36 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 5u8.into());
     }
 
+    fn reports_sv_warnings_of_a_veryl_top(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let veryl = "module Top(y: output logic<8>) { inst child: $sv::Child(y); }";
+            let sv = format!(r#"
+                module Child(output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{}", mem);
+                    assign y = mem[0];
+                endmodule
+            "#, file.display());
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(&sv, Path::new("child.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+        let warnings: Vec<_> = sim.warnings().iter().map(ToString::to_string).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let celox::CompilationWarning::SystemVerilog(warning) = &sim.warnings()[0] else {
+            panic!("{warnings:?}");
+        };
+        assert!(matches!(warning.kind, celox::SvFrontendWarningKind::MemoryFileWordCount { .. }));
+        let location = warning.location.as_ref().unwrap();
+        assert_eq!((location.path.as_str(), location.line), ("child.sv", 4));
+    }
+
     fn resolves_veryl_interface_parameter_types_after_prior_overrides(sim) {
         @setup {
             let veryl = "interface Bus #(param W: u32 = 8, param V: logic<W> = 4) { var req: logic<V>; var rsp: logic<V>; modport slave { req: input, rsp: output, } } module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req; }";
-            let sv = "module Top(input logic [259:0] a, output logic [259:0] y); Bus #(.V(16'd260), .W(16)) bus(); assign bus.req = a; Child child(.bus(bus)); assign y = bus.rsp; endmodule";
+            let sv = "module Top(input logic [259:0] a, output logic [259:0] y); prj_Bus #(.V(16'd260), .W(16)) bus(); assign bus.req = a; prj_Child child(.bus(bus)); assign y = bus.rsp; endmodule";
         }
         @build Simulator::from_mixed_sources(vec![(veryl, Path::new("bus.veryl"))], vec![(sv, Path::new("top.sv"))], "Top");
         let a = sim.signal("a");
@@ -81,7 +107,7 @@ sv_backends! {
                 }
                 module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req + 1; }
             "#;
-            let sv = "module Top(input logic [31:0] a, output logic [31:0] y); Bus #(.W(16)) bus(); assign bus.req = a; Child child(.bus(bus)); assign y = bus.rsp; endmodule";
+            let sv = "module Top(input logic [31:0] a, output logic [31:0] y); prj_Bus #(.W(16)) bus(); assign bus.req = a; prj_Child child(.bus(bus)); assign y = bus.rsp; endmodule";
         }
         @build Simulator::from_mixed_sources(
             vec![(veryl, Path::new("bus.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
@@ -108,7 +134,7 @@ sv_backends! {
             let sv = r#"
                 module Top(output logic [255:0] y, negative);
                     localparam logic [127:0] HIGH = 128'h8000_0000_0000_0000_0000_0000_0000_0001;
-                    Child #(.K(HIGH), .S(-128'sd1)) child(.y(y), .negative(negative));
+                    prj_Child #(.K(HIGH), .S(-128'sd1)) child(.y(y), .negative(negative));
                 endmodule
             "#;
         }
@@ -183,7 +209,7 @@ sv_backends! {
             let sv = r#"
                 module Top(input logic [7:0] a, output logic [7:0] y);
                     timeunit 1ns; timeprecision 1ps;
-                    Child child(.a(a), .y(y));
+                    prj_Child child(.a(a), .y(y));
                 endmodule
             "#;
         }
@@ -266,7 +292,7 @@ sv_backends! {
                     assign y = a + 42;
                 endmodule
                 module Top(input logic [7:0] a, output logic [7:0] specialized, authored);
-                    Child #(.K(5)) child(.a(a), .y(specialized));
+                    prj_Child #(.K(5)) child(.a(a), .y(specialized));
                     __celox_foreign_Child_0 other(.a(a), .y(authored));
                 endmodule
             "#;
@@ -302,8 +328,8 @@ sv_backends! {
                     assign y = a + W;
                 endmodule
                 module Top(input logic [15:0] a, output logic [15:0] y, output logic [7:0] narrow);
-                    Mid #(.W(16)) wide(.a(a), .y(y));
-                    Mid normal(.a(a[7:0]), .y(narrow));
+                    prj_Mid #(.W(16)) wide(.a(a), .y(y));
+                    prj_Mid normal(.a(a[7:0]), .y(narrow));
                 endmodule
             "#;
         }
@@ -325,8 +351,8 @@ sv_backends! {
                     assign rsp = req + W;
                 endinterface
                 module Top(input logic [15:0] a, output logic [15:0] y, output logic [7:0] narrow);
-                    Mid #(.W(16)) wide(.a(a), .y(y));
-                    Mid normal(.a(a[7:0]), .y(narrow));
+                    prj_Mid #(.W(16)) wide(.a(a), .y(y));
+                    prj_Mid normal(.a(a[7:0]), .y(narrow));
                 endmodule
             "#;
         }
@@ -356,8 +382,8 @@ sv_backends! {
             let sv = r#"
                 module Leaf(interface bus); assign bus.rsp = bus.req + bus.W; endmodule
                 module Top(input logic [15:0] a, output logic [15:0] y, output logic [7:0] narrow);
-                    Mid #(.W(16)) wide(.a(a), .y(y));
-                    Mid normal(.a(a[7:0]), .y(narrow));
+                    prj_Mid #(.W(16)) wide(.a(a), .y(y));
+                    prj_Mid normal(.a(a[7:0]), .y(narrow));
                 endmodule
             "#;
         }
@@ -382,14 +408,14 @@ sv_backends! {
             "#;
             let sv = r#"
                 module Hop #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y);
-                    Final #(.W(W)) child(.a(a), .y(y));
+                    prj_Final #(.W(W)) child(.a(a), .y(y));
                 endmodule
                 module Leaf #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y);
                     assign y = a + W;
                 endmodule
                 module Top(input logic [31:0] a, output logic [31:0] y, output logic [15:0] narrow);
-                    Mid #(.W(32)) wide(.a(a), .y(y));
-                    Mid #(.W(16)) other(.a(a[15:0]), .y(narrow));
+                    prj_Mid #(.W(32)) wide(.a(a), .y(y));
+                    prj_Mid #(.W(16)) other(.a(a[15:0]), .y(narrow));
                 endmodule
             "#;
         }
@@ -438,7 +464,7 @@ sv_backends! {
     "#;
     let sv = r#"
         module Top(output logic [127:0] negative, output logic [95:0] positive);
-            Child #(.NEG(-128'sd1), .HIGH(96'h1_0000_0000_0000_0001)) child(.negative(negative), .positive(positive));
+            prj_Child #(.NEG(-128'sd1), .HIGH(96'h1_0000_0000_0000_0001)) child(.negative(negative), .positive(positive));
         endmodule
     "#;
         }
@@ -495,7 +521,7 @@ sv_backends! {
         module Child #(param W: u32 = 8, param N: u32 = W * 2, param C: u32 = Defaults::increment())
             (a: input logic<N>, y: output logic<N>) { assign y = a + C; }
     "#;
-    let sv = "module Top(input logic [31:0] a, output logic [31:0] y); Child #(.W(16)) child(.a(a), .y(y)); endmodule";
+    let sv = "module Top(input logic [31:0] a, output logic [31:0] y); prj_Child #(.W(16)) child(.a(a), .y(y)); endmodule";
         }
         @build Simulator::from_mixed_sources(
             vec![(veryl, Path::new("child.veryl"))], vec![(sv, Path::new("top.sv"))], "Top",
@@ -516,9 +542,9 @@ sv_backends! {
     "#;
     let sv = r#"
         module Top(input logic [31:0] a, output logic [31:0] y);
-            Bus #(.W(16)) bus();
+            prj_Bus #(.W(16)) bus();
             assign bus.req = a;
-            Child child(.bus(bus));
+            prj_Child child(.bus(bus));
             assign y = bus.rsp;
         endmodule
     "#;
@@ -573,7 +599,7 @@ sv_backends! {
     fn overrides_parameters_of_a_systemverilog_top_in_a_mixed_design(sim) {
         @setup {
     let veryl = "module Child (a: input logic<16>, y: output logic<16>) { assign y = a + 1; }";
-    let sv = "module Top #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y); Child child(.a(a), .y(y)); endmodule";
+    let sv = "module Top #(parameter W = 8)(input logic [W-1:0] a, output logic [W-1:0] y); prj_Child child(.a(a), .y(y)); endmodule";
         }
         @build Simulator::from_mixed_sources(
             vec![(veryl, Path::new("child.veryl"))],
@@ -668,7 +694,7 @@ sv_backends! {
     "#;
     let sv = r#"
         module Top(input logic [15:0] a, output logic [15:0] y);
-            Child #(.W(16)) child(.a(a), .y(y));
+            prj_Child #(.W(16)) child(.a(a), .y(y));
         endmodule
     "#;
         }
@@ -696,7 +722,7 @@ sv_backends! {
         module Top(input logic [15:0] a, output logic [15:0] y);
             Bus #(.W(16)) bus();
             assign bus.req = a;
-            Child child(.bus(bus));
+            prj_Child child(.bus(bus));
             assign y = bus.rsp;
         endmodule
     "#;
@@ -777,9 +803,9 @@ sv_backends! {
     "#;
     let sv = r#"
         module Top(input logic [7:0] a, output logic [7:0] y);
-            Bus bus();
+            prj_Bus bus();
             assign bus.req = a;
-            Child child(.bus(bus));
+            prj_Child child(.bus(bus));
             assign y = bus.rsp;
         endmodule
     "#;
@@ -808,7 +834,7 @@ sv_backends! {
             assign y = bus.rsp;
         }
     "#;
-    let sv = "module Slave(Bus.slave bus); assign bus.rsp = bus.req + 8'd1; endmodule";
+    let sv = "module Slave(prj_Bus.slave bus); assign bus.rsp = bus.req + 8'd1; endmodule";
         }
         @build Simulator::from_mixed_sources(
             vec![(veryl, Path::new("bus.veryl"))],
@@ -834,7 +860,7 @@ sv_backends! {
         module Top(input logic [7:0] a, output logic [7:0] y);
             Bus bus();
             assign bus.req = a;
-            Child child(.bus(bus));
+            prj_Child child(.bus(bus));
             assign y = bus.rsp;
         endmodule
     "#;
@@ -888,7 +914,7 @@ sv_backends! {
     "#;
     let sv = r#"
         module Top(input logic [7:0] a, output logic [7:0] y);
-            VerylChild child(.y(y), .a(a));
+            prj_VerylChild child(.y(y), .a(a));
         endmodule
         module SvLeaf(input logic [7:0] a, output logic [7:0] y);
             assign y = a ^ 8'h55;
@@ -902,6 +928,68 @@ sv_backends! {
         let a = sim.signal("a");
         sim.modify(|io| io.set(a, 0x20u8)).unwrap();
         assert_eq!(sim.get(sim.signal("y")), 0x76u8.into());
+    }
+
+    fn keeps_specialized_systemverilog_leaves_of_identical_veryl_children(sim) {
+        @setup {
+    let veryl = r#"
+        module Inner (a: input logic<8>, y: output logic<8>) {
+            inst leaf: $sv::SvLeaf #(K: 8'h0f) (a, y);
+        }
+        module Mid (a: input logic<8>, y0: output logic<8>, y1: output logic<8>) {
+            inst first: Inner (a, y: y0);
+            inst second: Inner (a: a + 8'd1, y: y1);
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y0, y1);
+            prj_Mid mid(.a(a), .y0(y0), .y1(y1));
+        endmodule
+        module SvLeaf #(parameter logic [7:0] K = 0)(input logic [7:0] a, output logic [7:0] y);
+            assign y = a ^ K;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("mid.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y0")), 0x2fu8.into());
+        assert_eq!(sim.get(sim.signal("y1")), 0x2eu8.into());
+    }
+
+    fn reaches_systemverilog_descendants_through_native_veryl_children(sim) {
+        @setup {
+    let veryl = r#"
+        module Inner (a: input logic<8>, y: output logic<8>) {
+            inst leaf: $sv::SvLeaf (a, y);
+        }
+        module Mid #(param K: u32 = 1) (a: input logic<8>, y: output logic<8>) {
+            var b: logic<8>;
+            assign b = a + K;
+            inst inner: Inner (a: b, y);
+        }
+    "#;
+    let sv = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y, output logic [7:0] wide);
+            prj_Mid plain(.a(a), .y(y));
+            prj_Mid #(.K(16)) specialized(.a(a), .y(wide));
+        endmodule
+        module SvLeaf(input logic [7:0] a, output logic [7:0] y);
+            assign y = a ^ 8'h55;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("mid.veryl"))],
+            vec![(sv, Path::new("top.sv"))], "Top",
+        );
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+        assert_eq!(sim.get(sim.signal("y")), 0x74u8.into());
+        assert_eq!(sim.get(sim.signal("wide")), 0x65u8.into());
     }
 
     fn preserves_positional_veryl_to_systemverilog_port_order(sim) {
@@ -1168,7 +1256,7 @@ sv_backends! {
 #[test]
 fn bounds_recursive_alternating_parameter_specializations() {
     let veryl = "module Mid #(param W: u32 = 0) { inst child: $sv::Hop #(W: W + 1); }";
-    let sv = "module Hop #(parameter W = 0); Mid #(.W(W)) child(); endmodule module Top; Mid #(.W(1)) child(); endmodule";
+    let sv = "module Hop #(parameter W = 0); prj_Mid #(.W(W)) child(); endmodule module Top; prj_Mid #(.W(1)) child(); endmodule";
     let error = Simulator::from_mixed_sources(
         vec![(veryl, Path::new("mid.veryl"))],
         vec![(sv, Path::new("top.sv"))],
@@ -1200,7 +1288,7 @@ fn rejects_missing_children_of_a_systemverilog_top_in_a_mixed_design() {
 #[test]
 fn rejects_cycles_that_cross_language_boundaries() {
     let veryl = "module Child { inst parent: $sv::Top; }";
-    let sv = "module Top; Child child(); endmodule";
+    let sv = "module Top; prj_Child child(); endmodule";
     let error = Simulator::from_mixed_sources(
         vec![(veryl, Path::new("child.veryl"))],
         vec![(sv, Path::new("top.sv"))],
@@ -1212,6 +1300,118 @@ fn rejects_cycles_that_cross_language_boundaries() {
         error.to_string().contains("recursive mixed-language"),
         "{error}"
     );
+}
+
+fn metadata(project: &str, omit_project_prefix: bool) -> veryl_metadata::Metadata {
+    let mut metadata = veryl_metadata::Metadata::create_default(project).unwrap();
+    metadata.build.omit_project_prefix = omit_project_prefix;
+    metadata
+}
+
+#[test]
+fn names_veryl_declarations_by_their_emitted_project_prefix() {
+    let veryl = r#"
+        interface Bus { var req: logic<8>; var rsp: logic<8>; modport slave { req: input, rsp: output, } }
+        module Child (bus: modport Bus::slave) { assign bus.rsp = bus.req + 8'd1; }
+    "#;
+    let sv = "module Top(input logic [7:0] a, output logic [7:0] y); mylib_Bus bus(); assign bus.req = a; mylib_Child child(.bus(bus)); assign y = bus.rsp; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("child.veryl"))],
+        vec![(sv, Path::new("top.sv"))],
+        "Top",
+    )
+    .with_metadata(metadata("mylib", false))
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 41u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+}
+
+#[test]
+fn names_veryl_declarations_without_an_omitted_project_prefix() {
+    let veryl = "module Child (a: input logic<8>, y: output logic<8>) { assign y = a + 1; }";
+    let sv = "module Top(input logic [7:0] a, output logic [7:0] y); Child child(.a(a), .y(y)); endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("child.veryl"))],
+        vec![(sv, Path::new("top.sv"))],
+        "Top",
+    )
+    .with_metadata(metadata("prj", true))
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 41u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 42u8.into());
+}
+
+#[test]
+fn rejects_veryl_source_names_that_differ_from_emitted_names() {
+    let veryl = "module Child (a: input logic<8>, y: output logic<8>) { assign y = a + 1; }";
+    let sv = "module Top(input logic [7:0] a, output logic [7:0] y); Child child(.a(a), .y(y)); endmodule";
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("child.veryl"))],
+        vec![(sv, Path::new("top.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("External module `Child` was not supplied"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_sv_modules_named_like_an_emitted_veryl_module() {
+    let veryl = "module Top (a: input logic<8>, y: output logic<8>) { inst child: $sv::Child (a, y); } module Child (a: input logic<8>, y: output logic<8>) { assign y = a + 1; }";
+    let sv = "module Child(input logic [7:0] a, output logic [7:0] y); assign y = a; endmodule";
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("child.sv"))],
+        "Top",
+    )
+    .with_metadata(metadata("prj", true))
+    .build_cranelift()
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Duplicate module declaration: Child"),
+        "{error}"
+    );
+}
+
+#[test]
+fn names_same_named_modules_of_dependencies_by_their_projects() {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mixed_dependency");
+    let mut metadata = veryl_metadata::Metadata::load(project.join("Veryl.toml")).unwrap();
+    let sources = metadata
+        .paths::<std::path::PathBuf>(&[], false, true)
+        .unwrap()
+        .into_iter()
+        .map(|path| (std::fs::read_to_string(&path.src).unwrap(), path.src))
+        .collect::<Vec<_>>();
+    let sv = std::fs::read_to_string(project.join("top.sv")).unwrap();
+    let mut sim = Simulator::from_mixed_sources(
+        sources
+            .iter()
+            .map(|(source, path)| (source.as_str(), path.as_path()))
+            .collect(),
+        vec![(sv.as_str(), &project.join("top.sv"))],
+        "Top",
+    )
+    .with_metadata(metadata)
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0x20u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("app_y")), 0x21u8.into());
+    assert_eq!(sim.get(sim.signal("lib_y")), 0x22u8.into());
+    assert_eq!(sim.get(sim.signal("app_wide")), 0x31u8.into());
+    assert_eq!(sim.get(sim.signal("lib_wide")), 0x42u8.into());
 }
 
 // These assert the intended simulation results, so implementing the missing
@@ -1397,5 +1597,251 @@ mod pending_interface_functions {
                 assert_eq!(sim.get(y), expected.into());
             }
         }
+    }
+}
+
+/// The probe analyzes the interface for its signature; the signature then
+/// fails the build before the design analyzes it again.
+#[test]
+fn keeps_sv_interface_warnings_when_its_signature_fails() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sv = r#"interface Bus;
+    function automatic int width();
+        $exit;
+        return 8;
+    endfunction
+    localparam int W = width();
+    logic [W-1:0] req;
+    assign req = 1;
+    function automatic logic [W-1:0] get();
+        return req;
+    endfunction
+    modport reader(input req, import get);
+endinterface
+"#;
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap_err();
+    assert!(error.to_string().contains("imported function"), "{error}");
+    let warned: Vec<_> = error
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(warning) => Some(&warning.kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        vec![&celox::SvFrontendWarningKind::ExitOutsideProgram]
+    );
+}
+
+/// Warnings in an SV interface point at their call in the interface's file,
+/// under an SV top and under a Veryl top alike.
+#[test]
+fn locates_sv_interface_warnings_at_their_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let bus = format!(
+        r#"interface Bus;
+    function automatic int width();
+        $exit;
+        return 8;
+    endfunction
+    localparam int W = width();
+    logic [W-1:0] mem [0:1];
+    logic [W-1:0] req;
+    initial begin
+        $readmemh("{}", mem);
+        $exit();
+    end
+    assign req = mem[0];
+endinterface
+"#,
+        file.display()
+    );
+    let located = |warnings: &[celox::CompilationWarning]| {
+        warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => {
+                    let location = warning.location.as_ref().unwrap();
+                    Some((
+                        matches!(
+                            warning.kind,
+                            celox::SvFrontendWarningKind::ExitOutsideProgram
+                        ),
+                        location.path.clone(),
+                        location.line,
+                        location.column,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        (true, "bus.sv".to_string(), 3, 9),
+        (false, "bus.sv".to_string(), 10, 9),
+        (true, "bus.sv".to_string(), 11, 9),
+    ];
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(&bus, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(located(sim.warnings()), expected);
+    let top =
+        "module Top(output logic [7:0] y); Bus bus(); assign y = bus.req; initial $exit; endmodule";
+    let sim = Simulator::from_sv_sources(
+        vec![(&bus, Path::new("bus.sv")), (top, Path::new("top.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let mut expected = expected;
+    expected.push((
+        true,
+        "top.sv".to_string(),
+        1,
+        top.find("$exit").unwrap() + 1,
+    ));
+    assert_eq!(located(sim.warnings()), expected);
+}
+
+#[test]
+fn retains_behaviorless_interface_probe_warnings() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sv = r#"interface Bus;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+        logic [W-1:0] req;
+    endinterface"#;
+    let sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let warnings: Vec<_> = sim
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].kind,
+        celox::SvFrontendWarningKind::ExitOutsideProgram
+    );
+    let location = warnings[0].location.as_ref().unwrap();
+    assert_eq!((location.path.as_str(), location.line), ("bus.sv", 2));
+}
+
+#[test]
+fn keeps_warnings_when_interface_analysis_fails() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    for sv in [
+        r#"interface Bus;
+            function automatic int width(); $exit; return 8; endfunction
+            localparam int W = width();
+            logic [W-1:0] req;
+            localparam int BAD = missing();
+        endinterface"#,
+        r#"package P;
+            function automatic int width(); $exit; return 8; endfunction
+            localparam int W = width();
+        endpackage
+        interface Bus;
+            logic [P::W-1:0] req;
+            localparam int BAD = missing();
+        endinterface"#,
+    ] {
+        let error = Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap_err();
+        assert!(error.to_string().contains("constant function"), "{error}");
+        let warnings: Vec<_> = error
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "{error}");
+        assert_eq!(
+            warnings[0].kind,
+            celox::SvFrontendWarningKind::ExitOutsideProgram
+        );
+        let location = warnings[0].location.as_ref().unwrap();
+        assert_eq!((location.path.as_str(), location.line), ("bus.sv", 2));
+    }
+}
+
+#[test]
+fn review_warnings_follow_instantiated_interface_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let sv = format!(
+        r#"interface Bus #(parameter N = 2);
+        logic [7:0] mem [0:N-1];
+        logic [7:0] req;
+        initial $readmemh("{}", mem);
+        assign req = mem[0];
+    endinterface
+    interface Passive;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+        logic [W-1:0] req;
+    endinterface"#,
+        file.display()
+    );
+    for n in [1, 2] {
+        let veryl = format!(
+            "module Top(y: output logic<8>) {{ inst bus: $sv::Bus #(N: {n}); inst passive: $sv::Passive; assign y = bus.req ^ passive.req; }}"
+        );
+        let sim = Simulator::from_mixed_sources(
+            vec![(&veryl, Path::new("top.veryl"))],
+            vec![(&sv, Path::new("bus.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap();
+        let warnings: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+                _ => None,
+            })
+            .collect();
+        let lines: Vec<_> = warnings
+            .iter()
+            .map(|warning| warning.location.as_ref().unwrap().line)
+            .collect();
+        assert_eq!(
+            lines,
+            if n == 1 { vec![8] } else { vec![4, 8] },
+            "N={n}: {:?}",
+            sim.warnings()
+        );
     }
 }

@@ -18,7 +18,6 @@ struct ResolvedScope {
     call: system_functions::SystemCall,
     scale: Scale,
     display: DisplayScope,
-    is_interface: bool,
 }
 
 impl ResolvedScope {
@@ -64,23 +63,6 @@ impl ResolvedScope {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
     }
-
-    fn replacement(&self, prefix: Option<&str>) -> String {
-        if self.call == system_functions::SystemCall::Task(SystemTask::Printtimescale) {
-            format!("$display(\"{}\")", self.message(prefix))
-        } else {
-            format!("32'sh{:08x}", self.value() as u32)
-        }
-    }
-}
-
-/// Whether `call` is a timescale query or `$printtimescale`, whose argument
-/// names a design element instead of a value.
-pub(super) fn is_timescale_call(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> bool {
-    matches!(
-        called_system_function(call, tree),
-        Some(SystemFunction::Timeunit | SystemFunction::Timeprecision)
-    ) || called_system_task(call, tree) == Some(SystemTask::Printtimescale)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +81,6 @@ enum ScopeKind {
 struct Scope {
     name: String,
     kind: ScopeKind,
-    is_interface: bool,
     start: usize,
     end: usize,
     scale: Scale,
@@ -117,7 +98,7 @@ struct Unit {
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct Timescales {
-    // Identical preprocessed text has identical scope offsets. Content keys
+    // Identical expanded tokens have identical native scope positions. Content keys
     // remain valid when ParsedSource values move or their trees are dropped.
     units: HashMap<String, Arc<Unit>>,
     definitions: HashMap<String, Scope>,
@@ -128,15 +109,43 @@ pub(super) struct Timescales {
     specified: [u8; 2],
 }
 
+/// Time-query state owned by one analysis, shared explicitly by nested scopes.
+#[derive(Default)]
+pub(super) struct State {
+    design: RefCell<QueryContext>,
+    interface_instance: RefCell<Option<String>>,
+}
+
+pub(super) fn with_interface_instance<T>(
+    state: &State,
+    name: &str,
+    analyze: impl FnOnce() -> T,
+) -> T {
+    struct Restore<'a> {
+        state: &'a State,
+        previous: Option<String>,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            *self.state.interface_instance.borrow_mut() = self.previous.take();
+        }
+    }
+    let previous = {
+        let mut current = state.interface_instance.borrow_mut();
+        let nested = current
+            .as_ref()
+            .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"));
+        current.replace(nested)
+    };
+    let _restore = Restore { state, previous };
+    analyze()
+}
+
 #[cfg(test)]
 thread_local! {
     static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PARENT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SCOPE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-thread_local! {
-    static DESIGN: RefCell<QueryContext> = RefCell::new(QueryContext::default());
 }
 
 #[derive(Default)]
@@ -152,41 +161,29 @@ struct PreparedTree {
 
 pub(super) struct Installed<'a> {
     previous: QueryContext,
+    state: &'a State,
     // A prepared tree's address is used only while this guard borrows it.
-    // The guard must also stay on the thread whose context it installed.
     _tree: Option<&'a SyntaxTree>,
-    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 impl Drop for Installed<'_> {
     fn drop(&mut self) {
-        DESIGN.with(|current| {
-            *current.borrow_mut() = std::mem::take(&mut self.previous);
-        });
+        *self.state.design.borrow_mut() = std::mem::take(&mut self.previous);
     }
 }
-pub(super) fn install(design: Arc<Timescales>) -> Installed<'static> {
-    install_context(
-        QueryContext {
-            design,
-            prepared: None,
-        },
-        None,
-    )
-}
-
-pub(super) fn install_for_tree(
+pub(super) fn install_for_tree<'a>(
+    state: &'a State,
     design: Arc<Timescales>,
-    tree: &SyntaxTree,
-) -> Converted<Installed<'_>> {
+    tree: &'a SyntaxTree,
+) -> Converted<Installed<'a>> {
     let source = key(tree);
     // Missing sources and type-specialized trees contribute to the same design.
     // Collect and merge once, before any query or module-body analysis.
-    let (design, unit) = if let Some(unit) = design.units.get(source) {
+    let (design, unit) = if let Some(unit) = design.units.get(&source) {
         let unit = unit.clone();
         (design, unit)
     } else {
         let design = Arc::new(design.including_tree(tree)?);
-        let unit = design.units[source].clone();
+        let unit = design.units[&source].clone();
         (design, unit)
     };
     let prepared = Some(PreparedTree {
@@ -194,42 +191,30 @@ pub(super) fn install_for_tree(
         unit,
     });
     Ok(install_context(
+        state,
         QueryContext { design, prepared },
         Some(tree),
     ))
 }
 
-fn install_context(context: QueryContext, tree: Option<&SyntaxTree>) -> Installed<'_> {
+fn install_context<'a>(
+    state: &'a State,
+    context: QueryContext,
+    tree: Option<&'a SyntaxTree>,
+) -> Installed<'a> {
     Installed {
-        previous: DESIGN.with(|current| current.replace(context)),
+        previous: state.design.replace(context),
+        state,
         _tree: tree,
-        _thread: std::marker::PhantomData,
     }
 }
 
-fn key(tree: &SyntaxTree) -> &str {
-    tree.into_iter()
-        .find_map(|node| match node {
-            RefNode::SourceText(source) => tree.get_str(source),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// A token's offset, excluding leading/trailing whitespace and directives.
-fn offset(node: RefNode<'_>) -> Option<usize> {
-    let mut whitespace = 0;
-    for event in node.into_iter().event() {
-        match event {
-            sv_parser::NodeEvent::Enter(RefNode::WhiteSpace(_)) => whitespace += 1,
-            sv_parser::NodeEvent::Leave(RefNode::WhiteSpace(_)) => whitespace -= 1,
-            sv_parser::NodeEvent::Enter(RefNode::Locate(locate)) if whitespace == 0 => {
-                return Some(locate.offset);
-            }
-            _ => {}
-        }
-    }
-    None
+fn key(tree: &SyntaxTree) -> String {
+    tree.declarations()
+        .tokens
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect()
 }
 
 fn exponent(number: &str, suffix: &str) -> Converted<i32> {
@@ -262,43 +247,12 @@ fn exponent(number: &str, suffix: &str) -> Converted<i32> {
     Ok(base + magnitude)
 }
 
-fn literal(value: &sv_parser::TimeLiteral, tree: &SyntaxTree) -> Converted<i32> {
-    match value {
-        sv_parser::TimeLiteral::Unsigned(value) => exponent(
-            tree.get_str_trim(&value.nodes.0).unwrap_or_default(),
-            tree.get_str_trim(&value.nodes.1).unwrap_or_default(),
-        ),
-        sv_parser::TimeLiteral::FixedPoint(value) => exponent(
-            tree.get_str_trim(&value.nodes.0).unwrap_or_default(),
-            tree.get_str_trim(&value.nodes.1).unwrap_or_default(),
-        ),
-    }
-}
-
-fn declaration(
-    value: &sv_parser::TimeunitsDeclaration,
-    tree: &SyntaxTree,
-) -> Converted<(Option<i32>, Option<i32>)> {
-    use sv_parser::TimeunitsDeclaration::*;
-    Ok(match value {
-        Timeunit(v) => (
-            Some(literal(&v.nodes.1, tree)?),
-            v.nodes
-                .2
-                .as_ref()
-                .map(|(_, p)| literal(p, tree))
-                .transpose()?,
-        ),
-        Timeprecision(v) => (None, Some(literal(&v.nodes.1, tree)?)),
-        TimeunitTimeprecision(v) => (
-            Some(literal(&v.nodes.1, tree)?),
-            Some(literal(&v.nodes.4, tree)?),
-        ),
-        TimeprecisionTimeunit(v) => (
-            Some(literal(&v.nodes.4, tree)?),
-            Some(literal(&v.nodes.1, tree)?),
-        ),
-    })
+fn declaration(value: &celox_sv_syntax::TimeDeclaration) -> Converted<(Option<i32>, Option<i32>)> {
+    let convert = |value: &celox_sv_syntax::TimeValue| exponent(&value.magnitude, &value.unit);
+    Ok((
+        value.unit.as_ref().map(convert).transpose()?,
+        value.precision.as_ref().map(convert).transpose()?,
+    ))
 }
 
 fn merge(
@@ -318,127 +272,28 @@ fn merge(
     Ok(())
 }
 
-/// Only direct time declarations and compiler directives leave the initial
-/// time-declaration region open. `sv-parser` stores `timescale` in whitespace,
-/// outside these item lists; its top-level `resetall` description is handled
-/// explicitly below. Nested declarations never extend the initial region.
-fn time_item(node: &RefNode<'_>) -> bool {
-    use sv_parser::{
-        InterfaceItem, ModuleItem, NonPortInterfaceItem, NonPortModuleItem, NonPortProgramItem,
-        PackageItem, ProgramItem,
-    };
-    match node {
-        RefNode::NonPortModuleItem(NonPortModuleItem::TimeunitsDeclaration(_))
-        | RefNode::NonPortInterfaceItem(NonPortInterfaceItem::TimeunitsDeclaration(_))
-        | RefNode::NonPortProgramItem(NonPortProgramItem::TimeunitsDeclaration(_))
-        | RefNode::PackageItem(PackageItem::TimeunitsDeclaration(_))
-        | RefNode::Description(sv_parser::Description::ResetallCompilerDirective(_)) => true,
-        RefNode::ModuleItem(ModuleItem::NonPortModuleItem(item)) => {
-            matches!(&**item, NonPortModuleItem::TimeunitsDeclaration(_))
-        }
-        RefNode::InterfaceItem(InterfaceItem::NonPortInterfaceItem(item)) => {
-            matches!(&**item, NonPortInterfaceItem::TimeunitsDeclaration(_))
-        }
-        RefNode::ProgramItem(ProgramItem::NonPortProgramItem(item)) => {
-            matches!(&**item, NonPortProgramItem::TimeunitsDeclaration(_))
-        }
-        RefNode::Description(sv_parser::Description::PackageItem(item)) => {
-            matches!(item.nodes.1, PackageItem::TimeunitsDeclaration(_))
-        }
-        _ => false,
-    }
-}
-
-fn scope_node(node: RefNode<'_>, tree: &SyntaxTree) -> Option<Scope> {
-    let kind = if matches!(node, RefNode::PackageDeclaration(_)) {
-        ScopeKind::Package
-    } else {
-        ScopeKind::Definition
-    };
-    let (name, end, items) = match &node {
-        RefNode::ModuleDeclarationAnsi(v) => (
-            identifier_text(RefNode::ModuleIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::NonPortModuleItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::ModuleDeclarationNonansi(v) => (
-            identifier_text(RefNode::ModuleIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::ModuleItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::InterfaceDeclarationAnsi(v) => (
-            identifier_text(RefNode::InterfaceIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::NonPortInterfaceItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::InterfaceDeclarationNonansi(v) => (
-            identifier_text(RefNode::InterfaceIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::InterfaceItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::ProgramDeclarationAnsi(v) => (
-            identifier_text(RefNode::ProgramIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::NonPortProgramItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::ProgramDeclarationNonansi(v) => (
-            identifier_text(RefNode::ProgramIdentifier(&v.nodes.0.nodes.3), tree)?,
-            v.nodes.3.nodes.0.offset,
-            v.nodes
-                .2
-                .iter()
-                .map(RefNode::ProgramItem)
-                .collect::<Vec<_>>(),
-        ),
-        RefNode::PackageDeclaration(v) => (
-            identifier_text(RefNode::PackageIdentifier(&v.nodes.3), tree)?,
-            v.nodes.7.nodes.0.offset,
-            v.nodes
-                .6
-                .iter()
-                .map(|(_, item)| RefNode::PackageItem(item))
-                .collect::<Vec<_>>(),
-        ),
-        _ => return None,
-    };
-    Some(Scope {
-        name,
-        kind,
-        is_interface: matches!(
-            node,
-            RefNode::InterfaceDeclarationAnsi(_) | RefNode::InterfaceDeclarationNonansi(_)
-        ),
-        start: offset(node)?,
-        end,
+/// Scope positions are native token indices, shared by all native expression
+/// and declaration IDs, including macro expansions.
+fn scope_node(unit: &celox_sv_syntax::Unit, native: &celox_sv_syntax::Declarations) -> Scope {
+    Scope {
+        name: unit.name.spelling.clone(),
+        kind: if unit.kind == celox_sv_syntax::UnitKind::Package {
+            ScopeKind::Package
+        } else {
+            ScopeKind::Definition
+        },
+        start: unit.tokens.start,
+        end: unit.tokens.end,
         scale: DEFAULT,
-        time_items_end: items
-            .into_iter()
-            .find(|item| !time_item(item))
-            .and_then(offset)
-            .unwrap_or(end),
+        time_items_end: unit
+            .items
+            .iter()
+            .map(|id| native.body_item(*id))
+            .find(|item| !matches!(item.kind, celox_sv_syntax::BodyItemKind::Time(_)))
+            .map_or(unit.body.end, |item| item.tokens.start),
         specified: (false, false),
         instances: HashMap::default(),
-    })
+    }
 }
 
 /// Syntax scopes are sorted by start and either nest or are disjoint. Each
@@ -508,7 +363,7 @@ pub(crate) fn generated_source_declarations(
 ) -> Converted<String> {
     let trees = sources
         .iter()
-        .map(|(code, path)| crate::syntax::parse_source(code, path).map(|tree| (tree, *path)))
+        .map(|(code, path)| crate::source_tree::parse_source(code, path).map(|tree| (tree, *path)))
         .collect::<Converted<Vec<_>>>()?;
     let mut scales = Timescales::collect(
         &trees
@@ -522,7 +377,137 @@ pub(crate) fn generated_source_declarations(
     Ok(scales.generated_declarations())
 }
 
+/// Validate authored native queries, including operands discarded by folding.
+pub(super) fn validate_queries(
+    tree: &AnalysisContext<'_>,
+    ranges: &[celox_sv_syntax::TokenRange],
+    excluded: &[celox_sv_syntax::TokenRange],
+) -> Converted<()> {
+    use celox_sv_syntax::{ExprKind, StatementKind};
+    let native = tree.declarations();
+    let callees: HashSet<_> = native
+        .expression_nodes()
+        .filter_map(|(_, node)| match node.kind {
+            ExprKind::Call { expression, .. } => Some(expression),
+            _ => None,
+        })
+        .collect();
+    let statements: HashSet<_> = native
+        .statements
+        .iter()
+        .filter_map(|statement| match statement.kind {
+            StatementKind::Expression(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    for (id, expression) in native.expression_nodes() {
+        let at = expression.tokens.start;
+        if !ranges
+            .iter()
+            .any(|range| range.start <= at && at < range.end)
+            || excluded
+                .iter()
+                .any(|range| range.start <= at && at < range.end)
+        {
+            continue;
+        }
+        if callees.contains(&id) {
+            continue;
+        }
+        let Ok((name, _)) = call_parts(id, native) else {
+            continue;
+        };
+        if matches!(name, "$timeunit" | "$timeprecision" | "$printtimescale") {
+            let site = if statements.contains(&id) {
+                system_functions::CallSite::Statement(system_functions::Body::Subroutine)
+            } else {
+                system_functions::CallSite::Expression
+            };
+            if name == "$printtimescale" {
+                print_message(id, tree, site)?;
+            } else {
+                query(id, tree)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn call_parts(
+    root: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<(&str, Option<&[celox_sv_syntax::Argument]>)> {
+    use celox_sv_syntax::ExprKind;
+    let (callee, arguments) = match &native.expression(root).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, Some(arguments.as_slice())),
+        ExprKind::Name(_) => (root, None),
+        _ => return Err(unsupported("timescale query name")),
+    };
+    let ExprKind::Name(name) = &native.expression(callee).kind else {
+        return Err(unsupported("timescale query name"));
+    };
+    Ok((&name.spelling, arguments))
+}
+
+pub(super) fn is_query(
+    root: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    call_parts(root, native).is_ok_and(|(name, _)| matches!(name, "$timeunit" | "$timeprecision"))
+}
+
+fn design_path(
+    mut root: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<(bool, Vec<String>)> {
+    use celox_sv_syntax::ExprKind;
+    let mut path = Vec::new();
+    loop {
+        match &native.expression(root).kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." => {
+                path.push(name.spelling.clone());
+                root = *expression;
+            }
+            ExprKind::Name(name) => {
+                path.push(name.spelling.clone());
+                break;
+            }
+            ExprKind::Select { .. } => {
+                return Err(unsupported("selected design element in timescale query"));
+            }
+            _ => return Err(unsupported("timescale query design-element argument")),
+        }
+    }
+    path.reverse();
+    let absolute = path.first().is_some_and(|name| name == "$root");
+    if absolute {
+        path.remove(0);
+    }
+    if path.is_empty() || path.iter().any(|name| name.starts_with('$')) {
+        return Err(unsupported("timescale query design-element argument"));
+    }
+    Ok((absolute, path))
+}
+
 impl Timescales {
+    pub(super) fn scope_scale(&self, name: &str) -> Option<(i32, i32)> {
+        let scope = self
+            .definitions
+            .get(name)
+            .or_else(|| self.packages.get(name))?;
+        Some((scope.scale.unit, scope.scale.precision))
+    }
+
+    pub(super) fn global_precision(&self) -> i32 {
+        self.precision.unwrap_or(DEFAULT.precision)
+    }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
         let local = Self::collect(&[(tree, Path::new(""))])?;
         let specified = [
@@ -590,73 +575,50 @@ impl Timescales {
         // explicit/inherited setting (2), independently for unit and precision.
         let mut specified = [0u8; 2];
         for (tree, _) in trees {
-            let mut scopes: Vec<_> = tree
-                .into_iter()
-                .filter_map(|node| scope_node(node, tree))
+            let native = tree.declarations();
+            let mut scopes: Vec<_> = native
+                .all_units()
+                .map(|unit| scope_node(unit, native))
                 .collect();
             scopes.sort_by_key(|s| s.start);
             let parents = scope_parents(&scopes);
             let mut declarations = vec![(None, None); scopes.len()];
             let mut unit_decl = (None, None);
-            let unit_time_items_end = tree
-                .into_iter()
-                .find_map(|node| match node {
-                    RefNode::SourceText(source) => source
-                        .nodes
-                        .2
-                        .iter()
-                        .map(RefNode::Description)
-                        .find(|item| !time_item(item))
-                        .and_then(offset),
-                    _ => None,
+            let unit_time_items_end = native
+                .source_items
+                .iter()
+                .find(|item| {
+                    !matches!(item.kind, celox_sv_syntax::SourceItemKind::Declaration(id)
+                    if matches!(native.body_item(id).kind, celox_sv_syntax::BodyItemKind::Time(_)))
                 })
-                .unwrap_or(usize::MAX);
+                .map_or(usize::MAX, |item| item.tokens.start);
+            for value in &native.time_declarations {
+                let at = value.tokens.start;
+                let value = declaration(value)?;
+                if let Some(p) = value.1 {
+                    design.precision = Some(design.precision.map_or(p, |old| old.min(p)));
+                }
+                let target = scope_at(&scopes, &parents, at);
+                let time_items_end =
+                    target.map_or(unit_time_items_end, |i| scopes[i].time_items_end);
+                let previous = target.map_or(&mut unit_decl, |i| &mut declarations[i]);
+                if (previous.0.is_none() && value.0.is_some()
+                    || previous.1.is_none() && value.1.is_some())
+                    && at >= time_items_end
+                {
+                    return Err(unsupported(
+                        "timeunit or timeprecision first declared after other scope items",
+                    ));
+                }
+                merge(previous, value)?;
+            }
             let mut directives = Vec::new();
-            let mut generate_depth = 0;
-            for event in tree.into_iter().event() {
-                let node = match event {
-                    sv_parser::NodeEvent::Enter(RefNode::GenerateBlock(_)) => {
-                        generate_depth += 1;
-                        continue;
-                    }
-                    sv_parser::NodeEvent::Leave(RefNode::GenerateBlock(_)) => {
-                        generate_depth -= 1;
-                        continue;
-                    }
-                    sv_parser::NodeEvent::Enter(node) => node,
-                    _ => continue,
-                };
-                match node {
-                    RefNode::TimeunitsDeclaration(v) => {
-                        let value = declaration(v, tree)?;
-                        if let Some(p) = value.1 {
-                            design.precision = Some(design.precision.map_or(p, |old| old.min(p)));
-                        }
-                        let at = offset(RefNode::TimeunitsDeclaration(v)).unwrap_or_default();
-                        let target = scope_at(&scopes, &parents, at);
-                        let time_items_end =
-                            target.map_or(unit_time_items_end, |i| scopes[i].time_items_end);
-                        let previous = target.map_or(&mut unit_decl, |i| &mut declarations[i]);
-                        if (previous.0.is_none() && value.0.is_some()
-                            || previous.1.is_none() && value.1.is_some())
-                            && at >= time_items_end
-                        {
-                            return Err(unsupported(
-                                "timeunit or timeprecision first declared after other scope items",
-                            ));
-                        }
-                        merge(previous, value)?;
-                    }
-                    RefNode::TimescaleCompilerDirective(v) => {
+            for directive in &native.time_directives {
+                let scale = match &directive.kind {
+                    celox_sv_syntax::TimeDirectiveKind::Scale { unit, precision } => {
                         let scale = Scale {
-                            unit: exponent(
-                                tree.get_str_trim(&v.nodes.2).unwrap_or_default(),
-                                tree.get_str_trim(&v.nodes.3).unwrap_or_default(),
-                            )?,
-                            precision: exponent(
-                                tree.get_str_trim(&v.nodes.5).unwrap_or_default(),
-                                tree.get_str_trim(&v.nodes.6).unwrap_or_default(),
-                            )?,
+                            unit: exponent(&unit.magnitude, &unit.unit)?,
+                            precision: exponent(&precision.magnitude, &precision.unit)?,
                         };
                         if scale.precision > scale.unit {
                             return Err(unsupported("timeprecision coarser than timeunit"));
@@ -666,42 +628,41 @@ impl Timescales {
                                 .precision
                                 .map_or(scale.precision, |old| old.min(scale.precision)),
                         );
-                        directives.push((v.nodes.1.nodes.0.offset, Some(scale)));
+                        Some(scale)
                     }
-                    RefNode::ResetallCompilerDirective(v) => {
-                        directives.push((v.nodes.1.nodes.0.offset, None))
-                    }
-                    RefNode::ModuleInstantiation(v) => {
-                        let module = identifier_text(RefNode::ModuleIdentifier(&v.nodes.0), tree)
-                            .unwrap_or_default();
-                        design.instantiated.insert(module.clone());
-                        // Keep generated instances out of the parent namespace.
-                        // Resolving selected generate scopes requires elaborated paths.
-                        if generate_depth > 0 {
-                            continue;
-                        }
-                        let at = offset(RefNode::ModuleInstantiation(v)).unwrap_or_default();
-                        if let Some(i) = scope_at(&scopes, &parents, at) {
-                            let scope = &mut scopes[i];
-                            let module =
-                                identifier_text(RefNode::ModuleIdentifier(&v.nodes.0), tree)
-                                    .unwrap_or_default();
-                            for instance in v.nodes.2.contents() {
-                                // Array and generate selections are resolved by elaboration, not by
-                                // interpreting an arbitrary expression as a design-element name.
-                                if !instance.nodes.0.nodes.1.is_empty() {
-                                    continue;
-                                }
-                                if let Some(name) = identifier_text(
-                                    RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                                    tree,
-                                ) {
-                                    scope.instances.insert(name, module.clone());
+                    celox_sv_syntax::TimeDirectiveKind::Reset => None,
+                };
+                directives.push((directive.tokens.start, scale));
+            }
+            // Every authored instance contributes to root inference. Only direct
+            // unit instances are visible without elaborated generate paths.
+            for instance in &native.instantiations {
+                design.instantiated.insert(instance.name.spelling.clone());
+            }
+            for unit in native.all_units() {
+                let Some(i) = scopes
+                    .binary_search_by_key(&unit.tokens.start, |scope| scope.start)
+                    .ok()
+                else {
+                    continue;
+                };
+                let mut items = unit.items.clone();
+                while let Some(id) = items.pop() {
+                    match &native.body_item(id).kind {
+                        celox_sv_syntax::BodyItemKind::Region(children) => items.extend(children),
+                        celox_sv_syntax::BodyItemKind::Instance(id) => {
+                            let instance = native.instantiation(*id);
+                            for declarator in &instance.instances {
+                                if declarator.dimensions.is_empty() {
+                                    scopes[i].instances.insert(
+                                        declarator.name.spelling.clone(),
+                                        instance.name.spelling.clone(),
+                                    );
                                 }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             directives.sort_by_key(|(at, _)| *at);
@@ -766,57 +727,75 @@ impl Timescales {
 
     pub(super) fn query(
         &self,
-        call: &sv_parser::SystemTfCall,
+        call: celox_sv_syntax::ExprId,
         tree: &SyntaxTree,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<i32> {
         let source = key(tree);
-        let extended = (!self.units.contains_key(source))
+        let extended = (!self.units.contains_key(&source))
             .then(|| self.including_tree(tree))
             .transpose()?;
         let design = extended.as_ref().unwrap_or(self);
-        design.query_in_unit(call, tree, &design.units[source])
+        design.query_in_unit(call, tree, &design.units[&source], interface_types)
     }
 
     fn query_in_unit(
         &self,
-        call: &sv_parser::SystemTfCall,
+        call: celox_sv_syntax::ExprId,
         tree: &SyntaxTree,
         unit: &Unit,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<i32> {
-        self.resolve(call, tree, unit, system_functions::CallSite::Expression)
-            .map(|scope| scope.value())
+        self.resolve(
+            call,
+            tree,
+            unit,
+            system_functions::CallSite::Expression,
+            interface_types,
+        )
+        .map(|scope| scope.value())
     }
 
-    pub(super) fn interface_path_queries<'a>(
-        &'a self,
-        tree: &'a SyntaxTree,
-    ) -> Converted<
-        impl Fn(&sv_parser::SystemTfCall, system_functions::CallSite) -> Converted<Option<String>> + 'a,
-    > {
-        let unit = self
-            .units
-            .get(key(tree))
-            .ok_or_else(|| unsupported("missing interface query time scope"))?;
-        // Resolve the content key once for this rewrite, not for each query.
-        Ok(move |call: &sv_parser::SystemTfCall, site| {
-            self.resolve(call, tree, unit, site)
-                .map(|scope| scope.is_interface.then(|| scope.replacement(None)))
-        })
+    /// The time units of the simulation, which counts the global time
+    /// precision (3.14.3), in one time unit of the scope of `node`.
+    fn time_divisor_in_unit(&self, at: usize, unit: &Unit) -> u64 {
+        let scale =
+            scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+        let precision = self.precision.unwrap_or(DEFAULT.precision);
+        // A scope's precision is not coarser than its unit, and no unit is
+        // longer than 100 s or precision finer than 1 fs.
+        10u64.pow((scale.unit - precision.min(scale.precision)) as u32)
     }
 
     fn resolve(
         &self,
-        call: &sv_parser::SystemTfCall,
+        call: celox_sv_syntax::ExprId,
         tree: &SyntaxTree,
         unit: &Unit,
         site: system_functions::CallSite,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<ResolvedScope> {
-        let (name, args) =
-            system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        let checked = system_functions::check_call(name, args.as_deref(), site)?;
-        let at = offset(RefNode::SystemTfCall(call)).unwrap_or_default();
+        let native = tree.declarations();
+        let (name, arguments) = call_parts(call, native)?;
+        let args = arguments.map(|args| {
+            args.iter()
+                .map(|arg| {
+                    if arg.value.is_some() {
+                        system_functions::Arg::Given
+                    } else {
+                        system_functions::Arg::Omitted
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        let named = arguments.is_some_and(|args| args.iter().any(|arg| arg.name.is_some()));
+        let checked = system_functions::check_call(
+            name,
+            (!named).then_some(args.as_deref().unwrap_or(&[])),
+            site,
+        )?;
+        let at = native.expression(call).tokens.start;
         let current = scope_at(&unit.scopes, &unit.parents, at).map(|i| &unit.scopes[i]);
-        let mut interface_target = false;
         let mut display = match current {
             Some(scope) if scope.kind == ScopeKind::Package => {
                 DisplayScope::Absolute(scope.name.clone())
@@ -824,17 +803,19 @@ impl Timescales {
             Some(_) => DisplayScope::Relative(String::new()),
             None => DisplayScope::Absolute("$unit".into()),
         };
-        let scale = if args.as_ref().is_some_and(|args| args.is_empty()) {
+        let scale = if arguments.is_none_or(|args| args.is_empty()) {
             current.map_or(unit.scale, |s| s.scale)
         } else {
-            let argument = argument(call)
+            let argument = arguments
+                .and_then(|args| args.first())
+                .and_then(|arg| arg.value)
                 .ok_or_else(|| unsupported("timescale query design-element argument"))?;
-            match tree.get_str_trim(argument).unwrap_or_default().trim() {
-                "$unit" => {
+            match &native.expression(argument).kind {
+                celox_sv_syntax::ExprKind::Name(name) if name.spelling == "$unit" => {
                     display = DisplayScope::Absolute("$unit".into());
                     unit.scale
                 }
-                "$root" => {
+                celox_sv_syntax::ExprKind::Name(name) if name.spelling == "$root" => {
                     display = DisplayScope::Absolute("$root".into());
                     let precision = self.precision.unwrap_or(DEFAULT.precision);
                     Scale {
@@ -843,31 +824,15 @@ impl Timescales {
                     }
                 }
                 _ => {
-                    let sv_parser::Expression::Primary(primary) = argument else {
-                        return Err(unsupported("timescale query design-element argument"));
-                    };
-                    let sv_parser::Primary::Hierarchical(primary) = &**primary else {
-                        return Err(unsupported("timescale query design-element argument"));
-                    };
-                    if primary.nodes.0.as_ref().is_some_and(|qualifier| !matches!(qualifier, sv_parser::ClassQualifierOrPackageScope::ClassQualifier(c) if c.nodes.0.is_none() && c.nodes.1.is_none())) || !primary.nodes.2.nodes.1.nodes.0.is_empty() || primary.nodes.2.nodes.2.is_some() { return Err(unsupported("timescale query design-element argument")); }
-                    let hierarchy = &primary.nodes.1;
-                    let mut path = Vec::new();
-                    for (identifier, select, _) in &hierarchy.nodes.1 {
-                        if !select.nodes.0.is_empty() {
-                            return Err(unsupported("selected design element in timescale query"));
-                        }
-                        path.push(
-                            identifier_text(RefNode::Identifier(identifier), tree)
-                                .ok_or_else(|| unsupported("timescale query identifier"))?,
-                        );
-                    }
-                    path.push(
-                        identifier_text(RefNode::Identifier(&hierarchy.nodes.2), tree)
-                            .ok_or_else(|| unsupported("timescale query identifier"))?,
-                    );
+                    let (absolute, path) = design_path(argument, native)?;
                     let first = &path[0];
-                    let (mut target, start) = if hierarchy.nodes.0.is_none()
-                        && current.is_some_and(|s| s.instances.contains_key(first))
+                    let (mut target, start) = if !absolute
+                        && let Some(interface) = interface_types.get(first)
+                        && let Some(target) = self.definitions.get(interface)
+                    {
+                        display = DisplayScope::Relative(path.join("."));
+                        (target, 1)
+                    } else if !absolute && current.is_some_and(|s| s.instances.contains_key(first))
                     {
                         display = DisplayScope::Relative(path.join("."));
                         (current.unwrap(), 0)
@@ -878,7 +843,7 @@ impl Timescales {
                         // A root instance is part of the hierarchy and takes
                         // precedence over a same-named global package.
                         (root, 1)
-                    } else if hierarchy.nodes.0.is_none()
+                    } else if !absolute
                         && path.len() == 1
                         && let Some(package) = self.packages.get(first)
                     {
@@ -889,16 +854,14 @@ impl Timescales {
                         (package, 1)
                     } else {
                         if !self.is_root(first)
-                            && (hierarchy.nodes.0.is_some()
-                                || current.is_none_or(|scope| scope.name != *first))
+                            && (absolute || current.is_none_or(|scope| scope.name != *first))
                             && self.definitions.contains_key(first)
                         {
                             return Err(unsupported(format!(
                                 "timescale query names module type `{first}`, not an instance"
                             )));
                         }
-                        display = if hierarchy.nodes.0.is_none()
-                            && current.is_some_and(|scope| scope.name == *first)
+                        display = if !absolute && current.is_some_and(|scope| scope.name == *first)
                         {
                             DisplayScope::Relative(path[1..].join("."))
                         } else {
@@ -921,7 +884,6 @@ impl Timescales {
                             unsupported(format!("unknown timescale query module `{module}`"))
                         })?;
                     }
-                    interface_target = target.is_interface;
                     target.scale
                 }
             }
@@ -930,145 +892,145 @@ impl Timescales {
             call: checked,
             scale,
             display,
-            is_interface: interface_target,
         })
     }
 
     pub(super) fn print_message(
         &self,
-        call: &sv_parser::SystemTfCall,
+        call: celox_sv_syntax::ExprId,
         tree: &SyntaxTree,
         site: system_functions::CallSite,
         prefix: Option<&str>,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<String> {
         let source = key(tree);
-        let extended = (!self.units.contains_key(source))
+        let extended = (!self.units.contains_key(&source))
             .then(|| self.including_tree(tree))
             .transpose()?;
         let design = extended.as_ref().unwrap_or(self);
         design
-            .resolve(call, tree, &design.units[source], site)
+            .resolve(call, tree, &design.units[&source], site, interface_types)
             .map(|scope| scope.message(prefix))
-    }
-
-    pub(super) fn interface_print_statement(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        site: system_functions::CallSite,
-        prefix: &str,
-        indices: &[String],
-    ) -> Converted<String> {
-        let source = key(tree);
-        let scope = self.resolve(call, tree, &self.units[source], site)?;
-        let args = if matches!(scope.display, DisplayScope::Relative(_)) && !indices.is_empty() {
-            format!(", {}", indices.join(", "))
-        } else {
-            String::new()
-        };
-        Ok(format!(
-            "$display(\"{}\"{args})",
-            scope.message(Some(prefix))
-        ))
-    }
-
-    pub(super) fn print_needs_instance_scope(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        site: system_functions::CallSite,
-    ) -> Converted<bool> {
-        let scope = self.resolve(call, tree, &self.units[key(tree)], site)?;
-        Ok(matches!(scope.display, DisplayScope::Relative(_)))
-    }
-
-    pub(super) fn interface_replacement(
-        &self,
-        call: &sv_parser::SystemTfCall,
-        tree: &SyntaxTree,
-        ty: &str,
-        handle: &str,
-        site: system_functions::CallSite,
-    ) -> Converted<String> {
-        let (name, args) =
-            system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
-        let checked = system_functions::check_call(name, args.as_deref(), site)?;
-        let scope = self
-            .definitions
-            .get(ty)
-            .ok_or_else(|| unsupported(format!("unknown timescale query design element `{ty}`")))?;
-        Ok(ResolvedScope {
-            call: checked,
-            scale: scope.scale,
-            display: DisplayScope::Relative(handle.to_string()),
-            is_interface: true,
-        }
-        .replacement(None))
     }
 }
 
 pub(super) fn print_message(
-    call: &sv_parser::SystemTfCall,
-    tree: &SyntaxTree,
+    call: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
     site: system_functions::CallSite,
 ) -> Converted<String> {
-    DESIGN.with(|context| {
-        let context = context.borrow();
+    let prefix = tree.state.timescales.interface_instance.borrow().clone();
+    {
+        let context = tree.state.timescales.design.borrow();
         if let Some(prepared) = &context.prepared
-            && prepared.address == tree as *const SyntaxTree as usize
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
             context
                 .design
-                .resolve(call, tree, &prepared.unit, site)
-                .map(|scope| scope.message(None))
+                .resolve(
+                    call,
+                    tree,
+                    &prepared.unit,
+                    site,
+                    &scope::imported(&tree.state).interface_types,
+                )
+                .map(|scope| scope.message(prefix.as_deref()))
         } else {
-            context.design.print_message(call, tree, site, None)
+            context.design.print_message(
+                call,
+                tree,
+                site,
+                prefix.as_deref(),
+                &scope::imported(&tree.state).interface_types,
+            )
         }
-    })
-}
-
-pub(super) fn argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
-    match call {
-        sv_parser::SystemTfCall::ArgExpression(call) => call
-            .nodes
-            .1
-            .nodes
-            .1
-            .0
-            .contents()
-            .first()
-            .and_then(|arg| arg.as_ref()),
-        sv_parser::SystemTfCall::ArgOptionl(call) => {
-            call.nodes
-                .1
-                .as_ref()
-                .and_then(|paren| match &paren.nodes.1 {
-                    sv_parser::ListOfArguments::Ordered(args) => {
-                        args.nodes.0.contents().first().and_then(|arg| arg.as_ref())
-                    }
-                    _ => None,
-                })
-        }
-        _ => None,
     }
 }
 
-pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Converted<i32> {
-    DESIGN.with(|context| {
-        let context = context.borrow();
+pub(super) fn query(call: celox_sv_syntax::ExprId, tree: &AnalysisContext<'_>) -> Converted<i32> {
+    {
+        let context = tree.state.timescales.design.borrow();
         if let Some(prepared) = &context.prepared
-            && prepared.address == tree as *const SyntaxTree as usize
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
-            context.design.query_in_unit(call, tree, &prepared.unit)
+            context.design.query_in_unit(
+                call,
+                tree,
+                &prepared.unit,
+                &scope::imported(&tree.state).interface_types,
+            )
         } else {
-            context.design.query(call, tree)
+            context
+                .design
+                .query(call, tree, &scope::imported(&tree.state).interface_types)
         }
-    })
+    }
+}
+
+/// The simulation's time units in one time unit of the scope of `node`: the
+/// divisor that scales the simulation time to `$time` (20.3.1), and the
+/// factor that scales a delay to the simulation time (3.14.1).
+pub(super) fn time_divisor(
+    node: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+) -> Converted<u64> {
+    {
+        let context = tree.state.timescales.design.borrow();
+        if let Some(prepared) = &context.prepared
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
+        {
+            return Ok(context.design.time_divisor_in_unit(
+                tree.declarations().expression(node).tokens.start,
+                &prepared.unit,
+            ));
+        }
+        let design = &context.design;
+        let source = key(tree);
+        let extended = (!design.units.contains_key(&source))
+            .then(|| design.including_tree(tree))
+            .transpose()?;
+        let design = extended.as_ref().unwrap_or(design);
+        Ok(design.time_divisor_in_unit(
+            tree.declarations().expression(node).tokens.start,
+            &design.units[&source],
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_interface_instances_keep_their_full_path() {
+        let state = State::default();
+        with_interface_instance(&state, "outer", || {
+            with_interface_instance(&state, "child[2]", || {
+                assert_eq!(
+                    state.interface_instance.borrow().as_deref(),
+                    Some("outer.child[2]")
+                );
+            });
+            assert_eq!(state.interface_instance.borrow().as_deref(), Some("outer"));
+        });
+        assert!(state.interface_instance.borrow().is_none());
+    }
+
     use super::*;
+    fn native_calls(tree: &SyntaxTree) -> Vec<celox_sv_syntax::ExprId> {
+        let native = tree.declarations();
+        let callees: HashSet<_> = native
+            .expression_nodes()
+            .filter_map(|(_, node)| match node.kind {
+                celox_sv_syntax::ExprKind::Call { expression, .. } => Some(expression),
+                _ => None,
+            })
+            .collect();
+        let mut calls: Vec<_> = native
+            .expression_nodes()
+            .filter_map(|(id, _)| (is_query(id, native) && !callees.contains(&id)).then_some(id))
+            .collect();
+        calls.sort_by_key(|id| native.expression(*id).tokens.start);
+        calls
+    }
     #[test]
     fn current_query_scope_lookup_scales_logarithmically() {
         let mut code = String::new();
@@ -1082,20 +1044,19 @@ mod tests {
                 "module M{i}(); timeunit {time}; localparam Q=$timeunit(); endmodule\n"
             ));
         }
-        let tree = crate::syntax::parse_source(&code, Path::new("many_queries.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(&code, Path::new("many_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("many_queries.sv"))]).unwrap());
-        let _guard = install_for_tree(design, &tree).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
         let before = SCOPE_CHECKS.with(|count| count.get());
         let mut calls = 0;
-        for node in &tree {
-            if let RefNode::SystemTfCall(call) = node {
-                assert_eq!(
-                    query(call, &tree).unwrap(),
-                    if calls % 2 == 0 { -7 } else { -6 }
-                );
-                calls += 1;
-            }
+        for call in native_calls(&tree) {
+            assert_eq!(
+                query(call, &tree).unwrap(),
+                if calls % 2 == 0 { -7 } else { -6 }
+            );
+            calls += 1;
         }
         assert_eq!(calls, 1024);
         let checks = SCOPE_CHECKS.with(|count| count.get()) - before;
@@ -1111,16 +1072,14 @@ mod tests {
             module Inner(); timeunit 10ns; localparam I=$timeunit(); endmodule
             localparam O=$timeunit(); endmodule
             module Sibling(); timeunit 1ns / 1ps; localparam S=$timeunit(); endmodule";
-        let tree = crate::syntax::parse_source(code, Path::new("nested_queries.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(code, Path::new("nested_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("nested_queries.sv"))]).unwrap());
-        let _guard = install_for_tree(design, &tree).unwrap();
-        let values: Vec<_> = tree
+        let tree = AnalysisContext::unspecialized(&tree);
+        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
+        let values: Vec<_> = native_calls(&tree)
             .into_iter()
-            .filter_map(|node| match node {
-                RefNode::SystemTfCall(call) => Some(query(call, &tree).unwrap()),
-                _ => None,
-            })
+            .map(|call| query(call, &tree).unwrap())
             .collect();
         assert_eq!(values, [-8, -7, -9]);
     }
@@ -1222,6 +1181,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &[],
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -1242,7 +1202,7 @@ mod tests {
                 "module M{i}(); timeunit 1us / 1ns; M0 child(); endmodule\n"
             ));
         }
-        let tree = crate::syntax::parse_source(&code, Path::new("many_scopes.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(&code, Path::new("many_scopes.sv")).unwrap();
         let before = PARENT_CHECKS.with(|count| count.get());
         let design = Timescales::collect(&[(&tree, Path::new("many_scopes.sv"))]).unwrap();
         let checks = PARENT_CHECKS.with(|count| count.get()) - before;
@@ -1270,7 +1230,7 @@ mod tests {
             module Sibling(); endmodule
             `resetall
             package After; endpackage";
-        let tree = crate::syntax::parse_source(code, Path::new("nested_scopes.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(code, Path::new("nested_scopes.sv")).unwrap();
         let design = Timescales::collect(&[(&tree, Path::new("nested_scopes.sv"))]).unwrap();
         for (name, unit, precision) in [
             ("Outer", -7, -11),
@@ -1384,19 +1344,19 @@ mod tests {
             "module B(); endmodule module A(); timeunit 1ns / 1ns; endmodule",
             "module A(); timeunit 1ns / 1ns; endmodule package P; endpackage",
         ] {
-            let tree = crate::syntax::parse_source(code, Path::new("mixed_times.sv")).unwrap();
+            let tree = crate::source_tree::parse_source(code, Path::new("mixed_times.sv")).unwrap();
             assert!(
                 Timescales::collect(&[(&tree, Path::new("mixed_times.sv"))]).is_err(),
                 "accepted {code}"
             );
         }
-        let explicit = crate::syntax::parse_source(
+        let explicit = crate::source_tree::parse_source(
             "module A(); timeunit 1ns / 1ns; endmodule",
             Path::new("a.sv"),
         )
         .unwrap();
         let default =
-            crate::syntax::parse_source("module B(); endmodule", Path::new("b.sv")).unwrap();
+            crate::source_tree::parse_source("module B(); endmodule", Path::new("b.sv")).unwrap();
         assert!(
             Timescales::collect(&[
                 (&explicit, Path::new("a.sv")),
@@ -1428,16 +1388,10 @@ mod tests {
                 );
                 let result = crate::analyze_source(&code, Path::new("package_path.sv"));
                 let tree =
-                    crate::syntax::parse_source(&code, Path::new("package_path.sv")).unwrap();
-                let call = tree
-                    .into_iter()
-                    .find_map(|node| match node {
-                        RefNode::SystemTfCall(call) => Some(call),
-                        _ => None,
-                    })
-                    .unwrap();
+                    crate::source_tree::parse_source(&code, Path::new("package_path.sv")).unwrap();
+                let call = native_calls(&tree)[0];
                 // Exercise both collected design metadata and the local-tree fallback.
-                let local = Timescales::default().query(call, &tree);
+                let local = Timescales::default().query(call, &tree, &HashMap::default());
                 if operand == "P" {
                     let expected: i32 = if function == "$timeunit" { -7 } else { -11 };
                     let ir = result.unwrap();
@@ -1468,6 +1422,7 @@ mod tests {
                 "Child",
                 &HashMap::default(),
                 &[],
+                &[],
                 &ModuleInterfaces::default(),
                 &packages,
             )
@@ -1495,6 +1450,7 @@ mod tests {
                         "Child",
                         &HashMap::default(),
                         &[],
+                        &[],
                         &ModuleInterfaces::default(),
                         &packages
                     )
@@ -1505,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_handle_queries_reject_invalid_operands_and_macro_edits() {
+    fn interface_handle_queries_validate_operands_without_editing_macros() {
         for (instance, expression) in [
             ("I i();", "$timeunit(i, 1)"),
             ("I i();", "$timeprecision(i + 1)"),
@@ -1517,8 +1473,7 @@ mod tests {
                 "interface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; {instance} assign y = {expression}; endmodule"
             );
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_handle_query.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_handle_query.sv")).is_err(),
                 "accepted {expression} with {instance}"
             );
         }
@@ -1530,14 +1485,8 @@ mod tests {
             let code = format!(
                 "{definition}\ninterface I; timeunit 1ns / 1ps; endinterface module Top(output int y); timeunit 1ns / 1ps; I i(); assign y = {call}; endmodule"
             );
-            let error = crate::elaborate_interfaces(&[(&code, Path::new("macro_handle_query.sv"))])
-                .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("macro-origin interface timescale query"),
-                "{error}"
-            );
+            let result = crate::analyze_source(&code, Path::new("macro_handle_query.sv"));
+            assert!(result.is_ok(), "{result:?}");
         }
     }
 
@@ -1560,37 +1509,34 @@ mod tests {
         let prefix = "`define SCALE $timeunit()\ninterface I; timeunit 100ps / 10fs; function automatic int u(); return `SCALE; endfunction endinterface";
         let code =
             format!("{prefix} module Top(); timeunit 1ms / 1us; localparam U=`SCALE; endmodule");
-        let rewritten =
-            crate::elaborate_interfaces(&[(&code, Path::new("unused_macro_interface.sv"))])
-                .unwrap()
-                .unwrap();
-        let ir =
-            crate::analyze_source(&rewritten[0], Path::new("unused_macro_interface.sv")).unwrap();
+        let ir = crate::analyze_source(&code, Path::new("unused_macro_interface.sv")).unwrap();
         assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-3));
-        let code = format!("{prefix} module Top(); timeunit 1ms / 1us; I i(); endmodule");
-        let error = crate::elaborate_interfaces(&[(&code, Path::new("used_macro_interface.sv"))])
-            .unwrap_err();
+        let code = format!(
+            "{prefix} module Top(output int y); timeunit 1ms / 1us; localparam U=`SCALE; I i(); assign y=i.u(); endmodule"
+        );
+        let ir = crate::analyze_source(&code, Path::new("used_macro_interface.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(-3));
         assert!(
-            error
-                .to_string()
-                .contains("macro or compiler directive in interface `I`"),
-            "{error}"
+            ir.modules()[0]
+                .subroutines()
+                .iter()
+                .any(|function| function.name == "i$u")
         );
     }
 
     #[test]
     fn prepared_tree_context_is_restored_after_nested_analysis_and_errors() {
-        let a = crate::syntax::parse_source(
+        let a = crate::source_tree::parse_source(
             "module A(); timeunit 1us / 1ns; localparam U=$timeunit(); endmodule",
             Path::new("a.sv"),
         )
         .unwrap();
-        let b = crate::syntax::parse_source(
+        let b = crate::source_tree::parse_source(
             "module B(); timeunit 1ns / 1ps; localparam U=$timeunit(); endmodule",
             Path::new("b.sv"),
         )
         .unwrap();
-        let invalid = crate::syntax::parse_source(
+        let invalid = crate::source_tree::parse_source(
             "module Invalid(); timeunit 2ns; endmodule",
             Path::new("invalid.sv"),
         )
@@ -1598,20 +1544,18 @@ mod tests {
         let design = Arc::new(
             Timescales::collect(&[(&a, Path::new("a.sv")), (&b, Path::new("b.sv"))]).unwrap(),
         );
-        fn call(tree: &SyntaxTree) -> &sv_parser::SystemTfCall {
-            tree.into_iter()
-                .find_map(|node| match node {
-                    RefNode::SystemTfCall(call) => Some(call),
-                    _ => None,
-                })
-                .unwrap()
+        fn call(tree: &SyntaxTree) -> celox_sv_syntax::ExprId {
+            native_calls(tree)[0]
         }
-        let _outer = install_for_tree(design.clone(), &a).unwrap();
+        let a = AnalysisContext::unspecialized(&a);
+        let overrides = HashMap::default();
+        let b = a.child(&b, &overrides);
+        let _outer = install_for_tree(&a.state.timescales, design.clone(), &a).unwrap();
         assert_eq!(query(call(&a), &a).unwrap(), -6);
         {
-            let _inner = install_for_tree(design.clone(), &b).unwrap();
+            let _inner = install_for_tree(&b.state.timescales, design.clone(), &b).unwrap();
             assert_eq!(query(call(&b), &b).unwrap(), -9);
-            assert!(install_for_tree(design, &invalid).is_err());
+            assert!(install_for_tree(&b.state.timescales, design, &invalid).is_err());
             assert_eq!(query(call(&b), &b).unwrap(), -9);
         }
         assert_eq!(query(call(&a), &a).unwrap(), -6);
@@ -1631,19 +1575,29 @@ mod tests {
         )
         .unwrap();
         let packages = crate::ParsedSource::analyze_packages(&[&source, &unused]).unwrap();
-        for ty in ["logic [7:0]", "logic [3:0]", "logic [7:0]"] {
+        for width in [8, 4, 8] {
+            let mut ty = Type::new(TypeKind::Logic);
+            ty.packed_ranges = vec![PackedRange::new(
+                ConstExpr::Literal((width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            )];
             let before = COLLECTIONS.with(std::cell::Cell::get);
             let result = source
                 .analyze_module(
                     "Child",
                     &HashMap::default(),
-                    &[("T".into(), ty.into())],
+                    &[("T".into(), ty)],
+                    &[],
                     &ModuleInterfaces::default(),
                     &packages,
                 )
                 .unwrap();
             let after = COLLECTIONS.with(std::cell::Cell::get);
-            assert_eq!(after - before, 1, "recollected time scopes for {ty}");
+            assert_eq!(
+                after - before,
+                0,
+                "recollected cached time scopes for width {width}"
+            );
             let values: Vec<_> = result.modules()[0]
                 .parameters()
                 .iter()
@@ -1669,12 +1623,9 @@ mod tests {
     }
 
     #[test]
-    fn interface_query_rewriting_preserves_macros_in_module_scopes() {
+    fn interface_bindings_preserve_macros_in_module_scopes() {
         let code = "`define U $timeunit()\ninterface I; timeunit 1ns / 1ps; endinterface module Top(); timeunit 1ms / 1us; localparam U=`U; endmodule module Child(); timeunit 1us / 1ns; localparam U=`U; endmodule";
-        let elaborated = crate::elaborate_interfaces(&[(code, Path::new("macro_times.sv"))])
-            .unwrap()
-            .unwrap();
-        let result = crate::analyze_source(&elaborated[0], Path::new("macro_times.sv")).unwrap();
+        let result = crate::analyze_source(code, Path::new("macro_times.sv")).unwrap();
         for (name, value) in [("Top", -3), ("Child", -6)] {
             let module = result.modules().iter().find(|m| m.name() == name).unwrap();
             assert_eq!(module.parameters()[0].resolved_value(), Some(value));
@@ -1682,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_query_rewriting_validates_discarded_and_hidden_operands() {
+    fn interface_queries_validate_discarded_and_hidden_operands() {
         for expression in [
             "$timeunit(missing);",
             "void'($timeprecision(1));",
@@ -1692,8 +1643,7 @@ mod tests {
                 "interface I; timeunit 1ns / 1ps; function automatic int f(); {expression} return 0; endfunction endinterface module Top(); timeunit 1ns / 1ps; I i(); endmodule"
             );
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_query.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_interface_query.sv")).is_err(),
                 "accepted {expression}"
             );
         }
@@ -1704,8 +1654,7 @@ mod tests {
         ] {
             let code = format!("interface I; {items} endinterface module Top(); endmodule");
             assert!(
-                crate::elaborate_interfaces(&[(&code, Path::new("invalid_interface_scale.sv"))])
-                    .is_err(),
+                crate::analyze_source(&code, Path::new("invalid_interface_scale.sv")).is_err(),
                 "accepted {items}"
             );
         }

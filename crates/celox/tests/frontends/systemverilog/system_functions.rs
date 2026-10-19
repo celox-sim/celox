@@ -945,6 +945,8 @@ sv_backends! {
         assert_eq!(sim.get(initial_words), 0xaabbcc00u32.into());
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(registered), 0x0a0b0c00u32.into());
+        // Address directives, or a word for each address, warn nothing.
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
     fn readmem_count_mismatch_preserves_unwritten_words(sim) {
@@ -976,6 +978,50 @@ sv_backends! {
         let short_y = sim.signal("short_y");
         assert_eq!(sim.get(y), 0xbbcc3344u32.into());
         assert_eq!(sim.get(short_y), 0x112233aau32.into());
+        // IEEE 1800-2023 21.4: a count mismatch without address directives
+        // issues a warning, at each call.
+        let warned = readmem_warnings(sim.warnings());
+        assert_eq!(warned, vec![
+            ("readmem.sv".to_string(), source_line(&source, "short_mem, 3, 2"), short.display().to_string()),
+            ("readmem.sv".to_string(), source_line(&source, "mem, -1, 0"), long.display().to_string()),
+        ]);
+    }
+
+    fn readmem_count_mismatch_warns_once_per_call(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"
+                module Child #(parameter int P = 0) (output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{file}", mem);
+                    assign y = mem[0] + P;
+                endmodule
+                module Top(output logic [31:0] y);
+                    logic [7:0] a [0:1];
+                    logic [7:0] b [0:1];
+                    initial $readmemh("{file}", a);
+                    initial $readmemh("{file}", b);
+                    Child #(.P(0)) c0(y[23:16]);
+                    Child #(.P(1)) c1(y[31:24]);
+                    assign y[15:0] = {{a[0], b[0]}};
+                endmodule
+            "#, file = file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("calls.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xabaaaaaau32.into());
+        // Calls that read the same file into equal ranges warn separately;
+        // a call in a module specialized twice warns once.
+        let file = file.display().to_string();
+        assert_eq!(readmem_warnings(sim.warnings()), vec![
+            ("calls.sv".to_string(), source_line(&source, "\", mem);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", a);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", b);"), file),
+        ]);
+        let rendered = celox::render_diagnostic(&sim.warnings()[1]);
+        let line = source_line(&source, "\", a);");
+        assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
     }
     fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
     fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
@@ -1089,6 +1135,32 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
     }
 }
 
+/// The file, line and memory file of each `$readmem` word-count warning.
+fn readmem_warnings(warnings: &[celox::CompilationWarning]) -> Vec<(String, usize, String)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::MemoryFileWordCount { task, file, .. },
+                location: Some(location),
+            }) => {
+                assert_eq!(task, "$readmemh");
+                (location.path.clone(), location.line, file.clone())
+            }
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line of the first line of `source` containing `needle`.
+fn source_line(source: &str, needle: &str) -> usize {
+    source
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap()
+        + 1
+}
+
 fn build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("system_functions.sv"))], "Top")
         .build_cranelift()
@@ -1124,12 +1196,31 @@ fn printtimescale_rejects_invalid_operands_and_value_contexts() {
     build_error(
         "module Top(output int y); localparam UNUSED=$bits($printtimescale()); assign y=0; endmodule",
     );
-    let error = build_error(
+}
+
+#[test]
+fn printtimescale_in_interface_array_functions_keeps_each_instance_scope() {
+    let mut sim = initial_simulation(
         "interface I; function automatic int show(); $printtimescale; return 0; endfunction initial $display(\"%0d\", show()); endinterface module Top(output logic y); I info[2](); assign y=0; endmodule",
     );
-    assert!(
-        error.contains("uses its instance scope in `$printtimescale`"),
-        "{error}"
+    sim.step().unwrap();
+    let mut messages = sim
+        .drain_runtime_events()
+        .into_iter()
+        .map(|event| match event {
+            celox::RuntimeEvent::Display { message } => String::from_utf8(message).unwrap(),
+            event => panic!("unexpected event: {event:?}"),
+        })
+        .collect::<Vec<_>>();
+    messages.sort();
+    assert_eq!(
+        messages,
+        [
+            "0",
+            "0",
+            "Time scale of (Top.info[0]) is 1ns / 1ps",
+            "Time scale of (Top.info[1]) is 1ns / 1ps",
+        ]
     );
 }
 
@@ -1250,21 +1341,365 @@ fn readmem_diagnostics_identify_task_and_requested_range() {
 }
 
 #[test]
-fn rejects_stop_and_deferred_cover_instead_of_discarding_their_semantics() {
-    for body in [
-        "initial $stop;",
-        "always_comb begin $stop(0); y = 0; end",
-        "always_ff @(posedge clk) begin $stop; y <= 0; end",
-        "function automatic int f(); $stop; return 1; endfunction initial y = f();",
-    ] {
-        let source = format!("module Top(input logic clk, output logic y); {body} endmodule");
-        assert!(build_error(&source).contains("system task `$stop`"));
-    }
+fn rejects_deferred_cover_instead_of_discarding_its_semantics() {
     for timing in ["#0", "final"] {
         let source =
             format!("module Top(output logic y); initial cover {timing} (1) y = 1; endmodule");
         assert!(build_error(&source).contains("deferred immediate cover"));
     }
+}
+
+/// IEEE 1800-2023 20.2: `$stop` suspends the simulation, and continuing it
+/// resumes after the call, including inside loops and functions. The other
+/// processes of the round wait for the simulation to continue.
+#[test]
+fn stop_suspends_the_simulation_until_it_continues() {
+    let source = r#"
+        module Top(input int rounds, output int count, other, sum);
+          int acc;
+          function automatic int bump(input int x);
+            $stop;
+            return x + 1;
+          endfunction
+          initial begin
+            count = 1;
+            $stop;
+            count = 2;
+            acc = 10;
+            for (int i = 0; i < rounds; i++) begin
+              if (i != 1) $stop(0);
+              count = count + 1;
+              acc = acc + i;
+            end
+            count = bump(count);
+            $display("done %0d %0d", count, acc);
+          end
+          // Reading an input keeps this block a process instead of initial
+          // state.
+          initial other = rounds + 2;
+          assign sum = count + other;
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let rounds = sim.signal("rounds");
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    let (count, other, sum) = (sim.signal("count"), sim.signal("other"), sim.signal("sum"));
+    for expected in [1u8, 2, 4, 5] {
+        assert_eq!(sim.step().unwrap(), Some(0));
+        assert!(sim.is_stopped());
+        assert_eq!(sim.get(count), expected.into());
+        assert_eq!(sim.get(other), 0u8.into());
+        assert_eq!(sim.get(sum), expected.into());
+        assert_eq!(sim.drain_runtime_events(), Vec::new());
+        // A suspended time step cannot be captured.
+        assert!(matches!(
+            sim.checkpoint(),
+            Err(celox::CheckpointError::Stopped)
+        ));
+    }
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(!sim.is_stopped());
+    assert!(!sim.is_finished());
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
+    assert_eq!(sim.get(sum), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"done 6 13".to_vec(),
+        }],
+    );
+    assert_eq!(sim.step().unwrap(), None);
+    assert!(sim.checkpoint().is_ok());
+
+    // `run_until` returns at the stop, before reaching its target time, and
+    // continues when called again.
+    let mut sim = initial_simulation(source);
+    let rounds = sim.signal("rounds");
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    for expected in [1u8, 2, 4, 5] {
+        sim.run_until(10).unwrap();
+        assert!(sim.is_stopped());
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.get(count), expected.into());
+    }
+    sim.run_until(10).unwrap();
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.time(), 10);
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
+
+    // The bounded API returns false both at a new stop and when no step is
+    // allowed to resume it. Bindings distinguish these using the stop state
+    // and whether the budget allowed a step.
+    let mut sim = initial_simulation(source);
+    sim.modify(|io| io.set(rounds, 3u8)).unwrap();
+    for expected in [1u8, 2, 4, 5] {
+        assert!(!sim.run_until_bounded(10, 1).unwrap());
+        assert!(sim.is_stopped());
+        assert_eq!(sim.time(), 0);
+        assert_eq!(sim.get(count), expected.into());
+        assert!(!sim.run_until_bounded(10, 0).unwrap());
+        assert!(sim.is_stopped());
+        assert_eq!(sim.get(count), expected.into());
+    }
+    assert!(sim.run_until_bounded(10, 1).unwrap());
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.time(), 10);
+    assert_eq!(sim.get(count), 6u8.into());
+    assert_eq!(sim.get(other), 5u8.into());
+}
+
+/// The time step a `$stop` suspends continues where it stopped: an edge a
+/// process made before the stop triggers its domain after the rest of the
+/// process has run.
+#[test]
+fn stop_keeps_the_edges_of_its_time_step() {
+    let source = r#"
+        module Top(input int start, output logic clk, output int q);
+          always_ff @(posedge clk) q <= q + 1;
+          initial begin
+            clk = start[0];
+            clk = 1;
+            $stop;
+            $display("q=%0d", q);
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    let q = sim.signal("q");
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(sim.is_stopped());
+    assert_eq!(sim.get(q), 0u8.into());
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert!(!sim.is_stopped());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"q=0".to_vec(),
+        }],
+    );
+    assert_eq!(sim.get(q), 1u8.into());
+}
+
+/// Outside a process kernel, `$stop` is reported to the host like `$finish`.
+#[test]
+fn stop_in_a_clocked_or_combinational_process_is_an_event() {
+    let source = r#"
+        module Top(input logic clk, enabled, output logic y);
+          always_ff @(posedge clk) if (enabled) $stop;
+          always_comb begin
+            if (enabled) $stop(2);
+            y = enabled;
+          end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("stop.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.drain_runtime_events();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    let enabled = sim.signal("enabled");
+    sim.modify(|io| io.set(enabled, 1u8)).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Stop]);
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Stop]);
+}
+
+/// IEEE 1800-2023 24.7: `$exit` outside a program block is ignored.
+#[test]
+fn exit_outside_a_program_block_is_ignored() {
+    let source = r#"
+        module Top(input logic clk, output int a, b);
+          initial begin
+            a = 1;
+            $exit;
+            a = 2;
+            $exit();
+            a = 3;
+          end
+          always_ff @(posedge clk) begin
+            $exit;
+            b <= b + 1;
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.run_until(0).unwrap();
+    assert!(!sim.is_finished());
+    assert!(!sim.is_stopped());
+    assert_eq!(sim.get(sim.signal("a")), 3u8.into());
+    assert_eq!(sim.drain_runtime_events(), Vec::new());
+    // Each call warns once, at its line.
+    let warned: Vec<_> = sim
+        .warnings()
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => location.line,
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("$exit"))
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>()
+    );
+    let error =
+        build_error("module Top(output logic y); initial $exit(1); assign y = 0; endmodule");
+    assert!(
+        error.contains("$exit") && error.contains("expected 0 arguments"),
+        "{error}"
+    );
+}
+
+/// The location of each `$exit` warning, which must be all of them.
+fn exit_warning_locations(warnings: &[celox::CompilationWarning]) -> Vec<(usize, usize)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => (location.line, location.column),
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line and column of the first `needle` in `source`.
+fn source_position(source: &str, needle: &str) -> (usize, usize) {
+    let line = source_line(source, needle);
+    let column = source.lines().nth(line - 1).unwrap().find(needle).unwrap() + 1;
+    (line, column)
+}
+
+#[test]
+fn exit_in_a_timed_process_warns_at_the_call() {
+    let source = r#"
+        module Top(input logic clk, output int a);
+          timeunit 1ps;
+          timeprecision 1ps;
+          initial begin
+            #1 $exit;
+            a = 1;
+          end
+          always @(posedge clk) begin
+            #1;
+            $exit();
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+#[test]
+fn exit_in_a_constant_function_warns_at_the_call() {
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          function automatic int f();
+            $exit();
+            return 4;
+          endfunction
+          localparam int N = f();
+          assign y = N + P::Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 6u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+#[test]
+fn package_warnings_survive_a_failing_module() {
+    // Analyzing the top fails the build before the package states lower.
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          always_comb y <= P::Q;
+        endmodule
+    "#;
+    let Err(error) = Simulator::from_sv_sources(vec![(source, Path::new("package.sv"))], "Top")
+        .build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        exit_warning_locations(error.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+}
+
+/// Type and assignment-pattern parameters are bound by rewriting the module
+/// source; the warnings still point at the call in the file.
+#[test]
+fn warnings_of_rewritten_specializations_point_at_their_call() {
+    let source = r#"
+        module Child #(parameter type T = logic, parameter int P [2] = '{1, 2})
+            (output int y);
+          T v;
+          initial begin
+            $exit;
+          end
+          assign y = P[0];
+        endmodule
+        module Top(output int a, b, c);
+          Child #(.T(logic [63:0])) c0(.y(a));
+          Child #(.P('{100000, 200000})) c1(.y(b));
+          Child c2(.y(c));
+        endmodule
+    "#;
+    let sim = Simulator::from_sv_sources(vec![(source, Path::new("rewritten.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    // The three specializations share the call.
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+    let rendered = celox::render_diagnostic(&sim.warnings()[0]);
+    assert!(
+        rendered.contains("$exit;") && !rendered.contains("logic [63:0]"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -1336,8 +1771,8 @@ fn rejects_unknown_system_functions_in_every_context() {
 fn reports_where_a_known_system_function_is_not_supported() {
     let cases = [
         (
-            "system function `$time` in an expression",
-            "module Top(output logic [63:0] y); assign y = $time; endmodule",
+            "system function `$realtime` in an expression",
+            "module Top(output logic [63:0] y); assign y = $realtime; endmodule",
         ),
         (
             "system function `$sqrt` in an expression",
@@ -1360,8 +1795,8 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system task `$stop`",
-            "module Top(output logic y); initial $stop; assign y = 0; endmodule",
+            "system task `$dumpvars`",
+            "module Top(output logic y); initial $dumpvars; assign y = 0; endmodule",
         ),
         (
             "system task `$stacktrace`",
@@ -1634,18 +2069,27 @@ fn initial_blocks_that_read_design_state_run_at_time_zero() {
     assert_eq!(sim.get(y), 1u8.into());
 }
 
+/// A nonblocking assignment in an `initial` process updates its target in
+/// the NBA region: a `$display` in the same time slot sees the old value.
 #[test]
-fn rejects_nonblocking_assignments_in_initial_processes() {
-    let error = build_error(
-        r#"module Top(output logic y);
-            logic v;
+fn nonblocking_assignments_in_initial_processes_update_after_the_display() {
+    let source = r#"module Top(output logic y);
+            logic v = 1'b0;
             initial begin v <= 1'b1; $display("%0d", v); end
             assign y = v;
-        endmodule"#,
-    );
-    assert!(
-        error.contains("nonblocking assignment in an initial block that runs as a process"),
-        "{error}"
+        endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("system_functions.sv"))], "Top")
+            .build()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"0".to_vec()
+        }]
     );
 }
 
@@ -2101,5 +2545,493 @@ fn urandom_parameter_storage_does_not_consume_default_seeds() {
         "localparam logic [7:0] A[0:0] = '{0};",
     ] {
         assert_eq!(run(parameter), baseline, "{parameter}");
+    }
+}
+
+/// Drive a rising edge of `clk` at `time`, then drain the runtime events.
+fn rising_edge_at(sim: &mut celox::Simulation, time: u64) -> Vec<celox::RuntimeEvent> {
+    let clk = sim.signal("clk");
+    sim.run_until(time).unwrap();
+    sim.modify(|io| io.set(clk, 1u8)).unwrap();
+    sim.run_until(time).unwrap();
+    sim.modify(|io| io.set(clk, 0u8)).unwrap();
+    sim.run_until(time).unwrap();
+    sim.drain_runtime_events()
+}
+
+fn displays(lines: &[&str]) -> Vec<celox::RuntimeEvent> {
+    lines
+        .iter()
+        .map(|line| celox::RuntimeEvent::Display {
+            message: line.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+#[test]
+fn time_counts_the_global_precision_in_the_unit_of_the_caller() {
+    // IEEE 1800-2023 20.3: a Simulation counts the global precision, 1 ps;
+    // `$time` rounds to the caller's unit and `$stime` keeps 32 bits.
+    let source = r#"
+        package P;
+            timeunit 100ps / 1ps;
+            function automatic longint now();
+                return $time;
+            endfunction
+        endpackage
+        module Top(input logic clk, input logic [7:0] a, output logic [31:0] y);
+            timeunit 1ns; timeprecision 1ps;
+            Child child(.clk(clk));
+            initial $display("initial %0d", $time);
+            always_ff @(posedge clk) $display("top %0d %0d %0d", $time, $stime, P::now());
+            always_comb y = a + $stime;
+        endmodule
+        module Child(input logic clk);
+            timeunit 10ps / 1ps;
+            always_ff @(posedge clk) $display("child %0d", $time);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (a, y) = (sim.signal("a"), sim.signal("y"));
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.drain_runtime_events(), displays(&["initial 0"]));
+    // 1.499 ns rounds down, 149.9 x 10 ps up; 1.5 ns, a half, rounds up.
+    // The package function counts the unit of its package.
+    assert_eq!(
+        rising_edge_at(&mut sim, 1_499),
+        displays(&["top 1 1 15", "child 150"]),
+    );
+    assert_eq!(
+        rising_edge_at(&mut sim, 1_500),
+        displays(&["top 2 2 15", "child 150"]),
+    );
+    assert_eq!(
+        rising_edge_at(&mut sim, 2_494),
+        displays(&["top 2 2 25", "child 249"]),
+    );
+    // Past 32 bits of the caller's unit, `$stime` wraps.
+    let late = ((1u64 << 32) + 3) * 1_000;
+    assert_eq!(
+        rising_edge_at(&mut sim, late),
+        displays(&["top 4294967299 3 42949672990", "child 429496729900"]),
+    );
+    // A combinational process reads the time when its inputs change, not
+    // when the time does.
+    assert_eq!(sim.get(y), 0u32.into());
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    sim.run_until(late).unwrap();
+    assert_eq!(sim.get(y), 8u32.into());
+}
+
+#[test]
+fn time_reaches_a_module_that_reads_it_only_combinationally() {
+    let source = r#"
+        module Top(input logic [7:0] a, output logic [63:0] y);
+            assign y = a + $time;
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let (a, y) = (sim.signal("a"), sim.signal("y"));
+    // No work is due at 7 ns: the run moves the time without a round.
+    sim.run_until(7_000).unwrap();
+    sim.modify(|io| io.set(a, 5u8)).unwrap();
+    sim.run_until(7_000).unwrap();
+    assert_eq!(sim.get(y), 12u64.into());
+}
+
+#[test]
+fn delays_count_the_time_unit_of_their_scope() {
+    // IEEE 1800-2023 3.14.1: `#3` waits three time units of its module, here
+    // 3 ns and 30 ps, which a Simulation counts in 1 ps.
+    let source = r#"
+        module Top;
+            timeunit 1ns / 1ps;
+            Child child();
+            initial begin
+                #3 $display("top %0d", $time);
+            end
+        endmodule
+        module Child;
+            timeunit 10ps / 1ps;
+            initial begin
+                #3 $display("child %0d", $time);
+            end
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("delay.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(sim.step().unwrap(), Some(0));
+    assert_eq!(sim.step().unwrap(), Some(30));
+    assert_eq!(sim.drain_runtime_events(), displays(&["child 3"]));
+    assert_eq!(sim.step().unwrap(), Some(3_000));
+    assert_eq!(sim.drain_runtime_events(), displays(&["top 3"]));
+}
+
+#[test]
+fn interface_functions_read_the_time_in_their_own_unit() {
+    let source = r#"
+        interface Clock;
+            timeunit 10ps / 1ps;
+            function automatic longint now();
+                return $time;
+            endfunction
+        endinterface
+        module Top(input logic clk);
+            timeunit 1ns / 1ps;
+            Clock bus();
+            always_ff @(posedge clk) $display("top %0d %0d", $time, bus.now());
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    assert_eq!(rising_edge_at(&mut sim, 2_000), displays(&["top 2 200"]));
+}
+
+#[test]
+fn time_is_not_a_constant_expression() {
+    let error = build_error(
+        "module Top(output logic [63:0] y);
+            localparam logic [63:0] T = $time;
+            assign y = T;
+        endmodule",
+    );
+    assert!(
+        error.contains("$time") && error.contains("constant-value expression"),
+        "{error}"
+    );
+}
+
+#[test]
+fn functions_that_read_the_simulation_state_are_no_constant_functions() {
+    // IEEE 1800-2023 13.4.3: whether or not the call is reached, and in the
+    // functions that call such a function.
+    for (function, call) in [
+        (
+            "function automatic int f(input int x);
+                if (x > 0) return x; else return int'($time);
+            endfunction",
+            "f(1)",
+        ),
+        (
+            "function automatic int f(input int x);
+                if (x > 0) return x; else return int'($stime);
+            endfunction
+            function automatic int g(input int x);
+                return x > 0 ? x : f(x);
+            endfunction",
+            "g(1)",
+        ),
+        (
+            "function automatic int state_reader(); return int'($time); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic int state_reader(); return int'($stime); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction
+            function automatic int g(); if (0) f(); return 2; endfunction",
+            "g()",
+        ),
+        (
+            "function automatic int state_reader(); return $urandom; endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic void state_reader(); int x; x = int'($time); endfunction
+            function automatic int f(); if (0) state_reader(); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic int f(); if (0) return int'($time); return 1; endfunction",
+            "f()",
+        ),
+        (
+            "function automatic int f(input int x, input int seed = $urandom);
+                return x;
+            endfunction",
+            "f(1, 2)",
+        ),
+    ] {
+        let error = build_error(&format!(
+            "module Top(output logic [7:0] y);
+                {function}
+                localparam int P = {call};
+                assign y = P;
+            endmodule"
+        ));
+        assert!(
+            error.contains("not permitted in constant function"),
+            "{call}: {error}"
+        );
+    }
+}
+
+#[test]
+fn constant_functions_reject_state_reads_in_selectors() {
+    for statement in [
+        "x[$time] = 1;",
+        "x[$stime +: 1] = 1;",
+        "x[31 - $time -: 1] = 1;",
+        "{x[0], x[$time]} = 2'b01;",
+        "x[now()] = 1;",
+        "x[0] = x[now()];",
+        "x[x[now()]] = 1;",
+        "x[0] = x[x[now()]];",
+        "x[$time ? 1 : 0] = 1;",
+        "x[int'($stime)] = 1;",
+        "x[$urandom] = 1;",
+        "x[0] = {x[now()], x[0]};",
+    ] {
+        let source = format!(
+            r#"
+            module Top(output logic [7:0] y);
+              function automatic int now(); return int'($time); endfunction
+              function automatic int f();
+                int x;
+                if (0) begin {statement} end
+                return 7;
+              endfunction
+              localparam int P = f();
+              assign y = P;
+            endmodule
+        "#
+        );
+        let error = build_error(&source);
+        assert!(
+            error.contains("not permitted in constant function"),
+            "{statement}: {error}"
+        );
+    }
+}
+
+#[test]
+fn constant_functions_accept_pure_selector_calls_and_ignore_task_selectors() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+          function automatic int index(input int n); return n; endfunction
+          function automatic int now(); return int'($time); endfunction
+          function automatic int f();
+            int x = 0;
+            x[index(1)] = 1;
+            $display("%0d", x[now()]);
+            return x[index(1)] + 1;
+          endfunction
+          localparam int P = f();
+          assign y = P;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("constant_selectors.sv"))], "Top")
+            .build()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
+fn state_files_keep_the_time_in_their_schedule() {
+    let source = r#"
+        module Top(input logic clk);
+            timeunit 1ns / 1ps;
+            always_ff @(posedge clk) $display("%0d", $time);
+        endmodule
+    "#;
+    let build = || {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+            .build()
+            .unwrap()
+    };
+    let mut sim = build();
+    sim.run_until(5_000).unwrap();
+    let file = sim.save_state().unwrap();
+    // A Simulator has no time, also after loading a timed simulation's state.
+    let mut untimed = Simulator::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    untimed.load_state(&file).unwrap();
+    let clk = untimed.event("clk");
+    untimed.tick(clk).unwrap();
+    assert_eq!(untimed.drain_runtime_events(), displays(&["0"]));
+    // A Simulation continues at the saved time.
+    let mut timed = build();
+    timed.load_state(&file).unwrap();
+    assert_eq!(rising_edge_at(&mut timed, 5_000), displays(&["5"]));
+}
+
+#[test]
+fn constant_functions_ignore_the_arguments_of_their_system_tasks() {
+    // IEEE 1800-2023 13.4.3: a constant function ignores its system task
+    // calls, so the `$time` of a message does not make it nonconstant.
+    let source = r#"
+        module Top(output logic [7:0] y);
+            function automatic int f(input int x);
+                $display("%0d", $time);
+                return x + 1;
+            endfunction
+            localparam int P = f(4);
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+        .build()
+        .unwrap();
+    let y = sim.signal("y");
+    assert_eq!(sim.get(y), 5u8.into());
+}
+
+#[test]
+fn time_is_zero_in_a_simulator_without_time() {
+    let source = r#"
+        module Top(input logic clk);
+            always_ff @(posedge clk) $display("%0d %0d", $time, $stime);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("time.sv"))], "Top")
+        .build()
+        .unwrap();
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.drain_runtime_events(), displays(&["0 0"]));
+}
+
+#[test]
+fn readmem_warnings_survive_a_later_lowering_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    // The top's inout port fails the build after its processes lowered.
+    let source = format!(
+        r#"
+        module Top(inout wire x, output logic [7:0] y);
+            logic [7:0] mem [0:1];
+            initial $readmemh("{}", mem);
+            assign y = mem[0];
+        endmodule
+    "#,
+        file.display()
+    );
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(&source, Path::new("inout.sv"))], "Top").build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        readmem_warnings(error.warnings()),
+        vec![(
+            "inout.sv".to_string(),
+            source_line(&source, "$readmemh"),
+            file.display().to_string()
+        )]
+    );
+}
+
+#[test]
+fn exit_warnings_survive_analyzer_errors() {
+    for source in [
+        r#"module Top(output int y);
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            always_comb y <= N;
+        endmodule"#,
+        r#"package P;
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            localparam int BAD = missing();
+        endpackage
+        module Top(output int y); assign y = P::N; endmodule"#,
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("error.sv"))], "Top")
+            .build_cranelift()
+            .unwrap_err();
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")],
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn exit_warnings_survive_simulator_initialization_errors() {
+    let source = "module Top(output int y); initial $exit; assign y = 1; endmodule";
+    let dir = tempfile::tempdir().unwrap();
+    // A directory cannot be opened as a VCD file, after compilation succeeded.
+    let builder =
+        || Simulator::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top").vcd(dir.path());
+    let mut errors = vec![
+        builder().build_cranelift().unwrap_err(),
+        builder().build_interpreter().unwrap_err(),
+        builder().build_tiered().unwrap_err(),
+        builder().build_wasm().unwrap_err(),
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top")
+            .vcd(dir.path())
+            .build_cranelift()
+            .unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().build_native().unwrap_err());
+    for error in errors {
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+#[test]
+fn review_warnings_survive_test_runner_errors() {
+    let source = r#"module Top(output int y);
+        function automatic int value(); $exit; return 1; endfunction
+        localparam int N = value();
+        assign y = N;
+    endmodule"#;
+    let builder = || Simulator::from_sv_sources(vec![(source, Path::new("testbench.sv"))], "Top");
+    let mut errors = vec![
+        builder().run_test().unwrap_err(),
+        builder().run_test_cranelift().unwrap_err(),
+        builder().run_test_detailed().unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().run_test_native().unwrap_err());
+    for error in errors {
+        assert!(
+            error.to_string().contains("no initial block found"),
+            "{error}"
+        );
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+sv_backends! {
+    fn review_warnings_deduplicate_parameterized_readmem_calls(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"module Child #(parameter N = 2)(output logic [7:0] y);
+                logic [7:0] mem [0:N-1];
+                initial $readmemh("{}", mem);
+                assign y = mem[0];
+            endmodule
+            module Top(output logic [7:0] a, b, c);
+                Child #(.N(2)) one(a);
+                Child #(.N(3)) two(b);
+                Child #(.N(4)) three(c);
+            endmodule"#, file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("specialized.sv"))], "Top");
+        let warnings = readmem_warnings(sim.warnings());
+        assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
+        assert_eq!(warnings[0].0, "specialized.sv");
+        assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
     }
 }

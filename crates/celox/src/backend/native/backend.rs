@@ -395,6 +395,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
     pub(crate) nba_sites: Vec<celox_design::NbaSite<AbsoluteAddr>>,
+    pub(crate) active_commits: Vec<AbsoluteAddr>,
+    pub(crate) time_slots: Vec<AbsoluteAddr>,
 }
 
 /// Pointer-free native compiler artifact which can be attached to the
@@ -427,6 +429,11 @@ pub struct NativeProgramImage {
 }
 
 impl NativeProgramImage {
+    /// Physical duration of one tick, retained in serialized native images.
+    pub fn time_precision(&self) -> celox_design::TimePrecision {
+        self.design.time_precision
+    }
+
     /// Remap filesystem paths in the image's runtime and diagnostic metadata.
     /// This permits relative paths in stored artifacts and rebinding on load.
     /// Machine code and design-authored literal strings are not modified.
@@ -499,6 +506,8 @@ impl NativeProgramImage {
                 watches: self.runtime_schema.watches.clone(),
                 wait_sites: self.runtime_schema.wait_sites.clone(),
                 nba_sites: self.runtime_schema.nba_sites.clone(),
+                active_commits: self.runtime_schema.active_commits.clone(),
+                time_slots: self.runtime_schema.time_slots.clone(),
             },
             testbench: self.testbench.clone(),
         }
@@ -2281,6 +2290,8 @@ fn compile_program(
                 watches: sir.runtime().runtime_schema.watches.clone(),
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
+                active_commits: sir.runtime().runtime_schema.active_commits.clone(),
+                time_slots: sir.runtime().runtime_schema.time_slots.clone(),
             },
             layout: layout.clone(),
             native_memory_size,

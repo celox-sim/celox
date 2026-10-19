@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "case_fingerprint": "1cb78dfea7f04bd89a555170f12432d011e6532a7a66da848c6efa89ea6e9694",
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: error: A hierarchical reference (`base.N') is not allowed in a constant expression.\n<case>/source_0.sv:3: error: Dimensions must be constant.\n<case>/source_0.sv:3       : This MSB expression violates the rule: (base.N)-('sd1)\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "interfaces::propagates_interface_dependent_ports",
+      "phase": "compile",
+      "reused": false,
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "verified_at_unix": 1792292897
+    }
+  ],
+  "context_fingerprint": "66452008dd5247ff71406b66de4a2697abd6d7624bd7c67a13d43a8ee98d1b17",
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 1,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

@@ -2,39 +2,29 @@
 
 use super::*;
 
-fn hierarchical_path(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Vec<String>> {
-    let Some(RefNode::HierarchicalIdentifier(identifier)) =
-        unwrap_node!(node.clone(), HierarchicalIdentifier)
-    else {
-        return identifier_text(node, syntax_tree).map(|name| vec![name]);
-    };
-    if identifier.nodes.0.is_some() {
-        return None;
+/// Collapse an interface handle/member prefix using its bound symbols. Any
+/// remaining path selects a packed-structure member of the interface signal.
+fn bind_interface_path(
+    state: &AnalysisState,
+    path: &mut Vec<String>,
+    dimensions: &PackedDimensions,
+) -> bool {
+    // A lexical variable wins over an enclosing interface handle, even if its
+    // member path is invalid. Never fall back to the interface in that case.
+    if path
+        .first()
+        .is_some_and(|root| dimensions.get(root).is_some())
+    {
+        return false;
     }
-    let mut path = Vec::new();
-    for (name, indices, _) in &identifier.nodes.1 {
-        // Indexing arrays of structs is a separate extension. Never drop an index.
-        if !indices.nodes.0.is_empty() {
-            return None;
+    let imported = scope::imported(state);
+    for length in (2..=path.len()).rev() {
+        if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
+            path.splice(..length, [name.clone()]);
+            return true;
         }
-        path.push(identifier_text(RefNode::Identifier(name), syntax_tree)?);
     }
-    path.push(identifier_text(
-        RefNode::Identifier(&identifier.nodes.2),
-        syntax_tree,
-    )?);
-    Some(path)
-}
-
-pub(in crate::ast) fn has_member_access(node: RefNode<'_>, select: RefNode<'_>) -> bool {
-    let hierarchy = matches!(unwrap_node!(node, HierarchicalIdentifier),
-        Some(RefNode::HierarchicalIdentifier(identifier)) if !identifier.nodes.1.is_empty());
-    hierarchy
-        || match select {
-            RefNode::Select(select) => select.nodes.0.is_some(),
-            RefNode::ConstantSelect(select) => select.nodes.0.is_some(),
-            _ => false,
-        }
+    false
 }
 
 fn selected_member<'a>(
@@ -78,20 +68,21 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
 }
 
 fn finish_lvalue(
+    state: &AnalysisState,
     path: &[String],
     offset: usize,
     r#type: &Type,
     relative: LValue,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
-    let width = expr_type_from_type(r#type, &dimensions.const_env)?.width;
+    let width = expr_type_from_type(state, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
         } => (
-            eval_ast_const_expr(&msb, &dimensions.const_env)?,
-            eval_ast_const_expr(&lsb, &dimensions.const_env)?,
+            eval_ast_const_expr(state, &msb, &dimensions.const_env)?,
+            eval_ast_const_expr(state, &lsb, &dimensions.const_env)?,
             signed,
         ),
     };
@@ -110,111 +101,32 @@ fn finish_lvalue(
     })
 }
 
-fn variable_path(
-    node: RefNode<'_>,
-    select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
-) -> Option<Vec<String>> {
-    let mut path = hierarchical_path(node, syntax_tree)?;
-    if let Some((members, _, last)) = &select.nodes.0 {
-        for (_, name, indices) in members {
-            if !indices.nodes.0.is_empty() {
-                return None;
-            }
-            path.push(identifier_text(
-                RefNode::MemberIdentifier(name),
-                syntax_tree,
-            )?);
-        }
-        path.push(identifier_text(
-            RefNode::MemberIdentifier(last),
-            syntax_tree,
-        )?);
-    }
-    Some(path)
-}
-
-pub(in crate::ast) fn member_first_dimension_width(
-    node: RefNode<'_>,
-    select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
-    dimensions: &PackedDimensions,
-) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree)?;
-    let (_, r#type) = selected_member(&path, dimensions)?;
-    if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let bound = |expr| {
-            let expr = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(expr),
-                syntax_tree,
-                &dimensions.const_env,
-                &dimensions.type_aliases,
-            )
-            .ok()
-            .flatten()?;
-            eval_ast_const_expr(&expr, &dimensions.const_env)
-        };
-        return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
-            .ok()?
-            .checked_add(1);
-    }
-    let index_count = select.nodes.1.nodes.0.len();
-    if index_count == r#type.packed_ranges.len() {
-        return Some(1);
-    }
-    let range = r#type.packed_ranges.get(index_count)?;
-    let left = eval_ast_const_expr(range.left(), &dimensions.const_env)?;
-    let right = eval_ast_const_expr(range.right(), &dimensions.const_env)?;
-    usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
-}
-
-pub(in crate::ast) fn member_dimension_count(
-    node: RefNode<'_>,
-    select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
-    dimensions: &PackedDimensions,
-) -> Option<usize> {
-    let path = variable_path(node, select, syntax_tree)?;
-    let (_, ty) = selected_member(&path, dimensions)?;
-    let remaining = ty
-        .packed_ranges
-        .len()
-        .checked_sub(select.nodes.1.nodes.0.len())?;
-    if select.nodes.2.is_some() && remaining == 0 {
-        return None;
-    }
-    Some(remaining)
-}
-
-/// A member of the structure `node` names. `base`, when given, is the name
-/// of that structure, such as the qualified name of a package parameter.
-pub(in crate::ast) fn variable_member(
-    node: RefNode<'_>,
+/// A whole native member path uses the same interface shadowing, type/offset
+/// lookup and bounds kernel as the remaining authored-select adapters.
+pub(in crate::ast) fn whole_member(
+    state: &AnalysisState,
+    mut path: Vec<String>,
     base: Option<String>,
-    select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let mut path = variable_path(node, select, syntax_tree)
-        .ok_or_else(|| unsupported("member access through an indexed structure"))?;
-    if let Some(base) = base {
+    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
-    let (offset, r#type) = selected_member(&path, dimensions)
+    if bound_interface && path.len() == 1 {
+        return Ok(LValue::Ident(path[0].clone()));
+    }
+    let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
-    let mut leaf_select = select.clone();
-    leaf_select.nodes.0 = None;
-    let relative = super::super::selects::lvalue_from_select(
-        path[0].clone(),
-        &leaf_select,
-        syntax_tree,
-        &member_dimensions(&path[0], r#type, dimensions),
-        true,
-    )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(
+        state,
+        &path,
+        offset,
+        ty,
+        LValue::Ident(path[0].clone()),
+        dimensions,
+    )
+    .ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
@@ -222,41 +134,30 @@ pub(in crate::ast) fn variable_member(
     })
 }
 
-pub(in crate::ast) fn net_member(
-    node: RefNode<'_>,
-    select: &sv_parser::ConstantSelect,
-    syntax_tree: &SyntaxTree,
+/// Select already-bound native member coordinates in the member's own type
+/// context. Interface members retain ordinary target coordinate rules.
+pub(in crate::ast) fn select_member(
+    state: &AnalysisState,
+    mut path: Vec<String>,
+    base: Option<String>,
     dimensions: &PackedDimensions,
+    select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
 ) -> Converted<LValue> {
-    let indexed = || unsupported("member access through an indexed structure");
-    let mut path = hierarchical_path(node, syntax_tree).ok_or_else(indexed)?;
-    if let Some((members, _, last)) = &select.nodes.0 {
-        for (_, name, indices) in members {
-            if !indices.nodes.0.is_empty() {
-                return Err(indexed());
-            }
-            path.push(
-                identifier_text(RefNode::MemberIdentifier(name), syntax_tree)
-                    .ok_or_else(|| unsupported("structure member name"))?,
-            );
-        }
-        path.push(
-            identifier_text(RefNode::MemberIdentifier(last), syntax_tree)
-                .ok_or_else(|| unsupported("structure member name"))?,
-        );
+    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    if !bound_interface && let Some(base) = base {
+        path[0] = base;
     }
-    let (offset, r#type) = selected_member(&path, dimensions)
+    if bound_interface && path.len() == 1 {
+        return select(path[0].clone(), dimensions, false);
+    }
+    let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unsupported(format!("structure member `{}`", path.join("."))))?;
-    let mut leaf_select = select.clone();
-    leaf_select.nodes.0 = None;
-    let relative = super::super::selects::lvalue_from_constant_select(
+    let relative = select(
         path[0].clone(),
-        &leaf_select,
-        syntax_tree,
-        &member_dimensions(&path[0], r#type, dimensions),
+        &member_dimensions(&path[0], ty, dimensions),
         true,
     )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(state, &path, offset, ty, relative, dimensions).ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")

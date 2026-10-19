@@ -118,41 +118,43 @@ pub(super) fn resolve(assignment: &AssignmentMap, vreg: VReg) -> PhysReg {
         .unwrap_or_else(|| panic!("VReg {vreg} has no physical register assignment"))
 }
 
-pub(super) fn state_base_strategy() -> StateBaseStrategy {
-    ACTIVE_STATE_BASE.with(Cell::get)
+pub(super) fn state_base_strategy(context: &EmissionContext) -> StateBaseStrategy {
+    context.state_base
 }
 
-fn physical_offset(base: BaseReg, offset: i32) -> i32 {
+fn physical_offset(context: &EmissionContext, base: BaseReg, offset: i32) -> i32 {
     match base {
         BaseReg::SimState => offset,
-        BaseReg::StackFrame => ACTIVE_SPILL_BASE.with(|base| {
-            base.get()
-                .checked_add(offset)
-                .expect("verified stack offset fits native arena displacement")
-        }),
+        BaseReg::StackFrame => context
+            .spill_base
+            .checked_add(offset)
+            .expect("verified stack offset fits native arena displacement"),
     }
 }
 
-pub(super) fn mem_operand(base: BaseReg, offset: i32) -> AsmMemoryOperand {
-    let offset = physical_offset(base, offset);
-    match state_base_strategy() {
+pub(super) fn mem_operand(
+    context: &EmissionContext,
+    base: BaseReg,
+    offset: i32,
+) -> AsmMemoryOperand {
+    let offset = physical_offset(context, base, offset);
+    match state_base_strategy(context) {
         StateBaseStrategy::Fs => ptr(offset).fs(),
         StateBaseStrategy::Gs => ptr(offset).gs(),
         StateBaseStrategy::R15 => r15 + offset,
     }
 }
 
-fn scratch_offset(slot: usize) -> i32 {
-    ACTIVE_SCRATCH_BASE.with(|base| {
-        base.get()
-            .checked_add(i32::try_from(slot * 8).expect("scratch slot offset"))
-            .expect("scratch slot displacement")
-    })
+fn scratch_offset(context: &EmissionContext, slot: usize) -> i32 {
+    context
+        .scratch_base
+        .checked_add(i32::try_from(slot * 8).expect("scratch slot offset"))
+        .expect("scratch slot displacement")
 }
 
-pub(super) fn scratch_operand(slot: usize) -> AsmMemoryOperand {
-    let offset = scratch_offset(slot);
-    match state_base_strategy() {
+pub(super) fn scratch_operand(context: &EmissionContext, slot: usize) -> AsmMemoryOperand {
+    let offset = scratch_offset(context, slot);
+    match state_base_strategy(context) {
         StateBaseStrategy::Fs => ptr(offset).fs(),
         StateBaseStrategy::Gs => ptr(offset).gs(),
         StateBaseStrategy::R15 => r15 + offset,
@@ -160,13 +162,14 @@ pub(super) fn scratch_operand(slot: usize) -> AsmMemoryOperand {
 }
 
 pub(super) fn mem_operand_indexed(
+    context: &EmissionContext,
     base: BaseReg,
     offset: i32,
     index: AsmRegister64,
     scale: u8,
 ) -> AsmMemoryOperand {
-    let offset = physical_offset(base, offset);
-    match (state_base_strategy(), scale) {
+    let offset = physical_offset(context, base, offset);
+    match (state_base_strategy(context), scale) {
         (StateBaseStrategy::Fs, 1) => ptr(index + offset).fs(),
         (StateBaseStrategy::Fs, 2) => ptr(index * 2 + offset).fs(),
         (StateBaseStrategy::Fs, 4) => ptr(index * 4 + offset).fs(),
@@ -184,10 +187,11 @@ pub(super) fn mem_operand_indexed(
 }
 
 pub(super) fn emit_state_base(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     destination: AsmRegister64,
 ) -> Result<(), IcedError> {
-    match state_base_strategy() {
+    let context = asm.context;
+    match state_base_strategy(&context) {
         StateBaseStrategy::Fs => asm.rdfsbase(destination),
         StateBaseStrategy::Gs => asm.rdgsbase(destination),
         StateBaseStrategy::R15 => asm.mov(destination, r15),

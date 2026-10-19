@@ -2,91 +2,15 @@
 
 use super::*;
 
-/// The value of an `Option` in a constant-expression parser, which returns
-/// `Ok(None)` for a form it leaves to the typed expression path.
-macro_rules! some {
-    ($option:expr) => {
-        match $option {
-            Some(value) => value,
-            None => return Ok(None),
-        }
-    };
-}
-
-/// The value of a nested constant-expression parse: its error is returned,
-/// and a form it leaves to the typed path is left to it here too.
-macro_rules! parsed {
-    ($result:expr) => {
-        match $result? {
-            Some(value) => value,
-            None => return Ok(None),
-        }
-    };
-}
-
-/// The next value of a genvar, or `None` for an update Celox does not
-/// support. `evaluate` converts the right-hand side of an assignment update.
-pub(super) fn next_genvar_value(
-    value: i128,
-    iteration: &sv_parser::GenvarIteration,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    evaluate: impl FnOnce(&sv_parser::ConstantExpression) -> Converted<Option<ConstExpr>>,
-) -> Converted<Option<i128>> {
-    Ok(match iteration {
-        sv_parser::GenvarIteration::Prefix(iteration) => {
-            match some!(syntax_tree.get_str(&iteration.nodes.0.nodes.0.nodes.0)) {
-                "++" => value.checked_add(1),
-                "--" => value.checked_sub(1),
-                _ => None,
-            }
-        }
-        sv_parser::GenvarIteration::Suffix(iteration) => {
-            match some!(syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0)) {
-                "++" => value.checked_add(1),
-                "--" => value.checked_sub(1),
-                _ => None,
-            }
-        }
-        sv_parser::GenvarIteration::Assignment(iteration) => {
-            let op = some!(syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0));
-            let rhs = parsed!(evaluate(&iteration.nodes.2.nodes.0));
-            if op == "=" {
-                return Ok(eval_ast_const_expr(&rhs, const_env));
-            }
-            let op = match op {
-                "+=" => BinaryOp::Add,
-                "-=" => BinaryOp::Sub,
-                "*=" => BinaryOp::Mul,
-                "/=" => BinaryOp::Div,
-                "%=" => BinaryOp::Mod,
-                "<<=" => BinaryOp::Shl,
-                ">>=" => BinaryOp::Shr,
-                _ => return Ok(None),
-            };
-            // A compound assignment performs the typed binary operation before
-            // assignment conversion. Do not erase the RHS width or signedness.
-            eval_ast_const_expr(
-                &ConstExpr::Binary {
-                    left: Box::new(ConstExpr::Literal(format_typed_parameter_literal(
-                        value, 32, true,
-                    ))),
-                    op,
-                    right: Box::new(rhs),
-                },
-                const_env,
-            )
-        }
-    })
-}
-
 pub(super) fn bind_generate_parameter(
+    state: &AnalysisState,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
     let mut parameter_types = parameter_types_from_const_env(const_env);
     bind_generate_parameter_with_types(
+        state,
         parameter,
         const_env,
         parameter_literals,
@@ -95,6 +19,7 @@ pub(super) fn bind_generate_parameter(
 }
 
 pub(super) fn bind_generate_parameter_with_types(
+    state: &AnalysisState,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
@@ -114,7 +39,7 @@ pub(super) fn bind_generate_parameter_with_types(
     );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
-        parameter.resolved_value_and_literal(const_env, parameter_types, parameter_literals);
+        parameter.resolved_value_and_literal(state, const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -124,7 +49,7 @@ pub(super) fn bind_generate_parameter_with_types(
         }))
     } else {
         resolved_literal.or_else(|| {
-            parameter_value_env(std::slice::from_ref(&parameter), const_env)
+            parameter_value_env(state, std::slice::from_ref(&parameter), const_env)
                 .remove(parameter.name())
                 .map(|value| substitute_expr_idents(value, parameter_literals))
         })
@@ -139,6 +64,7 @@ pub(super) fn bind_generate_parameter_with_types(
 }
 
 pub(super) fn eval_ast_const_expr(
+    state: &AnalysisState,
     expr: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> Option<i128> {
@@ -149,24 +75,37 @@ pub(super) fn eval_ast_const_expr(
         const_env,
         &|name| parameter_type_from_const_env(const_env, name),
     );
-    typecheck::eval_const_expr(&expr.into(), const_env)
+    typecheck::eval_const_expr_in_env(
+        &expr.into(),
+        &const_functions::Environment {
+            constants: const_env,
+            functions: &state.const_functions,
+        },
+    )
 }
 
 pub(super) fn substitute_process_constants(
+    state: &AnalysisState,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
-    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::default())
+    substitute_process_constants_with_parameter_literals(
+        state,
+        process,
+        const_env,
+        &HashMap::default(),
+    )
 }
 
 pub(super) fn substitute_process_constants_with_parameter_literals(
+    state: &AnalysisState,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
     let mut sensitivity_body = process.sensitivity_body;
     for stmt in &mut sensitivity_body {
-        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
     }
     let condition = process
         .condition
@@ -174,7 +113,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     if process.assignments.is_empty() {
         let mut body = process.body;
         for stmt in &mut body {
-            procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+            procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
         }
         return CombProcess {
             creation_order: process.creation_order,
@@ -190,6 +129,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .into_iter()
             .map(|assignment| {
                 substitute_assignment_constants_with_parameter_literals(
+                    state,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -203,6 +143,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
 }
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
+    state: &AnalysisState,
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -210,6 +151,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
         substitute_expr_constants_with_parameter_literals(
+            state,
             assignment.rhs,
             const_env,
             parameter_literals,
@@ -245,6 +187,7 @@ pub(super) fn substitute_lvalue_constants(
 }
 
 pub(super) fn substitute_expr_constants_with_parameter_literals(
+    state: &AnalysisState,
     expr: Expr,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -286,6 +229,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Select {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -299,6 +243,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
+                        state,
                         part,
                         const_env,
                         parameter_literals,
@@ -312,6 +257,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
+                        state,
                         part,
                         const_env,
                         parameter_literals,
@@ -325,6 +271,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Resize {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -335,6 +282,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         Expr::Unary { op, expr } => Expr::Unary {
             op,
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -342,12 +290,14 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Binary { left, op, right } => Expr::Binary {
             left: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *left,
                 const_env,
                 parameter_literals,
             )),
             op,
             right: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *right,
                 const_env,
                 parameter_literals,
@@ -359,16 +309,19 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             else_expr,
         } => Expr::Mux {
             condition: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *condition,
                 const_env,
                 parameter_literals,
             )),
             then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *then_expr,
                 const_env,
                 parameter_literals,
             )),
             else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *else_expr,
                 const_env,
                 parameter_literals,
@@ -376,6 +329,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -385,6 +339,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|item| {
                     item.map(&mut |operand| {
                         substitute_expr_constants_with_parameter_literals(
+                            state,
                             operand,
                             const_env,
                             parameter_literals,
@@ -403,6 +358,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|arg| {
                     arg.map(|arg| {
                         substitute_expr_constants_with_parameter_literals(
+                            state,
                             arg,
                             const_env,
                             parameter_literals,
@@ -413,7 +369,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             let function = callee.system();
             if let Some(function @ (SystemFunction::Signed | SystemFunction::Unsigned)) = function
                 && let [Some(arg)] = args.as_slice()
-                && let Some(constant) = expr_to_const(arg.clone())
+                && let Some(constant) = expr_to_const(state, arg.clone())
                 && let Some(ty) =
                     infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
             {
@@ -425,6 +381,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             } else if function == Some(SystemFunction::Countbits) {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
                 fold_const_integral_expr_preserving_mask(
+                    state,
                     Expr::Call {
                         callee,
                         args,
@@ -615,201 +572,22 @@ fn substitute_const_expr_constants_impl(
     }
 }
 
-/// A constant expression, or `None` for a form the typed expression path
-/// converts instead. An error is a call that no path can convert.
-pub(super) fn const_expr_from_expr(
-    expr: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
-) -> Converted<Option<ConstExpr>> {
-    // Indexed selects need the typed path, including when nested in call arguments.
-    if expr
-        .into_iter()
-        .any(|node| matches!(node, RefNode::IndexedRange(_)))
-    {
-        return Ok(None);
-    }
-    Ok(Some(match expr {
-        sv_parser::Expression::Primary(primary) => {
-            parsed!(const_expr_from_primary(primary, syntax_tree))
-        }
-        sv_parser::Expression::Unary(unary) => {
-            let op = some!(unary_op_from_symbol(
-                &unary.nodes.0.nodes.0.nodes.0,
-                syntax_tree
-            ));
-            let expr = parsed!(const_expr_from_primary(&unary.nodes.2, syntax_tree));
-            ConstExpr::Unary {
-                op,
-                expr: Box::new(expr),
-            }
-        }
-        sv_parser::Expression::Binary(binary) => {
-            let right_is_grouped = expression_is_grouped(&binary.nodes.3);
-            let left = parsed!(const_expr_from_expr(&binary.nodes.0, syntax_tree));
-            let op = some!(binary_op_from_symbol(
-                &binary.nodes.1.nodes.0.nodes.0,
-                syntax_tree
-            ));
-            let right = parsed!(const_expr_from_expr(&binary.nodes.3, syntax_tree));
-            let expr = ConstExpr::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
-            if right_is_grouped {
-                expr
-            } else {
-                left_associate_const_binary(expr)
-            }
-        }
-        _ => return Ok(None),
-    }))
-}
-
-fn const_expr_from_primary(
-    primary: &sv_parser::Primary,
-    syntax_tree: &SyntaxTree,
-) -> Converted<Option<ConstExpr>> {
-    match primary {
-        sv_parser::Primary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
-        sv_parser::Primary::PrimaryLiteral(_) => Ok(primary_literal_text(
-            RefNode::Primary(primary),
-            syntax_tree,
-        )
-        .map(ConstExpr::Literal)),
-        sv_parser::Primary::Hierarchical(hierarchical) => {
-            if packed_structs::has_member_access(
-                RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-                RefNode::Select(&hierarchical.nodes.2),
-            ) {
-                return Ok(None);
-            }
-            let ident = some!(
-                reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
-                    .map(ConstExpr::Ident)
-            );
-            // A single bit-select is kept; other selections need the typed
-            // expression path and must not be dropped here.
-            let select = &hierarchical.nodes.2;
-            if select.nodes.0.is_some() || select.nodes.2.is_some() {
-                return Ok(None);
-            }
-            Ok(match select.nodes.1.nodes.0.as_slice() {
-                [] => Some(ident),
-                [bit] => Some(ConstExpr::Select {
-                    expr: Box::new(ident),
-                    bit: Box::new(parsed!(const_expr_from_expr(&bit.nodes.1, syntax_tree))),
-                }),
-                _ => None,
-            })
-        }
-        sv_parser::Primary::FunctionSubroutineCall(call) => {
-            const_expr_from_function_subroutine_call(call, syntax_tree, &HashMap::default())
-        }
-        sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
-            sv_parser::MintypmaxExpression::Expression(expr) => {
-                const_expr_from_expr(expr, syntax_tree)
-            }
-            sv_parser::MintypmaxExpression::Ternary(_) => Ok(None),
-        },
-        _ => Ok(expr_from_primary(primary, syntax_tree)
-            .ok()
-            .and_then(expr_to_const)),
-    }
-}
-
-pub(super) fn left_associate_expr_binary(expr: Expr) -> Expr {
-    let Expr::Binary { left, op, right } = expr else {
-        return expr;
-    };
-    match *right {
-        Expr::Binary {
-            left: right_left,
-            op: right_op,
-            right: right_right,
-        } if binary_precedence(op) >= binary_precedence(right_op) => {
-            left_associate_expr_binary(Expr::Binary {
-                left: Box::new(left_associate_expr_binary(Expr::Binary {
-                    left,
-                    op,
-                    right: right_left,
-                })),
-                op: right_op,
-                right: right_right,
-            })
-        }
-        right => Expr::Binary {
-            left,
-            op,
-            right: Box::new(right),
-        },
-    }
-}
-
-fn left_associate_const_binary(expr: ConstExpr) -> ConstExpr {
-    let ConstExpr::Binary { left, op, right } = expr else {
-        return expr;
-    };
-    match *right {
-        ConstExpr::Binary {
-            left: right_left,
-            op: right_op,
-            right: right_right,
-        } if binary_precedence(op) >= binary_precedence(right_op) => {
-            left_associate_const_binary(ConstExpr::Binary {
-                left: Box::new(left_associate_const_binary(ConstExpr::Binary {
-                    left,
-                    op,
-                    right: right_left,
-                })),
-                op: right_op,
-                right: right_right,
-            })
-        }
-        right => ConstExpr::Binary {
-            left,
-            op,
-            right: Box::new(right),
-        },
-    }
-}
-
-fn binary_precedence(op: BinaryOp) -> u8 {
-    match op {
-        BinaryOp::Pow => 12,
-        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 11,
-        BinaryOp::Add | BinaryOp::Sub => 10,
-        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 9,
-        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
-        BinaryOp::Eq
-        | BinaryOp::Ne
-        | BinaryOp::EqCase
-        | BinaryOp::NeCase
-        | BinaryOp::EqWildcard
-        | BinaryOp::NeWildcard => 7,
-        BinaryOp::BitAnd => 6,
-        BinaryOp::BitXor => 5,
-        BinaryOp::BitOr => 4,
-        BinaryOp::LogicAnd => 3,
-        BinaryOp::LogicOr => 2,
-    }
-}
-
-pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
+/// Convert an expression to its symbolic constant form when representable.
+pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstExpr> {
     match expr {
         Expr::Ident(name) => Some(ConstExpr::Ident(name)),
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_const(*expr)?),
+            expr: Box::new(expr_to_const(state, *expr)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_const(*left)?),
+            left: Box::new(expr_to_const(state, *left)?),
             op,
-            right: Box::new(expr_to_const(*right)?),
+            right: Box::new(expr_to_const(state, *right)?),
         }),
         Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
-            expr: Box::new(expr_to_const(*expr)?),
+            expr: Box::new(expr_to_const(state, *expr)?),
             bit: Box::new(msb),
         }),
         Expr::Mux {
@@ -817,9 +595,9 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_const(*condition)?),
-            then_expr: Box::new(expr_to_const(*then_expr)?),
-            else_expr: Box::new(expr_to_const(*else_expr)?),
+            condition: Box::new(expr_to_const(state, *condition)?),
+            then_expr: Box::new(expr_to_const(state, *then_expr)?),
+            else_expr: Box::new(expr_to_const(state, *else_expr)?),
         }),
         Expr::Call {
             callee,
@@ -830,9 +608,10 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
                 return None;
             }
             Some(ConstExpr::call(
+                state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_const(arg?))
+                    .map(|arg| expr_to_const(state, arg?))
                     .collect::<Option<_>>()?,
             ))
         }
@@ -844,7 +623,11 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
     }
 }
 
-pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> Option<ConstExpr> {
+pub(super) fn expr_to_index_const(
+    state: &AnalysisState,
+    expr: Expr,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
     match expr {
         Expr::Resize {
             expr,
@@ -855,7 +638,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                 return Some(ConstExpr::Literal("0".into()));
             }
             Some(ConstExpr::Resize {
-                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
                 width,
                 signed,
             })
@@ -864,12 +647,12 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+            expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_index_const(*left, dimensions)?),
+            left: Box::new(expr_to_index_const(state, *left, dimensions)?),
             op,
-            right: Box::new(expr_to_index_const(*right, dimensions)?),
+            right: Box::new(expr_to_index_const(state, *right, dimensions)?),
         }),
         Expr::Select {
             expr,
@@ -878,7 +661,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             signed,
         } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
             Some(ConstExpr::SelectRange {
-                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
                 msb: Box::new(msb),
                 lsb: Box::new(lsb),
                 signed,
@@ -889,9 +672,9 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_index_const(*condition, dimensions)?),
-            then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
-            else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
+            condition: Box::new(expr_to_index_const(state, *condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(state, *then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(state, *else_expr, dimensions)?),
         }),
         Expr::Call {
             callee,
@@ -904,9 +687,10 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                 return None;
             }
             Some(ConstExpr::call(
+                state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_index_const(arg?, dimensions))
+                    .map(|arg| expr_to_index_const(state, arg?, dimensions))
                     .collect::<Option<_>>()?,
             ))
         }
@@ -916,8 +700,8 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             lsb,
             signed: false,
         } => {
-            let msb = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+            let msb = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
             let width = usize::try_from(msb.abs_diff(lsb).checked_add(1)?).ok()?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -938,13 +722,13 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                     if inlining::calls_subroutine(&expr) {
                         return None;
                     }
-                    let source = IndexBitSource::from_expr(expr, dimensions)?;
+                    let source = IndexBitSource::from_expr(state, expr, dimensions)?;
                     positions
                         .map(|bit| source.bit(bit))
                         .collect::<Option<_>>()?
                 }
                 expr => {
-                    let expr = expr_to_index_const(expr, dimensions)?;
+                    let expr = expr_to_index_const(state, expr, dimensions)?;
                     positions
                         .map(|bit| ConstExpr::Select {
                             expr: Box::new(expr.clone()),
@@ -1027,18 +811,18 @@ enum IndexBitSource {
 }
 
 impl IndexBitSource {
-    fn from_expr(expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
-        let width = expr_static_width(&expr, dimensions)?;
+    fn from_expr(state: &AnalysisState, expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
+        let width = expr_static_width(state, &expr, dimensions)?;
         Some(match expr {
             Expr::Concat(parts) => Self::Concat {
                 parts: parts
                     .into_iter()
-                    .map(|part| Self::from_expr(part, dimensions))
+                    .map(|part| Self::from_expr(state, part, dimensions))
                     .collect::<Option<_>>()?,
                 width,
             },
             Expr::RepeatConcat { parts, .. } => Self::Repeat {
-                part: Box::new(Self::from_expr(Expr::Concat(parts), dimensions)?),
+                part: Box::new(Self::from_expr(state, Expr::Concat(parts), dimensions)?),
                 width,
             },
             Expr::Resize { expr, .. } => {
@@ -1049,7 +833,7 @@ impl IndexBitSource {
                     &dimensions.function_return_types,
                 )?;
                 Self::Resize {
-                    part: Box::new(Self::from_expr(*expr, dimensions)?),
+                    part: Box::new(Self::from_expr(state, *expr, dimensions)?),
                     width,
                     extend_signed,
                 }
@@ -1062,10 +846,10 @@ impl IndexBitSource {
             } => {
                 match *expr {
                     expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
-                        let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-                        let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                        let left = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
                         Self::Slice {
-                            part: Box::new(Self::from_expr(expr, dimensions)?),
+                            part: Box::new(Self::from_expr(state, expr, dimensions)?),
                             width,
                             right,
                             step: if left >= right { 1 } else { -1 },
@@ -1075,6 +859,7 @@ impl IndexBitSource {
                         // The selected value has [width-1:0] coordinates even
                         // when its position in an unpacked array is dynamic.
                         expr: expr_to_index_const(
+                            state,
                             Expr::Select {
                                 expr: Box::new(expr),
                                 msb,
@@ -1096,14 +881,14 @@ impl IndexBitSource {
                     && !variable.packed[0].normalize_single
                 {
                     let range = &variable.packed[0];
-                    let left = eval_ast_const_expr(&range.left, &dimensions.const_env)?;
-                    let right = eval_ast_const_expr(&range.right, &dimensions.const_env)?;
+                    let left = eval_ast_const_expr(state, &range.left, &dimensions.const_env)?;
+                    let right = eval_ast_const_expr(state, &range.right, &dimensions.const_env)?;
                     (right, if left >= right { 1 } else { -1 })
                 } else {
                     (0, 1)
                 };
                 Self::Scalar {
-                    expr: expr_to_index_const(expr, dimensions)?,
+                    expr: expr_to_index_const(state, expr, dimensions)?,
                     width,
                     right,
                     step,
@@ -1165,436 +950,16 @@ impl IndexBitSource {
     }
 }
 
-pub(super) fn const_expr_from_constant_param_with_env(
-    expr: &sv_parser::ConstantParamExpression,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Converted<Option<ConstExpr>> {
-    match expr {
-        sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(expr) => match &**expr {
-            sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
-                const_expr_from_ref_node_with_env(
-                    RefNode::ConstantExpression(expr),
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )
-            }
-            sv_parser::ConstantMintypmaxExpression::Ternary(_) => Ok(None),
-        },
-        sv_parser::ConstantParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
-        _ => Ok(None),
-    }
-}
-
-pub(super) fn const_expr_from_param_expression(
-    expr: &sv_parser::ParamExpression,
-    syntax_tree: &SyntaxTree,
-) -> Converted<Option<ConstExpr>> {
-    match expr {
-        sv_parser::ParamExpression::MintypmaxExpression(expr) => match &**expr {
-            sv_parser::MintypmaxExpression::Expression(expr) => {
-                const_expr_from_expr(expr.as_ref(), syntax_tree)
-            }
-            sv_parser::MintypmaxExpression::Ternary(_) => Ok(None),
-        },
-        sv_parser::ParamExpression::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
-        sv_parser::ParamExpression::DataType(_) => Ok(None),
-    }
-}
-
-pub(super) fn const_expr_from_ref_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Converted<Option<ConstExpr>> {
-    const_expr_from_ref_node_with_env(node, syntax_tree, &HashMap::default(), &HashMap::default())
-}
-
-pub(super) fn const_expr_from_ref_node_with_env(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Converted<Option<ConstExpr>> {
-    // Indexed selections require declared dimensions and typed selection
-    // lowering. Never let this lightweight parser replace them by the base.
-    if node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::ConstantIndexedRange(_)))
-    {
-        return Ok(None);
-    }
-    let convert =
-        |node| const_expr_from_ref_node_with_env(node, syntax_tree, const_env, type_aliases);
-    match node {
-        RefNode::ConstantExpression(expr) => match expr {
-            sv_parser::ConstantExpression::ConstantPrimary(primary) => {
-                convert(RefNode::ConstantPrimary(primary))
-            }
-            sv_parser::ConstantExpression::Unary(unary) => {
-                let op = some!(unary_op_from_symbol(
-                    &unary.nodes.0.nodes.0.nodes.0,
-                    syntax_tree
-                ));
-                let expr = parsed!(convert(RefNode::ConstantPrimary(&unary.nodes.2)));
-                Ok(Some(ConstExpr::Unary {
-                    op,
-                    expr: Box::new(expr),
-                }))
-            }
-            sv_parser::ConstantExpression::Binary(binary) => {
-                let right_is_grouped = constant_expression_is_grouped(&binary.nodes.3);
-                let left = parsed!(convert(RefNode::ConstantExpression(&binary.nodes.0)));
-                let op = some!(binary_op_from_symbol(
-                    &binary.nodes.1.nodes.0.nodes.0,
-                    syntax_tree
-                ));
-                let right = parsed!(convert(RefNode::ConstantExpression(&binary.nodes.3)));
-                let expr = ConstExpr::Binary {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                };
-                Ok(Some(if right_is_grouped {
-                    expr
-                } else {
-                    left_associate_const_binary(expr)
-                }))
-            }
-            sv_parser::ConstantExpression::Ternary(expr) => {
-                const_expr_from_constant_expression_ternary_with_env(
-                    expr,
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )
-            }
-            sv_parser::ConstantExpression::Inside(_) => Ok(None),
-        },
-        RefNode::ConstantPrimary(primary) => match primary {
-            sv_parser::ConstantPrimary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
-            sv_parser::ConstantPrimary::PrimaryLiteral(_) => {
-                Ok(primary_literal_text(node, syntax_tree).map(ConstExpr::Literal))
-            }
-            sv_parser::ConstantPrimary::PsParameter(parameter) => {
-                if parameter.nodes.1.nodes.0.is_some() {
-                    // Struct-valued parameters need typed member evaluation;
-                    // never replace a member by the entire parameter value.
-                    return Ok(None);
-                }
-                let base = some!(
-                    reference_name(
-                        RefNode::PsParameterIdentifier(&parameter.nodes.0),
-                        syntax_tree
-                    )
-                    .map(ConstExpr::Ident)
-                );
-                const_select_expr(
-                    base,
-                    &parameter.nodes.1,
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                )
-            }
-            sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
-                if let sv_parser::SubroutineCall::SystemTfCall(system_call) = &call.nodes.0.nodes.0
-                {
-                    let function =
-                        some!(expressions::system_function_call(system_call, syntax_tree)?);
-                    if let SystemFunction::Timeunit | SystemFunction::Timeprecision = function {
-                        return Ok(Some(ConstExpr::Literal(format_typed_parameter_literal(
-                            i128::from(timescales::query(system_call, syntax_tree)?),
-                            32,
-                            true,
-                        ))));
-                    }
-                    parameters::reject_unbounded_data_query(
-                        system_call,
-                        syntax_tree,
-                        const_env,
-                        false,
-                    )?;
-                    match function {
-                        // Imported aliases may not be bound in preliminary
-                        // collection. Retain the query for later resolution,
-                        // including its one-bit type for dependent queries.
-                        SystemFunction::Isunbounded => {
-                            return const_expr_from_function_subroutine_call(
-                                &call.nodes.0,
-                                syntax_tree,
-                                const_env,
-                            );
-                        }
-                        SystemFunction::Dimensions => {
-                            if let Some(count) = dimensions::dimensions_system_function_call_value(
-                                system_call,
-                                syntax_tree,
-                                const_env,
-                                type_aliases,
-                                None,
-                            ) {
-                                return Ok(Some(ConstExpr::Literal(count.to_string())));
-                            }
-                        }
-                        SystemFunction::UnpackedDimensions => {
-                            if let Some(count) = dimensions::unpacked_dimensions_call_value(
-                                system_call,
-                                syntax_tree,
-                                const_env,
-                                type_aliases,
-                                None,
-                            ) {
-                                return Ok(Some(ConstExpr::Literal(count.to_string())));
-                            }
-                        }
-                        SystemFunction::ArrayQuery(_) => {
-                            return Ok(dimensions::array_query_call(
-                                system_call,
-                                syntax_tree,
-                                const_env,
-                                type_aliases,
-                                None,
-                            )
-                            .and_then(expr_to_const));
-                        }
-                        _ => {}
-                    }
-                }
-                if let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0
-                    && tf_call.nodes.2.is_some()
-                {
-                    // Plain scalar operands do not read declaration metadata
-                    // while lowering. Their types are substituted later during
-                    // parameter evaluation; avoid copying the whole environment
-                    // for every initializer in a growing declaration prefix.
-                    let dimensions = if call_arguments_are_context_free(tf_call) {
-                        PackedDimensions::default()
-                    } else {
-                        #[cfg(test)]
-                        CALL_CONTEXT_COPIES.with(|count| count.set(count.get() + 1));
-                        PackedDimensions::new(HashMap::default(), const_env, type_aliases)
-                    };
-                    return Ok(const_user_call(tf_call, syntax_tree, dimensions, const_env));
-                }
-                if let Some(ty) =
-                    size_system_function_expr_type(primary, syntax_tree, const_env, type_aliases)
-                {
-                    return Ok(Some(ConstExpr::Literal(ty.width.to_string())));
-                }
-                let lowered = const_expr_from_function_subroutine_call(
-                    &call.nodes.0,
-                    syntax_tree,
-                    const_env,
-                )?;
-                if let Some(ConstExpr::Function {
-                    callee: Callee::System(SystemFunction::Bits),
-                    args,
-                    ..
-                }) = &lowered
-                    && let [arg] = args.as_slice()
-                    && let Some(r#type) =
-                        infer_const_expr_type(arg, &parameter_types_from_const_env(const_env))
-                {
-                    return Ok(Some(ConstExpr::Literal(r#type.width.to_string())));
-                }
-                Ok(lowered.or_else(|| {
-                    let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0 else {
-                        return None;
-                    };
-                    if tf_call.nodes.2.is_some() {
-                        return None;
-                    }
-                    reference_name(
-                        RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
-                        syntax_tree,
-                    )
-                    .map(ConstExpr::Ident)
-                }))
-            }
-            sv_parser::ConstantPrimary::ConstantCast(cast) => Ok(constant_cast_const_expr(
-                cast,
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )),
-            sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
-                sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
-                    convert(RefNode::ConstantExpression(expr))
-                }
-                sv_parser::ConstantMintypmaxExpression::Ternary(_) => Ok(None),
-            },
-            _ => Ok(None),
-        },
-        _ => {
-            if let Some(integral_number) = unwrap_node!(node.clone(), IntegralNumber) {
-                return Ok(
-                    integral_number_literal(integral_number, syntax_tree).map(ConstExpr::Literal)
-                );
-            }
-            if let Some(identifier) = unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
-                return Ok(identifier_locate(identifier)
-                    .and_then(|locate| syntax_tree.get_str(&locate).map(str::to_string))
-                    .map(ConstExpr::Ident));
-            }
-            Ok(None)
-        }
-    }
-}
-
-fn constant_expression_is_grouped(expr: &sv_parser::ConstantExpression) -> bool {
-    matches!(
-        expr,
-        sv_parser::ConstantExpression::ConstantPrimary(primary)
-            if matches!(
-                &**primary,
-                sv_parser::ConstantPrimary::MintypmaxExpression(_)
-            )
-    )
-}
-
-fn const_expr_from_constant_expression_ternary_with_env(
-    expr: &sv_parser::ConstantExpressionTernary,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Converted<Option<ConstExpr>> {
-    let convert = |expr| {
-        const_expr_from_ref_node_with_env(
-            RefNode::ConstantExpression(expr),
-            syntax_tree,
-            const_env,
-            type_aliases,
-        )
-    };
-    Ok(Some(ConstExpr::Mux {
-        condition: Box::new(parsed!(convert(&expr.nodes.0))),
-        then_expr: Box::new(parsed!(convert(&expr.nodes.3))),
-        else_expr: Box::new(parsed!(convert(&expr.nodes.5))),
-    }))
-}
-
-/// These operands follow only expression-lowering branches that do not read
-/// `PackedDimensions`. Keep selections, casts, system calls, and patterns on
-/// the contextual path so their ranges, aliases, and parameter types survive.
-fn call_arguments_are_context_free(call: &sv_parser::TfCall) -> bool {
-    let Some(paren) = &call.nodes.2 else {
-        return false;
-    };
-    let sv_parser::ListOfArguments::Ordered(args) = &paren.nodes.1 else {
-        return false;
-    };
-    let args = args.nodes.0.contents();
-    // The parser represents `f()` as one omitted argument.
-    if args.len() == 1 && args[0].is_none() {
-        return true;
-    }
-    args.iter()
-        .all(|arg| arg.as_ref().is_some_and(context_free_expression))
-}
-
-fn context_free_expression(expr: &sv_parser::Expression) -> bool {
-    match expr {
-        sv_parser::Expression::Primary(primary) => context_free_primary(primary),
-        sv_parser::Expression::Unary(unary) => context_free_primary(&unary.nodes.2),
-        sv_parser::Expression::Binary(binary) => {
-            context_free_expression(&binary.nodes.0) && context_free_expression(&binary.nodes.3)
-        }
-        _ => false,
-    }
-}
-
-fn context_free_primary(primary: &sv_parser::Primary) -> bool {
-    match primary {
-        sv_parser::Primary::PrimaryLiteral(_) => true,
-        sv_parser::Primary::Hierarchical(primary) => {
-            let select = &primary.nodes.2;
-            select.nodes.0.is_none()
-                && select.nodes.1.nodes.0.is_empty()
-                && select.nodes.2.is_none()
-                && !packed_structs::has_member_access(
-                    RefNode::HierarchicalIdentifier(&primary.nodes.1),
-                    RefNode::Select(select),
-                )
-        }
-        sv_parser::Primary::MintypmaxExpression(primary) => match &primary.nodes.0.nodes.1 {
-            sv_parser::MintypmaxExpression::Expression(expr) => context_free_expression(expr),
-            sv_parser::MintypmaxExpression::Ternary(_) => false,
-        },
-        sv_parser::Primary::FunctionSubroutineCall(call) => match &call.nodes.0 {
-            sv_parser::SubroutineCall::TfCall(call) => call_arguments_are_context_free(call),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static CALL_CONTEXT_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 #[cfg(test)]
 mod tests;
 
-fn const_select_expr(
-    base: ConstExpr,
-    select: &sv_parser::ConstantSelect,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Converted<Option<ConstExpr>> {
-    let bit_selects = select.nodes.1.nodes.0.as_slice();
-    if select.nodes.2.is_some() {
-        return Ok(None);
-    }
-    if bit_selects.is_empty() {
-        return Ok(Some(base));
-    }
-    // An element of a packed parameter takes its width and signedness from
-    // the parameter's dimensions.
-    if let ConstExpr::Ident(name) = &base {
-        let mut indices = Vec::with_capacity(bit_selects.len());
-        for bit_select in bit_selects {
-            let index = const_expr_from_ref_node_with_env(
-                RefNode::ConstantExpression(&bit_select.nodes.1),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?;
-            indices.push(index.and_then(|index| eval_ast_const_expr(&index, const_env)));
-        }
-        if let Some(indices) = indices.into_iter().collect::<Option<Vec<_>>>()
-            && let Some(literal) = parameter_element_literal(name, &indices, const_env)
-        {
-            return Ok(Some(ConstExpr::Literal(literal)));
-        }
-    }
-    if bit_selects.len() != 1 {
-        return Ok(None);
-    }
-    let bit = parsed!(const_expr_from_ref_node_with_env(
-        RefNode::ConstantExpression(&bit_selects[0].nodes.1),
-        syntax_tree,
-        const_env,
-        type_aliases,
-    ));
-    Ok(Some(ConstExpr::Select {
-        expr: Box::new(base),
-        bit: Box::new(bit),
-    }))
-}
-
-fn const_user_call(
-    call: &sv_parser::TfCall,
-    tree: &SyntaxTree,
-    mut dimensions: PackedDimensions,
+/// Preserve constant-call resolution/default/result-type semantics independently
+/// of the syntax adapter that supplied the call and its actual values.
+pub(super) fn user_call_value(
+    state: &AnalysisState,
+    expression: Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    dimensions.subroutine_param_names = const_functions::argument_names();
-    let expression = expr_from_tf_call(call, tree, &dimensions).ok()?;
     if let Expr::Call {
         args, arg_order, ..
     } = &expression
@@ -1602,7 +967,11 @@ fn const_user_call(
     {
         // Effectful runtime named calls keep their source order. Constant calls
         // are folded only when their bodies and actuals evaluate successfully.
-        let literal = const_functions::eval_expression_literal(&expression, constants)?;
+        let literal = const_functions::eval_expression_literal(
+            &state.const_functions,
+            &expression,
+            constants,
+        )?;
         let Expr::Call { callee, args, .. } = &expression else {
             unreachable!()
         };
@@ -1610,115 +979,60 @@ fn const_user_call(
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        let args = const_functions::resolved_arguments(callee, args)?
+        let args = const_functions::resolved_arguments(&state.const_functions, callee, args)?
             .into_iter()
             .map(|arg| {
-                expr_to_const(arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(&arg, constants, &types)
+                expr_to_const(state, arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(
+                        state, &arg, constants, &types,
+                    )
                 })
             })
             .collect::<Option<Vec<_>>>()?;
         // Keep references to parameters for consumers that re-specialize the
         // declaration contract; retain the native function's result type too.
         return Some(ConstExpr::Resize {
-            expr: Box::new(ConstExpr::call(callee.clone(), args)),
+            expr: Box::new(ConstExpr::call(state, callee.clone(), args)),
             width: literal.width,
             signed: literal.signed,
         });
     }
-    expr_to_const(expression)
-}
-
-/// A system function call in a constant expression. The call is checked
-/// against the system function catalog: no path converts a call it rejects.
-fn const_expr_from_function_subroutine_call(
-    call: &sv_parser::FunctionSubroutineCall,
-    syntax_tree: &SyntaxTree,
-    const_env: &HashMap<String, i128>,
-) -> Converted<Option<ConstExpr>> {
-    let system_call = match &call.nodes.0 {
-        sv_parser::SubroutineCall::SystemTfCall(system_call) => system_call,
-        // A user function call, such as in a run-time select index; the
-        // procedural lowering evaluates it before the operation. Without
-        // parentheses the name parses as a call but is an identifier.
-        sv_parser::SubroutineCall::TfCall(tf_call) if tf_call.nodes.2.is_some() => {
-            return Ok(const_user_call(
-                tf_call,
-                syntax_tree,
-                PackedDimensions::new(HashMap::default(), const_env, &HashMap::default()),
-                const_env,
-            ));
+    expr_to_const(state, expression.clone()).or_else(|| {
+        let Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } = expression
+        else {
+            return None;
+        };
+        if !arg_order.is_empty() {
+            return None;
         }
-        // `$unit::x` names an item of the compilation unit.
-        sv_parser::SubroutineCall::TfCall(tf_call)
-            if RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0)
-                .into_iter()
-                .any(|node| {
-                    matches!(
-                        node,
-                        RefNode::PackageScope(sv_parser::PackageScope::Unit(_))
+        let types = parameter_types_from_const_env(constants)
+            .into_iter()
+            .map(|(name, ty)| (name, (ty.width, ty.signed)))
+            .collect();
+        let args = args
+            .into_iter()
+            .map(|arg| {
+                let arg = arg?;
+                expr_to_const(state, arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(
+                        state, &arg, constants, &types,
                     )
-                }) =>
-        {
-            return Ok(reference_name(
-                RefNode::PsOrHierarchicalTfIdentifier(&tf_call.nodes.0),
-                syntax_tree,
-            )
-            .map(ConstExpr::Ident));
-        }
-        _ => return Ok(None),
-    };
-    let function = some!(expressions::system_function_call(system_call, syntax_tree)?);
-    if function == SystemFunction::Isunbounded {
-        if let Some(value) = parameters::isunbounded_call(system_call, syntax_tree, const_env)? {
-            return Ok(Some(value));
-        }
-        let argument = expressions::single_expression_argument(system_call).unwrap();
-        return Ok(Some(ConstExpr::call(
-            Callee::System(function),
-            vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
-        )));
-    }
-    let sv_parser::SystemTfCall::ArgExpression(expression_call) = &**system_call else {
-        return Ok(None);
-    };
-    if let SystemFunction::Countbits
-    | SystemFunction::Countones
-    | SystemFunction::Onehot
-    | SystemFunction::Onehot0
-    | SystemFunction::Isunknown = function
-    {
-        // Use expression lowering so selections are never silently discarded
-        // by the limited constant-primary identifier path below. Unsupported
-        // constant argument forms must remain unresolved rather than counting
-        // the entire identifier in place of its selection.
-        let expression = expr_from_function_subroutine_call(
-            call,
-            syntax_tree,
-            &PackedDimensions::new(HashMap::default(), const_env, &HashMap::default()),
-        )
-        .ok();
-        return Ok(expression.and_then(|expression| {
-            if function == SystemFunction::Countbits {
-                countbits_constant_call(expression, const_env)
-            } else {
-                expr_to_const(expression)
-            }
-        }));
-    }
-    let mut lowered = Vec::new();
-    for argument in expression_call.nodes.1.nodes.1.0.contents() {
-        // The catalog check rejects omitted arguments of functions.
-        let argument = some!(argument.as_ref());
-        lowered.push(parsed!(const_expr_from_expr(argument, syntax_tree)));
-    }
-    Ok(Some(ConstExpr::call(Callee::System(function), lowered)))
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(ConstExpr::call(state, callee, args))
+    })
 }
 
 // ConstExpr represents bit selects but not concatenations or part selects.
 // Counting each stream segment separately keeps parameter dependencies symbolic
 // and preserves the selected width, including when zero bits are counted.
-fn countbits_constant_call(
+pub(super) fn countbits_constant_call(
+    state: &AnalysisState,
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
@@ -1731,16 +1045,17 @@ fn countbits_constant_call(
         .into_iter()
         .map(|control| match control {
             Expr::Select { expr, lsb, .. } => Some(ConstExpr::Select {
-                expr: Box::new(expr_to_const(*expr)?),
+                expr: Box::new(expr_to_const(state, *expr)?),
                 bit: Box::new(lsb),
             }),
-            control => expr_to_const(control),
+            control => expr_to_const(state, control),
         })
         .collect::<Option<Vec<_>>>()?;
-    countbits_constant_operand(operand, &controls, const_env)
+    countbits_constant_operand(state, operand, &controls, const_env)
 }
 
 fn countbits_constant_operand(
+    state: &AnalysisState,
     operand: Expr,
     controls: &[ConstExpr],
     const_env: &HashMap<String, i128>,
@@ -1749,7 +1064,7 @@ fn countbits_constant_operand(
         let mut args = Vec::with_capacity(controls.len() + 1);
         args.push(operand);
         args.extend_from_slice(controls);
-        ConstExpr::call(Callee::System(SystemFunction::Countbits), args)
+        ConstExpr::call(state, Callee::System(SystemFunction::Countbits), args)
     };
     let sum = |mut terms: Vec<ConstExpr>| {
         // Keep large selected vectors from creating a deeply nested sum.
@@ -1772,13 +1087,13 @@ fn countbits_constant_operand(
     };
     match operand {
         Expr::Select { expr, msb, lsb, .. } if msb != lsb => {
-            let msb = usize::try_from(eval_ast_const_expr(&msb, const_env)?).ok()?;
-            let lsb = usize::try_from(eval_ast_const_expr(&lsb, const_env)?).ok()?;
+            let msb = usize::try_from(eval_ast_const_expr(state, &msb, const_env)?).ok()?;
+            let lsb = usize::try_from(eval_ast_const_expr(state, &lsb, const_env)?).ok()?;
             let width = msb.checked_sub(lsb)?.checked_add(1)?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
-            let operand = expr_to_const(*expr)?;
+            let operand = expr_to_const(state, *expr)?;
             sum((lsb..=msb)
                 .map(|bit| {
                     call(ConstExpr::Select {
@@ -1790,104 +1105,27 @@ fn countbits_constant_operand(
         }
         Expr::Concat(parts) => sum(parts
             .into_iter()
-            .map(|part| countbits_constant_operand(part, controls, const_env))
+            .map(|part| countbits_constant_operand(state, part, controls, const_env))
             .collect::<Option<Vec<_>>>()?),
         Expr::RepeatConcat { count, parts } => {
-            let count = eval_ast_const_expr(&count, const_env)?;
+            let count = eval_ast_const_expr(state, &count, const_env)?;
             if count < 0 {
                 return None;
             }
-            let counted = countbits_constant_operand(Expr::Concat(parts), controls, const_env)?;
+            let counted =
+                countbits_constant_operand(state, Expr::Concat(parts), controls, const_env)?;
             Some(ConstExpr::Binary {
                 left: Box::new(counted),
                 op: BinaryOp::Mul,
                 right: Box::new(ConstExpr::Literal(format!("32'sd{count}"))),
             })
         }
-        operand => Some(call(expr_to_const(operand)?)),
+        operand => Some(call(expr_to_const(state, operand)?)),
     }
 }
 
-fn integral_number_literal(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
-    let RefNode::IntegralNumber(number) = node else {
-        return None;
-    };
-    match number {
-        sv_parser::IntegralNumber::DecimalNumber(decimal) => match &**decimal {
-            sv_parser::DecimalNumber::UnsignedNumber(number) => {
-                locate_text(&number.nodes.0, syntax_tree)
-            }
-            sv_parser::DecimalNumber::BaseUnsigned(number) => based_literal(
-                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-                &number.nodes.1.nodes.0,
-                &number.nodes.2.nodes.0,
-                syntax_tree,
-            ),
-            sv_parser::DecimalNumber::BaseXNumber(number) => based_literal(
-                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-                &number.nodes.1.nodes.0,
-                &number.nodes.2.nodes.0,
-                syntax_tree,
-            ),
-            sv_parser::DecimalNumber::BaseZNumber(number) => based_literal(
-                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-                &number.nodes.1.nodes.0,
-                &number.nodes.2.nodes.0,
-                syntax_tree,
-            ),
-        },
-        sv_parser::IntegralNumber::BinaryNumber(number) => based_literal(
-            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-            &number.nodes.1.nodes.0,
-            &number.nodes.2.nodes.0,
-            syntax_tree,
-        ),
-        sv_parser::IntegralNumber::OctalNumber(number) => based_literal(
-            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-            &number.nodes.1.nodes.0,
-            &number.nodes.2.nodes.0,
-            syntax_tree,
-        ),
-        sv_parser::IntegralNumber::HexNumber(number) => based_literal(
-            number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
-            &number.nodes.1.nodes.0,
-            &number.nodes.2.nodes.0,
-            syntax_tree,
-        ),
-    }
-}
-
-fn based_literal(
-    size: Option<&Locate>,
-    base: &Locate,
-    digits: &Locate,
-    syntax_tree: &SyntaxTree,
-) -> Option<String> {
-    let size = size
-        .and_then(|size| locate_text(size, syntax_tree))
-        .unwrap_or_default();
-    let base = locate_text(base, syntax_tree)?;
-    let digits = locate_text(digits, syntax_tree)?;
-    Some(format!("{size}{base}{digits}"))
-}
-
-fn locate_text(locate: &Locate, syntax_tree: &SyntaxTree) -> Option<String> {
-    syntax_tree.get_str(locate).map(str::to_string)
-}
-
-pub(super) fn primary_literal_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
-    if let Some(integral_number) = unwrap_node!(node.clone(), IntegralNumber) {
-        return integral_number_literal(integral_number, syntax_tree);
-    }
-    let unbased = unwrap_node!(node, UnbasedUnsizedLiteral)?;
-    let RefNode::UnbasedUnsizedLiteral(unbased) = unbased else {
-        return None;
-    };
-    syntax_tree.get_str(&unbased.nodes.0).map(str::to_string)
-}
-
-fn unary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<UnaryOp> {
-    match syntax_tree.get_str(symbol)? {
+pub(super) fn unary_op_from_text(text: &str) -> Option<UnaryOp> {
+    match text {
         "+" => Some(UnaryOp::Plus),
         "-" => Some(UnaryOp::Minus),
         "~" => Some(UnaryOp::BitNot),
@@ -1899,12 +1137,8 @@ fn unary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Una
     }
 }
 
-pub(super) fn unary_expr_from_symbol(
-    symbol: &Locate,
-    expr: Expr,
-    syntax_tree: &SyntaxTree,
-) -> Option<Expr> {
-    let reduction = match syntax_tree.get_str(symbol)? {
+pub(super) fn unary_expr_from_text(text: &str, expr: Expr) -> Option<Expr> {
+    let reduction = match text {
         "~&" => Some(UnaryOp::RedAnd),
         "~|" => Some(UnaryOp::RedOr),
         "~^" | "^~" => Some(UnaryOp::RedXor),
@@ -1920,13 +1154,13 @@ pub(super) fn unary_expr_from_symbol(
         });
     }
     Some(Expr::Unary {
-        op: unary_op_from_symbol(symbol, syntax_tree)?,
+        op: unary_op_from_text(text)?,
         expr: Box::new(expr),
     })
 }
 
-pub(super) fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<BinaryOp> {
-    match syntax_tree.get_str(symbol)? {
+pub(super) fn binary_op_from_text(text: &str) -> Option<BinaryOp> {
+    match text {
         "+" => Some(BinaryOp::Add),
         "-" => Some(BinaryOp::Sub),
         "*" => Some(BinaryOp::Mul),

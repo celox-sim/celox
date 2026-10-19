@@ -9,6 +9,15 @@
 
 use crate::system_functions::SystemTask;
 
+/// Where a construct is written: its file and byte range in the source text
+/// before preprocessing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceSpan {
+    pub path: std::path::PathBuf,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// One procedural statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StmtBase<E, L> {
@@ -59,10 +68,12 @@ pub enum StmtBase<E, L> {
     /// the expression is evaluated like any other operand and its value is
     /// discarded.
     Eval(E),
-    /// A system task call statement such as `$display`.
+    /// A system task call statement such as `$display`. `site` is the call,
+    /// unless the analyzer created the statement.
     SystemTask {
         task: SystemTask,
         args: Vec<SystemTaskArg<E>>,
+        site: Option<SourceSpan>,
     },
     /// The declaration point of a local variable: it is (re)initialized here,
     /// to `init` or to the default value of its type.
@@ -70,6 +81,40 @@ pub enum StmtBase<E, L> {
         name: String,
         init: Option<E>,
     },
+    /// `#amount`: suspend the process for `amount` time units (IEEE
+    /// 1800-2023 9.4.1).
+    Delay {
+        amount: E,
+        /// Global-precision ticks in one time unit of the declaring scope.
+        ticks_per_unit: u64,
+    },
+    /// `@(items)`: suspend the process until one of the events occurs
+    /// (9.4.2).
+    WaitEvent(Vec<EventItemBase<E>>),
+    /// `wait (condition)`: suspend the process until the condition is true
+    /// (9.4.3).
+    Wait(E),
+}
+
+/// One item of an event control, `[edge] expr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventItemBase<E> {
+    pub edge: EventEdge,
+    pub expr: E,
+}
+
+/// Which transitions of an event expression are events (IEEE 1800-2023
+/// 9.4.2, Table 9-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventEdge {
+    /// Any change of the value.
+    Any,
+    /// `posedge`: the least significant bit rises.
+    Pos,
+    /// `negedge`: the least significant bit falls.
+    Neg,
+    /// `edge`: the least significant bit rises or falls.
+    Both,
 }
 
 /// How a case statement compares its selector with the item labels.
@@ -240,8 +285,9 @@ impl<E, L> StmtBase<E, L> {
                 args: args.into_iter().map(|arg| arg.map(&mut *fe)).collect(),
             },
             StmtBase::Eval(expr) => StmtBase::Eval(fe(expr)),
-            StmtBase::SystemTask { task, args } => StmtBase::SystemTask {
+            StmtBase::SystemTask { task, args, site } => StmtBase::SystemTask {
                 task,
+                site,
                 args: args
                     .into_iter()
                     .map(|arg| match arg {
@@ -255,6 +301,23 @@ impl<E, L> StmtBase<E, L> {
                 name,
                 init: init.map(fe),
             },
+            StmtBase::Delay {
+                amount,
+                ticks_per_unit,
+            } => StmtBase::Delay {
+                amount: fe(amount),
+                ticks_per_unit,
+            },
+            StmtBase::WaitEvent(items) => StmtBase::WaitEvent(
+                items
+                    .into_iter()
+                    .map(|item| EventItemBase {
+                        edge: item.edge,
+                        expr: fe(item.expr),
+                    })
+                    .collect(),
+            ),
+            StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
         }
     }
 
@@ -360,6 +423,13 @@ impl<E, L> StmtBase<E, L> {
                     fe(init);
                 }
             }
+            StmtBase::Delay { amount, .. } => fe(amount),
+            StmtBase::WaitEvent(items) => {
+                for item in items {
+                    fe(&mut item.expr);
+                }
+            }
+            StmtBase::Wait(condition) => fe(condition),
         }
     }
 

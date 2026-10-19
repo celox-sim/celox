@@ -35,8 +35,56 @@ pub fn external_signatures(
     ir: &veryl_analyzer::ir::Ir,
     config: &BuildConfig,
 ) -> Result<crate::symbolic::artifact::ExternalHierarchy, ParserError> {
+    external_signatures_named(ir, config, |module| module.name.to_string())
+}
+
+/// Like [`external_signatures`], but registers each module under `name`, so
+/// modules that share a source name stay distinct.
+pub fn external_signatures_named(
+    ir: &veryl_analyzer::ir::Ir,
+    config: &BuildConfig,
+    name: impl Fn(&veryl_analyzer::ir::Module) -> String,
+) -> Result<crate::symbolic::artifact::ExternalHierarchy, ParserError> {
     use crate::symbolic::artifact::{ExternalHierarchy, ExternalModule};
     use veryl_analyzer::ir::Component;
+
+    // Veryl children link through the IR, but the SV modules beneath them
+    // still have to be prepared by the SV frontend. Instances of one analyzed
+    // body share it, so each body is visited once across all exported roots.
+    // Bodies are keyed by address: equal signatures can still differ in the
+    // aliases of their SV children.
+    type Memo = HashMap<*const veryl_analyzer::ir::Module, std::rc::Rc<Vec<StrId>>>;
+    fn sv_descendants(module: &veryl_analyzer::ir::Module, memo: &mut Memo) -> Vec<StrId> {
+        let mut names = Vec::new();
+        let mut seen = crate::HashSet::default();
+        for declaration in &module.declarations {
+            let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
+                continue;
+            };
+            match instance.component.as_ref() {
+                Component::SystemVerilog(child) => {
+                    if seen.insert(child.name) {
+                        names.push(child.name);
+                    }
+                }
+                Component::Module(child) => {
+                    let key: *const _ = child;
+                    let nested = match memo.get(&key) {
+                        Some(nested) => nested.clone(),
+                        None => {
+                            let nested = std::rc::Rc::new(sv_descendants(child, memo));
+                            memo.insert(key, nested.clone());
+                            nested
+                        }
+                    };
+                    names.extend(nested.iter().filter(|&&name| seen.insert(name)));
+                }
+                Component::Interface(_) => {}
+            }
+        }
+        names
+    }
+    let mut memo = Memo::default();
 
     let mut external = ExternalHierarchy::default();
     for component in &ir.components {
@@ -74,8 +122,13 @@ pub fn external_signatures(
         let mut port_ids = module.ports.values().copied().collect::<Vec<_>>();
         port_ids.sort();
         let port_order = port_ids.iter().map(|id| ids[id]).collect();
-        let (sim_module, _) =
+        let (mut sim_module, _) =
             project_module_with_ids(&empty, module, config, ids, &HashMap::default())?;
+        sim_module.name = name(module);
+        let unresolved_instances = sv_descendants(module, &mut memo)
+            .into_iter()
+            .map(|name| veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
+            .collect();
         let id = celox_design::ModuleId(external.modules.len());
         external.roots.insert(sim_module.name.clone(), id);
         external.modules.insert(
@@ -83,21 +136,7 @@ pub fn external_signatures(
             ExternalModule {
                 sim_module,
                 port_order,
-                unresolved_instances: module
-                    .declarations
-                    .iter()
-                    .filter_map(|declaration| {
-                        let veryl_analyzer::ir::Declaration::Inst(instance) = declaration else {
-                            return None;
-                        };
-                        let name = match instance.component.as_ref() {
-                            Component::Module(module) => module.name,
-                            Component::SystemVerilog(module) => module.name,
-                            Component::Interface(_) => return None,
-                        };
-                        Some(veryl_parser::resource_table::get_str_value(name).unwrap_or_default())
-                    })
-                    .collect(),
+                unresolved_instances,
             },
         );
     }
@@ -446,6 +485,8 @@ pub(crate) fn project_module_with_ids(
 
     Ok((
         crate::symbolic::artifact::SimModule {
+            time_precision: None,
+            time_scale: celox_design::TimeScale::default(),
             name: veryl_parser::resource_table::get_str_value(module.name).unwrap_or_default(),
             variables,
             ff_access_summaries: module
@@ -489,6 +530,7 @@ pub(crate) fn project_module_with_ids(
             eval_only_ff_blocks: map_units(&module.eval_only_ff_blocks),
             apply_ff_blocks: map_units(&module.apply_ff_blocks),
             eval_apply_ff_blocks: map_units(&module.eval_apply_ff_blocks),
+            split_commit_ff_blocks: HashMap::default(),
             parallel_ff_parts: module
                 .parallel_ff_parts
                 .iter()
@@ -565,6 +607,7 @@ pub(crate) fn project_module_with_ids(
             counter_slots: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            time_slot: None,
         },
         ids,
     ))

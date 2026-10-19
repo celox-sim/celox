@@ -3,7 +3,7 @@
 
 use std::{fmt::Write, path::Path, time::Instant};
 
-use celox_sv_analyzer::{ModuleInterfaces, ParsedSource, analyze, ast, syntax};
+use celox_sv_analyzer::{ModuleInterfaces, ParsedSource};
 use fxhash::FxHashMap as HashMap;
 
 fn source(kind: &str, count: usize) -> String {
@@ -58,7 +58,7 @@ fn main() {
         hierarchy_scaling(&counts);
         return;
     }
-    println!("kind,count,bytes,parse_ms,ast_ms,ir_ms");
+    println!("kind,count,bytes,parse_index_ms,analysis_ms");
     for kind in ["assign", "comb", "locals", "ff", "generate"] {
         for &count in &counts {
             let code = source(kind, count);
@@ -67,23 +67,27 @@ fn main() {
             let mut samples = Vec::new();
             for _ in 0..3 {
                 let start = Instant::now();
-                let tree = syntax::parse_source(&code, Path::new("scaling.sv")).unwrap();
+                let source = ParsedSource::parse(&code, Path::new("scaling.sv")).unwrap();
                 let parsed = Instant::now();
-                let source = ast::Source::from_syntax(&tree).unwrap();
-                let lowered = Instant::now();
-                let ir = analyze::analyze_source(source).unwrap();
+                let ir = source
+                    .analyze_module_with_parameter_expr_overrides(
+                        "Top",
+                        &Default::default(),
+                        &ModuleInterfaces::default(),
+                    )
+                    .unwrap();
                 let finished = Instant::now();
+                assert_eq!(ir.modules()[0].signals().len(), count);
                 assert_eq!(
-                    ir.modules()[0].signals().len(),
-                    if kind == "locals" { 2 * count } else { count }
+                    ir.modules()[0].locals().len(),
+                    if kind == "locals" { count } else { 0 }
                 );
                 samples.push([
                     (parsed - start).as_secs_f64() * 1000.0,
-                    (lowered - parsed).as_secs_f64() * 1000.0,
-                    (finished - lowered).as_secs_f64() * 1000.0,
+                    (finished - parsed).as_secs_f64() * 1000.0,
                 ]);
             }
-            let median: Vec<_> = (0..3)
+            let median: Vec<_> = (0..2)
                 .map(|phase| {
                     let mut times: Vec<_> = samples.iter().map(|sample| sample[phase]).collect();
                     times.sort_by(f64::total_cmp);
@@ -91,11 +95,10 @@ fn main() {
                 })
                 .collect();
             println!(
-                "{kind},{count},{},{:.3},{:.3},{:.3}",
+                "{kind},{count},{},{:.3},{:.3}",
                 code.len(),
                 median[0],
-                median[1],
-                median[2]
+                median[1]
             );
         }
     }

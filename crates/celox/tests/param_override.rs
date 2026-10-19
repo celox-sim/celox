@@ -6,6 +6,12 @@ use celox::Simulator;
 mod test_utils;
 
 all_backends! {
+fn test_four_state_integral_instance_override(sim) {
+    @case "param_override::test_four_state_integral_instance_override";
+}
+fn test_wide_integral_instance_override(sim) {
+    @case "param_override::test_wide_integral_instance_override";
+}
 
 // Basic param override: change WIDTH from default 8 to 16 and verify signal width.
 fn test_param_override_basic_width(sim) {
