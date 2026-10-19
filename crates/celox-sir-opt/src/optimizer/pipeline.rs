@@ -8,6 +8,8 @@ mod diagnostics;
 mod late;
 mod parallel;
 pub(in crate::optimizer) mod pass_manager;
+#[cfg(test)]
+mod process_tests;
 mod runner;
 
 use pass_manager::ExecutionUnitPassManager;
