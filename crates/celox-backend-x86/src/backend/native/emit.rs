@@ -1,6 +1,6 @@
 //! x86-64 code emission: MIR + physical register assignment → machine code.
 //!
-//! Uses iced-x86's CodeAssembler for instruction encoding.
+//! Uses iced-x86's EmitAssembler for instruction encoding.
 //! ABI: System V AMD64 at the external boundary. On supported x86-64 hosts,
 //! generated code temporarily uses an otherwise available segment base for
 //! simulation-state/allocator-arena addressing, leaving every non-stack GPR
@@ -47,7 +47,6 @@ use operands::{
 };
 pub use pipeline::{emit_owned_prepared_eu, emit_prepared_eu};
 
-use std::cell::Cell;
 use std::fmt;
 
 use iced_x86::BlockEncoderOptions;
@@ -449,15 +448,49 @@ fn select_spill_register_cache(
     cache
 }
 
-thread_local! {
-    /// Emission-only relocation from logical allocator stack slots into the
-    /// per-instance area following simulation state. Native functions are
-    /// compiled concurrently, so this context is thread-local rather than
-    /// process-global.
-    static ACTIVE_SPILL_BASE: Cell<i32> = const { Cell::new(0) };
-    static ACTIVE_SCRATCH_BASE: Cell<i32> = const { Cell::new(0) };
-    static ACTIVE_STATE_BASE: Cell<StateBaseStrategy> =
-        const { Cell::new(StateBaseStrategy::R15) };
+/// Per-function emission state, owned alongside the instruction assembler.
+struct EmitAssembler {
+    assembler: iced_x86::code_asm::CodeAssembler,
+    context: EmissionContext,
+}
+
+#[derive(Clone, Copy)]
+struct EmissionContext {
+    spill_base: i32,
+    scratch_base: i32,
+    state_base: StateBaseStrategy,
+    call_area: Option<i32>,
+    caller_segment: extern_call::CallerSegment,
+    pinned_xmms: u16,
+}
+
+impl EmitAssembler {
+    fn new(bitness: u32) -> Result<Self, IcedError> {
+        Ok(Self {
+            assembler: iced_x86::code_asm::CodeAssembler::new(bitness)?,
+            context: EmissionContext {
+                spill_base: 0,
+                scratch_base: 0,
+                state_base: StateBaseStrategy::R15,
+                call_area: None,
+                caller_segment: extern_call::CallerSegment::None,
+                pinned_xmms: 0,
+            },
+        })
+    }
+}
+
+impl std::ops::Deref for EmitAssembler {
+    type Target = iced_x86::code_asm::CodeAssembler;
+    fn deref(&self) -> &Self::Target {
+        &self.assembler
+    }
+}
+
+impl std::ops::DerefMut for EmitAssembler {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.assembler
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1039,7 +1072,7 @@ fn emit_planned(
         uses_avx,
         uses_popcnt,
     );
-    let mut asm = CodeAssembler::new(64)?;
+    let mut asm = EmitAssembler::new(64)?;
     let block_order = emission_block_order(func);
 
     // Empty layout fallthrough chains share the label of the next block that
@@ -1071,8 +1104,8 @@ fn emit_planned(
         tick_loop,
     )?;
     debug_assert!(arena.scratch_size >= 4 * 8);
-    ACTIVE_SPILL_BASE.with(|base| base.set(arena.spill_base));
-    ACTIVE_SCRATCH_BASE.with(|base| base.set(arena.scratch_base));
+    asm.context.spill_base = arena.spill_base;
+    asm.context.scratch_base = arena.scratch_base;
     // XMM15 holds the tick count or the caller's segment base, and
     // XMM9-XMM14 the callee-saved GPRs stashed outside a tick loop.
     let mut pinned_xmms = 0u16;
@@ -1084,7 +1117,8 @@ fn emit_planned(
             pinned_xmms |= 1 << (9 + index);
         }
     }
-    extern_call::set_active_call_area(
+    extern_call::set_call_area(
+        &mut asm,
         arena.call_area,
         match (tick_loop, state_base) {
             (_, StateBaseStrategy::R15) => extern_call::CallerSegment::None,
@@ -1095,7 +1129,8 @@ fn emit_planned(
         },
         pinned_xmms,
     );
-    ACTIVE_STATE_BASE.with(|active| active.set(state_base));
+    asm.context.state_base = state_base;
+    let context = asm.context;
 
     let mut epilogue_label = asm.create_label();
     let mut tick_loop_success_label = tick_loop.then(|| asm.create_label());
@@ -1161,6 +1196,7 @@ fn emit_planned(
             asm.mov(
                 rax,
                 qword_ptr(mem_operand(
+                    &context,
                     BaseReg::SimState,
                     STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
                 )),
@@ -1180,6 +1216,7 @@ fn emit_planned(
                 asm.mov(
                     rax,
                     qword_ptr(mem_operand(
+                        &context,
                         BaseReg::SimState,
                         STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                     )),
@@ -1187,6 +1224,7 @@ fn emit_planned(
                 asm.mov(rax, qword_ptr(rax))?;
                 asm.mov(
                     qword_ptr(mem_operand(
+                        &context,
                         BaseReg::SimState,
                         STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET as i32,
                     )),
@@ -1236,6 +1274,7 @@ fn emit_planned(
                             asm.mov(
                                 rax,
                                 qword_ptr(mem_operand(
+                                    &context,
                                     BaseReg::SimState,
                                     STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                                 )),
@@ -1244,6 +1283,7 @@ fn emit_planned(
                             asm.cmp(
                                 rax,
                                 qword_ptr(mem_operand(
+                                    &context,
                                     BaseReg::SimState,
                                     STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET as i32,
                                 )),
@@ -1414,6 +1454,7 @@ fn emit_planned(
         asm.movq(r10, xmm15)?;
         asm.mov(
             qword_ptr(mem_operand(
+                &context,
                 BaseReg::SimState,
                 STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as i32,
             )),
@@ -1423,7 +1464,7 @@ fn emit_planned(
     if let Some(save_offset) = arena.loop_xmm15_save {
         asm.movdqu(
             xmm15,
-            xmmword_ptr(mem_operand(BaseReg::SimState, save_offset)),
+            xmmword_ptr(mem_operand(&context, BaseReg::SimState, save_offset)),
         )?;
     }
     if let Some(base) = arena.loop_gpr_save_base {
@@ -1431,6 +1472,7 @@ fn emit_planned(
             asm.mov(
                 preg_to_reg64(reg),
                 qword_ptr(mem_operand(
+                    &context,
                     BaseReg::SimState,
                     base + i32::try_from(index * 8).unwrap(),
                 )),
@@ -1446,6 +1488,7 @@ fn emit_planned(
             asm.mov(
                 r11,
                 qword_ptr(mem_operand(
+                    &context,
                     BaseReg::SimState,
                     arena.loop_segment_save.expect("loop segment save"),
                 )),
@@ -1456,6 +1499,7 @@ fn emit_planned(
             asm.mov(
                 r11,
                 qword_ptr(mem_operand(
+                    &context,
                     BaseReg::SimState,
                     arena.loop_segment_save.expect("loop segment save"),
                 )),
@@ -1606,7 +1650,7 @@ fn emit_planned(
 /// a large share of all loads and stores and inflate the instruction-cache
 /// footprint. Instruction order and count are unchanged, so labels, which
 /// name instruction indices, stay valid.
-fn shorten_absolute_moves(asm: &mut CodeAssembler) -> Result<(), iced_x86::IcedError> {
+fn shorten_absolute_moves(asm: &mut EmitAssembler) -> Result<(), iced_x86::IcedError> {
     use iced_x86::{Code, Instruction, MemoryOperand, Register};
     for instruction in asm.take_instructions() {
         let (code, load) = match instruction.code() {

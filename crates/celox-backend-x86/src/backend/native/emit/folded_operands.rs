@@ -20,7 +20,7 @@ pub(super) fn count_vreg_uses(func: &MFunction, plan: &SsaDestructionPlan) -> Ha
 }
 
 pub(super) fn try_emit_not_and_fold(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     first: &MInst,
     second: &MInst,
     uses: &HashMap<VReg, usize>,
@@ -64,7 +64,7 @@ pub(super) fn try_emit_not_and_fold(
 }
 
 pub(super) fn try_emit_load_fold(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     inst: &MInst,
     next: &MInst,
     use_counts: &HashMap<VReg, usize>,
@@ -72,6 +72,7 @@ pub(super) fn try_emit_load_fold(
     func: &MFunction,
     spill_register_cache: SpillRegisterCache,
 ) -> Result<bool, IcedError> {
+    let context = asm.context;
     let MInst::Load {
         dst,
         base,
@@ -87,7 +88,7 @@ pub(super) fn try_emit_load_fold(
     if use_counts.get(dst).copied().unwrap_or(0) != 1 || !next.uses().contains(dst) {
         return Ok(false);
     }
-    let memory = mem_operand(*base, *offset);
+    let memory = mem_operand(&context, *base, *offset);
     if *size == OpSize::S64 {
         return emit_inst_with_memory(asm, next, *dst, memory, assignment, func);
     }
@@ -126,7 +127,7 @@ pub(super) fn try_emit_load_fold(
 }
 
 fn emit_inst_with_memory(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     inst: &MInst,
     memory_vreg: VReg,
     memory: AsmMemoryOperand,
