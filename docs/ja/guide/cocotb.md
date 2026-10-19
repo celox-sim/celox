@@ -63,14 +63,17 @@ Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソ
 まとめてコンパイルします。Verylプロジェクト外の単独ソースを指定した場合は、
 そのファイルだけをコンパイルします。`-o`を省略した出力先は`celox.out`です。
 
-単独のSystemVerilogソースには`.sv`ファイルを指定します。
+SystemVerilogでは1つ以上の`.sv`ファイルをコンパイル順に指定します。
 
 ```sh
-target/release/celox vpi build src/Top.sv --top Top -o build/top-sim
+target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
 ```
 
-Celoxが対応するSystemVerilogの範囲で、そのファイル内の子モジュールも含めて
-コンパイルします。`Veryl.toml`や追加のSystemVerilogソースは自動探索しません。
+Celoxが対応するSystemVerilogの範囲で、指定したファイルをコンパイルします。
+package定義は利用側より先に指定してください。`Veryl.toml`や追加のSystemVerilog
+ソースは自動探索しません。複数指定時はすべて`.sv`ファイルにする必要があります。
+Verylではプロジェクトの入口となるファイルを1つ指定します。
+`celox-vpi-compile`も同じソース一覧を受け付けます。
 
 ## cocotbを実行する
 
