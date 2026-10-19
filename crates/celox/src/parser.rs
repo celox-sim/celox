@@ -595,10 +595,11 @@ pub fn parse_sv(
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
     warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
+    force_signals: &[String],
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
-    let scheduled = celox_frontend_sv::schedule_sources_with_options(
+    let scheduled = celox_frontend_sv::schedule_sources_with_force_signals(
         sources,
         top,
         parameter_overrides,
@@ -610,6 +611,7 @@ pub fn parse_sv(
         trace.is_some().then_some(&mut frontend_trace),
         warnings,
         diagnostic_policy.sv_options(),
+        force_signals,
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),

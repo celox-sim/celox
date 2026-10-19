@@ -326,3 +326,102 @@ fn sv_project_without_feature_reports_the_required_build_option() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("--features systemverilog"));
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn native_build_applies_target_and_cli_signal_access_contracts() {
+    use celox::{BigUint, NativeProgramInstance, SimBackend};
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("top.sv"), "module Top(input logic [7:0] a, output logic [7:0] y); logic [7:0] hidden; assign hidden=a+7; assign y=a+1; endmodule").unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+      sources = ["top.sv"]
+      top = "Top"
+      opt_level = "O0"
+      live_signals = ["Top.bad_common"]
+      force_signals = ["Top.bad_common"]
+      [targets.selected]
+      opt_level = "O2"
+      live_signals = ["Top.hidden"]
+      force_signals = ["Top.hidden"]
+      [targets.empty]
+      live_signals = []
+      force_signals = []
+    "#,
+    )
+    .unwrap();
+    for arguments in [
+        vec!["--target", "selected"],
+        vec![
+            "-O",
+            "O2",
+            "--live-signal",
+            "Top.hidden",
+            "--force-signal",
+            "Top.hidden",
+        ],
+    ] {
+        let output = invoke(
+            root.path(),
+            &[vec!["vpi", "build", "-o", "sim"], arguments].concat(),
+        );
+        success(&output);
+        let bytes = fs::read(root.path().join("sim")).unwrap();
+        let image = celox::NativeProgramImage::discover_appended(&bytes)
+            .unwrap()
+            .unwrap()
+            .image;
+        // Safety: this CLI invocation compiled the trusted test design.
+        let mut sim = unsafe { NativeProgramInstance::from_image(image) }.unwrap();
+        let lookup = |sim: &NativeProgramInstance, path: &str| {
+            celox::ReflectionSignalId(
+                sim.reflection()
+                    .signals()
+                    .iter()
+                    .position(|signal| signal.full_name == path)
+                    .unwrap() as u32,
+            )
+        };
+        let a = lookup(&sim, "Top.a");
+        let hidden = lookup(&sim, "Top.hidden");
+        let signal = sim.reflection().signal(a).unwrap().signal;
+        sim.backend_mut().set(signal, 11u8);
+        sim.eval_comb().unwrap();
+        let signal = sim.reflection().signal(hidden).unwrap().signal;
+        assert_eq!(
+            sim.backend().get_four_state(signal),
+            (BigUint::from(18u8), BigUint::from(0u8))
+        );
+        assert!(!sim.force_signal(a, 1u8.into(), 0u8.into()));
+        assert!(sim.force_signal(hidden, 40u8.into(), 0u8.into()));
+    }
+    success(&invoke(
+        root.path(),
+        &["vpi", "build", "--target", "empty", "-o", "empty"],
+    ));
+    success(&invoke(
+        root.path(),
+        &[
+            "vpi",
+            "build",
+            "--no-live-signals",
+            "--no-force-signals",
+            "-o",
+            "cleared",
+        ],
+    ));
+    let output = invoke(
+        root.path(),
+        &[
+            "vpi",
+            "build",
+            "--target",
+            "selected",
+            "--force-signal",
+            "Top.typo",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Top.typo"));
+}

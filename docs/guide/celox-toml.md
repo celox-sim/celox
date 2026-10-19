@@ -183,3 +183,49 @@ The order is common diagnostics → selected target → CLI overrides. Repeat
 `--diagnostic CODE=LEVEL` to override multiple codes; the last assignment to a
 code wins. `celox run` and `celox vpi build` print retained compilation warnings.
 Diagnostic severity does not change optimizer settings or runtime error handling.
+
+## CLI optimization and signal access
+
+`celox run` and `celox vpi build` accept these project/target settings:
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+opt_level = "O2"
+live_signals = ["Top.uut.debug_count"]
+force_signals = ["Top.uut.state"]
+
+[targets.observe]
+opt_level = "O1"
+force_signals = []
+```
+
+The default optimization level is `O2` for `celox run` and `O1` for `celox vpi build`. Signal lists default to empty. `O2` may remove internal
+computations that do not affect design outputs; `live_signals` retains the
+listed objects for external observation. `force_signals` also implies liveness
+and emits external override controls before symbolic evaluation and SIR
+optimization, so blocking assignments and downstream expressions observe the
+forced value. It does not switch the whole design to `O0`. Force permission is
+retained in the standalone native image; undeclared force requests fail.
+
+Use exact hierarchy paths including the top module, as reported by VPI (for
+example `Top.uut.s_axis.tdata`). Missing or ambiguous paths fail compilation;
+wildcards are not expanded. Explicit force currently supports whole packed
+SystemVerilog variables, including owned interface members. For an interface member, select its owning
+variable rather than a child modport alias; structured port alias targets are
+rejected. Unpacked arrays, clock
+and reset event signals, and Veryl/mixed-language force targets are rejected.
+Observation roots support both source languages.
+
+```sh
+celox vpi build --project celox.toml -O O2 \
+  --live-signal Top.uut.debug_count --force-signal Top.uut.state -o dut-sim
+celox run --project celox.toml --target observe --no-force-signals
+```
+
+Priority is common settings → selected target → CLI. Each signal list replaces
+the preceding list as a whole; an omitted target list inherits the common list,
+and `[]` clears it. Repeat `--live-signal` or `--force-signal` for multiple paths.
+`--no-live-signals` and `--no-force-signals` clear inherited lists and conflict
+with the corresponding path options. These settings apply to the two CLI
+compilation commands; JavaScript simulator options are configured separately.

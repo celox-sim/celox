@@ -223,3 +223,6 @@ mod flatting_tests;
 
 mod diagnostic_policy;
 pub use diagnostic_policy::{DiagnosticLevel, DiagnosticPolicy};
+
+mod signal_access;
+pub use signal_access::SignalAccessOptions;

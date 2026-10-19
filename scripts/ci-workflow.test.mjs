@@ -453,8 +453,8 @@ test("cocotb retains Celox features without enabling unrelated adapter features"
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     FEATURES: "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus",
   });
-  assert.deepEqual(args, ["test", "--locked", "-p", "celox-vpi", "--features", "celox/systemverilog", "--test", "cocotb_e2e",
-    "cocotb_drives_an_attached_native_flip_flop", "--", "--exact", "--ignored"]);
+  assert.deepEqual(args, ["test", "--locked", "-p", "celox-vpi", "--features", "systemverilog", "--features", "celox/systemverilog", "--test", "cocotb_e2e",
+    "cocotb_", "--", "--ignored"]);
   assert.match(job("rust-tests"), /name: Run cocotb VPI end-to-end test\n        if: needs.changes.outputs.rust_vpi_e2e != 'false'/);
 });
 

@@ -54,6 +54,35 @@ pub fn compile_native_image_with_diagnostics(
     top: &str,
     policy: DiagnosticPolicy,
 ) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_configured(
+        source,
+        top,
+        policy,
+        celox::OptLevel::O0,
+        celox::SignalAccessOptions::default(),
+        true,
+    )
+}
+
+/// Compile with an explicit observation/force contract, retaining optimization.
+pub fn compile_native_image_with_options(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_configured(source, top, policy, level, access, false)
+}
+
+fn compile_native_image_configured(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+    legacy_force: bool,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
     let simulator = if let Ok(metadata_path) = Metadata::search_from(source) {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
@@ -76,8 +105,9 @@ pub fn compile_native_image_with_diagnostics(
             .with_metadata(metadata)
             .diagnostic_policy(policy.clone())
             .four_state(true)
-            .native_force_support(true)
-            .opt_level(celox::OptLevel::O0)
+            .native_force_support(legacy_force)
+            .signal_access(access.clone())
+            .opt_level(level)
             .build()
     } else {
         let contents = std::fs::read_to_string(source)
@@ -85,8 +115,9 @@ pub fn compile_native_image_with_diagnostics(
         Simulator::from_sources(vec![(contents.as_str(), source)], top)
             .diagnostic_policy(policy.clone())
             .four_state(true)
-            .native_force_support(true)
-            .opt_level(celox::OptLevel::O0)
+            .native_force_support(legacy_force)
+            .signal_access(access.clone())
+            .opt_level(level)
             .build()
     }
     .map_err(|error| format!("compilation failed: {error}"))?;

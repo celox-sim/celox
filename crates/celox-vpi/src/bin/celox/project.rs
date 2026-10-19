@@ -15,6 +15,29 @@ pub(super) struct DesignArgs {
     /// Override a compilation diagnostic: CODE=allow|warn|error (repeatable).
     #[arg(long = "diagnostic", value_name = "CODE=LEVEL")]
     diagnostics: Vec<String>,
+    /// Optimization level: O0, O1, O2 (default: project setting or O2 for run, O1 for vpi build).
+    #[arg(short = 'O', long, value_parser = super::parse_opt_level)]
+    opt_level: Option<celox::OptLevel>,
+    /// Preserve a hierarchical signal for observation (repeatable; replaces project list).
+    #[arg(
+        long = "live-signal",
+        value_name = "PATH",
+        conflicts_with = "no_live_signals"
+    )]
+    live_signals: Vec<String>,
+    /// Permit force/release on a packed SV signal (repeatable; replaces project list).
+    #[arg(
+        long = "force-signal",
+        value_name = "PATH",
+        conflicts_with = "no_force_signals"
+    )]
+    force_signals: Vec<String>,
+    /// Clear the project's live_signals list.
+    #[arg(long)]
+    no_live_signals: bool,
+    /// Clear the project's force_signals list.
+    #[arg(long)]
+    no_force_signals: bool,
     /// Project manifest (otherwise discover celox.toml when no inputs are given).
     #[arg(long, value_name = "FILE")]
     project: Option<PathBuf>,
@@ -52,6 +75,8 @@ struct Manifest {
     defines: BTreeMap<String, String>,
     top: Option<String>,
     opt_level: Option<String>,
+    live_signals: Option<Vec<String>>,
+    force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
     default_target: Option<String>,
     targets: BTreeMap<String, Target>,
@@ -67,6 +92,8 @@ struct Target {
     defines: BTreeMap<String, String>,
     top: Option<String>,
     opt_level: Option<String>,
+    live_signals: Option<Vec<String>>,
+    force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
 }
 
@@ -78,6 +105,7 @@ pub(super) struct Design {
     pub defines: BTreeMap<String, String>,
     pub top: String,
     pub opt_level: Option<celox::OptLevel>,
+    pub signal_access: celox::SignalAccessOptions,
     pub max_steps: Option<u64>,
 }
 
@@ -169,6 +197,8 @@ impl DesignArgs {
             design.diagnostics = config.diagnostics.clone();
             design.top = config.top.clone().unwrap_or_default();
             let mut opt_level = config.opt_level.as_deref();
+            design.signal_access.live_signals = config.live_signals.clone().unwrap_or_default();
+            design.signal_access.force_signals = config.force_signals.clone().unwrap_or_default();
             design.max_steps = config.max_steps;
             if let Some(target) = selected {
                 design.diagnostics.0.extend(target.diagnostics.0.clone());
@@ -183,6 +213,12 @@ impl DesignArgs {
                     design.top.clone_from(top);
                 }
                 opt_level = target.opt_level.as_deref().or(opt_level);
+                if let Some(paths) = &target.live_signals {
+                    design.signal_access.live_signals.clone_from(paths);
+                }
+                if let Some(paths) = &target.force_signals {
+                    design.signal_access.force_signals.clone_from(paths);
+                }
                 design.max_steps = target.max_steps.or(design.max_steps);
             }
             design.opt_level = opt_level
@@ -195,6 +231,17 @@ impl DesignArgs {
             if design.max_steps == Some(0) {
                 return Err("max_steps must be positive".to_string());
             }
+        }
+        design.opt_level = self.opt_level.or(design.opt_level);
+        if self.no_live_signals {
+            design.signal_access.live_signals.clear();
+        } else if !self.live_signals.is_empty() {
+            design.signal_access.live_signals = self.live_signals;
+        }
+        if self.no_force_signals {
+            design.signal_access.force_signals.clear();
+        } else if !self.force_signals.is_empty() {
+            design.signal_access.force_signals = self.force_signals;
         }
         let inputs = if self.input_order.is_empty() {
             (0..self.sources.len())

@@ -153,3 +153,31 @@ mixed_timescale = "warn"
 ```
 
 共通設定→選択したターゲット→CLI の順に優先されます。`--diagnostic CODE=LEVEL` は繰り返し指定でき、同じコードを複数回指定した場合は最後の指定が有効です。`celox run` と `celox vpi build` は抑制していない警告を表示します。診断レベルを変更しても、最適化設定や実行時エラーの扱いは変わりません。
+
+## CLIの最適化と信号アクセス
+
+`celox run` と `celox vpi build` は、共通設定とターゲット設定に次の項目を指定できます。
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+opt_level = "O2"
+live_signals = ["Top.uut.debug_count"]
+force_signals = ["Top.uut.state"]
+
+[targets.observe]
+opt_level = "O1"
+force_signals = []
+```
+
+最適化レベルの既定値は `celox run` では `O2`、`celox vpi build` では `O1` です。信号リストの既定値は空です。`O2` では出力に影響しない内部の計算を削除することがあるため、外部から観測する信号を `live_signals` で保持します。`force_signals` は保持対象にもなり、シンボリック評価とSIR最適化より前に外部から値を切り替える制御を追加します。これにより、blocking代入と後続の式もforceされた値を参照できます。設計全体を `O0` に変更することはありません。forceの許可対象は生成した実行バイナリにも保存され、宣言外へのforceは失敗します。
+
+パスはtopを含むVPI上の完全名を指定します（例: `Top.uut.s_axis.tdata`）。存在しない名前や曖昧な名前はコンパイルエラーとなり、ワイルドカードは展開しません。明示的なforceは、現在SystemVerilogのpacked変数全体とinterfaceが所有するメンバーに対応しています。interfaceメンバーは子のmodport側の別名ではなく、所有する変数を指定してください。構造化ポートの別名をforce対象にするとエラーになります。unpacked配列、clock/resetのイベント信号、Verylまたは混在設計のforce対象はエラーになります。観測対象の指定は両方の言語に対応しています。
+
+```sh
+celox vpi build --project celox.toml -O O2 \
+  --live-signal Top.uut.debug_count --force-signal Top.uut.state -o dut-sim
+celox run --project celox.toml --target observe --no-force-signals
+```
+
+共通設定→選択したターゲット→CLIの順に優先されます。信号リストは全体を置き換えます。ターゲットで省略したリストは共通設定を継承し、`[]` で空にできます。CLIでは `--live-signal` / `--force-signal` を繰り返して列挙し、`--no-live-signals` / `--no-force-signals` で継承したリストを空にできます。リストを空にするオプションと、対応するパス指定は併用できません。これらの設定はCLIの2つのコンパイルコマンドに適用されます。JavaScriptのシミュレータオプションは別に指定します。

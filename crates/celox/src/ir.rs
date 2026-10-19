@@ -1077,6 +1077,34 @@ impl RuntimeProgram {
         ))
     }
 
+    /// Resolve an exact reflected hierarchy path without guessing where module
+    /// instance paths end and interface/member paths begin.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn hierarchical_signal_addr(&self, path: &str) -> Option<AbsoluteAddr> {
+        let root = &self.design.root_instance()?.module_name;
+        let mut found = None;
+        for instance in self.design.instances() {
+            let prefix = if instance.display_path.is_empty() {
+                root.clone()
+            } else {
+                format!("{root}.{}", instance.display_path.join("."))
+            };
+            for address in instance.state_addresses() {
+                let variable = self.design.variable(address)?;
+                if !instance.resolves_path_to(&variable.path, *address) {
+                    continue;
+                }
+                if format!("{prefix}.{}", variable.path.join(".")) == path {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(*address);
+                }
+            }
+        }
+        found
+    }
+
     pub fn get_addr(
         &self,
         instance_path: &[(&str, usize)],

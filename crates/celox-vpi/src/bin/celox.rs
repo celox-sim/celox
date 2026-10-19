@@ -44,10 +44,6 @@ struct RunArgs {
     #[command(flatten)]
     design: DesignArgs,
 
-    /// Compiler optimization level: O0, O1, O2 (default: project setting or O2).
-    #[arg(short = 'O', long, value_parser = parse_opt_level)]
-    opt_level: Option<celox::OptLevel>,
-
     /// Maximum SV scheduler steps or Veryl ticks (default: project setting or 1000000).
     /// Does not bound compilation or work within a single step/tick.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -98,10 +94,7 @@ fn parse_opt_level(value: &str) -> Result<celox::OptLevel, String> {
 fn resolve_run_config(arguments: RunArgs) -> RunConfig {
     let design = resolve_design(arguments.design);
     RunConfig {
-        opt_level: arguments
-            .opt_level
-            .or(design.opt_level)
-            .unwrap_or(celox::OptLevel::O2),
+        opt_level: design.opt_level.unwrap_or(celox::OptLevel::O2),
         max_steps: arguments
             .max_steps
             .or(design.max_steps)
@@ -169,7 +162,8 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     )
     .four_state(true)
     .opt_level(arguments.opt_level)
-    .diagnostic_policy(arguments.design.diagnostics.clone());
+    .diagnostic_policy(arguments.design.diagnostics.clone())
+    .signal_access(arguments.design.signal_access.clone());
     if let Some(metadata) = metadata {
         builder = builder.with_metadata(metadata);
     }
@@ -208,6 +202,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .four_state(true)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
+        .signal_access(arguments.design.signal_access.clone())
         .build()
         .map_err(|error| format!("compilation failed:\n{error}"))?;
     report_warnings(simulation.warnings())?;
@@ -438,8 +433,8 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
             let simulator = celox::Simulator::from_sv_sources(refs, &design.top)
                 .four_state(true)
                 .diagnostic_policy(design.diagnostics.clone())
-                .native_force_support(true)
-                .opt_level(celox::OptLevel::O0)
+                .signal_access(design.signal_access.clone())
+                .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1))
                 .build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             report_warnings(simulator.warnings())?;
@@ -458,10 +453,12 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let (image, warnings) = celox_vpi::driver::compile_native_image_with_diagnostics(
+    let (image, warnings) = celox_vpi::driver::compile_native_image_with_options(
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
+        design.opt_level.unwrap_or(celox::OptLevel::O1),
+        design.signal_access.clone(),
     )?;
     report_warnings(&warnings)?;
     Ok(image)

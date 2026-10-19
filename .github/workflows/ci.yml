@@ -293,8 +293,8 @@ jobs:
             case "$feature" in celox/*) args+=(--features "$feature");; esac
           done
           CELOX_COCOTB_PYTHON="$(command -v python)" \
-            cargo test --locked -p celox-vpi "${args[@]}" --test cocotb_e2e \
-            cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
+            cargo test --locked -p celox-vpi --features systemverilog "${args[@]}" --test cocotb_e2e \
+            cocotb_ -- --ignored
 
   external-suites:
     name: External suite (${{ matrix.suite }}, ${{ matrix.tool }})

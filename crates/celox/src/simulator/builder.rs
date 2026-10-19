@@ -1066,6 +1066,7 @@ pub fn compile_sv_to_sir(
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        &[],
     )
 }
 
@@ -1094,6 +1095,7 @@ fn compile_sv_to_sir_with_layout_mode(
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -1123,6 +1125,7 @@ fn compile_sv_to_sir_with_layout_mode(
         component_libraries,
         component_file_base,
         &mut sv_warnings,
+        force_signals,
     );
     let warnings = sv_warnings
         .into_iter()
@@ -1348,7 +1351,14 @@ fn compile_hdl_to_sir_with_layout_mode(
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if !force_signals.is_empty() && !sources.is_empty() {
+        return Err(crate::CodegenError::message(
+            "force_signals currently require pure SystemVerilog sources",
+        )
+        .into());
+    }
     #[cfg(not(feature = "systemverilog"))]
     {
         debug_assert!(sv_sources.is_empty());
@@ -1413,6 +1423,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             diagnostics,
             diagnostic_policy,
             layout_mode,
+            force_signals,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,
@@ -1489,6 +1500,8 @@ mod host {
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Explicit hierarchical observation and native force targets.
+        pub signal_access: crate::SignalAccessOptions,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
@@ -1686,6 +1699,7 @@ mod host {
                 diagnostic_policy: Default::default(),
                 emit_triggers: false,
                 native_force_support: false,
+                signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
@@ -2057,6 +2071,14 @@ mod host {
         /// Set when the tiered backend adopts background-compiled code.
         pub fn tier_promotion(mut self, policy: TierPromotion) -> Self {
             self.options.tier_promotion = policy;
+            self
+        }
+
+        /// Declare hierarchical observation and native force targets.
+        /// This preserves the requested optimization level. Force targets currently
+        /// require a pure SystemVerilog design and the native backend.
+        pub fn signal_access(mut self, options: crate::SignalAccessOptions) -> Self {
+            self.options.signal_access = options;
             self
         }
 
@@ -2463,6 +2485,7 @@ mod host {
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
+                    &self.options.signal_access.force_signals,
                 )
             };
             let (program, mut warnings) = compiled
@@ -2483,6 +2506,7 @@ mod host {
                 tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
             }
 
+            validate_signal_access(&laid_out, &self.options.signal_access)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -3089,6 +3113,7 @@ mod host {
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
+                    &self.options.signal_access.force_signals,
                 )
             };
 
@@ -3102,6 +3127,7 @@ mod host {
                     laid_out.enable_vcd_tracking();
                 }
 
+                validate_signal_access(&laid_out, &self.options.signal_access)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
@@ -3358,6 +3384,21 @@ mod host {
         }
     }
 
+    fn validate_signal_access(
+        program: &LaidOutProgram,
+        access: &crate::SignalAccessOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in access.live_signals.iter().chain(&access.force_signals) {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
     fn run_dead_store_elimination(
         program: &mut LaidOutProgram,
@@ -3372,8 +3413,21 @@ mod host {
         // signals named with `live_signal()`.
         externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
-        // User-specified live signals
         let mut listed = HashSet::default();
+        for path in options
+            .signal_access
+            .live_signals
+            .iter()
+            .chain(&options.signal_access.force_signals)
+        {
+            let addr = program
+                .hierarchical_signal_addr(path)
+                .expect("validated signal path");
+            externally_live.insert(addr);
+            listed.insert(addr);
+        }
+
+        // User-specified live signals
         for (inst_path, var_path) in live_signals {
             let inst_refs: Vec<(&str, usize)> =
                 inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();

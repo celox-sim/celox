@@ -137,6 +137,43 @@ impl<'p, 'a> Comb<'p, 'a> {
         id: SourceVarId,
         access: BitAccess,
     ) -> Result<Value, sv::AnalyzerError> {
+        let mut value = self.read_unforced(store, id, access)?;
+        // Initial-state folding runs before a foreign caller can apply force.
+        // Runtime initial processes are lowered separately through Ff.
+        if !self.initial
+            && let Some((enabled, forced)) = self.m.force_controls(id)
+        {
+            let cond = self.alloc(SLTNode::Input {
+                variable: enabled,
+                signed: false,
+                index: vec![],
+                access: full(1),
+            })?;
+            let replacement = self.alloc(SLTNode::Input {
+                variable: forced,
+                signed: false,
+                index: vec![],
+                access,
+            })?;
+            value.0 = self.alloc(SLTNode::Mux {
+                cond,
+                then_expr: replacement,
+                else_expr: value.0,
+            })?;
+            value.1.insert(VarAtomBase::new(enabled, 0, 0));
+            value
+                .1
+                .insert(VarAtomBase::new(forced, access.lsb, access.msb));
+        }
+        Ok(value)
+    }
+
+    fn read_unforced(
+        &mut self,
+        store: &Store,
+        id: SourceVarId,
+        access: BitAccess,
+    ) -> Result<Value, sv::AnalyzerError> {
         let signed =
             self.m.var(id).signed && access.lsb == 0 && access.msb + 1 == self.m.var(id).width;
         let Some(range) = store.get(&id) else {
@@ -189,6 +226,34 @@ impl<'p, 'a> Comb<'p, 'a> {
         value: Value,
     ) -> Result<(), sv::AnalyzerError> {
         let width = self.m.var(id).width;
+        let mut value = value;
+        // Initial-state folding runs before a foreign caller can apply force.
+        // Runtime initial processes are lowered separately through Ff.
+        if !self.initial
+            && let Some((enabled, forced)) = self.m.force_controls(id)
+        {
+            let condition = self.alloc(SLTNode::Input {
+                variable: enabled,
+                signed: false,
+                index: vec![],
+                access: full(1),
+            })?;
+            let replacement = self.alloc(SLTNode::Input {
+                variable: forced,
+                signed: false,
+                index: vec![],
+                access,
+            })?;
+            value.0 = self.alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: replacement,
+                else_expr: value.0,
+            })?;
+            value.1.insert(VarAtomBase::new(enabled, 0, 0));
+            value
+                .1
+                .insert(VarAtomBase::new(forced, access.lsb, access.msb));
+        }
         debug_assert_eq!(self.width(value.0), access.msb - access.lsb + 1);
         store
             .entry(id)
@@ -563,11 +628,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                 access,
             } => {
                 if index.is_empty() {
-                    if store.get(&variable).is_some_and(|range| {
-                        range
-                            .get_parts_ref(access)
-                            .is_ok_and(|parts| parts.iter().any(|(value, _)| value.is_some()))
-                    }) {
+                    if self.m.force_controls(variable).is_some()
+                        || store.get(&variable).is_some_and(|range| {
+                            range
+                                .get_parts_ref(access)
+                                .is_ok_and(|parts| parts.iter().any(|(value, _)| value.is_some()))
+                        })
+                    {
                         let (value, sources) = self.read(store, variable, access)?;
                         let _ = signed;
                         (value, sources)
@@ -592,9 +659,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                         });
                     }
                     let var_width = self.m.var(variable).width;
-                    let written = store.get(&variable).is_some_and(|range| {
-                        range.ranges.values().any(|(value, _, _)| value.is_some())
-                    });
+                    let written = self.m.force_controls(variable).is_some()
+                        || store.get(&variable).is_some_and(|range| {
+                            range.ranges.values().any(|(value, _, _)| value.is_some())
+                        });
                     if written {
                         // Read the selected bits out of the current value.
                         let (whole, whole_sources) = self.read(store, variable, full(var_width))?;
