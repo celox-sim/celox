@@ -1,7 +1,8 @@
 use veryl_metadata::{ClockType, ResetType};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct BuildConfig {
+    pub file_dependencies: crate::FileDependencyCollector,
     pub clock_type: ClockType,
     pub reset_type: ResetType,
     /// Simulation lanes requested for partitioned execution. More than one
@@ -15,6 +16,7 @@ impl Default for BuildConfig {
             clock_type: ClockType::PosEdge,
             reset_type: ResetType::AsyncLow,
             parallel_lanes: 1,
+            file_dependencies: Default::default(),
         }
     }
 }
@@ -25,6 +27,7 @@ impl From<&veryl_metadata::Build> for BuildConfig {
             clock_type: build.clock_type,
             reset_type: build.reset_type,
             parallel_lanes: 1,
+            file_dependencies: Default::default(),
         }
     }
 }

@@ -203,9 +203,13 @@ pub use host_api::*;
 pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
-pub use simulator::{compile_frontend_to_sir, compile_to_sir};
+pub use simulator::{
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies,
+};
 #[cfg(feature = "systemverilog")]
-pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
+pub use simulator::{
+    compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
+};
 
 #[cfg(test)]
 mod flatting_tests;

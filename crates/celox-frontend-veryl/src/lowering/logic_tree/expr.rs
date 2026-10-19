@@ -1363,7 +1363,7 @@ pub(super) fn eval_function_body_return(
             symbolic_store.insert(*id, loop_store);
         }
         symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let _loop_range = super::LoopRangeScope::enter(for_stmt);
+        let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
         let iter_store_before = symbolic_store.fork();
 
         let iter_state = for_stmt.body.iter().try_fold(
@@ -3920,8 +3920,9 @@ pub fn convert_unary_op(op: &Op) -> UnaryOp {
 
 #[cfg(test)]
 mod tests {
+    use super::SLTNodeArena;
     use super::coerce_node_width;
-    use celox_slt::{SLTNode, SLTNodeArena};
+    use celox_slt::SLTNode;
     use num_bigint::BigUint;
 
     #[test]
