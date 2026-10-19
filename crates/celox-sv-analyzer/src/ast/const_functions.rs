@@ -334,7 +334,7 @@ impl ConstantFunctions {
 fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
     use celox_sv_syntax::{BodyItemKind, SubroutineKind};
     let native = tree.declarations();
-    let mut pending = tree.native_body_membership().unwrap_or_default();
+    let mut pending = tree.body_membership().unwrap_or_default();
     let mut seen = HashSet::default();
     let (mut functions, mut controls) = (false, false);
     while let Some(id) = pending.pop() {

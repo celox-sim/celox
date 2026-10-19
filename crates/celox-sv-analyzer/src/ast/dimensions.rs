@@ -3,10 +3,10 @@
 use super::*;
 mod discovery;
 pub(super) use discovery::State;
-mod native;
+mod query_binding;
 pub(super) use discovery::query_operand_dimensions_id;
 mod queries;
-pub(super) use native::{
+pub(super) use query_binding::{
     query_context_for_operand, query_value, shape as operand_shape, validate_data_operand,
 };
 

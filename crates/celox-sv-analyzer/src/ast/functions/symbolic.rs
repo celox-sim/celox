@@ -362,7 +362,7 @@ mod tests {
     use super::*;
     fn source(code: &str) -> Source {
         let tree =
-            crate::migration::parse_scope_fixture(code, Path::new("native-symbolic.sv")).unwrap();
+            crate::source_tree::parse_scope_fixture(code, Path::new("native-symbolic.sv")).unwrap();
         Source::from_syntax(&tree).unwrap()
     }
     fn evaluate(expr: Expr, bindings: &HashMap<String, Expr>) -> i128 {
@@ -393,7 +393,7 @@ mod tests {
     }
     #[test]
     fn native_task_outputs_keep_formal_fit_and_two_state_coercion() {
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module M;task automatic t(input logic[3:0]x,output bit[2:0]y);y=x+1;endtask endmodule",
             Path::new("native-task-symbolic.sv"),
         )
@@ -442,7 +442,7 @@ mod tests {
     }
     #[test]
     fn duplicate_native_formals_keep_the_existing_function_argument_diagnostic() {
-        let tree=crate::migration::parse_scope_fixture("module M(output wire y);function logic f(input logic a,input logic a);return a;endfunction assign y=f(1'b0,1'b1);endmodule",Path::new("native-duplicate-formals.sv")).unwrap();
+        let tree=crate::source_tree::parse_scope_fixture("module M(output wire y);function logic f(input logic a,input logic a);return a;endfunction assign y=f(1'b0,1'b1);endmodule",Path::new("native-duplicate-formals.sv")).unwrap();
         let error = Source::from_syntax(&tree).unwrap_err();
         assert!(
             error

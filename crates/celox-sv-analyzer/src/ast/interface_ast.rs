@@ -63,11 +63,11 @@ pub(super) fn analyze(
         local: interfaces,
         extra: &ModuleInterfaces::default(),
     };
-    let nested = native_interfaces::analyze_module(
+    let nested = interface_binding::analyze_module(
         tree,
         path,
         packages,
-        native_interfaces::Bindings {
+        interface_binding::Bindings {
             values: overrides,
             types,
             export_symbols: true,
@@ -107,7 +107,7 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<crate::ir::Module> {
-    let projected_tree = native_interfaces::declaration_view(tree)?;
+    let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
     let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;

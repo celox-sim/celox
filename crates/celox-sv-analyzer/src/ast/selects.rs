@@ -1045,7 +1045,7 @@ pub(super) fn selected_parameter_initializer(
 ) -> Converted<ConstExpr> {
     let mut dimensions = dimensions.clone();
     dimensions.constant_indexed_base = true;
-    let expression = native_constants::indexed_expression(
+    let expression = constant_binding::indexed_expression(
         native,
         syntax_tree.declarations(),
         syntax_tree,

@@ -1,0 +1,1111 @@
+//! Interface instances bound in semantic scopes, retaining authored syntax.
+use super::*;
+pub(super) type InstanceKey = (celox_sv_syntax::BodyItemId, usize);
+
+pub(super) struct Bindings<'a> {
+    pub values: &'a HashMap<String, ConstExpr>,
+    pub types: &'a [(String, Type)],
+    pub export_symbols: bool,
+    pub plan: Option<&'a interfaces::NativeModulePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InstanceBinding {
+    pub module: String,
+    pub connections: HashMap<String, Vec<PortConnection>>,
+    pub parameters: Vec<ParameterOverride>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ScopeBinding {
+    pub members: HashMap<String, String>,
+    pub types: HashMap<String, String>,
+    pub arrays: HashMap<String, ArrayBinding>,
+    pub instances: HashMap<InstanceKey, InstanceBinding>,
+}
+
+/// Elements in declaration order, independent of the numeric index origins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ArrayBinding {
+    pub elements: Vec<String>,
+    pub shape: Vec<usize>,
+}
+
+pub(super) fn analyze_module(
+    tree: &AnalysisContext<'_>,
+    path: &Path,
+    packages: &packages::Packages,
+    bindings: Bindings<'_>,
+    interfaces: &InterfaceLookup<'_>,
+    mut imported: scope::ScopeSymbols,
+) -> Converted<Option<Module>> {
+    let mut definitions = HashMap::default();
+    for (interface_tree, interface_path) in packages.interface_sources.values() {
+        for handle in interface_tree.root_scopes()? {
+            let scoped = interface_tree.scoped(handle)?;
+            if scoped.root_unit()?.kind == celox_sv_syntax::UnitKind::Interface {
+                let name = instances::normalize_identifier(&scoped.root_name()?);
+                definitions.insert(name, (scoped, interface_path.as_path()));
+            }
+        }
+    }
+    for handle in tree.root_scopes()? {
+        let scoped = tree.scoped(handle)?;
+        if scoped.root_unit()?.kind == celox_sv_syntax::UnitKind::Interface {
+            let name = instances::normalize_identifier(&scoped.root_name()?);
+            definitions.entry(name).or_insert((scoped, path));
+        }
+    }
+    if definitions.is_empty() {
+        return Ok(None);
+    }
+    let name = tree.root_name()?;
+    let plan = bindings.plan;
+    let overrides = bindings.values;
+    let interface_ports = plan.map(|plan| plan.ports.as_slice()).unwrap_or_default();
+    let mut view_ports = port_owners::Selection::authored(tree)?;
+    remove_interface_ports(&mut view_ports, interface_ports, tree)?;
+    let supplied = overrides;
+    let overrides = overrides
+        .iter()
+        .filter(|(name, _)| {
+            !interface_ports
+                .iter()
+                .any(|port| name.starts_with(&format!("{}$", port.name)))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    // Direct interface declarations retain native ownership before the
+    // structural view removes their original nodes. Explicit generate regions
+    // remain in the later generated-item scheduling path.
+    let mut instantiations = Vec::new();
+    for id in tree.body_membership()? {
+        if let celox_sv_syntax::BodyItemKind::Instance(native) =
+            tree.declarations().body_item(id).kind
+            && definitions.contains_key(&instances::normalize_identifier(
+                &tree.declarations().instantiation(native).name.spelling,
+            ))
+        {
+            instantiations.push(id);
+        }
+    }
+    let selected_header_tree = view_ports.project(tree)?;
+    let projected_tree = retain_body(
+        &selected_header_tree,
+        |id| Ok(!instantiations.contains(&id)),
+    )?;
+    let projected_context = tree.child(&projected_tree, bindings.values);
+    let tree = &projected_context;
+    let has_generated_interfaces =
+        native_body_items(tree)?
+            .iter()
+            .any(|id| match tree.declarations().body_item(*id).kind {
+                celox_sv_syntax::BodyItemKind::Instance(id) => {
+                    definitions.contains_key(&instances::normalize_identifier(
+                        &tree.declarations().instantiation(id).name.spelling,
+                    ))
+                }
+                _ => false,
+            });
+    if instantiations.is_empty() && interface_ports.is_empty() && !has_generated_interfaces {
+        return Ok(None);
+    }
+    let array_scope = if interface_ports.iter().any(|port| port.array_rank != 0) {
+        let (header_ports, header_tree) =
+            binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+        let mut header_imports = imported.clone();
+        header_imports.declarations_only = true;
+        Some(Module::from_selected_scope(
+            &tree.child(&header_tree, &overrides),
+            &name,
+            &overrides,
+            interfaces,
+            Arc::new(header_imports),
+            true,
+            Some(&header_ports),
+        )?)
+    } else {
+        None
+    };
+    for port in interface_ports {
+        let (definition_tree, definition_path) = definitions
+            .get(&port.interface)
+            .ok_or_else(|| unsupported(format!("interface `{}`", port.interface)))?;
+        let prefix = format!("{}$", port.name);
+        let values = supplied
+            .iter()
+            .filter_map(|(name, value)| {
+                name.strip_prefix(&prefix)
+                    .filter(|name| !name.starts_with('$'))
+                    .map(|name| (name.to_string(), value.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let types = bindings
+            .types
+            .iter()
+            .filter_map(|(name, ty)| {
+                name.strip_prefix(&prefix)
+                    .map(|name| (name.to_string(), ty.clone()))
+            })
+            .collect::<Vec<_>>();
+        let dimensions = formal_dimensions(&port.name, tree)?;
+        let array_symbols = array_scope
+            .as_ref()
+            .and_then(|module| module.symbols.as_ref())
+            .unwrap_or(&imported);
+        let array = instance_elements(
+            &port.name,
+            &dimensions,
+            tree,
+            &array_symbols.const_env,
+            &array_symbols.type_aliases,
+        )?;
+        for (dimension, size) in array.shape.iter().enumerate() {
+            if let Some(actual) = supplied.get(&format!("{}$$dimension{dimension}", port.name))
+                && eval_ast_const_expr(&tree.state, actual, &array_symbols.const_env)
+                    != Some(*size as i128)
+            {
+                return Err(unsupported(format!(
+                    "interface array dimension mismatch at `{name}.{}`",
+                    port.name
+                )));
+            }
+        }
+        if !dimensions.is_empty() {
+            imported
+                .interface_arrays
+                .insert(port.name.clone(), array.clone());
+        }
+        for (ordinal, handle) in array.elements.iter().enumerate() {
+            imported
+                .interface_types
+                .insert(handle.clone(), port.interface.clone());
+            let symbol_prefix = if dimensions.is_empty() {
+                port.name.clone()
+            } else {
+                format!("{}${ordinal}", port.name)
+            };
+            let interface =
+                timescales::with_interface_instance(&tree.state.timescales, handle, || {
+                    interface_ast::analyze(
+                        &tree.child(definition_tree, &values),
+                        definition_path,
+                        packages,
+                        &values,
+                        &types,
+                        interfaces.extra,
+                        imported.declarations_only,
+                    )
+                })?;
+            let symbols = interface.symbols.as_ref().unwrap();
+            let names = binding_names_with_prefix(
+                &interface,
+                symbols,
+                handle,
+                &symbol_prefix,
+                &mut imported,
+            );
+            let mut bound = instance_symbols(symbols, &names);
+            let functions = port
+                .functions
+                .iter()
+                .filter_map(|name| names.get(name))
+                .cloned()
+                .collect::<HashSet<_>>();
+            bound
+                .functions
+                .retain(|name, _| name.contains("::") || functions.contains(name));
+            bound.subroutines.retain(|function| {
+                function.name.contains("::") || functions.contains(&function.name)
+            });
+            bound
+                .constant_functions
+                .retain(|name| name.contains("::") || functions.contains(name));
+            bound.comb_processes.clear();
+            bound.ff_processes.clear();
+            let members = port
+                .all_members
+                .iter()
+                .map(|name| names[name].clone())
+                .collect::<HashSet<_>>();
+            // Declaration initializers of interface variables belong to the
+            // actual instance, not to each module receiving its port view.
+            bound.initial_processes.retain(|process| {
+                process.synthetic && procedural::written_names(&process.body).is_disjoint(&members)
+            });
+            for (member, direction) in &port.members {
+                let signal = bound
+                    .signals
+                    .iter()
+                    .find(|signal| signal.name == names[member])
+                    .ok_or_else(|| {
+                        unsupported(format!("interface member `{}.{member}`", port.name))
+                    })?;
+                bound.ports.push(Port::new(
+                    signal.name.clone(),
+                    *direction,
+                    signal.r#type.clone(),
+                    signal.is_net,
+                ));
+            }
+            bound
+                .signals
+                .retain(|signal| !members.contains(&signal.name));
+            imported.extend(&bound);
+        }
+    }
+    // Resolve the caller's declarations before evaluating instance overrides.
+    let (header_ports, header_tree) =
+        binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+    let mut header_imports = imported.clone();
+    header_imports.declarations_only = true;
+    let caller = Module::from_selected_scope(
+        &tree.child(&header_tree, &overrides),
+        &name,
+        &overrides,
+        interfaces,
+        Arc::new(header_imports),
+        true,
+        Some(&header_ports),
+    )?;
+    let mut caller_symbols = caller.symbols.as_ref().unwrap().clone();
+    let _caller_scope = scope::install(&tree.state, Arc::new(caller_symbols.clone()));
+    let _functions = const_functions::install(&tree.state, caller.constant_functions.clone());
+    let mut port_assignments = Vec::new();
+    let mut pending = instantiations
+        .iter()
+        .copied()
+        .map(|id| (id, None))
+        .collect::<std::collections::VecDeque<_>>();
+    let mut generated = false;
+    loop {
+        if pending.is_empty() && !generated {
+            // Interface constants now exist, so dependent ordinary declarations
+            // can be collected before elaborating generate conditions and bounds.
+            let header_tree = declaration_view(tree)?;
+            let header_ports = view_ports.clone();
+            let mut header_imports = imported.clone();
+            header_imports.declarations_only = true;
+            let caller = Module::from_selected_scope(
+                &tree.child(&header_tree, &overrides),
+                &name,
+                &overrides,
+                interfaces,
+                Arc::new(header_imports),
+                true,
+                Some(&header_ports),
+            )?;
+            caller_symbols = caller.symbols.unwrap();
+            generated = true;
+            let mut current = caller_symbols.clone();
+            current.extend(&imported);
+            let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+            let _functions =
+                const_functions::install(&tree.state, current.constant_functions.clone());
+            for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
+                if let celox_sv_syntax::BodyItemKind::Instance(native) =
+                    tree.declarations().body_item(item.id).kind
+                    && definitions.contains_key(&instances::normalize_identifier(
+                        &tree.declarations().instantiation(native).name.spelling,
+                    ))
+                {
+                    imported.interface_declarations.insert(item.id);
+                    pending.push_back((item.id, Some(item)));
+                }
+            }
+        }
+        let Some((id, generated_item)) = pending.pop_front() else {
+            break;
+        };
+        if generated_item.is_none() {
+            // Newly bound instances may unlock declarations used by the next
+            // instance's overrides. Keep only still-unbound dependencies out.
+            let (header_ports, header_tree) =
+                binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
+            let mut header_imports = imported.clone();
+            header_imports.declarations_only = true;
+            caller_symbols = Module::from_selected_scope(
+                &tree.child(&header_tree, &overrides),
+                &name,
+                &overrides,
+                interfaces,
+                Arc::new(header_imports),
+                true,
+                Some(&header_ports),
+            )?
+            .symbols
+            .unwrap();
+        }
+        let mut current = caller_symbols.clone();
+        current.extend(&imported);
+        if let Some(item) = &generated_item {
+            current
+                .const_env
+                .extend(item.env.iter().map(|(name, value)| (name.clone(), *value)));
+        }
+        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
+        let mut dimensions = packed_dimensions_from_ports_and_signals(
+            &current.ports,
+            &current.signals,
+            &current.const_env,
+            &current.type_aliases,
+        );
+        dimensions.extend(parameter_packed_dimensions(&current.parameters));
+        let native = instances::declaration_from_item(id, tree)?;
+        let interface_name = instances::normalize_identifier(&native.name.spelling);
+        let (definition_tree, definition_path) = &definitions[&interface_name];
+        let interface =
+            module_interface_from_scope(&tree.child(definition_tree, &HashMap::default()))?;
+        let bindings = instances::parameter_overrides(
+            native.parameters.as_deref(),
+            tree,
+            Some(&interface),
+            &dimensions,
+            true,
+        )?;
+        let mut values = HashMap::default();
+        let mut types = Vec::new();
+        for binding in bindings {
+            if let Some(ty) = binding.bound_type {
+                types.push((binding.name, ty));
+            } else {
+                let value = binding
+                    .value
+                    .ok_or_else(|| unsupported("interface pattern parameter binding"))?;
+                let value = substitute_typed_parameter_literals(
+                    value,
+                    &current.const_env,
+                    &parameter_types_from_const_env(&current.const_env),
+                );
+                values.insert(binding.name, value);
+            }
+        }
+        for (index, authored) in native.instances.iter().enumerate() {
+            let handle = instances::normalize_identifier(&authored.name.spelling);
+            let elements = instance_elements(
+                &handle,
+                &authored.dimensions,
+                tree,
+                &current.const_env,
+                &current.type_aliases,
+            )?;
+            if !elements.shape.is_empty() {
+                let qualified = generated_item
+                    .as_ref()
+                    .map_or_else(|| handle.clone(), |item| item.instance_name(&handle));
+                let absolute = ArrayBinding {
+                    elements: elements
+                        .elements
+                        .iter()
+                        .map(|element| {
+                            generated_item
+                                .as_ref()
+                                .map_or_else(|| element.clone(), |item| item.instance_name(element))
+                        })
+                        .collect(),
+                    shape: elements.shape.clone(),
+                };
+                imported.interface_arrays.insert(qualified, absolute);
+                if let Some(item) = &generated_item {
+                    imported
+                        .interface_scopes
+                        .entry(item.scope_name().to_string())
+                        .or_default()
+                        .arrays
+                        .insert(handle.clone(), elements.clone());
+                }
+            }
+            for local_handle in elements.elements {
+                let handle = generated_item.as_ref().map_or_else(
+                    || local_handle.clone(),
+                    |item| item.instance_name(&local_handle),
+                );
+                imported
+                    .interface_types
+                    .insert(handle.clone(), interface_name.clone());
+                let connections = instances::port_connections(
+                    (id, index),
+                    authored,
+                    tree,
+                    &dimensions,
+                    Some(&interface),
+                )?;
+                let mut module =
+                    timescales::with_interface_instance(&tree.state.timescales, &handle, || {
+                        interface_ast::analyze(
+                            &tree.child(definition_tree, &values),
+                            definition_path,
+                            packages,
+                            &values,
+                            &types,
+                            interfaces.extra,
+                            imported.declarations_only,
+                        )
+                    })?;
+                for port in &module.ports {
+                    let signal = Signal {
+                        name: port.name.clone(),
+                        r#type: port.r#type.clone(),
+                        is_net: port.is_net,
+                        package_variable: None,
+                    };
+                    module.symbols.as_mut().unwrap().signals.push(signal);
+                    let Some(connection) = connections
+                        .iter()
+                        .find(|connection| connection.formal == port.name)
+                    else {
+                        continue;
+                    };
+                    let Some(actual) = connection.actual_expr.clone() else {
+                        continue;
+                    };
+                    let bound = format!("{handle}${}", port.name);
+                    let assignment = match port.direction {
+                        PortDirection::Input => Assignment::new(LValue::Ident(bound), actual),
+                        PortDirection::Output => {
+                            Assignment::new(connection_lvalue(actual)?, Expr::Ident(bound))
+                        }
+                        _ => return Err(unsupported("bidirectional interface declaration port")),
+                    };
+                    port_assignments.push(assignment);
+                }
+                let symbols = module.symbols.as_ref().unwrap();
+                let names = binding_names(&module, symbols, &handle, &mut imported);
+                if let Some(item) = &generated_item {
+                    let scope = imported
+                        .interface_scopes
+                        .entry(item.scope_name().to_string())
+                        .or_default();
+                    scope
+                        .types
+                        .insert(local_handle.clone(), interface_name.clone());
+                    for (member, bound) in &names {
+                        scope
+                            .members
+                            .insert(format!("{local_handle}.{member}"), bound.clone());
+                    }
+                }
+                let bound = instance_symbols(symbols, &names);
+                imported
+                    .initial_processes
+                    .extend(bound.initial_processes.iter().cloned());
+                imported.extend(&bound);
+            }
+        }
+    }
+    if let Some(plan) = plan {
+        let mut current = caller_symbols.clone();
+        current.extend(&imported);
+        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
+        for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
+            let _interface_scope = item.interface_scope();
+            let active_scope = scope::imported(&tree.state);
+            let celox_sv_syntax::BodyItemKind::Instance(native) =
+                tree.declarations().body_item(item.id).kind
+            else {
+                continue;
+            };
+            let native = tree.declarations().instantiation(native);
+            let original = instances::normalize_identifier(&native.name.spelling);
+            for (index, authored) in native.instances.iter().enumerate() {
+                let Some(alias) = plan.children.get(&(item.id, index)) else {
+                    continue;
+                };
+                let child = &packages.interface_plan.modules[alias];
+                let mut connections = HashMap::default();
+                let mut parameters = Vec::new();
+                for port in &child.ports {
+                    let actual =
+                        connection_expression(authored, &port.name, interfaces.get(&original))?;
+                    let env = &item.env;
+                    let handle = match actual {
+                        Some(actual) => {
+                            actual_handle_key(actual, tree, env, &active_scope.type_aliases)?
+                        }
+                        None => port.name.clone(),
+                    };
+                    let actuals = if port.array_rank == 0 {
+                        ArrayBinding {
+                            elements: vec![handle.clone()],
+                            shape: Vec::new(),
+                        }
+                    } else {
+                        active_scope
+                            .interface_arrays
+                            .get(&handle)
+                            .cloned()
+                            .ok_or_else(|| {
+                                unsupported(format!("interface array actual `{handle}`"))
+                            })?
+                    };
+                    if actuals.shape.len() != port.array_rank {
+                        return Err(unsupported(format!(
+                            "interface array rank mismatch at `{original}.{}`",
+                            port.name
+                        )));
+                    }
+                    let mut members = Vec::new();
+                    for (ordinal, handle) in actuals.elements.iter().enumerate() {
+                        let prefix = if port.array_rank == 0 {
+                            port.name.clone()
+                        } else {
+                            format!("{}${ordinal}", port.name)
+                        };
+                        for (member, _) in &port.members {
+                            let actual = active_scope
+                                .interface_members
+                                .get(&format!("{handle}.{member}"))
+                                .ok_or_else(|| {
+                                    unsupported(format!(
+                                        "unbound interface member `{handle}.{member}`"
+                                    ))
+                                })?
+                                .clone();
+                            members.push(PortConnection::new(
+                                format!("{prefix}${member}"),
+                                actual.clone(),
+                                Some(Expr::Ident(actual)),
+                            ));
+                        }
+                    }
+                    connections.insert(port.name.clone(), members);
+                    for (dimension, size) in actuals.shape.iter().enumerate() {
+                        parameters.push(ParameterOverride::new(
+                            format!("{}$$dimension{dimension}", port.name),
+                            Some(ConstExpr::Literal(size.to_string())),
+                        ));
+                    }
+                    let handle = &actuals.elements[0];
+                    for parameter in &port.type_parameters {
+                        let bound = active_scope
+                            .interface_members
+                            .get(&format!("{handle}.{parameter}"))
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "unbound interface type parameter `{handle}.{parameter}`"
+                                ))
+                            })?;
+                        let ty = active_scope.type_aliases.get(bound).ok_or_else(|| {
+                            unsupported(format!("interface type parameter `{handle}.{parameter}`"))
+                        })?;
+                        parameters.push(ParameterOverride::type_override(
+                            format!("{}${parameter}", port.name),
+                            ty.clone(),
+                        ));
+                    }
+                    for parameter in &port.parameters {
+                        let bound = active_scope
+                            .interface_members
+                            .get(&format!("{handle}.{parameter}"))
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "unbound interface parameter `{handle}.{parameter}`"
+                                ))
+                            })?;
+                        let value = active_scope
+                            .parameter_values
+                            .get(bound)
+                            .cloned()
+                            .and_then(|expr| expr_to_const(&tree.state, expr))
+                            .ok_or_else(|| {
+                                unsupported(format!("interface parameter `{handle}.{parameter}`"))
+                            })?;
+                        parameters.push(ParameterOverride::new(
+                            format!("{}${parameter}", port.name),
+                            Some(value),
+                        ));
+                    }
+                }
+                let binding = InstanceBinding {
+                    module: alias.clone(),
+                    connections,
+                    parameters,
+                };
+                if item.scope_name().is_empty() {
+                    imported
+                        .interface_instances
+                        .insert((item.id, index), binding);
+                } else {
+                    imported
+                        .interface_scopes
+                        .entry(item.scope_name().to_string())
+                        .or_default()
+                        .instances
+                        .insert((item.id, index), binding);
+                }
+            }
+        }
+    }
+    for assignment in port_assignments {
+        imported.comb_processes.push(CombProcess::new(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![assignment],
+        ));
+    }
+    // Check authored declarations before module collection can prefer a local
+    // function/type/constant over an imported interface binding of the same name.
+    let authored = imports::scope_names(tree)?;
+    for bound in imported.interface_members.values() {
+        if authored.contains(bound) {
+            return Err(unsupported(format!(
+                "interface binding collides with declaration `{bound}`"
+            )));
+        }
+    }
+    let module = Module::from_selected_scope(
+        tree,
+        &name,
+        &overrides,
+        interfaces,
+        Arc::new(imported),
+        bindings.export_symbols,
+        Some(&view_ports),
+    )?;
+    let mut names = HashSet::default();
+    for name in module
+        .ports
+        .iter()
+        .map(|port| &port.name)
+        .chain(module.signals.iter().map(|signal| &signal.name))
+    {
+        if !names.insert(name) {
+            return Err(unsupported(format!(
+                "interface binding collides with declaration `{name}`"
+            )));
+        }
+    }
+    Ok(Some(module))
+}
+
+fn native_body_items(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::BodyItemId>> {
+    use celox_sv_syntax::BodyItemKind;
+    let mut pending = tree.body_membership()?;
+    let mut seen = HashSet::default();
+    let mut items = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native interface body owner".into(),
+            ));
+        }
+        items.push(id);
+        match &tree.declarations().body_item(id).kind {
+            BodyItemKind::Region(children)
+            | BodyItemKind::Block {
+                items: children, ..
+            }
+            | BodyItemKind::Unconverted {
+                items: children, ..
+            } => pending.extend(children),
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                pending.push(*then_body);
+                pending.extend(otherwise);
+            }
+            BodyItemKind::Case { arms, .. } => pending.extend(arms.iter().map(|arm| arm.body)),
+            BodyItemKind::Loop { body, .. } => pending.push(*body),
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+/// Delay declarations that reference local interface instances (and declarations
+/// depending on those names) until the instances have populated semantic scopes.
+fn binding_declaration_view<'a>(
+    selected: &port_owners::Selection<'a>,
+    instances: &[celox_sv_syntax::BodyItemId],
+    tree: &AnalysisContext<'_>,
+    imported: &scope::ScopeSymbols,
+) -> Converted<(port_owners::Selection<'a>, SyntaxTree)> {
+    let mut selected = selected.clone();
+    let mut deferred = instances
+        .iter()
+        .filter_map(|id| instances::declaration_from_item(*id, tree).ok())
+        .flat_map(|instance| instance.instances.iter())
+        .map(|instance| instances::normalize_identifier(&instance.name.spelling))
+        .filter(|name| {
+            !imported.interface_types.contains_key(name)
+                && !imported.interface_arrays.contains_key(name)
+        })
+        .collect::<HashSet<_>>();
+    let references = imports::unqualified_names(tree);
+    let mut header_tree = declaration_view(tree)?;
+    loop {
+        let mut removed = false;
+        header_tree = retain_body(&header_tree, |id| {
+            if references_deferred(
+                tree.declarations().body_item(id).tokens,
+                &references,
+                &deferred,
+            ) {
+                deferred.extend(imports::item_names(id, tree));
+                removed = true;
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        })?;
+        let unit = tree.root_unit()?;
+        let native_ports = port_owners::scope(Some(&selected), tree)?
+            .into_iter()
+            .filter(|port| {
+                port.tokens.start >= unit.header.start && port.tokens.end <= unit.header.end
+            });
+        let mut inherited_deferred = false;
+        let mut membership = Vec::new();
+        for native in native_ports {
+            let inherits_type = !matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. })
+                && native.data_type.is_some_and(|id| {
+                    tree.declarations().data_type(id).tokens.start < native.tokens.start
+                });
+            inherited_deferred = (inherits_type && inherited_deferred)
+                || references_deferred(native.tokens, &references, &deferred);
+            membership.push(!inherited_deferred);
+            if inherited_deferred {
+                match &native.kind {
+                    celox_sv_syntax::PortKind::Named(name)
+                    | celox_sv_syntax::PortKind::Explicit { name, .. } => {
+                        deferred.insert(instances::normalize_identifier(&name.spelling));
+                    }
+                    _ => {}
+                }
+                removed = true;
+            }
+        }
+        selected.retain(&membership)?;
+        if !removed {
+            break;
+        }
+    }
+    let header_tree = selected.project(&header_tree)?;
+    Ok((selected, header_tree))
+}
+
+fn references_deferred(
+    range: celox_sv_syntax::TokenRange,
+    references: &HashMap<String, Vec<usize>>,
+    deferred: &HashSet<String>,
+) -> bool {
+    references.iter().any(|(name, uses)| {
+        deferred.contains(name)
+            && uses
+                .iter()
+                .any(|index| (range.start..range.end).contains(index))
+    })
+}
+
+pub(super) fn retain_body(
+    tree: &SyntaxTree,
+    mut keep: impl FnMut(celox_sv_syntax::BodyItemId) -> Converted<bool>,
+) -> Converted<SyntaxTree> {
+    let mut membership = Vec::new();
+    for id in tree.body_membership()? {
+        if keep(id)? {
+            membership.push(id);
+        }
+    }
+    tree.with_body_membership(membership)
+}
+
+pub(super) fn declaration_view(tree: &SyntaxTree) -> Converted<SyntaxTree> {
+    retain_body(tree, |id| {
+        use celox_sv_syntax::BodyItemKind::*;
+        Ok(matches!(
+            tree.declarations().body_item(id).kind,
+            Data(_)
+                | Net(_)
+                | Dpi(_)
+                | Parameter(_)
+                | Subroutine(_)
+                | TypeAlias(_)
+                | PackageBinding(_)
+                | Unconverted { .. }
+        ))
+    })
+}
+
+fn formal_dimensions(
+    port_name: &str,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Vec<celox_sv_syntax::Dimension>> {
+    tree.root_unit()?
+        .ports
+        .iter()
+        .find(|port| match &port.kind {
+            celox_sv_syntax::PortKind::Named(name)
+            | celox_sv_syntax::PortKind::Explicit { name, .. } => {
+                instances::normalize_identifier(&name.spelling) == port_name
+            }
+            _ => false,
+        })
+        .map(|port| port.dimensions.clone())
+        .ok_or_else(|| unsupported(format!("missing interface port `{port_name}`")))
+}
+
+fn connection_lvalue(expr: Expr) -> Converted<LValue> {
+    match expr {
+        Expr::Ident(name) => Ok(LValue::Ident(name)),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => {
+            let Expr::Ident(name) = *expr else {
+                return Err(unsupported("interface output connection"));
+            };
+            Ok(LValue::Select {
+                name,
+                msb,
+                lsb,
+                signed,
+                is_2state: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+            })
+        }
+        _ => Err(unsupported("interface output connection")),
+    }
+}
+
+// Nested handles are private to the interface whose body has already been
+// analyzed. Export its bound objects and processes without leaking those
+// lexical handle paths into the caller.
+fn instance_symbols(
+    symbols: &scope::ScopeSymbols,
+    names: &HashMap<String, String>,
+) -> scope::ScopeSymbols {
+    let mut bound = symbols.renamed(names);
+    bound.interface_members.clear();
+    bound.interface_types.clear();
+    bound.interface_arrays.clear();
+    bound.interface_scopes.clear();
+    bound.interface_instances.clear();
+    bound
+}
+
+fn binding_names(
+    module: &Module,
+    symbols: &scope::ScopeSymbols,
+    handle: &str,
+    imported: &mut scope::ScopeSymbols,
+) -> HashMap<String, String> {
+    binding_names_with_prefix(module, symbols, handle, handle, imported)
+}
+
+fn binding_names_with_prefix(
+    module: &Module,
+    symbols: &scope::ScopeSymbols,
+    handle: &str,
+    prefix: &str,
+    imported: &mut scope::ScopeSymbols,
+) -> HashMap<String, String> {
+    let mut names = symbols.local_names();
+    names.extend(
+        module
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone()),
+    );
+    names.extend(
+        symbols
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name.contains('$'))
+            .map(|parameter| parameter.name.clone()),
+    );
+    names.extend(module.signals.iter().map(|signal| signal.name.clone()));
+    names.extend(module.ports.iter().map(|port| port.name.clone()));
+    names.extend(symbols.type_aliases.keys().cloned());
+    names.extend(symbols.functions.keys().cloned());
+    names.extend(symbols.enum_constants.numbers.keys().cloned());
+    names.retain(|name| !name.contains("::"));
+    let mut names: HashMap<_, _> = names
+        .into_iter()
+        .map(|name| {
+            let bound = format!("{prefix}${name}");
+            imported
+                .interface_members
+                .insert(format!("{handle}.{name}"), bound.clone());
+            (name, bound)
+        })
+        .collect();
+    // An imported package constant is not an instance-local declaration.
+    // Bind references in exported parameter defaults to its qualified name;
+    // the caller need not import the package's simple name itself.
+    for (alias, target) in &symbols.aliases {
+        names.entry(alias.clone()).or_insert_with(|| target.clone());
+    }
+    names
+}
+
+fn remove_interface_ports(
+    selected: &mut port_owners::Selection<'_>,
+    ports: &[interfaces::NativePortPlan],
+    tree: &SyntaxTree,
+) -> Converted<()> {
+    let unit = tree.root_unit()?;
+    let membership = port_owners::scope(Some(selected), tree)?
+        .into_iter()
+        .filter(|port| port.tokens.start >= unit.header.start && port.tokens.end <= unit.header.end)
+        .map(|native| {
+            let name = match &native.kind {
+                celox_sv_syntax::PortKind::Named(name)
+                | celox_sv_syntax::PortKind::Explicit { name, .. } => {
+                    Some(instances::normalize_identifier(&name.spelling))
+                }
+                _ => None,
+            };
+            !ports.iter().any(|port| Some(&port.name) == name.as_ref())
+        })
+        .collect::<Vec<_>>();
+    selected.retain(&membership)
+}
+
+fn connection_expression(
+    instance: &celox_sv_syntax::InstanceDeclarator,
+    formal: &str,
+    interface: Option<&ModuleInterface>,
+) -> Converted<Option<celox_sv_syntax::ExprId>> {
+    use celox_sv_syntax::{ConnectionValue, InstanceConnectionKind};
+    let found = if instance
+        .connections
+        .iter()
+        .any(|connection| matches!(connection.kind, InstanceConnectionKind::Named { .. }))
+    {
+        instance
+            .connections
+            .iter()
+            .find_map(|connection| match &connection.kind {
+                InstanceConnectionKind::Named { name, value }
+                    if instances::normalize_identifier(&name.spelling) == formal =>
+                {
+                    match value {
+                        ConnectionValue::Expression(root) => Some(Some(*root)),
+                        ConnectionValue::Implicit => Some(None),
+                        ConnectionValue::Empty => None,
+                    }
+                }
+                _ => None,
+            })
+    } else {
+        interface
+            .and_then(|interface| interface.ports.iter().position(|name| name == formal))
+            .and_then(|index| instance.connections.get(index))
+            .and_then(|connection| match connection.kind {
+                InstanceConnectionKind::Ordered(Some(root)) => Some(Some(root)),
+                _ => None,
+            })
+    };
+    found.ok_or_else(|| unsupported(format!("missing interface connection `{formal}`")))
+}
+
+fn instance_elements(
+    handle: &str,
+    dimensions: &[celox_sv_syntax::Dimension],
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<ArrayBinding> {
+    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    let ranges = constant_binding::bind_unpacked_ranges(dimensions, tree, &context)?;
+    validate_unpacked_dimension_sizes(&tree.state, &ranges, env)?;
+    let mut shape = Vec::new();
+    let mut elements = vec![handle.to_string()];
+    for range in ranges {
+        let left = eval_ast_const_expr(&tree.state, &range.left, env)
+            .ok_or_else(|| unsupported("interface array bound"))?;
+        let right = eval_ast_const_expr(&tree.state, &range.right, env)
+            .ok_or_else(|| unsupported("interface array bound"))?;
+        let count = usize::try_from(left.abs_diff(right))
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .filter(|count| {
+                elements
+                    .len()
+                    .checked_mul(*count)
+                    .is_some_and(|count| count <= 4096)
+            })
+            .ok_or_else(|| unsupported("interface array elaboration limit exceeded"))?;
+        shape.push(count);
+        elements = elements
+            .into_iter()
+            .flat_map(|prefix| {
+                (0..count).map(move |offset| {
+                    let index = if left <= right {
+                        left + offset as i128
+                    } else {
+                        left - offset as i128
+                    };
+                    format!("{prefix}[{index}]")
+                })
+            })
+            .collect();
+    }
+    Ok(ArrayBinding { elements, shape })
+}
+
+pub(super) fn actual_handle_key(
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<String> {
+    use celox_sv_syntax::{DimensionKind, ExprKind};
+    enum Suffix {
+        Member(String),
+        Index(celox_sv_syntax::ExprId),
+    }
+    let native = tree.declarations();
+    let mut root = root;
+    let mut suffixes = Vec::new();
+    let mut handle = loop {
+        match &native.expression(root).kind {
+            ExprKind::Name(name) => break instances::normalize_identifier(&name.spelling),
+            ExprKind::Member {
+                expression,
+                name,
+                separator,
+            } if separator == "." => {
+                suffixes.push(Suffix::Member(instances::normalize_identifier(
+                    &name.spelling,
+                )));
+                root = *expression;
+            }
+            ExprKind::Select {
+                expression,
+                dimension,
+            } => {
+                let DimensionKind::Index(index) = dimension.kind else {
+                    return Err(unsupported("interface handle expression"));
+                };
+                suffixes.push(Suffix::Index(index));
+                root = *expression;
+            }
+            _ => return Err(unsupported("interface handle expression")),
+        }
+    };
+    let context = PackedDimensions::new(HashMap::default(), env, aliases);
+    for suffix in suffixes.into_iter().rev() {
+        match suffix {
+            Suffix::Member(name) => {
+                handle.push('.');
+                handle.push_str(&name);
+            }
+            Suffix::Index(root) => {
+                let value = constant_binding::bind(root, tree, &context)?
+                    .and_then(|value| eval_ast_const_expr(&tree.state, &value, env))
+                    .ok_or_else(|| unsupported("nonconstant interface index"))?;
+                handle.push_str(&format!("[{value}]"));
+            }
+        }
+    }
+    Ok(handle)
+}

@@ -1,5 +1,5 @@
 //! Native import/export owners; original ranges only retain visibility kernels.
-//! No range is used as an identity key or stored in ValidatedSyntax.
+//! No range is used as an identity key or stored in SourceTree.
 use super::*;
 use celox_sv_syntax::{
     BodyItemId, BodyItemKind, Declarations, LocalDeclaration, PackageBindingId,
@@ -131,16 +131,13 @@ pub(super) fn scope(tree: &SyntaxTree) -> Converted<Vec<Binding>> {
     } else {
         Vec::new()
     };
-    ids.extend(body_ids(
-        &tree.native_body_membership()?,
-        tree.declarations(),
-    )?);
+    ids.extend(body_ids(&tree.body_membership()?, tree.declarations())?);
     bindings(ids, tree)
 }
 pub(super) fn compilation(tree: &SyntaxTree) -> Converted<Vec<Binding>> {
     let tree = tree.compilation_scope();
     let ids = tree
-        .native_body_membership()?
+        .body_membership()?
         .into_iter()
         .filter_map(|id| match tree.declarations().body_item(id).kind {
             BodyItemKind::PackageBinding(id) => Some(id),

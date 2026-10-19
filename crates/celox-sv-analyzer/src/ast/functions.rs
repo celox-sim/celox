@@ -191,9 +191,9 @@ fn native_signature(
         let ty = if port.direction.is_none() && omitted {
             previous
                 .clone()
-                .or(native_types::bind(port.data_type, tree, context)?)
+                .or(type_binding::bind(port.data_type, tree, context)?)
         } else {
-            native_types::bind(port.data_type, tree, context)?
+            type_binding::bind(port.data_type, tree, context)?
         };
         previous = ty.clone();
         let expr_type = ty
@@ -214,7 +214,7 @@ fn native_signature(
         });
     }
     let ty = match native.return_type {
-        Some(id) => native_types::bind(id, tree, context)?,
+        Some(id) => type_binding::bind(id, tree, context)?,
         None => None,
     };
     let result = ty

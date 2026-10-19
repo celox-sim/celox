@@ -15,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::migration::ValidatedSyntax as SyntaxTree;
+use crate::source_tree::SourceTree as SyntaxTree;
 
 /// State owned by one analysis session, shared explicitly with nested scopes.
 #[derive(Default)]
@@ -103,11 +103,13 @@ mod comb_process;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
+mod constant_binding;
 mod constant_folding;
 mod constants;
 mod declarations;
 mod dimensions;
 mod dpi;
+mod expression_binding;
 mod expressions;
 mod ff_process;
 mod functions;
@@ -116,19 +118,17 @@ mod imports;
 mod inlining;
 mod instances;
 mod interface_ast;
+mod interface_binding;
 pub mod interfaces;
 mod lifetimes;
 pub(crate) mod module_index;
-mod native_constants;
-mod native_expressions;
-mod native_interfaces;
-mod native_types;
 mod package_owners;
 pub mod packages;
 mod packed_structs;
 mod parameters;
 mod port_owners;
 mod timing;
+mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod patterns;
 mod procedural;
@@ -409,11 +409,11 @@ impl Source {
                         type_parameters::bind(syntax_tree, &own_types)?;
                     imported.pattern_parameter_bindings =
                         type_parameters::bind_patterns(syntax_tree, bindings.patterns)?;
-                    if let Some(mut module) = native_interfaces::analyze_module(
+                    if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
                         path,
                         packages,
-                        native_interfaces::Bindings {
+                        interface_binding::Bindings {
                             values: bindings.values,
                             types: bindings.types,
                             export_symbols: false,

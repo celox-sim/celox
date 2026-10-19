@@ -7,10 +7,10 @@
 //! module signal or share its name with a local of another process.
 
 use super::*;
-mod native_assertions;
-mod native_control;
-mod native_foreach;
-mod native_timing;
+mod assertions;
+mod control;
+mod foreach;
+mod timing;
 use crate::procedural::{
     CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
     SystemTaskArg,
@@ -382,7 +382,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     fn native_value(&self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
         let mut value =
-            native_expressions::value(id, self.tree.declarations(), self.tree, &self.dims)?;
+            expression_binding::value(id, self.tree.declarations(), self.tree, &self.dims)?;
         self.rename_expr(&mut value);
         Ok(value)
     }
@@ -391,7 +391,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &self,
         id: celox_sv_syntax::ExprId,
     ) -> Result<(LValue, LValue), AnalyzerError> {
-        let lowered = native_expressions::variable_lvalue(
+        let lowered = expression_binding::variable_lvalue(
             id,
             self.tree.declarations(),
             self.tree,
@@ -415,7 +415,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 pending.extend(items.iter().rev().copied());
             } else {
                 let mut target =
-                    native_expressions::variable_lvalue(id, native, self.tree, &self.dims)?;
+                    expression_binding::variable_lvalue(id, native, self.tree, &self.dims)?;
                 self.rename_lvalue(&mut target);
                 parts.push(target);
             }
@@ -458,7 +458,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
         let (written, lhs) = self.native_lvalue(left)?;
         let mut rhs = if op == "=" {
-            native_expressions::expression(
+            expression_binding::expression(
                 right,
                 self.tree.declarations(),
                 &written,
@@ -467,7 +467,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             )?
         } else {
             let value =
-                native_expressions::value(right, self.tree.declarations(), self.tree, &self.dims)?;
+                expression_binding::value(right, self.tree.declarations(), self.tree, &self.dims)?;
             assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
         };
         // A two-state member of a four-state packed struct drops unknown bits.
@@ -599,7 +599,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             _ => return Err(unsupported("local declaration")),
         };
-        let signals = native_types::local_signals(
+        let signals = type_binding::local_signals(
             native,
             self.tree,
             &self.dims.const_env,
@@ -611,7 +611,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             signals
                 .into_iter()
                 .zip(native.variables.iter().filter(|variable| {
-                    native_types::ordinary_variable(variable, self.tree.declarations())
+                    type_binding::ordinary_variable(variable, self.tree.declarations())
                 }))
         {
             // A declaration may not repeat a name of its own scope, such as
@@ -635,7 +635,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         signal.name().to_string(),
                         dimensions_from_type(signal.r#type()),
                     );
-                    let mut init = native_expressions::expression(
+                    let mut init = expression_binding::expression(
                         root,
                         self.tree.declarations(),
                         &target,
@@ -742,7 +742,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         );
         {
             let query_root =
-                native_expressions::call_statement_root(root, discarded, self.tree.declarations())?;
+                expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
             if timescales::is_query(query_root, self.tree.declarations()) {
                 let value = timescales::query(query_root, self.tree)?;
                 return Ok(vec![Stmt::Eval(Expr::Literal(
@@ -754,7 +754,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             } else {
                 &self.dims.subroutine_param_names
             };
-            if let Some(mut call) = native_expressions::call_statement(
+            if let Some(mut call) = expression_binding::call_statement(
                 root,
                 discarded,
                 self.tree.declarations(),
@@ -779,7 +779,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
         }
         let root =
-            native_expressions::call_statement_root(root, discarded, self.tree.declarations())?;
+            expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
         let declarations = self.tree.declarations();
         let (callee, arguments) = match &declarations.expression(root).kind {
             celox_sv_syntax::ExprKind::Call {
@@ -815,7 +815,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 // expression, then its value is discarded. `$bits`
                 // and `$size` become constants and do not evaluate
                 // their operands (IEEE 1800-2023 20.6.2).
-                let mut value = native_expressions::bind_value(
+                let mut value = expression_binding::bind_value(
                     root,
                     declarations,
                     self.tree,
@@ -852,7 +852,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     return Ok(SystemTaskArg::Str(text.to_string()));
                 }
                 let mut value =
-                    native_expressions::bind_value(id, declarations, self.tree, &self.dims, None)?;
+                    expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
                 self.rename_expr(&mut value);
                 Ok(SystemTaskArg::Expr(value))
             })
@@ -914,7 +914,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if item.pattern.is_some() {
             return Err(unsupported("pattern matching in a condition"));
         }
-        let condition = native_expressions::value(
+        let condition = expression_binding::value(
             item.expression,
             self.tree.declarations(),
             self.tree,
@@ -935,7 +935,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => {}
             Some(ForInitialization::Declarations(groups)) => {
                 for group in groups {
-                    let ty = native_types::procedural_type(
+                    let ty = type_binding::procedural_type(
                         group.data_type,
                         self.tree.declarations(),
                         self.tree,
@@ -948,7 +948,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         let target = LValue::Ident(source.clone());
                         let mut scoped = self.dims.clone();
                         scoped.insert(source.clone(), dimensions_from_type(&ty));
-                        let mut value = native_expressions::expression(
+                        let mut value = expression_binding::expression(
                             variable.value,
                             self.tree.declarations(),
                             &target,
@@ -1088,7 +1088,7 @@ pub(super) fn subroutine_param_declarations(
         Option<celox_sv_syntax::ExprId>,
     )>,
 > {
-    native_types::subroutine_formals(
+    type_binding::subroutine_formals(
         native,
         tree,
         &PackedDimensions::new(HashMap::default(), env, aliases),
@@ -1296,14 +1296,14 @@ pub(super) fn lower_subroutine(
                 celox_sv_syntax::DataTypeKind::Implicit
             ) =>
         {
-            Some(native_types::implicit_subroutine_type(
+            Some(type_binding::implicit_subroutine_type(
                 id,
                 tree,
                 declaration_env,
                 type_aliases,
             )?)
         }
-        Some(id) => native_types::procedural_type(
+        Some(id) => type_binding::procedural_type(
             id,
             tree.declarations(),
             tree,
@@ -1337,7 +1337,7 @@ pub(super) fn lower_subroutine(
         .map(|(_, _, _, default)| {
             default
                 .map(|root| {
-                    let mut value = native_expressions::bind(root, tree, &builder.dims)?;
+                    let mut value = expression_binding::bind(root, tree, &builder.dims)?;
                     builder.rename_expr(&mut value);
                     Ok(value)
                 })
@@ -1500,7 +1500,7 @@ pub(super) fn initial_processes_from_scope(
             for variable in declaration
                 .variables
                 .iter()
-                .filter(|variable| native_types::ordinary_variable(variable, tree.declarations()))
+                .filter(|variable| type_binding::ordinary_variable(variable, tree.declarations()))
             {
                 if let Some(value) = variable.value {
                     assignments.push((
@@ -1526,7 +1526,7 @@ pub(super) fn initial_processes_from_scope(
                     )?;
                 }
                 let lhs = LValue::Ident(name);
-                let rhs = native_expressions::expression(
+                let rhs = expression_binding::expression(
                     native,
                     tree.declarations(),
                     &lhs,

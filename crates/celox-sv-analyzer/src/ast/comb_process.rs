@@ -173,7 +173,7 @@ fn net_declaration_assignments(
             )?;
         }
         let lhs = LValue::Ident(name);
-        let rhs = native_expressions::expression(
+        let rhs = expression_binding::expression(
             value,
             syntax_tree.declarations(),
             &lhs,
@@ -230,13 +230,13 @@ fn continuous_assignments(
                     dimensions,
                 )?;
             }
-            let lhs = native_expressions::net_lvalue(
+            let lhs = expression_binding::net_lvalue(
                 assignment.left,
                 tree.declarations(),
                 tree,
                 dimensions,
             )?;
-            let rhs = native_expressions::expression(
+            let rhs = expression_binding::expression(
                 assignment.right,
                 tree.declarations(),
                 &lhs,

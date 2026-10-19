@@ -2,8 +2,8 @@
 //! keys and repetition counts bind in the caller; element sizing happens in
 //! the receiving declaration's assignment context (IEEE 1800-2023 10.9).
 use super::*;
-mod native;
-pub(super) use native::{Kind as NativeKind, prepare_native};
+mod binding;
+pub(super) use binding::{Kind as NativeKind, prepare_native};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundPattern {
@@ -36,7 +36,7 @@ pub(super) fn from_param(
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<BoundPattern> {
-    match native::value(root, tree, dims)? {
+    match binding::value(root, tree, dims)? {
         Value::Pattern(pattern) => Ok(pattern),
         Value::Expression(value) => Ok(BoundPattern {
             items: Items::Value(value),

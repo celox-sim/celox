@@ -20,7 +20,7 @@ pub(super) fn bind(
         }
     }
     let mut pending = tree
-        .native_body_membership()?
+        .body_membership()?
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
@@ -118,7 +118,7 @@ pub(super) fn bind_patterns(
             );
         }
     }
-    let mut pending = tree.native_body_membership()?;
+    let mut pending = tree.body_membership()?;
     while let Some(id) = pending.pop() {
         match &tree.declarations().body_item(id).kind {
             celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items),

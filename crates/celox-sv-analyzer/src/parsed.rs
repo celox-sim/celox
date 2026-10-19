@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use fxhash::FxHashMap as HashMap;
 
-use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, migration};
+use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, source_tree};
 
 /// A parsed source that can analyze many modules or parameter specializations.
 ///
@@ -16,7 +16,7 @@ use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, mig
 pub struct ParsedSource {
     code: std::rc::Rc<str>,
     path: PathBuf,
-    tree: std::rc::Rc<migration::ValidatedSyntax>,
+    tree: std::rc::Rc<source_tree::SourceTree>,
     index: ast::module_index::ModuleIndex,
     /// Immutable declaration diagnostics, indexed once alongside module syntax.
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
@@ -24,7 +24,7 @@ pub struct ParsedSource {
 
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
-        let tree = migration::parse_source(code, path)?;
+        let tree = source_tree::parse_source(code, path)?;
         let index = ast::module_index::ModuleIndex::from_declarations(&tree, tree.declarations())?;
         let warnings = ast::warnings::components(&tree);
         Ok(Self {
@@ -1095,7 +1095,7 @@ mod declaration_tests {
             ParsedSource::parse(code, Path::new("invalid_body.sv")),
             Err(AnalyzerError::Parse(_))
         ));
-        assert!(migration::parse_source(code, Path::new("invalid_body.sv")).is_err());
+        assert!(source_tree::parse_source(code, Path::new("invalid_body.sv")).is_err());
     }
 
     #[test]

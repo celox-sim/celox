@@ -228,7 +228,7 @@ pub(super) fn scope_names(tree: &SyntaxTree) -> Converted<HashSet<String>> {
             }
         }
     }
-    let mut pending = tree.native_body_membership()?;
+    let mut pending = tree.body_membership()?;
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
@@ -276,7 +276,7 @@ fn validate_children(
 
 fn body_items(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::BodyItemId>> {
     use celox_sv_syntax::BodyItemKind;
-    let mut pending = tree.native_body_membership()?;
+    let mut pending = tree.body_membership()?;
     let mut result = Vec::new();
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
@@ -433,7 +433,7 @@ fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
     let mut seen = HashSet::default();
     let mut loop_variables = HashMap::default();
     let mut pending: Vec<(celox_sv_syntax::BodyItemId, Option<usize>, bool)> = tree
-        .native_body_membership()?
+        .body_membership()?
         .into_iter()
         .map(|id| (id, None, false))
         .collect();
@@ -783,7 +783,7 @@ pub(super) fn resolve_imports(
     let imports = ScopeImports::from_scope(tree)?;
     // A module sees the compilation-unit items declared before it, which are
     // also those declared before any reference in it.
-    let start = tree.native_scope_start()?;
+    let start = tree.scope_start()?;
     let package = |name: &String| {
         packages
             .get(name)
@@ -823,7 +823,7 @@ pub(super) fn resolve_imports(
         .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
         .map(|unit| normalize_identifier(&unit.name.spelling))
         .or_else(|| {
-            (tree.scope_handle() == crate::migration::ScopeHandle::Compilation)
+            (tree.scope_handle() == crate::source_tree::ScopeHandle::Compilation)
                 .then(|| "$unit".into())
         });
     let mut own_names = None;
