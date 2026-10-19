@@ -1,7 +1,7 @@
 //! Interface contracts and binding plans collected from authored declarations.
 //!
 //! Port directions and generic bindings are computed before semantic lowering.
-//! `native_interfaces` binds bodies and references in the original syntax tree;
+//! `interface_binding` binds bodies and references in the original syntax tree;
 //! these contracts never generate or reparse SystemVerilog source.
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use super::*;
 use celox_sv_syntax as native;
 type BodyId = native::BodyItemId;
 type ExprId = native::ExprId;
-type ScopeHandle = crate::migration::ScopeHandle;
+type ScopeHandle = crate::source_tree::ScopeHandle;
 
 /// Joins an interface handle (instance or port) and an interface item name.
 const SEPARATOR: &str = "$";
@@ -341,7 +341,7 @@ fn unsupported(construct: impl Into<String>) -> AnalyzerError {
 /// Lexical qualified spelling for contract discovery, before package binding.
 fn expression_name(id: ExprId, native: &native::Declarations) -> Option<String> {
     match &native
-        .expression(native_expressions::ungroup(id, native))
+        .expression(expression_binding::ungroup(id, native))
         .kind
     {
         native::ExprKind::Name(name) => Some(native_name(name)),
@@ -377,7 +377,7 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(code: &'a str, path: &Path) -> Result<Self, AnalyzerError> {
-        let syntax_tree = crate::migration::parse_source(code, path)?;
+        let syntax_tree = crate::source_tree::parse_source(code, path)?;
         let native = syntax_tree.declarations();
         let mut tokens = Vec::new();
         let mut identifiers = HashSet::default();
@@ -656,7 +656,7 @@ enum ModportItem {
 }
 
 struct InterfaceDecl {
-    scope: crate::migration::ScopeHandle,
+    scope: crate::source_tree::ScopeHandle,
     name: String,
     file: usize,
     /// The start of the declaration in its file.
@@ -861,7 +861,7 @@ struct PortDecl {
 }
 
 struct ModuleDecl {
-    scope: crate::migration::ScopeHandle,
+    scope: crate::source_tree::ScopeHandle,
     name: String,
     file: usize,
     span: Span,

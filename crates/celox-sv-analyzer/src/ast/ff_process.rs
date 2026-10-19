@@ -104,7 +104,7 @@ fn ff_event_control_and_body(
             _ => return Err(unsupported_event()),
         };
         let expression =
-            native_expressions::value(item.expression, native, tree, &PackedDimensions::default())?;
+            expression_binding::value(item.expression, native, tree, &PackedDimensions::default())?;
         let signal = expr_ident_name(&expression).ok_or_else(unsupported_event)?;
         events.push(FfEvent::new(edge, signal));
     }

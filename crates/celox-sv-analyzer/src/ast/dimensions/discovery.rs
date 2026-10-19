@@ -11,7 +11,7 @@ struct Key {
     // Arena incarnation only disambiguates temporary reentrancy caches. Native
     // scope/body handles below select semantic ownership; this address never does.
     arena: usize,
-    scope: crate::migration::ScopeHandle,
+    scope: crate::source_tree::ScopeHandle,
     path: Vec<BodyItemId>,
 }
 #[derive(Default)]
@@ -45,7 +45,7 @@ struct Owners {
 }
 fn owners(tree: &AnalysisContext<'_>, target: TokenRange) -> Converted<Owners> {
     let native = tree.declarations();
-    let root = tree.native_body_membership()?;
+    let root = tree.body_membership()?;
     let mut result = Owners {
         frames: vec![root.clone()],
         path: Vec::new(),
@@ -140,7 +140,7 @@ fn type_with_dimensions(
 ) -> Converted<Type> {
     Ok(types::type_with_unpacked_ranges(
         ty,
-        native_constants::bind_unpacked_ranges(dimensions, tree, context)?,
+        constant_binding::bind_unpacked_ranges(dimensions, tree, context)?,
     ))
 }
 fn shape(context: &mut PackedDimensions, name: String, ty: &Type, local: bool) {
@@ -158,13 +158,13 @@ fn variables(
     key: &Key,
     local: bool,
 ) -> Converted<()> {
-    let Some(base) = native_types::bind(declaration.data_type, tree, context)? else {
+    let Some(base) = type_binding::bind(declaration.data_type, tree, context)? else {
         return Ok(());
     };
     for variable in declaration
         .variables
         .iter()
-        .filter(|variable| native_types::ordinary_variable(variable, tree.declarations()))
+        .filter(|variable| type_binding::ordinary_variable(variable, tree.declarations()))
     {
         let ty = type_with_dimensions(base.clone(), &variable.dimensions, tree, context)?;
         shape(context, name(&variable.name), &ty, local);
@@ -183,7 +183,7 @@ fn parameter(
     match &parameter.kind {
         ParameterKind::Type { default: Some(id) } => {
             if !context.type_aliases.contains_key(&n)
-                && let Some(ty) = native_types::bind(*id, tree, context)?
+                && let Some(ty) = type_binding::bind(*id, tree, context)?
             {
                 context.type_aliases.insert(n, ty);
             }
@@ -195,7 +195,7 @@ fn parameter(
         } => {
             if local
                 && let Some(value) = default
-                    .and_then(|id| native_constants::bind(id, tree, context).ok().flatten())
+                    .and_then(|id| constant_binding::bind(id, tree, context).ok().flatten())
                     .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
             {
                 context.const_env.insert(n.clone(), value);
@@ -208,7 +208,7 @@ fn parameter(
                 && !context
                     .const_env
                     .contains_key(&parameter_dimensions_marker(&n));
-            if !scalar_binding && let Some(base) = native_types::bind(*data_type, tree, context)? {
+            if !scalar_binding && let Some(base) = type_binding::bind(*data_type, tree, context)? {
                 let ty = type_with_dimensions(base, dimensions, tree, context)?;
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
                     shape(context, n, &ty, local);
@@ -237,7 +237,7 @@ fn declaration(
         }
         BodyItemKind::Net(id) => {
             let data = native.net_declaration(*id);
-            if let Some(base) = native_types::bind(data.data_type, tree, context)? {
+            if let Some(base) = type_binding::bind(data.data_type, tree, context)? {
                 for variable in &data.variables {
                     let ty =
                         type_with_dimensions(base.clone(), &variable.dimensions, tree, context)?;
@@ -254,7 +254,7 @@ fn declaration(
         BodyItemKind::TypeAlias(id) => {
             let alias = native.type_alias(*id);
             if let TypeAliasTarget::DataType(id) = alias.target
-                && let Some(base) = native_types::bind(id, tree, context)?
+                && let Some(base) = type_binding::bind(id, tree, context)?
             {
                 let ty = type_with_dimensions(base, &alias.dimensions, tree, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -299,7 +299,7 @@ fn formal_types(
             let mut base = if port.direction.is_none() && omitted && previous.is_some() {
                 previous.clone().unwrap()
             } else {
-                let Some(mut ty) = native_types::bind(port.data_type, tree, &local)? else {
+                let Some(mut ty) = type_binding::bind(port.data_type, tree, &local)? else {
                     return Err(unsupported("unsupported function formal data type"));
                 };
                 if matches!(data.kind, DataTypeKind::Implicit) {
@@ -392,7 +392,7 @@ fn signature(
     if subroutine.kind == SubroutineKind::Function {
         let mut ty = subroutine
             .return_type
-            .map(|id| native_types::bind(id, tree, context))
+            .map(|id| type_binding::bind(id, tree, context))
             .transpose()?
             .flatten();
         if subroutine.return_type.is_some_and(|id| {
@@ -429,7 +429,7 @@ fn local_declaration(
         LocalDeclaration::TypeAlias(id) => {
             let alias = tree.declarations().type_alias(*id);
             if let TypeAliasTarget::DataType(id) = alias.target
-                && let Some(ty) = native_types::bind(id, tree, context)?
+                && let Some(ty) = type_binding::bind(id, tree, context)?
             {
                 let ty = type_with_dimensions(ty, &alias.dimensions, tree, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -502,7 +502,7 @@ fn statement_scope(
             }
             Lexical::For(declarations) => {
                 for declaration in declarations {
-                    if let Some(ty) = native_types::bind(declaration.data_type, tree, context)? {
+                    if let Some(ty) = type_binding::bind(declaration.data_type, tree, context)? {
                         for variable in declaration.variables {
                             shape(context, name(&variable.name), &ty, true);
                             publish(&tree.state.dimensions, key, context);
@@ -511,7 +511,7 @@ fn statement_scope(
                 }
             }
             Lexical::Foreach(names) => {
-                let ty = native_types::builtin_type("int", None)
+                let ty = type_binding::builtin_type("int", None)
                     .ok_or_else(|| unsupported("foreach index type"))?;
                 for n in names {
                     shape(context, name(&n), &ty, true);
@@ -629,7 +629,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             for index in tree.header_port_ids()? {
                 let port = &unit.ports[index];
                 if let Some(id) = port.data_type
-                    && let Ok(Some(base)) = native_types::bind(id, tree, &context)
+                    && let Ok(Some(base)) = type_binding::bind(id, tree, &context)
                     && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, &context)
                     && let celox_sv_syntax::PortKind::Named(n) = &port.kind
                 {
@@ -657,7 +657,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         if contains(subroutine.body_tokens, target)
             && subroutine.kind == SubroutineKind::Function
             && let Some(id) = subroutine.return_type
-            && let Some(mut ty) = native_types::bind(id, tree, &context)?
+            && let Some(mut ty) = type_binding::bind(id, tree, &context)?
         {
             if matches!(native.data_type(id).kind, DataTypeKind::Implicit) {
                 ty.kind = TypeKind::Logic;
@@ -670,7 +670,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
     // A hierarchical operand can name a declaration in an active generate
     // branch. Use the same explicit specialization as normal elaboration;
     // typed wide/four-state overrides must remain parameter literals.
-    if let Some((wanted, _)) = native_types::argument_alias(root, native)
+    if let Some((wanted, _)) = type_binding::argument_alias(root, native)
         && wanted.contains('.')
         && context.get(&wanted).is_none()
     {
@@ -714,7 +714,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
 mod tests {
     use super::*;
     fn parse(code: &str) -> SyntaxTree {
-        crate::migration::parse_scope_fixture(code, Path::new("native-query-scope.sv")).unwrap()
+        crate::source_tree::parse_scope_fixture(code, Path::new("native-query-scope.sv")).unwrap()
     }
     fn argument(tree: &AnalysisContext<'_>) -> ExprId {
         tree.declarations().expression_nodes().find_map(|(_,expression)|{

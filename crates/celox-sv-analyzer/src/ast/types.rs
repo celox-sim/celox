@@ -12,7 +12,7 @@ pub(super) fn type_aliases_from_scope_with_env(
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
     let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
-    if syntax_tree.scope_handle() != crate::migration::ScopeHandle::Compilation {
+    if syntax_tree.scope_handle() != crate::source_tree::ScopeHandle::Compilation {
         for parameter in syntax_tree.root_unit()?.parameters.iter().flatten() {
             add_type_parameter(
                 parameter,
@@ -24,7 +24,7 @@ pub(super) fn type_aliases_from_scope_with_env(
         }
     }
     let mut pending = syntax_tree
-        .native_body_membership()?
+        .body_membership()?
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
@@ -52,7 +52,7 @@ pub(super) fn type_aliases_from_scope_with_env(
                 let TypeAliasTarget::DataType(id) = alias.target else {
                     continue;
                 };
-                let Some(base) = native_types::alias_base_type(
+                let Some(base) = type_binding::alias_base_type(
                     id,
                     syntax_tree.declarations(),
                     syntax_tree,
@@ -65,7 +65,7 @@ pub(super) fn type_aliases_from_scope_with_env(
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
                 let ty = type_with_unpacked_ranges(
                     base,
-                    native_constants::bind_unpacked_ranges(
+                    constant_binding::bind_unpacked_ranges(
                         &alias.dimensions,
                         syntax_tree,
                         &context,
@@ -136,7 +136,7 @@ fn add_type_parameter(
         aliases.insert(name, bound.clone());
     } else if let Some(id) = default {
         let context = PackedDimensions::new(HashMap::default(), env, aliases);
-        if let Some(ty) = native_types::bind(id, tree, &context)? {
+        if let Some(ty) = type_binding::bind(id, tree, &context)? {
             aliases.insert(name, ty);
         }
     }

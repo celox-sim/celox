@@ -67,7 +67,7 @@ pub(super) fn scope<'a>(
         return Err(mismatch());
     }
     let native = tree.declarations();
-    let mut pending = tree.native_body_membership()?;
+    let mut pending = tree.body_membership()?;
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
@@ -105,7 +105,7 @@ pub(super) fn scope<'a>(
 mod tests {
     use super::*;
     fn parse(code: &str) -> SyntaxTree {
-        crate::migration::parse_scope_fixture(code, Path::new("header-selection.sv")).unwrap()
+        crate::source_tree::parse_scope_fixture(code, Path::new("header-selection.sv")).unwrap()
     }
     #[test]
     fn authored_defaults_belong_to_native_port_owners() {

@@ -58,7 +58,7 @@ pub fn parse_source(
     code: &str,
     path: &Path,
 ) -> Result<celox_sv_syntax::Declarations, AnalyzerError> {
-    Ok(crate::migration::parse_source(code, path)?.into_declarations())
+    Ok(crate::source_tree::parse_source(code, path)?.into_declarations())
 }
 
 pub fn source_module_implicit_net_permissions(

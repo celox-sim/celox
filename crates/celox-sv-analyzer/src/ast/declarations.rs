@@ -14,10 +14,10 @@ pub(super) fn ports_from_scope(
     for native in port_owners::scope(selected, syntax_tree)? {
         let direction = native
             .direction
-            .map(native_types::port_direction)
+            .map(type_binding::port_direction)
             .unwrap_or(inherited_direction);
         let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
-        let base = match native_types::port_type(native, syntax_tree, const_env, type_aliases)? {
+        let base = match type_binding::port_type(native, syntax_tree, const_env, type_aliases)? {
             Some(ty) => ty,
             None if native.data_type.is_none() => inherited_type.clone(),
             None => return Err(unsupported("unsupported port data type")),
@@ -26,7 +26,7 @@ pub(super) fn ports_from_scope(
         inherited_type = base.clone();
         let ty = type_with_unpacked_ranges(
             base,
-            native_constants::unpacked_ranges(
+            constant_binding::unpacked_ranges(
                 &native.dimensions,
                 syntax_tree,
                 const_env,
@@ -76,7 +76,7 @@ pub(super) fn module_interface_from_scope(
                 .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
         );
     } else {
-        for id in syntax_tree.native_body_membership()? {
+        for id in syntax_tree.body_membership()? {
             if let celox_sv_syntax::BodyItemKind::Parameter(id) =
                 syntax_tree.declarations().body_item(id).kind
             {
@@ -149,7 +149,7 @@ pub(super) fn parameters_from_scope(
             )?;
         }
     }
-    for id in syntax_tree.native_body_membership()? {
+    for id in syntax_tree.body_membership()? {
         let celox_sv_syntax::BodyItemKind::Parameter(id) =
             syntax_tree.declarations().body_item(id).kind
         else {
@@ -270,9 +270,9 @@ pub(super) fn signals_from_body_item(
                         celox_sv_syntax::DataTypeKind::Named(_)
                     )
                 {
-                    native_types::alias_signals(value, tree, env, aliases, selected_name)?
+                    type_binding::alias_signals(value, tree, env, aliases, selected_name)?
                 } else {
-                    native_types::local_signals(value, tree, env, aliases, selected_name)?
+                    type_binding::local_signals(value, tree, env, aliases, selected_name)?
                 }
             }
             DataDeclaration::Unconverted(_) => {
@@ -281,7 +281,7 @@ pub(super) fn signals_from_body_item(
                 ));
             }
         },
-        BodyItemKind::Net(id) => native_types::net_signals(
+        BodyItemKind::Net(id) => type_binding::net_signals(
             tree.declarations().net_declaration(id),
             tree,
             env,
@@ -301,7 +301,7 @@ pub(super) fn signals_from_body_item(
                     }
                     let ty = type_with_unpacked_ranges(
                         base.clone(),
-                        native_constants::bind_unpacked_ranges(
+                        constant_binding::bind_unpacked_ranges(
                             &variable.dimensions,
                             tree,
                             &context,

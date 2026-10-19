@@ -1,7 +1,7 @@
 //! Parameter environments, enum constants, and typed parameter substitution.
 
 use super::*;
-mod native;
+mod declaration_types;
 pub(super) mod ownership;
 pub(super) mod skipped;
 
@@ -280,8 +280,9 @@ pub(super) fn parameters_from_native_with_environment(
     if authored.is_empty() {
         return Ok(());
     }
-    let native_prefix = native::prefix(authored.first().copied(), syntax_tree, type_aliases)?
-        .ok_or_else(|| AnalyzerError::Parse("native parameter type is missing".into()))?;
+    let native_prefix =
+        declaration_types::prefix(authored.first().copied(), syntax_tree, type_aliases)?
+            .ok_or_else(|| AnalyzerError::Parse("native parameter type is missing".into()))?;
     let declared_alias = native_prefix.alias.clone();
     let parameter_width = parameter_declared_width(
         authored,
@@ -417,7 +418,7 @@ pub(super) fn parameters_from_native_with_environment(
                     Err(_) => None,
                 }
             } else {
-                native_constants::expression(
+                constant_binding::expression(
                     ownership::default(native).ok_or_else(|| {
                         AnalyzerError::Parse("native parameter default is missing".into())
                     })?,
@@ -512,7 +513,7 @@ fn parameter_declared_width(
     environment: &ParameterEnvironment<'_>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
-    native: &native::Prefix<'_>,
+    native: &declaration_types::Prefix<'_>,
 ) -> Converted<Option<usize>> {
     let declared_alias = native.alias.clone();
     if declared_alias.is_none() && native.data.packed_dimensions.is_empty() {
@@ -545,7 +546,7 @@ fn parameter_declared_width(
             .cloned()
             .or_else(|| {
                 ownership::default(native).and_then(|_| {
-                    native_constants::expression(
+                    constant_binding::expression(
                         ownership::default(native)?,
                         syntax_tree.declarations(),
                         syntax_tree,
@@ -583,7 +584,7 @@ fn parameter_width_from_environments(
     type_aliases: &HashMap<String, Type>,
     range_env: &HashMap<String, i128>,
     env: &HashMap<String, i128>,
-    native: &native::Prefix<'_>,
+    native: &declaration_types::Prefix<'_>,
 ) -> Converted<Option<usize>> {
     let prefix = native;
     let ranges = prefix.ranges(syntax_tree, range_env, type_aliases)?;
@@ -880,7 +881,7 @@ pub(super) fn enum_member_constants_from_scope(
 ) -> Result<EnumMemberConstants, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataTypeKind, TypeAliasTarget};
     let native = syntax_tree.declarations();
-    let declarations = syntax_tree.native_body_membership()?;
+    let declarations = syntax_tree.body_membership()?;
     let enum_type = |id| {
         let BodyItemKind::TypeAlias(alias) = native.body_item(id).kind else {
             return None;
@@ -926,7 +927,7 @@ pub(super) fn enum_member_constants_from_scope(
             unreachable!();
         };
         let member_type = match base {
-            Some(id) => native_types::enum_constant_base(
+            Some(id) => type_binding::enum_constant_base(
                 *id,
                 syntax_tree,
                 &eval_env,
@@ -946,7 +947,7 @@ pub(super) fn enum_member_constants_from_scope(
                 return Err(unsupported(format!("ranged enum member `{name}`")));
             }
             let value = match new.value {
-                Some(id) => native_constants::expression(
+                Some(id) => constant_binding::expression(
                     id,
                     syntax_tree.declarations(),
                     syntax_tree,

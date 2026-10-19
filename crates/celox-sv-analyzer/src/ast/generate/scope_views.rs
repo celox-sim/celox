@@ -76,8 +76,9 @@ mod tests {
                 writeln!(code, "logic [7:0] s{index};").unwrap();
             }
             code.push_str("end endmodule");
-            let tree = crate::migration::parse_scope_fixture(&code, Path::new("scope_scaling.sv"))
-                .unwrap();
+            let tree =
+                crate::source_tree::parse_scope_fixture(&code, Path::new("scope_scaling.sv"))
+                    .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
             let dimensions = PackedDimensions::default();
@@ -93,7 +94,7 @@ mod tests {
 
     #[test]
     fn preserves_nested_and_interrupted_scopes_and_detaches_changed_snapshots() {
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module Top(); if (1) begin : g localparam int P=2; logic [P-1:0] x; if (1) begin : inner localparam int P=3; logic [P-1:0] x; end logic y; end if (1) begin : h localparam int P=4; logic [P-1:0] x; end endmodule",
             Path::new("scope_views.sv"),
         ).unwrap();

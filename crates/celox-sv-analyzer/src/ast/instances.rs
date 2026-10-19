@@ -1,7 +1,7 @@
 //! Module instantiations, parameter overrides, and port connections.
 
 use super::*;
-mod native;
+mod connections;
 
 pub(super) fn instances_from_scope(
     syntax_tree: &AnalysisContext<'_>,
@@ -246,13 +246,13 @@ pub(super) fn parameter_overrides(
 }
 
 pub(super) fn port_connections(
-    key: native_interfaces::InstanceKey,
+    key: interface_binding::InstanceKey,
     native: &celox_sv_syntax::InstanceDeclarator,
     syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    native::connections(key, native, syntax_tree, packed_dimensions, interface)
+    connections::connections(key, native, syntax_tree, packed_dimensions, interface)
 }
 
 pub(super) fn declaration_from_item<'a>(
@@ -293,7 +293,7 @@ pub(super) fn instance_ranges(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<UnpackedRange>, AnalyzerError> {
-    native_constants::unpacked_ranges(&native.dimensions, tree, env, aliases)
+    constant_binding::unpacked_ranges(&native.dimensions, tree, env, aliases)
 }
 
 // Child port directions are resolved by the frontend adapter. Defer its net
@@ -353,9 +353,9 @@ fn parameter_override(
 ) -> Result<ParameterOverride, AnalyzerError> {
     use celox_sv_syntax::{DimensionKind, ExprKind};
     let declarations = syntax_tree.declarations();
-    let root = native_expressions::ungroup(native, declarations);
+    let root = expression_binding::ungroup(native, declarations);
     if matches!(declarations.expression(root).kind, ExprKind::Type(_)) {
-        let ty = native_types::argument_type(
+        let ty = type_binding::argument_type(
             native,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -381,7 +381,7 @@ fn parameter_override(
         }
         pending.extend(parameters::skipped::children(id, declarations));
     }
-    if let Some((type_name, dimensions)) = native_types::argument_alias(native, declarations)
+    if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
         && packed_dimensions.type_aliases.contains_key(&type_name)
         && !dimensions.is_empty()
     {
@@ -391,7 +391,7 @@ fn parameter_override(
         {
             return Err(unsupported("indexed range on type parameter argument"));
         }
-        let ty = native_types::argument_type(
+        let ty = type_binding::argument_type(
             native,
             syntax_tree,
             &packed_dimensions.const_env,
@@ -413,7 +413,7 @@ fn parameter_override(
     {
         ConstExpr::Literal("$".into())
     } else if bind_values {
-        if let Some((type_name, dimensions)) = native_types::argument_alias(native, declarations)
+        if let Some((type_name, dimensions)) = type_binding::argument_alias(native, declarations)
             && dimensions.is_empty()
             && let Some(ty) = packed_dimensions.type_aliases.get(&type_name)
         {
@@ -427,11 +427,11 @@ fn parameter_override(
         }
         expr_to_const(
             &syntax_tree.state,
-            native_expressions::value(native, declarations, syntax_tree, packed_dimensions)?,
+            expression_binding::value(native, declarations, syntax_tree, packed_dimensions)?,
         )
         .ok_or_else(|| unsupported("constant interface parameter override"))?
     } else {
-        native_constants::value_expression(native, declarations, syntax_tree, packed_dimensions)?
+        constant_binding::value_expression(native, declarations, syntax_tree, packed_dimensions)?
             .ok_or_else(|| unsupported("parameter override expression"))?
     };
     // A bare name that denotes a type (a typedef, or the instantiating

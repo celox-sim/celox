@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn unresolved_local_parameter_masks_imported_bindings() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module C #(parameter logic [7:0] W, parameter N = W[3:0]); endmodule",
         Path::new("required_local_parameter.sv"),
     )
@@ -49,7 +49,7 @@ fn unresolved_local_parameter_masks_imported_bindings() {
 
 #[test]
 fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module C #(parameter logic FLAG, parameter N = FLAG && 1000000000'd0); endmodule",
         Path::new("required_short_circuit_flag.sv"),
     )
@@ -179,7 +179,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
     }
     code.push_str("endmodule\n");
     let tree =
-        crate::migration::parse_scope_fixture(&code, Path::new("parameter_prefix.sv")).unwrap();
+        crate::source_tree::parse_scope_fixture(&code, Path::new("parameter_prefix.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let state = tree.state.as_ref();
     PARAMETER_BINDINGS.with(|count| count.set(0));
@@ -207,7 +207,7 @@ fn incremental_collection_binds_each_prefix_entry_once() {
 
 #[test]
 fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top;
             typedef logic signed [3:0] nibble_t;
@@ -241,7 +241,7 @@ fn incremental_prefix_matches_rebuilding_with_inherited_values_and_overrides() {
         let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
         let incremental = parameters_from_scope(&tree, &aliases, &base, &overrides).unwrap();
         let mut rebuilt = Vec::new();
-        for id in tree.native_body_membership().unwrap() {
+        for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
                 celox_sv_syntax::BodyItemKind::Parameter(_)
@@ -323,7 +323,7 @@ fn collects_the_declarations_of_a_package() {
                 typedef enum logic [1:0] { IDLE, RUN = 2 } state_t;\n\
                 function automatic int twice(int x); return x * 2; endfunction\n\
                 endpackage\n";
-    let tree = crate::migration::parse_scope_fixture(code, Path::new("package.sv")).unwrap();
+    let tree = crate::source_tree::parse_scope_fixture(code, Path::new("package.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let state = tree.state.as_ref();
     let parameters = parameters_from_scope(
@@ -342,7 +342,7 @@ fn collects_the_declarations_of_a_package() {
     assert_eq!((enums.numbers["IDLE"], enums.numbers["RUN"]), (0, 2));
     let items = generate::items(&tree, &env, &aliases).unwrap();
     assert_eq!(items.len(), 5);
-    let membership = tree.native_body_membership().unwrap();
+    let membership = tree.body_membership().unwrap();
     assert!(items.iter().all(|item| membership.contains(&item.id)));
 }
 
@@ -360,7 +360,7 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
         }
         code.push_str("endmodule");
         let tree =
-            crate::migration::parse_scope_fixture(&code, Path::new("ranged_prefix.sv")).unwrap();
+            crate::source_tree::parse_scope_fixture(&code, Path::new("ranged_prefix.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let state = tree.state.as_ref();
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
@@ -387,7 +387,7 @@ fn numeric_ranged_headers_do_not_copy_the_environment() {
 
 #[test]
 fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); parameter N=4; typedef logic signed [3:0] word_t; parameter word_t [N-1:0] A='1; parameter logic [N-1:0] B=A+1; parameter logic [N-1:0] C=LATER+1; parameter LATER=7; endmodule",
         Path::new("borrowed_ranges.sv"),
     ).unwrap();
@@ -405,7 +405,7 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
         // former copy-and-mask path, providing an independent width context.
         let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
-        for id in tree.native_body_membership().unwrap() {
+        for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
                 celox_sv_syntax::BodyItemKind::Parameter(_)
@@ -425,7 +425,7 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
             .unwrap();
         }
         assert_eq!(DECLARATION_ENV_COPIES.with(|copies| copies.get()), 0);
-        for id in tree.native_body_membership().unwrap() {
+        for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
                 celox_sv_syntax::BodyItemKind::Parameter(_)
@@ -451,7 +451,7 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
 
 #[test]
 fn four_state_prefix_keeps_the_separate_range_projection() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); localparam logic [3:0] P='x; localparam logic [7:0] Q='1; endmodule",
         Path::new("four_state_ranges.sv"),
     )
@@ -480,9 +480,11 @@ fn four_state_parameter_chains_do_not_copy_growing_environments() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("endmodule");
-        let tree =
-            crate::migration::parse_scope_fixture(&code, Path::new("four_state_prefix_scaling.sv"))
-                .unwrap();
+        let tree = crate::source_tree::parse_scope_fixture(
+            &code,
+            Path::new("four_state_prefix_scaling.sv"),
+        )
+        .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let state = tree.state.as_ref();
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
@@ -519,7 +521,7 @@ fn four_state_parameter_chains_do_not_copy_growing_environments() {
 
 #[test]
 fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_shadows() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         "module Top(); parameter logic [3:0] P='x; parameter logic [P:0] Q='0; parameter logic [129:0] W='z; parameter logic [7:0] R='1; endmodule",
         Path::new("literal_prefix_projection.sv"),
     ).unwrap();
@@ -534,7 +536,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
         let mut copied = Vec::new();
         let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base);
         let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
-        for id in tree.native_body_membership().unwrap() {
+        for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
                 celox_sv_syntax::BodyItemKind::Parameter(_)
@@ -697,7 +699,7 @@ fn reverse_generate_literal_chains_borrow_width_and_initializer_environments() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("logic [$bits(P0)-1:0] s; assign s=P0; end endmodule");
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             &code,
             Path::new("generate_literal_prefix_scaling.sv"),
         )
@@ -863,7 +865,7 @@ fn module_parameter_bindings_and_ir_resolve_each_unknown_literal_once() {
             writeln!(code, "localparam logic [31:0] P{index}={value};").unwrap();
         }
         code.push_str("endmodule");
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             &code,
             Path::new("single_parameter_resolution.sv"),
         )

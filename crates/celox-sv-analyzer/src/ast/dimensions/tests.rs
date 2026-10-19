@@ -47,7 +47,7 @@ fn query_number(
 
 #[test]
 fn function_result_queries_preserve_expression_bodies() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top(output int y);
             localparam logic [31:0] P = 32'bx;
@@ -99,7 +99,8 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                      + $unpacked_dimensions(pair_t);
         endmodule
     "#;
-    let tree = crate::migration::parse_scope_fixture(code, Path::new("query_context.sv")).unwrap();
+    let tree =
+        crate::source_tree::parse_scope_fixture(code, Path::new("query_context.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
@@ -177,7 +178,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
 
 #[test]
 fn preliminary_function_scope_discovers_shadowing_formals() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top;
             logic [7:0] x;
@@ -251,7 +252,7 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         "#
         );
         let tree =
-            crate::migration::parse_scope_fixture(&code, Path::new("typedef_shadow.sv")).unwrap();
+            crate::source_tree::parse_scope_fixture(&code, Path::new("typedef_shadow.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
         let module = &source.modules()[0];
@@ -306,7 +307,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         endmodule
     "#;
     let tree =
-        crate::migration::parse_scope_fixture(code, Path::new("nonansi_validation.sv")).unwrap();
+        crate::source_tree::parse_scope_fixture(code, Path::new("nonansi_validation.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     crate::ast::validation::reject_silently_ignored_constructs(
         &tree,
@@ -327,7 +328,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
             assign y = N + $unpacked_dimensions(f());
         endmodule
     "#;
-    let tree = crate::migration::parse_scope_fixture(source, Path::new("dpi_query.sv")).unwrap();
+    let tree = crate::source_tree::parse_scope_fixture(source, Path::new("dpi_query.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     Source::from_syntax(&tree).unwrap();
     for call in native_calls(&tree) {
@@ -346,8 +347,8 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
             assign y = $unpacked_dimensions(a[0][index_value +: 1]);
         endmodule
     "#;
-    let tree =
-        crate::migration::parse_scope_fixture(source, Path::new("runtime_query_range.sv")).unwrap();
+    let tree = crate::source_tree::parse_scope_fixture(source, Path::new("runtime_query_range.sv"))
+        .unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     Source::from_syntax(&tree).unwrap();
     let call = native_calls(&tree)[0];
@@ -367,8 +368,8 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
         "module Top; typedef logic [7:0] byte_t; byte_t a [0:1], b [0:$unpacked_dimensions(a)];",
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
-        let tree =
-            crate::migration::parse_scope_fixture(&code, Path::new("preceding_query.sv")).unwrap();
+        let tree = crate::source_tree::parse_scope_fixture(&code, Path::new("preceding_query.sv"))
+            .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let aliases = type_aliases_from_scope(&tree).unwrap();
         let calls = native_calls(&tree);
@@ -394,7 +395,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
         let tree =
-            crate::migration::parse_scope_fixture(&code, Path::new("array_parameter_query.sv"))
+            crate::source_tree::parse_scope_fixture(&code, Path::new("array_parameter_query.sv"))
                 .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let calls = native_calls(&tree);
@@ -425,7 +426,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
 
 #[test]
 fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         package P;
             typedef logic [7:0] row_t [0:1];
@@ -461,7 +462,7 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
 
 #[test]
 fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
-    let tree = crate::migration::parse_scope_fixture(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top #(parameter logic [255:0] P = '0,
                      parameter logic [3:0] Q = '0)(output int y);

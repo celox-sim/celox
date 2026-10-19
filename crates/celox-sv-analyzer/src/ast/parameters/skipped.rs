@@ -4,7 +4,7 @@ use super::*;
 use celox_sv_syntax::{DimensionKind, ExprId, ExprKind};
 
 fn integer(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> Converted<i128> {
-    native_constants::bind(root, tree, dims)?
+    constant_binding::bind(root, tree, dims)?
         .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env))
         .ok_or_else(|| unsupported("parameter shape expression that is not a known constant"))
 }
@@ -15,7 +15,7 @@ fn bound(
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let value = native_constants::bind(root, tree, dims)?
+    let value = constant_binding::bind(root, tree, dims)?
         .ok_or_else(|| unsupported("parameter selection bound that is not constant"))?;
     if eval_ast_const_expr(&tree.state, &value, &dims.const_env).is_none()
         && !(unknown && selects::const_index_has_unknown_value(&value, dims))
@@ -94,7 +94,7 @@ fn value_name(
     if dims.get(name).is_none()
         && const_functions::is_constant_function(&state.const_functions, name)
     {
-        let (actuals, _) = native_expressions::arguments(name, &[], dims)?;
+        let (actuals, _) = expression_binding::arguments(name, &[], dims)?;
         return const_functions::validate_argument_bindings(
             &state.const_functions,
             name,
@@ -153,7 +153,7 @@ pub(in crate::ast) fn validate(
                 ..
             } => {
                 if separator == "::"
-                    && let Some(name) = native_expressions::native_name(&tree.state, id, native)
+                    && let Some(name) = expression_binding::native_name(&tree.state, id, native)
                 {
                     if names {
                         value_name(&tree.state, &name, query, dims, unavailable)?;
@@ -166,7 +166,7 @@ pub(in crate::ast) fn validate(
                 expression,
                 arguments,
             } => {
-                let name = native_expressions::callable_name(&tree.state, *expression, native)
+                let name = expression_binding::callable_name(&tree.state, *expression, native)
                     .ok_or_else(|| unsupported("function name in parameter operand"))?;
                 if let Some(function) = SystemFunction::from_name(&name) {
                     let args = arguments
@@ -206,7 +206,7 @@ pub(in crate::ast) fn validate(
                             "parameter `{name}` is not in the declaration prefix"
                         )));
                     }
-                    let (actuals, _) = native_expressions::arguments(&name, arguments, dims)?;
+                    let (actuals, _) = expression_binding::arguments(&name, arguments, dims)?;
                     const_functions::validate_argument_bindings(
                         &tree.state.const_functions,
                         &name,
@@ -233,7 +233,7 @@ pub(in crate::ast) fn validate(
                 // concatenation's huge payload remains unevaluated.
                 let mut base = *expression;
                 loop {
-                    base = native_expressions::ungroup(base, native);
+                    base = expression_binding::ungroup(base, native);
                     match native.expression(base).kind {
                         ExprKind::Select { expression, .. }
                         | ExprKind::Member { expression, .. } => base = expression,
@@ -263,7 +263,7 @@ pub(in crate::ast) fn validate(
                 dimension_jobs(&selection.kind, &mut jobs, query);
             }
             ExprKind::Cast { target, expression } => {
-                let cast = native_expressions::cast_target_native(
+                let cast = expression_binding::cast_target_native(
                     *target,
                     *expression,
                     native,
@@ -271,7 +271,7 @@ pub(in crate::ast) fn validate(
                     dims,
                 )?;
                 let shape = if let Some(name) =
-                    native_expressions::native_name(&tree.state, *target, native)
+                    expression_binding::native_name(&tree.state, *target, native)
                     && let Some(ty) = dims.type_aliases.get(&name)
                 {
                     Some(procedural::dimensions_from_type(ty))
@@ -313,13 +313,13 @@ pub(in crate::ast) fn validate(
             } => {
                 if let Some(slice) = slice {
                     let valid = if let ExprKind::Type(ty) = native.expression(*slice).kind {
-                        native_types::bind(ty, tree, dims)?
+                        type_binding::bind(ty, tree, dims)?
                             .and_then(|ty| {
                                 casts::expr_type_from_type(&tree.state, &ty, &dims.const_env)
                             })
                             .is_some_and(|ty| ty.width > 0)
                     } else {
-                        native_types::argument_alias(*slice, native)
+                        type_binding::argument_alias(*slice, native)
                             .and_then(|(name, dimensions)| dimensions.is_empty().then_some(name))
                             .and_then(|name| dims.type_aliases.get(&name))
                             .and_then(|ty| {
@@ -602,7 +602,7 @@ pub(in crate::ast) fn literal_widths(
                 expression,
                 arguments,
             } => {
-                let query = native_expressions::native_name(&tree.state, *expression, native)
+                let query = expression_binding::native_name(&tree.state, *expression, native)
                     .and_then(|name| SystemFunction::from_name(&name))
                     .is_some_and(SystemFunction::is_data_query);
                 for (index, arg) in arguments.iter().enumerate() {
@@ -718,7 +718,7 @@ pub(in crate::ast) fn literal_widths(
                     arguments,
                 } => {
                     if let Some(name) =
-                        native_expressions::native_name(&tree.state, *expression, native)
+                        expression_binding::native_name(&tree.state, *expression, native)
                         && name.starts_with('$')
                     {
                         let args = arguments
@@ -742,7 +742,7 @@ pub(in crate::ast) fn literal_widths(
                     }
                 }
                 ExprKind::Cast { target, expression } => {
-                    native_expressions::cast_target_native(
+                    expression_binding::cast_target_native(
                         *target,
                         *expression,
                         native,
@@ -785,9 +785,9 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                 ),
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                 ExprKind::Name(_) | ExprKind::Member { .. }
-                    if native_expressions::native_name(&tree.state, id, native).is_some() =>
+                    if expression_binding::native_name(&tree.state, id, native).is_some() =>
                 {
-                    let name = native_expressions::native_name(&tree.state, id, native).unwrap();
+                    let name = expression_binding::native_name(&tree.state, id, native).unwrap();
                     values.push(
                         dims.parameter_values
                             .get(&name)
@@ -822,7 +822,7 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                     while let ExprKind::Select { expression, .. } = native.expression(base).kind {
                         base = expression;
                     }
-                    let safe = native_expressions::native_name(&tree.state, base, native)
+                    let safe = expression_binding::native_name(&tree.state, base, native)
                         .is_some_and(|name| {
                             dims.parameter_values
                                 .get(&name)
@@ -834,7 +834,7 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                     values.push(if safe {
                         let mut context = dims.clone();
                         context.constant_indexed_base = true;
-                        native_expressions::bind(id, tree, &context)
+                        expression_binding::bind(id, tree, &context)
                             .ok()
                             .and_then(|value| {
                                 selects::indexed_expression_value(&tree.state, value, &context)
@@ -895,7 +895,7 @@ pub(in crate::ast) fn validate_scope(
     if owner.is_none()
         && !matches!(
             tree.scope_handle(),
-            crate::migration::ScopeHandle::Compilation
+            crate::source_tree::ScopeHandle::Compilation
         )
     {
         for parameter in tree.root_unit()?.parameters.iter().flatten() {
@@ -903,7 +903,7 @@ pub(in crate::ast) fn validate_scope(
         }
     }
     let mut bodies = owner
-        .map_or_else(|| tree.native_body_membership(), |id| Ok(vec![id]))?
+        .map_or_else(|| tree.body_membership(), |id| Ok(vec![id]))?
         .into_iter()
         .rev()
         .map(|id| (id, tree.syntax_tree.clone(), true))
@@ -959,7 +959,7 @@ pub(in crate::ast) fn validate_scope(
                     .map(|id| (*id, scope.clone())),
             ),
             BodyItemKind::Unit(id) => {
-                let scope = scope.scoped(crate::migration::ScopeHandle::Unit(*id))?;
+                let scope = scope.scoped(crate::source_tree::ScopeHandle::Unit(*id))?;
                 let unit = native.unit(*id);
                 for parameter in unit.parameters.iter().flatten() {
                     values.push((parameter.clone(), scope.clone(), false));
@@ -1034,7 +1034,7 @@ pub(in crate::ast) fn needs_selected(
         // Data query operands contribute shape, not constant values. Their
         // operators are validated by the query binder in its type context.
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
-            && native_expressions::native_name(state, expression, native)
+            && expression_binding::native_name(state, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
                 .is_some_and(SystemFunction::is_data_query)
         {
@@ -1048,7 +1048,7 @@ pub(in crate::ast) fn needs_selected(
             } if !matches!(dimension.kind, DimensionKind::Index(_))
                 || matches!(
                     native
-                        .expression(native_expressions::ungroup(*expression, native))
+                        .expression(expression_binding::ungroup(*expression, native))
                         .kind,
                     ExprKind::Select { .. }
                 ) =>
@@ -1071,7 +1071,7 @@ fn validate_operators(
         // Data query operands contribute shape, not constant values. Their
         // operators are validated by the query binder in its type context.
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
-            && native_expressions::native_name(state, expression, native)
+            && expression_binding::native_name(state, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
                 .is_some_and(SystemFunction::is_data_query)
         {
@@ -1095,7 +1095,7 @@ fn validate_operators(
                 return Err(unsupported("reduction operator in parameter expression"));
             }
             if operator == "~"
-                && native_expressions::native_name(state, *expression, native).is_some()
+                && expression_binding::native_name(state, *expression, native).is_some()
             {
                 return Err(unsupported(
                     "width-dependent complement in parameter expression",
@@ -1253,7 +1253,7 @@ fn type_expressions(
 mod tests {
     use super::*;
     fn parse(source: &str) -> SyntaxTree {
-        crate::migration::parse_scope_fixture(source, Path::new("native-skipped.sv")).unwrap()
+        crate::source_tree::parse_scope_fixture(source, Path::new("native-skipped.sv")).unwrap()
     }
     #[test]
     fn skipped_streaming_with_validates_ranges_without_lowering_arrays() {

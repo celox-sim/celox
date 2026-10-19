@@ -12,9 +12,9 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
-mod migration;
 mod parsed;
 pub mod procedural;
+mod source_tree;
 pub mod symbol;
 pub mod syntax;
 pub mod system_functions;
@@ -223,7 +223,7 @@ pub fn generated_time_declarations(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = migration::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
     let warnings = ast::warnings::source(&syntax_tree);
     collecting_warnings(warnings, || {
         if syntax_tree.declarations().all_units().any(|unit| {
@@ -246,7 +246,7 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = migration::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
     let warnings = ast::warnings::source(&syntax_tree);
     collecting_warnings(warnings, || {
         if syntax_tree.declarations().all_units().any(|unit| {
@@ -357,7 +357,7 @@ pub(crate) fn finish_analysis(
 /// Return the module names declared in a SystemVerilog source without
 /// performing semantic lowering of their bodies or port declarations.
 pub fn source_module_names(code: &str, path: &Path) -> Result<Vec<String>, AnalyzerError> {
-    let syntax_tree = migration::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
     ast::Source::module_names_from_syntax(&syntax_tree)
 }
 
@@ -378,7 +378,7 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = migration::parse_source(code, path)?;
+    let syntax_tree = source_tree::parse_source(code, path)?;
     let warnings = ast::warnings::components(&syntax_tree)
         .remove(module_name)
         .unwrap_or_default();

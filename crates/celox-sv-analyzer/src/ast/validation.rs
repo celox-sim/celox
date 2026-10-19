@@ -244,7 +244,7 @@ fn validate_scope(
         && syntax_tree
             .root_unit()
             .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Module);
-    let items = owner.map_or_else(|| syntax_tree.native_body_membership(), |id| Ok(vec![id]))?;
+    let items = owner.map_or_else(|| syntax_tree.body_membership(), |id| Ok(vec![id]))?;
     validate_body_items(&items, native, !is_module)?;
     parameters::skipped::validate_scope(owner, is_module, syntax_tree, indexed_dimensions)?;
     let const_env = &indexed_dimensions.const_env;
@@ -257,17 +257,19 @@ fn validate_scope(
         && let Ok(unit) = syntax_tree.root_unit()
     {
         let start = match syntax_tree.scope_handle() {
-            crate::migration::ScopeHandle::Compilation => unreachable!(),
-            crate::migration::ScopeHandle::SourceUnit(id) => {
+            crate::source_tree::ScopeHandle::Compilation => unreachable!(),
+            crate::source_tree::ScopeHandle::SourceUnit(id) => {
                 native.source_items.iter().find_map(|item| {
                     (item.kind == celox_sv_syntax::SourceItemKind::Unit(id))
                         .then_some(item.tokens.start)
                 })
             }
-            crate::migration::ScopeHandle::Unit(id) => native.body_items.iter().find_map(|item| {
-                matches!(item.kind, BodyItemKind::Unit(owner) if owner == id)
-                    .then_some(item.tokens.start)
-            }),
+            crate::source_tree::ScopeHandle::Unit(id) => {
+                native.body_items.iter().find_map(|item| {
+                    matches!(item.kind, BodyItemKind::Unit(owner) if owner == id)
+                        .then_some(item.tokens.start)
+                })
+            }
         }
         .ok_or_else(|| AnalyzerError::Parse("native root authored owner is absent".into()))?;
         ranges.push(celox_sv_syntax::TokenRange {
@@ -407,7 +409,7 @@ fn validate_scope(
         .filter(|(_, data)| selected(data.tokens))
     {
         if matches!(data.kind, DataTypeKind::Struct { .. })
-            && native_types::bind(id, syntax_tree, indexed_dimensions)?.is_none()
+            && type_binding::bind(id, syntax_tree, indexed_dimensions)?.is_none()
         {
             return Err(unsupported(
                 "unpacked struct, union, or unsupported packed struct member",
@@ -419,7 +421,7 @@ fn validate_scope(
         .iter()
         .flat_map(|instance| instance.parameters.iter().flatten())
         .filter_map(|argument| argument.value)
-        .filter_map(|id| native_types::argument_alias(id, native))
+        .filter_map(|id| type_binding::argument_alias(id, native))
         .filter(|(name, _)| type_aliases.contains_key(name))
         .flat_map(|(_, dimensions)| dimensions)
         .collect::<Vec<_>>();
@@ -434,7 +436,7 @@ fn validate_scope(
             continue;
         };
         for id in [left, right] {
-            if native_constants::expression(id, native, syntax_tree, const_env, type_aliases)?
+            if constant_binding::expression(id, native, syntax_tree, const_env, type_aliases)?
                 .is_none()
             {
                 return Err(unsupported("unsupported packed range"));
@@ -471,7 +473,7 @@ fn validate_scope(
                     if parameter_ranges.iter().any(|range| contains(*range, dimension.tokens)) { continue; }
                     let mut dimensions = indexed_dimensions.clone();
                     dimensions.constant_indexed_base = true;
-                    let value = native_expressions::value(base, native, syntax_tree, &dimensions)?;
+                    let value = expression_binding::value(base, native, syntax_tree, &dimensions)?;
                     selects::indexed_expression_value(&syntax_tree.state, value, &dimensions).ok_or_else(|| unsupported("index expression"))?;
                     check_indexed_width(width, syntax_tree, indexed_dimensions)?;
                 }
@@ -551,7 +553,7 @@ fn validate_scope(
                 .chain(&cast_exclusions)
                 .any(|range| range.start <= at && at < range.end)
         {
-            native_expressions::cast_target_native(
+            expression_binding::cast_target_native(
                 target,
                 operand,
                 native,
@@ -571,10 +573,10 @@ fn validate_scope(
         if let celox_sv_syntax::ExprKind::Call {
             expression: callee, ..
         } = native.expression(root).kind
-            && native_expressions::native_name(&syntax_tree.state, callee, native).as_deref()
+            && expression_binding::native_name(&syntax_tree.state, callee, native).as_deref()
                 == Some("$isunbounded")
         {
-            native_expressions::bind(root, syntax_tree, indexed_dimensions)?;
+            expression_binding::bind(root, syntax_tree, indexed_dimensions)?;
         } else {
             dimensions::query_value(root, syntax_tree, indexed_dimensions)?
                 .ok_or_else(|| unsupported("operand of native type query"))?;
@@ -744,7 +746,7 @@ fn reject_constant_calls(
         else {
             continue;
         };
-        let Some(name) = native_expressions::native_name(&tree.state, *callee, native) else {
+        let Some(name) = expression_binding::native_name(&tree.state, *callee, native) else {
             continue;
         };
         if SystemFunction::from_name(&name).is_some_and(SystemFunction::is_data_query)
@@ -774,7 +776,7 @@ fn reject_constant_calls(
                 expression,
                 arguments,
             } => {
-                let Some(name) = native_expressions::native_name(&tree.state, *expression, native)
+                let Some(name) = expression_binding::native_name(&tree.state, *expression, native)
                 else {
                     continue;
                 };
@@ -849,7 +851,7 @@ fn check_indexed_width(
 ) -> Converted<()> {
     let mut context = dimensions.clone();
     context.constant_indexed_base = true;
-    let value = native_constants::indexed_expression(
+    let value = constant_binding::indexed_expression(
         native,
         syntax_tree.declarations(),
         syntax_tree,
@@ -885,7 +887,7 @@ mod traversal_tests {
             ),
         ] {
             let source = format!("module Top; {body} endmodule");
-            let tree = crate::migration::parse_scope_fixture(
+            let tree = crate::source_tree::parse_scope_fixture(
                 &source,
                 Path::new("native_validation_scopes.sv"),
             )
