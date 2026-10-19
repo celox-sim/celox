@@ -256,6 +256,24 @@ impl<'a> PipelineBuilder<'a> {
         passes
     }
 
+    /// Resumable processes share state with other processes between calls.
+    /// Keep their memory operations and effects in order: simplify only SSA
+    /// values and control flow, without forwarding, coalescing or scheduling
+    /// state accesses. The entry's resume-slot load remains dynamic, so the
+    /// optimizer keeps every possible continuation reachable from the entry.
+    pub(super) fn process(&self) -> ExecutionUnitPassManager {
+        let mut passes = self.manager();
+        if self.on(SirPass::ControlFlowSimplify) {
+            passes.add_pass(ControlFlowSimplifyPass);
+        }
+        if self.on(SirPass::Gvn) {
+            // Reuse the existing GVN cleanup selector without value-numbering
+            // memory loads or applying the comb/FF memory assumptions.
+            passes.add_pass(DeadCodeEliminationPass);
+        }
+        passes
+    }
+
     pub(super) fn combinational(
         &self,
         program: &OptimizationContext<'_>,
