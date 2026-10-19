@@ -39,23 +39,43 @@ pub(super) struct FunctionErrors {
     by_name: HashMap<String, AnalyzerError>,
 }
 
-thread_local! {
-    static FUNCTIONS: RefCell<Arc<ConstantFunctionTable>> = RefCell::new(Arc::default());
-    static LOCALS: RefCell<Arc<HashMap<String, crate::ir::Type>>> = RefCell::new(Arc::default());
-    static ERRORS: RefCell<Arc<FunctionErrors>> = RefCell::new(Arc::default());
-    static DEPTH: Cell<usize> = const { Cell::new(0) };
-    // Reuse signatures without copying every function for each initializer.
-    static ARGUMENT_NAMES: RefCell<(Arc<ConstantFunctionTable>, Arc<HashMap<String, Vec<String>>>)> = RefCell::new((Arc::default(), Arc::default()));
+/// Constant evaluator state owned by one explicit analysis session.
+#[derive(Default)]
+pub(crate) struct State {
+    functions: RefCell<ConstantFunctions>,
+    depth: Cell<usize>,
+    argument_names: RefCell<(
+        Arc<ConstantFunctionTable>,
+        Arc<HashMap<String, Vec<String>>>,
+    )>,
 }
 
-/// Restores the previously installed functions when dropped.
 pub(super) struct Installed {
     previous: ConstantFunctions,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
-        replace(std::mem::take(&mut self.previous));
+        replace(
+            &self.state.const_functions,
+            std::mem::take(&mut self.previous),
+        );
+    }
+}
+
+/// A numeric environment together with the functions visible at its call site.
+pub(crate) struct Environment<'a> {
+    pub(crate) constants: &'a dyn ConstantEnvironment,
+    pub(crate) functions: &'a State,
+}
+
+impl ConstantEnvironment for Environment<'_> {
+    fn get(&self, name: &str) -> Option<&i128> {
+        self.constants.get(name)
+    }
+    fn function_state(&self) -> Option<&State> {
+        Some(self.functions)
     }
 }
 
@@ -70,55 +90,51 @@ pub(super) struct ConstantFunctions {
 }
 
 /// Make `functions` the constant functions until the guard is dropped.
-pub(super) fn install(functions: ConstantFunctions) -> Installed {
-    let previous = installed();
-    replace(functions);
-    Installed { previous }
-}
-
-/// Replace the installed functions; the guard of the enclosing [`install`]
-/// still restores the ones before it.
-pub(super) fn replace(functions: ConstantFunctions) {
-    FUNCTIONS.with(|current| *current.borrow_mut() = functions.functions);
-    LOCALS.with(|current| *current.borrow_mut() = functions.locals);
-    ERRORS.with(|current| *current.borrow_mut() = functions.errors);
-}
-
-pub(super) fn installed() -> ConstantFunctions {
-    ConstantFunctions {
-        functions: FUNCTIONS.with(|current| current.borrow().clone()),
-        locals: LOCALS.with(|current| current.borrow().clone()),
-        errors: ERRORS.with(|current| current.borrow().clone()),
+pub(super) fn install(
+    state: &std::rc::Rc<AnalysisState>,
+    functions: ConstantFunctions,
+) -> Installed {
+    let previous = installed(&state.const_functions);
+    replace(&state.const_functions, functions);
+    Installed {
+        previous,
+        state: state.clone(),
     }
 }
 
-/// Why the function `name` of the installed module could not be converted,
-/// if it could not.
-pub(super) fn conversion_error(name: &str) -> Option<AnalyzerError> {
-    ERRORS.with(|current| {
-        let errors = current.borrow();
-        errors.by_name.get(name).or(errors.all.as_ref()).cloned()
-    })
+pub(super) fn replace(state: &State, functions: ConstantFunctions) {
+    *state.functions.borrow_mut() = functions;
 }
 
-/// Source formal names used to bind named calls in constant syntax.
-pub(super) fn argument_names() -> Arc<HashMap<String, Vec<String>>> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
-    ARGUMENT_NAMES.with(|cached| {
-        let mut cached = cached.borrow_mut();
-        if !Arc::ptr_eq(&cached.0, &functions) {
-            let names = functions
-                .iter()
-                .map(|(name, function)| (name.clone(), function.argument_names.clone()))
-                .collect();
-            *cached = (functions, Arc::new(names));
-        }
-        cached.1.clone()
-    })
+pub(super) fn installed(state: &State) -> ConstantFunctions {
+    state.functions.borrow().clone()
 }
 
-pub(super) fn is_constant_function(name: &str) -> bool {
-    FUNCTIONS.with(|current| current.borrow().contains_key(name))
+pub(super) fn conversion_error(state: &State, name: &str) -> Option<AnalyzerError> {
+    let functions = state.functions.borrow();
+    functions
+        .errors
+        .by_name
+        .get(name)
+        .or(functions.errors.all.as_ref())
+        .cloned()
+}
+
+pub(super) fn argument_names(state: &State) -> Arc<HashMap<String, Vec<String>>> {
+    let functions = state.functions.borrow().functions.clone();
+    let mut cached = state.argument_names.borrow_mut();
+    if !Arc::ptr_eq(&cached.0, &functions) {
+        let names = functions
+            .iter()
+            .map(|(name, function)| (name.clone(), function.argument_names.clone()))
+            .collect();
+        *cached = (functions, Arc::new(names));
+    }
+    cached.1.clone()
+}
+
+pub(super) fn is_constant_function(state: &State, name: &str) -> bool {
+    state.functions.borrow().functions.contains_key(name)
 }
 
 /// The module-scope functions of a module, for constant evaluation. When
@@ -316,7 +332,7 @@ impl ConstantFunctions {
 
 pub(super) fn module_constant_functions(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -333,7 +349,7 @@ pub(super) fn module_constant_functions(
 
 pub(super) fn symbolic_module_constant_functions(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -346,7 +362,7 @@ pub(super) fn symbolic_module_constant_functions(
     {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !generate::root_subroutines_only()
+    let needs_bootstrap = !generate::root_subroutines_only(&tree.state)
         && node.clone().into_iter().any(|child| {
             matches!(
                 child,
@@ -363,7 +379,7 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         );
     }
-    let mut roots = generate::with_root_subroutines(|| {
+    let mut roots = generate::with_root_subroutines(&tree.state, || {
         collect_module_constant_functions(
             node.clone(),
             tree,
@@ -373,8 +389,8 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         )
     });
-    roots.extend_missing(&scope::imported().constant_functions);
-    let _installed = install(roots);
+    roots.extend_missing(&scope::imported(&tree.state).constant_functions);
+    let _installed = install(&tree.state, roots);
     collect_module_constant_functions(
         node,
         tree,
@@ -387,7 +403,7 @@ pub(super) fn symbolic_module_constant_functions(
 
 fn collect_module_constant_functions(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -687,8 +703,12 @@ fn visit_const_callees<'a>(expr: &'a ConstExpr, f: &mut impl FnMut(&'a Callee)) 
 }
 
 /// Fill defaults in the declaration's bound scope; runtime IR keeps its holes.
-pub(super) fn resolved_arguments(callee: &Callee, args: &[Option<Expr>]) -> Option<Vec<Expr>> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+pub(super) fn resolved_arguments(
+    state: &State,
+    callee: &Callee,
+    args: &[Option<Expr>],
+) -> Option<Vec<Expr>> {
+    let functions = state.functions.borrow().functions.clone();
     let Some(function) = callee.subroutine().and_then(|name| functions.get(name)) else {
         return args.iter().cloned().collect();
     };
@@ -706,9 +726,14 @@ pub(super) fn resolved_arguments(callee: &Callee, args: &[Option<Expr>]) -> Opti
 }
 
 /// Check arity and defaults without evaluating any actual argument.
-pub(super) fn validate_argument_bindings(name: &str, present: &[bool]) -> Converted<()> {
-    FUNCTIONS.with(|functions| {
-        let functions = functions.borrow();
+pub(super) fn validate_argument_bindings(
+    state: &State,
+    name: &str,
+    present: &[bool],
+) -> Converted<()> {
+    {
+        let functions = state.functions.borrow();
+        let functions = &functions.functions;
         let Some(function) = functions.get(name) else {
             // The raw syntax validator reports functions that cannot be used
             // in constant expressions, including conversion errors.
@@ -726,11 +751,12 @@ pub(super) fn validate_argument_bindings(name: &str, present: &[bool]) -> Conver
             }
         }
         Ok(())
-    })
+    }
 }
 
 /// A named constant call can be folded only when its body and actuals evaluate.
 pub(super) fn eval_expression_literal(
+    state: &State,
     expr: &Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
@@ -741,7 +767,12 @@ pub(super) fn eval_expression_literal(
     else {
         return None;
     };
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let env = Environment {
+        constants,
+        functions: state,
+    };
+    let constants: &dyn ConstantEnvironment = &env;
+    let functions = state.functions.borrow().functions.clone();
     let (_, ty) = functions.get(name)?.return_var.as_ref()?;
     let width = ty
         .resolved_width()
@@ -767,29 +798,41 @@ pub(crate) fn eval_call(
     args: &[crate::ir::ConstExpr],
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
-    let functions = FUNCTIONS.with(|current| current.borrow().clone());
+    let state = constants.function_state()?;
+    let functions = state.functions.borrow().functions.clone();
     let function = functions.get(name)?;
     let values = args
         .iter()
         .map(|arg| crate::typecheck::eval_const_expr_in_env(arg, constants))
         .collect::<Option<Vec<_>>>()?;
-    let depth = DEPTH.with(Cell::get);
+    let depth = state.depth.get();
     if depth >= MAX_DEPTH {
         return None;
     }
-    DEPTH.with(|current| current.set(depth + 1));
-    let result = call(function, &values, constants);
-    DEPTH.with(|current| current.set(depth));
-    result
+    struct DepthGuard<'a>(&'a Cell<usize>, usize);
+    impl Drop for DepthGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.1);
+        }
+    }
+    state.depth.set(depth + 1);
+    let _depth = DepthGuard(&state.depth, depth);
+    call(function, &values, constants)
 }
 
 /// Preserve the declared result type when freezing a caller's function value.
 pub(super) fn eval_call_literal(
+    state: &State,
     name: &str,
     args: &[crate::ir::ConstExpr],
     constants: &HashMap<String, i128>,
 ) -> Option<typecheck::IntegralLiteral> {
-    let functions = FUNCTIONS.with(|functions| functions.borrow().clone());
+    let env = Environment {
+        constants,
+        functions: state,
+    };
+    let constants: &dyn ConstantEnvironment = &env;
+    let functions = state.functions.borrow().functions.clone();
     let (_, ty) = functions.get(name)?.return_var.as_ref()?;
     let width = ty
         .resolved_width()
@@ -877,6 +920,9 @@ fn fit(value: i128, width: usize, signed: bool) -> i128 {
 }
 
 impl ConstantEnvironment for Frame<'_> {
+    fn function_state(&self) -> Option<&State> {
+        self.constants.function_state()
+    }
     fn get(&self, name: &str) -> Option<&i128> {
         self.values.get(name).or_else(|| self.constants.get(name))
     }
@@ -980,7 +1026,7 @@ impl Frame<'_> {
             }
             Expr::Call { callee, args, .. } => ConstExpr::Function {
                 callee: callee.clone(),
-                args: resolved_arguments(callee, args)?
+                args: resolved_arguments(self.constants.function_state()?, callee, args)?
                     .iter()
                     .map(|arg| self.lower(arg))
                     .collect::<Option<_>>()?,
@@ -1045,7 +1091,14 @@ impl Frame<'_> {
         match lhs {
             LValue::Ident(name) => {
                 if self.type_of(name).is_none() {
-                    let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
+                    let r#type = self
+                        .constants
+                        .function_state()?
+                        .functions
+                        .borrow()
+                        .locals
+                        .get(name)
+                        .cloned()?;
                     self.declare(name, &r#type)?;
                 }
                 self.set(name, value);
@@ -1074,7 +1127,14 @@ impl Frame<'_> {
                 self.assign(lhs, value)?;
             }
             Stmt::Local { name, init } => {
-                let r#type = LOCALS.with(|locals| locals.borrow().get(name).cloned())?;
+                let r#type = self
+                    .constants
+                    .function_state()?
+                    .functions
+                    .borrow()
+                    .locals
+                    .get(name)
+                    .cloned()?;
                 self.declare(name, &r#type)?;
                 let value = match init {
                     Some(init) => self.eval(init)?,

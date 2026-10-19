@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn instances_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
@@ -25,7 +25,7 @@ pub(super) fn instances_from_module_node(
         if let sv_parser::ModuleOrGenerateItem::Module(instance) = node
             && identifier_locate(RefNode::ModuleIdentifier(&instance.nodes.1.nodes.0)).is_some_and(
                 |locate| {
-                    scope::imported()
+                    scope::imported(&syntax_tree.state)
                         .interface_declarations
                         .contains(&locate.offset)
                 },
@@ -49,6 +49,7 @@ pub(super) fn instances_from_module_node(
             for connection in &mut instance.port_connections {
                 if let Some(expr) = &mut connection.actual_expr {
                     *expr = substitute_expr_constants_with_parameter_literals(
+                        &syntax_tree.state,
                         expr.clone(),
                         &item.env,
                         &item.literals,
@@ -65,7 +66,7 @@ pub(super) fn instances_from_module_node(
 fn instances_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
@@ -88,7 +89,7 @@ fn instances_from_module_or_generate_item(
 fn instances_from_module_instantiation(
     instantiation: &sv_parser::ModuleInstantiation,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     interfaces: &InterfaceLookup<'_>,
@@ -116,10 +117,13 @@ fn instances_from_module_instantiation(
                 const_env,
                 &parameter_types_from_const_env(const_env),
             );
-            let value = expr_to_const(substitute_expr_idents(
-                const_expr_to_expr(value),
-                &packed_dimensions.parameter_values,
-            ))
+            let value = expr_to_const(
+                &syntax_tree.state,
+                substitute_expr_idents(
+                    const_expr_to_expr(value),
+                    &packed_dimensions.parameter_values,
+                ),
+            )
             .ok_or_else(|| {
                 AnalyzerError::Unsupported(format!(
                     "constant module parameter override `{}`",
@@ -152,6 +156,7 @@ fn instances_from_module_instantiation(
         for connection in &mut port_connections {
             connection.actual_expr = connection.actual_expr.take().map(|expr| {
                 substitute_expr_constants_with_parameter_literals(
+                    &syntax_tree.state,
                     expr,
                     const_env,
                     &HashMap::default(),
@@ -181,8 +186,8 @@ fn instances_from_module_instantiation(
                         "multidimensional module instance array".to_string(),
                     ));
                 };
-                let left = eval_ast_const_expr(range.left(), const_env);
-                let right = eval_ast_const_expr(range.right(), const_env);
+                let left = eval_ast_const_expr(&syntax_tree.state, range.left(), const_env);
+                let right = eval_ast_const_expr(&syntax_tree.state, range.right(), const_env);
                 let bounds = left
                     .zip(right)
                     .filter(|(left, right)| left.abs_diff(*right) < 4096)
@@ -191,7 +196,7 @@ fn instances_from_module_instantiation(
                     })?;
                 Some(bounds)
             };
-        let imported = scope::imported();
+        let imported = scope::imported(&syntax_tree.state);
         let binding = identifier_locate(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0))
             .and_then(|locate| imported.interface_instances.get(&locate.offset));
         let mut parameter_names = parameter_names.clone();
@@ -221,7 +226,7 @@ fn instances_from_module_instantiation(
 
 pub(super) fn parameter_overrides_from_value_assignment(
     assignment: Option<&sv_parser::ParameterValueAssignment>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     interface: Option<&ModuleInterface>,
     packed_dimensions: &PackedDimensions,
     bind_values: bool,
@@ -289,11 +294,11 @@ pub(super) fn parameter_overrides_from_value_assignment(
 
 pub(super) fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    let imported = scope::imported();
+    let imported = scope::imported(&syntax_tree.state);
     let binding = identifier_locate(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0))
         .and_then(|locate| imported.interface_instances.get(&locate.offset));
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
@@ -419,7 +424,10 @@ pub(super) fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Op
 /// reads `p::` in an expression as a class scope, which is also a package
 /// scope here since classes are not supported. Otherwise it is the first
 /// identifier, as [`identifier_text`] gives.
-pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String> {
+pub(super) fn reference_name(
+    node: RefNode<'_>,
+    syntax_tree: &AnalysisContext<'_>,
+) -> Option<String> {
     if let Some(RefNode::HierarchicalIdentifier(identifier)) =
         unwrap_node!(node.clone(), HierarchicalIdentifier)
         && identifier.nodes.0.is_none()
@@ -440,7 +448,10 @@ pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opt
             RefNode::Identifier(&identifier.nodes.2),
             syntax_tree,
         )?);
-        if let Some(name) = scope::imported().interface_members.get(&path.join(".")) {
+        if let Some(name) = scope::imported(&syntax_tree.state)
+            .interface_members
+            .get(&path.join("."))
+        {
             return Some(name.clone());
         }
     }
@@ -474,7 +485,7 @@ pub(super) fn reference_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opt
                 }
                 let name = identifier_text(child, syntax_tree)?;
                 return Some(match package {
-                    Some(package) => scope::qualified_name(&package, &name),
+                    Some(package) => scope::qualified_name(&syntax_tree.state, &package, &name),
                     None => name,
                 });
             }
@@ -528,7 +539,7 @@ pub(super) fn node_source_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> O
 fn parameter_override(
     name: String,
     expr: &sv_parser::ParamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     bind_values: bool,
 ) -> Result<ParameterOverride, AnalyzerError> {
@@ -551,7 +562,9 @@ fn parameter_override(
                 &packed_dimensions.type_aliases,
             )
         })
-        .and_then(|ty| type_parameters::resolve(ty, &packed_dimensions.const_env))
+        .and_then(|ty| {
+            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+        })
         .ok_or_else(|| AnalyzerError::Unsupported(format!("parameter type override `{name}`")))?;
         return Ok(ParameterOverride::type_override(name, ty));
     }
@@ -601,7 +614,7 @@ fn parameter_override(
             ty.signed_element_depth.map(|depth| depth + 1)
         };
         ty.is_signed = false;
-        let ty = type_parameters::resolve(ty, &packed_dimensions.const_env)
+        let ty = type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
             .ok_or_else(|| unsupported("type parameter packed bounds"))?;
         return Ok(ParameterOverride::type_override(name, ty));
     }
@@ -612,10 +625,12 @@ fn parameter_override(
     if let ConstExpr::Ident(type_name) = &value
         && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
     {
-        let ty = type_parameters::resolve(r#type.clone(), &packed_dimensions.const_env)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported(format!("parameter type override `{name}`"))
-            })?;
+        let ty = type_parameters::resolve(
+            &syntax_tree.state,
+            r#type.clone(),
+            &packed_dimensions.const_env,
+        )
+        .ok_or_else(|| AnalyzerError::Unsupported(format!("parameter type override `{name}`")))?;
         return Ok(ParameterOverride::type_override(name, ty));
     }
     // Native interface instances are analyzed immediately in another scope.
@@ -624,11 +639,10 @@ fn parameter_override(
         && let sv_parser::ParamExpression::MintypmaxExpression(expression) = expr
         && let sv_parser::MintypmaxExpression::Expression(expression) = expression.as_ref()
     {
-        expr_to_const(expr_from_expression_with_types(
-            expression,
-            syntax_tree,
-            packed_dimensions,
-        )?)
+        expr_to_const(
+            &syntax_tree.state,
+            expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?,
+        )
         .ok_or_else(|| unsupported("constant interface parameter override"))?
     } else {
         value

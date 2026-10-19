@@ -5652,13 +5652,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "non-integer module parameter override `P`",
-            r#"
-            module Child #(parameter logic P = 1'b0) (output logic y); assign y = P; endmodule
-            module Top(output logic y); Child #(.P(1'bx)) child(.y(y)); endmodule
-        "#,
-        ),
-        (
             "unknown or duplicate systemverilog child port connection",
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule

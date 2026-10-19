@@ -32,7 +32,7 @@ pub(super) struct ArrayBinding {
 
 pub(super) fn analyze_module(
     declaration: &sv_parser::ModuleDeclarationAnsi,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     path: &Path,
     packages: &packages::Packages,
     bindings: Bindings<'_>,
@@ -73,6 +73,8 @@ pub(super) fn analyze_module(
     if definitions.is_empty() {
         return Ok(None);
     }
+    let context = tree.child(tree, bindings.values);
+    let tree = &context;
     let name = module_name_from_node(RefNode::ModuleDeclarationAnsi(declaration), tree)?;
     let plan = bindings.plan;
     let overrides = bindings.values;
@@ -166,7 +168,8 @@ pub(super) fn analyze_module(
         )?;
         for (dimension, size) in array.shape.iter().enumerate() {
             if let Some(actual) = supplied.get(&format!("{}$$dimension{dimension}", port.name))
-                && eval_ast_const_expr(actual, &array_symbols.const_env) != Some(*size as i128)
+                && eval_ast_const_expr(&tree.state, actual, &array_symbols.const_env)
+                    != Some(*size as i128)
             {
                 return Err(unsupported(format!(
                     "interface array dimension mismatch at `{name}.{}`",
@@ -188,18 +191,19 @@ pub(super) fn analyze_module(
             } else {
                 format!("{}${ordinal}", port.name)
             };
-            let interface = timescales::with_interface_instance(handle, || {
-                interface_ast::analyze(
-                    definition,
-                    definition_tree,
-                    definition_path,
-                    packages,
-                    &values,
-                    &types,
-                    interfaces.extra,
-                    imported.declarations_only,
-                )
-            })?;
+            let interface =
+                timescales::with_interface_instance(&tree.state.timescales, handle, || {
+                    interface_ast::analyze(
+                        definition,
+                        &tree.child(definition_tree, &values),
+                        definition_path,
+                        packages,
+                        &values,
+                        &types,
+                        interfaces.extra,
+                        imported.declarations_only,
+                    )
+                })?;
             let symbols = interface.symbols.as_ref().unwrap();
             let names = binding_names_with_prefix(
                 &interface,
@@ -271,8 +275,8 @@ pub(super) fn analyze_module(
         true,
     )?;
     let mut caller_symbols = caller.symbols.as_ref().unwrap().clone();
-    let _caller_scope = scope::install(Arc::new(caller_symbols.clone()));
-    let _functions = const_functions::install(caller.constant_functions.clone());
+    let _caller_scope = scope::install(&tree.state, Arc::new(caller_symbols.clone()));
+    let _functions = const_functions::install(&tree.state, caller.constant_functions.clone());
     let mut port_assignments = Vec::new();
     let mut pending = instantiations
         .iter()
@@ -300,8 +304,9 @@ pub(super) fn analyze_module(
             generated = true;
             let mut current = caller_symbols.clone();
             current.extend(&imported);
-            let _scope = scope::install(Arc::new(current.clone()));
-            let _functions = const_functions::install(current.constant_functions.clone());
+            let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+            let _functions =
+                const_functions::install(&tree.state, current.constant_functions.clone());
             for item in generate::items(
                 RefNode::ModuleDeclarationAnsi(&view),
                 tree,
@@ -350,8 +355,8 @@ pub(super) fn analyze_module(
                 .const_env
                 .extend(item.env.iter().map(|(name, value)| (name.clone(), *value)));
         }
-        let _scope = scope::install(Arc::new(current.clone()));
-        let _functions = const_functions::install(current.constant_functions.clone());
+        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
         let mut dimensions = packed_dimensions_from_ports_and_signals(
             &current.ports,
             &current.signals,
@@ -442,18 +447,19 @@ pub(super) fn analyze_module(
                     &dimensions,
                     Some(&interface),
                 )?;
-                let mut module = timescales::with_interface_instance(&handle, || {
-                    interface_ast::analyze(
-                        definition,
-                        definition_tree,
-                        definition_path,
-                        packages,
-                        &values,
-                        &types,
-                        interfaces.extra,
-                        imported.declarations_only,
-                    )
-                })?;
+                let mut module =
+                    timescales::with_interface_instance(&tree.state.timescales, &handle, || {
+                        interface_ast::analyze(
+                            definition,
+                            &tree.child(definition_tree, &values),
+                            definition_path,
+                            packages,
+                            &values,
+                            &types,
+                            interfaces.extra,
+                            imported.declarations_only,
+                        )
+                    })?;
                 for port in &module.ports {
                     let signal = Signal {
                         name: port.name.clone(),
@@ -508,8 +514,8 @@ pub(super) fn analyze_module(
     if let Some(plan) = plan {
         let mut current = caller_symbols.clone();
         current.extend(&imported);
-        let _scope = scope::install(Arc::new(current.clone()));
-        let _functions = const_functions::install(current.constant_functions.clone());
+        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
         for item in generate::items(
             RefNode::ModuleDeclarationAnsi(&view),
             tree,
@@ -517,7 +523,7 @@ pub(super) fn analyze_module(
             &current.type_aliases,
         )? {
             let _interface_scope = item.interface_scope();
-            let active_scope = scope::imported();
+            let active_scope = scope::imported(&tree.state);
             let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::Module(instantiation)) =
                 item.node
             else {
@@ -633,7 +639,7 @@ pub(super) fn analyze_module(
                             .parameter_values
                             .get(bound)
                             .cloned()
-                            .and_then(expr_to_const)
+                            .and_then(|expr| expr_to_const(&tree.state, expr))
                             .ok_or_else(|| {
                                 unsupported(format!("interface parameter `{handle}.{parameter}`"))
                             })?;
@@ -1077,7 +1083,7 @@ fn connection_expression<'a>(
 
 pub(super) fn method_call<'a>(
     call: &'a sv_parser::MethodCall,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(String, Option<&'a sv_parser::ListOfArguments>)> {
     let sv_parser::MethodCallRoot::Primary(root) = &call.nodes.0 else {
@@ -1111,7 +1117,7 @@ pub(super) fn method_call<'a>(
     };
     let member = identifier_text(RefNode::MethodIdentifier(identifier), tree)
         .ok_or_else(|| unsupported("interface method name"))?;
-    let name = scope::imported()
+    let name = scope::imported(&tree.state)
         .interface_members
         .get(&format!("{handle}.{member}"))
         .cloned()
@@ -1122,18 +1128,18 @@ pub(super) fn method_call<'a>(
 fn instance_elements(
     handle: &str,
     dimensions: &[sv_parser::UnpackedDimension],
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<ArrayBinding> {
     let ranges = unpacked_ranges_from_dimensions_with_env(dimensions, tree, env, aliases)?;
-    validate_unpacked_dimension_sizes(&ranges, env)?;
+    validate_unpacked_dimension_sizes(&tree.state, &ranges, env)?;
     let mut shape = Vec::new();
     let mut elements = vec![handle.to_string()];
     for range in ranges {
-        let left = eval_ast_const_expr(&range.left, env)
+        let left = eval_ast_const_expr(&tree.state, &range.left, env)
             .ok_or_else(|| unsupported("interface array bound"))?;
-        let right = eval_ast_const_expr(&range.right, env)
+        let right = eval_ast_const_expr(&tree.state, &range.right, env)
             .ok_or_else(|| unsupported("interface array bound"))?;
         let count = usize::try_from(left.abs_diff(right))
             .ok()
@@ -1165,7 +1171,7 @@ fn instance_elements(
 
 fn actual_handle_key(
     expression: &sv_parser::Expression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
@@ -1180,7 +1186,7 @@ fn actual_handle_key(
 
 fn primary_handle_key(
     primary: &sv_parser::PrimaryHierarchical,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
@@ -1192,8 +1198,8 @@ fn primary_handle_key(
     for bit in &primary.nodes.2.nodes.1.nodes.0 {
         let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
         let expression = expr_from_expression_with_types(&bit.nodes.1, tree, &dimensions)?;
-        let value = expr_to_const(expression)
-            .and_then(|value| eval_ast_const_expr(&value, env))
+        let value = expr_to_const(&tree.state, expression)
+            .and_then(|value| eval_ast_const_expr(&tree.state, &value, env))
             .ok_or_else(|| unsupported("nonconstant interface index"))?;
         handle.push_str(&format!("[{value}]"));
     }
