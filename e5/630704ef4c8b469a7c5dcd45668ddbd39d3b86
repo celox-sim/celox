@@ -1,1 +1,6 @@
-Preserve SystemVerilog-enabled VPI CLI defaults introduced by merged #1441 while resolving the project-input conflict.
+Revision history for #1566:
+
+rev 2 (content) 2026-10-19 22:10 UTC — Preserve SystemVerilog-enabled VPI CLI defaults introduced by merged #1441 while resolving the project-input conflict.
+rev 1 (initial) 2026-10-19 22:10 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1566,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"66fb60ef7624b72d2ea4fbb0a673719c4a34ccc5","timestamp_iso":"2026-10-19T22:10:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"66fb60ef7624b72d2ea4fbb0a673719c4a34ccc5","new_sha":"e5630704ef4c8b469a7c5dcd45668ddbd39d3b86","timestamp_iso":"2026-10-19T22:10:30Z","reason":"Preserve SystemVerilog-enabled VPI CLI defaults introduced by merged #1441 while resolving the project-input conflict.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/66fb60ef7624b72d2ea4fbb0a673719c4a34ccc5...e5630704ef4c8b469a7c5dcd45668ddbd39d3b86"}]} -->
