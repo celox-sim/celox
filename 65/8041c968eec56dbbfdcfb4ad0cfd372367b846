@@ -1,0 +1,1 @@
+Rebase onto current master and fix both P1 review findings: merge clock/reset aliases by edge polarity and restrict inferred VPI event identities to canonical sources. Add VPI regressions for mixed roles and downstream deposit/force isolation.
