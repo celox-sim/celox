@@ -305,16 +305,16 @@ struct VpiArgs {
 
 #[derive(Subcommand)]
 enum VpiCommand {
-    /// Compile a Veryl design into a self-contained native simulation executable.
+    /// Compile a Veryl or SystemVerilog design into a native simulation executable.
     Build(BuildArgs),
 }
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Veryl source file belonging to the design project.
+    /// Veryl project source file or standalone SystemVerilog (.sv) file.
     source: PathBuf,
 
-    /// Top-level Veryl module name.
+    /// Top-level module name.
     #[arg(long)]
     top: String,
 
