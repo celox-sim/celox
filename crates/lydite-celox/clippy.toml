@@ -1,2 +1,7 @@
 # lydite is a standalone verifier CLI: Celox's simulator-library rules in the
 # workspace clippy.toml (no env reads, no eprintln, Fx hash maps) do not apply.
+
+# Explicit state ownership also applies to the verifier crates.
+disallowed-macros = [
+    { path = "std::thread_local", reason = "production state must be owned and passed explicitly; only test-local instrumentation may opt out" },
+]
