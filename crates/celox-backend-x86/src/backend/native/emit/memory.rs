@@ -3,13 +3,14 @@
 use super::*;
 
 fn emit_direct_memcopy_chunk(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     src_offset: i32,
     dst_offset: i32,
     bytes: usize,
 ) -> Result<(), IcedError> {
-    let src = mem_operand(BaseReg::SimState, src_offset);
-    let dst = mem_operand(BaseReg::SimState, dst_offset);
+    let context = asm.context;
+    let src = mem_operand(&context, BaseReg::SimState, src_offset);
+    let dst = mem_operand(&context, BaseReg::SimState, dst_offset);
     match bytes {
         16 => {
             asm.movdqu(xmm0, xmmword_ptr(src))?;
@@ -37,15 +38,16 @@ fn emit_direct_memcopy_chunk(
 }
 
 pub(super) fn emit_direct_memcopy(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     src_offset: i32,
     dst_offset: i32,
     byte_len: usize,
     backward: bool,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let scalar_bytes = byte_len % 16;
     if scalar_bytes != 0 {
-        asm.mov(qword_ptr(scratch_operand(0)), rax)?;
+        asm.mov(qword_ptr(scratch_operand(&context, 0)), rax)?;
     }
 
     if backward {
@@ -98,23 +100,36 @@ pub(super) fn emit_direct_memcopy(
     }
 
     if scalar_bytes != 0 {
-        asm.mov(rax, qword_ptr(scratch_operand(0)))?;
+        asm.mov(rax, qword_ptr(scratch_operand(&context, 0)))?;
     }
     Ok(())
 }
 
 pub(super) fn emit_sparse_chunk_copy(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     src_offset: i32,
     dst_offset: i32,
     index: AsmRegister64,
     byte_len: usize,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let mut copied = 0usize;
     for bytes in [8usize, 4, 2, 1] {
         while copied + bytes <= byte_len {
-            let src = mem_operand_indexed(BaseReg::SimState, src_offset + copied as i32, index, 1);
-            let dst = mem_operand_indexed(BaseReg::SimState, dst_offset + copied as i32, index, 1);
+            let src = mem_operand_indexed(
+                &context,
+                BaseReg::SimState,
+                src_offset + copied as i32,
+                index,
+                1,
+            );
+            let dst = mem_operand_indexed(
+                &context,
+                BaseReg::SimState,
+                dst_offset + copied as i32,
+                index,
+                1,
+            );
             match bytes {
                 8 => {
                     asm.mov(rsi, qword_ptr(src))?;
@@ -155,10 +170,11 @@ pub(super) struct SparseDirtyWords {
 /// Take and clear the dirty word indexed by RDX, copy its chunks to stable
 /// storage, and continue at `summary_next`. Uses RDI, RSI, R8 and R9.
 pub(super) fn emit_sparse_dirty_word(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dirty: &SparseDirtyWords,
     summary_next: CodeLabel,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let &SparseDirtyWords {
         src_offset,
         dst_offset,
@@ -174,6 +190,7 @@ pub(super) fn emit_sparse_dirty_word(
     asm.mov(
         r8,
         qword_ptr(mem_operand_indexed(
+            &context,
             BaseReg::SimState,
             dirty_words_offset,
             rdi,
@@ -182,6 +199,7 @@ pub(super) fn emit_sparse_dirty_word(
     )?;
     asm.mov(
         qword_ptr(mem_operand_indexed(
+            &context,
             BaseReg::SimState,
             dirty_words_offset,
             rdi,
@@ -229,7 +247,7 @@ pub(super) fn emit_sparse_dirty_word(
     Ok(())
 }
 
-fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedError> {
+fn emit_sparse_runtime_plane_copy(asm: &mut EmitAssembler) -> Result<(), IcedError> {
     let mut tail = asm.create_label();
     let mut below_four = asm.create_label();
     let mut below_two = asm.create_label();
@@ -272,10 +290,11 @@ fn emit_sparse_runtime_plane_copy(asm: &mut CodeAssembler) -> Result<(), IcedErr
 /// size. R13 holds the captured active bits and RDI is the chunk index; all
 /// scratch registers belong to SparseCommitWorklist's existing clobber set.
 pub(super) fn emit_sparse_inline_commits(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     descriptors: &[u64],
     active_bits_offset: i32,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let Ok(active_start) = u64::try_from(active_bits_offset) else {
         return Ok(());
     };
@@ -350,12 +369,18 @@ pub(super) fn emit_sparse_inline_commits(
         let mask = small.iter().fold(0u64, |mask, (bit, _)| mask | (1 << bit));
         let offset = active_bits_offset + (word_index * 8) as i32;
         let mut word_done = asm.create_label();
-        asm.mov(r13, qword_ptr(mem_operand(BaseReg::SimState, offset)))?;
+        asm.mov(
+            r13,
+            qword_ptr(mem_operand(&context, BaseReg::SimState, offset)),
+        )?;
         asm.mov(rax, mask)?;
         asm.and(r13, rax)?;
         asm.je(word_done)?;
         asm.not(rax)?;
-        asm.and(qword_ptr(mem_operand(BaseReg::SimState, offset)), rax)?;
+        asm.and(
+            qword_ptr(mem_operand(&context, BaseReg::SimState, offset)),
+            rax,
+        )?;
         for (position, &(bit, row)) in small.iter().enumerate() {
             let last = position + 1 == small.len();
             let mut next = if last { word_done } else { asm.create_label() };
@@ -376,14 +401,15 @@ pub(super) fn emit_sparse_inline_commits(
 /// A fixed descriptor whose dirty chunks fit in one word. Bound and mask the
 /// dirty bitmap once, then copy using immediate addresses and plane widths.
 fn emit_sparse_fixed_commit(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     row: &[u64],
     next: CodeLabel,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let bytes = row[2] as usize;
     let planes = if row[7] != 0 { 2 } else { 1 };
-    let summary = qword_ptr(mem_operand(BaseReg::SimState, row[5] as i32));
-    let dirty = qword_ptr(mem_operand(BaseReg::SimState, row[3] as i32));
+    let summary = qword_ptr(mem_operand(&context, BaseReg::SimState, row[5] as i32));
+    let dirty = qword_ptr(mem_operand(&context, BaseReg::SimState, row[3] as i32));
     if bytes <= 8 {
         // The generic single-chunk path visits any nonempty dirty word, even
         // if restored metadata has a missing summary bit or dirty padding.
@@ -454,7 +480,7 @@ fn emit_sparse_fixed_commit(
 }
 
 pub(super) fn emit_sparse_commit_worklist(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     descriptor_label: CodeLabel,
     active_bits_offset: i32,
     active_capacity: usize,
