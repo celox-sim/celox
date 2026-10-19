@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local instrumentation exists only in unit tests; non-test library builds enforce the ban"
+    )
+)]
 //! Self-contained AArch64 code-generation backend.
 //!
 //! Production code lowers source-independent SIR directly into AArch64-owned

@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local instrumentation exists only in unit tests; non-test library builds enforce the ban"
+    )
+)]
 mod backend;
 #[cfg(all(feature = "arm64-codegen", feature = "x86_64-codegen"))]
 compile_error!("arm64-codegen and x86_64-codegen cannot be enabled together");
