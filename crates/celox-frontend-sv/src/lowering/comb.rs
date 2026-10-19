@@ -1916,20 +1916,28 @@ impl<'p, 'a> Comb<'p, 'a> {
             sv::ir::Stmt::SystemTask {
                 task: sv::ir::SystemTask::Readmem(format),
                 args,
+                site,
             } => {
-                self.readmem(&mut store, frames, *format, args)?;
+                self.readmem(&mut store, frames, *format, args, site.as_ref())?;
                 Ok(store)
             }
             // IEEE 1800-2023 24.7: `$exit` outside a program block is
-            // ignored.
+            // ignored, with a warning.
             sv::ir::Stmt::SystemTask {
                 task: sv::ir::SystemTask::Exit,
+                site,
                 ..
-            } => Ok(store),
+            } => {
+                self.m.warn(
+                    crate::FrontendWarningKind::ExitOutsideProgram,
+                    site.as_ref(),
+                );
+                Ok(store)
+            }
             sv::ir::Stmt::SystemTask { task, .. } if self.initial => Err(unsupported(format!(
                 "system task `{task}` inside an initial block"
             ))),
-            sv::ir::Stmt::SystemTask { task, args } => {
+            sv::ir::Stmt::SystemTask { task, args, .. } => {
                 self.system_task(&mut store, frames, *task, args)?;
                 Ok(store)
             }
@@ -3031,6 +3039,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format);
         let mut addresses = [None, None];
@@ -3057,7 +3066,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         if self.path_condition()?.is_some() {
             return Err(unsupported(format!("`{name}` under a run-time condition")));
         }
-        let (id, words) = self.m.readmem(format, args, addresses[0], addresses[1])?;
+        let (id, words) = self
+            .m
+            .readmem(format, args, addresses[0], addresses[1], site)?;
         for word in words {
             let width = word.access.msb - word.access.lsb + 1;
             let node = self.alloc(SLTNode::Constant(word.value, word.mask, width, false))?;

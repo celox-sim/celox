@@ -214,12 +214,37 @@ pub struct InterfaceSignature {
 pub fn interface_signatures(
     sources: &[(&str, &Path)],
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    interface_signatures_for(sources, None)
+    interface_signatures_for(sources, None, &mut Vec::new())
 }
 
+/// The signatures of the interfaces in `names`, or of every interface.
+/// Lowering an interface for its signature reports its warnings in
+/// `warnings`; lowering the design reports them again.
 pub fn interface_signatures_for(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    let mut found = Vec::new();
+    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    append_error_warnings(&signatures, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    signatures
+}
+
+fn append_error_warnings<T>(
+    result: &Result<T, FrontendError>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    if let Err(FrontendError::Analyzer(error)) = result {
+        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
+    }
+}
+
+fn interface_signatures_collecting(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let prototypes = sv::interface_prototypes_for(sources, names)?;
     if prototypes.is_empty() {
@@ -228,7 +253,8 @@ pub fn interface_signatures_for(
     prototypes
         .into_iter()
         .map(|prototype| {
-            let lowered = lower_module(&prototype.module, false, true, false)?;
+            warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
+            let lowered = lower_module(&prototype.module, false, true, false, warnings)?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -698,6 +724,19 @@ fn validate_net_driver_ranges(
     Ok(())
 }
 
+/// Report the warnings of analyzing the packages the modules share, before
+/// lowering a module can fail.
+fn package_warnings(
+    analyzed: &HashMap<String, AnalyzedSvModule>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    if let Some(module) = analyzed.values().next() {
+        warnings.extend(crate::warning::analyzer_warnings(
+            module.packages.warnings(),
+        ));
+    }
+}
+
 /// The packages that declare variables, lowered as the modules of their one
 /// instance each, numbered from `first`.
 fn lower_package_states(
@@ -705,6 +744,7 @@ fn lower_package_states(
     first: usize,
     four_state: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let mut states = packages.state_modules().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
@@ -712,7 +752,7 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let mut lowered = lower_module(module, four_state, true, ff_parts)?;
+            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings)?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1142,6 +1182,7 @@ pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign(
         sources,
@@ -1149,6 +1190,7 @@ pub fn prepare_external_hierarchy(
         &ExternalHierarchy::default(),
         &[],
         four_state,
+        warnings,
     )
 }
 
@@ -1160,6 +1202,7 @@ pub fn prepare_external_hierarchy_with_foreign(
     foreign: &ExternalHierarchy,
     declarations: &[(&str, &Path)],
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign_resolver(
         sources,
@@ -1170,14 +1213,46 @@ pub fn prepare_external_hierarchy_with_foreign(
         None,
         None,
         &[],
+        warnings,
     )
 }
 
 pub type ForeignModuleResolver<'a> =
     dyn FnMut(&str, &[(String, SvParameterValue)]) -> Result<ExternalModule, ParserError> + 'a;
 
+/// Appends the warnings of the lowered modules to `warnings`, also when
+/// lowering fails after them.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_external_hierarchy_with_foreign_resolver(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ExternalHierarchy, FrontendError> {
+    let mut found = Vec::new();
+    let hierarchy = prepare_external_hierarchy_collecting(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        &mut found,
+    );
+    append_error_warnings(&hierarchy, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    hierarchy
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_external_hierarchy_collecting(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     foreign: &ExternalHierarchy,
@@ -1186,6 +1261,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     mut resolver: Option<&mut ForeignModuleResolver<'_>>,
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1194,6 +1270,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
     )?;
+    package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -1388,7 +1465,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false)?;
+        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name)
@@ -1423,7 +1500,10 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            Ok((module_id, specialize_module(base, key, four_state, false)?))
+            Ok((
+                module_id,
+                specialize_module(base, key, four_state, false, warnings)?,
+            ))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
@@ -1450,6 +1530,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         modules.insert(
             module_id,
@@ -1482,8 +1563,13 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             packages: Vec::new(),
         });
     };
-    let package_states =
-        lower_package_states(&any_module.packages, module_ids.len(), four_state, false)?;
+    let package_states = lower_package_states(
+        &any_module.packages,
+        module_ids.len(),
+        four_state,
+        false,
+        warnings,
+    )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.
     let mut sim_modules: HashMap<ModuleId, SimModule> = modules
@@ -1564,8 +1650,48 @@ pub fn schedule_sources(
     parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let mut found = Vec::new();
+    let scheduled = schedule_sources_collecting(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        &mut found,
+    );
+    append_error_warnings(&scheduled, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    scheduled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_sources_collecting(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources, &[top])?;
+    package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -1596,7 +1722,7 @@ pub fn schedule_sources(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false)?;
+        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -1623,7 +1749,7 @@ pub fn schedule_sources(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let lowered = specialize_module(base, key, four_state, parallel.enabled())
+            let lowered = specialize_module(base, key, four_state, parallel.enabled(), warnings)
                 .map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
@@ -1658,6 +1784,7 @@ pub fn schedule_sources(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         module_names.insert(module_id, key.name.clone());
         modules.insert(module_id, sim_module);
@@ -1668,6 +1795,7 @@ pub fn schedule_sources(
         module_ids.len(),
         four_state,
         parallel.enabled(),
+        warnings,
     )?;
     validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
     let mut packages = Vec::new();
@@ -1757,6 +1885,7 @@ fn specialize_module(
     key: &LoweredSvModuleKey,
     four_state: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     // Type bindings are already resolved in the caller scope.
@@ -1770,14 +1899,19 @@ fn specialize_module(
         .iter()
         .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_pattern.clone()?)))
         .collect();
-    let ir = module.source.analyze_module(
+    let analyzed = module.source.analyze_module(
         &module.name,
         &overrides,
         &type_overrides,
         &pattern_overrides,
         &module.interfaces,
         &module.packages,
-    )?;
+    );
+    if let Err(error) = &analyzed {
+        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
+    }
+    let ir = analyzed?;
+    warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
     let specialized = ir
         .modules()
         .iter()
@@ -1788,6 +1922,7 @@ fn specialize_module(
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
+        warnings,
     )?;
     lowered.sim_module.time_precision = Some(
         celox_design::TimePrecision::try_from(module.packages.global_time_precision())
@@ -1819,8 +1954,16 @@ fn lower_module(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed, ff_parts)
+    lower_module_with_overrides(
+        module,
+        &[],
+        four_state,
+        implicit_nets_allowed,
+        ff_parts,
+        warnings,
+    )
 }
 
 /// `ff_parts` additionally keeps every `always_ff` process as an
@@ -1831,6 +1974,7 @@ fn lower_module_with_overrides(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
@@ -1983,6 +2127,7 @@ fn lower_module_with_overrides(
             &constants,
             &parameter_types,
             four_state,
+            warnings,
         );
         let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
         (
@@ -2003,6 +2148,7 @@ fn lower_module_with_overrides(
         &mut runtime_event_sites,
         &mut runtime_errors,
         &mut extern_functions,
+        warnings,
     )?;
     initial_memory_values.extend(initial_values);
 
@@ -2371,6 +2517,7 @@ pub(crate) fn attach_instance_glue(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -2443,6 +2590,7 @@ pub(crate) fn attach_instance_glue(
             &lowered.constants,
             &lowered.parameter_types,
             four_state,
+            warnings,
         );
         for (_, _, child, connections) in &mut resolved_instances {
             for connection in connections {
@@ -2497,6 +2645,7 @@ pub(crate) fn attach_instance_glue(
         four_state,
         &mut module.runtime_errors,
         &mut module.extern_functions,
+        warnings,
     )
     .map_err(|error| match error {
         sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -2820,6 +2969,7 @@ fn lower_initial_processes(
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<
     (
         Vec<InitialStateValue<SourceVarId>>,
@@ -2841,6 +2991,7 @@ fn lower_initial_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
@@ -2934,6 +3085,7 @@ fn lower_initial_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     pm.runtime_event_sites = std::mem::take(runtime_event_sites);
     pm.runtime_errors = std::mem::take(runtime_errors);
@@ -2974,6 +3126,7 @@ fn lower_comb_processes(
     four_state: bool,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -2995,6 +3148,7 @@ fn lower_comb_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);

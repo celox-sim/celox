@@ -2,8 +2,9 @@
 
 use crate::{ast, symbol::ModuleId, typecheck};
 
+pub use crate::ast::warnings::AnalyzerWarning;
 pub use crate::procedural::{
-    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, StmtBase, SystemTaskArg,
+    CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
@@ -20,15 +21,35 @@ pub type SubroutineParam = crate::procedural::SubroutineParamBase<Expr, Type>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ir {
     modules: Vec<Module>,
+    warnings: Vec<AnalyzerWarning>,
 }
 
 impl Ir {
     pub(crate) fn new(modules: Vec<Module>) -> Self {
-        Self { modules }
+        Self {
+            modules,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Merge warnings from nested analyses, reporting each source call once.
+    pub(crate) fn with_warnings(mut self, warnings: Vec<AnalyzerWarning>) -> Self {
+        for warning in warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self
     }
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    /// Source diagnostics of the analyzed declarations, including functions
+    /// whose bodies disappear during constant elaboration.
+    pub fn warnings(&self) -> &[AnalyzerWarning] {
+        &self.warnings
     }
 }
 

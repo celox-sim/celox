@@ -593,6 +593,7 @@ pub fn parse_sv(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
@@ -606,6 +607,7 @@ pub fn parse_sv(
         &crate::optimizer::parallel_schedule_options(optimize_options),
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
+        warnings,
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
@@ -633,8 +635,8 @@ pub fn parse_sv(
 /// support stays unsupported, and anything else is an error in the source.
 #[cfg(feature = "systemverilog")]
 pub(crate) fn sv_analysis_error(error: celox_frontend_sv::AnalyzerError) -> ParserError {
-    match error {
-        celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
+    match error.into_error() {
+        error @ celox_frontend_sv::AnalyzerError::Unsupported(_) => ParserError::unsupported(
             error.tracking_issue(),
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
@@ -682,6 +684,7 @@ pub fn parse_mixed(
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
+    sv_warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -726,7 +729,12 @@ pub fn parse_mixed(
     // A native specialization can introduce further SV specializations and
     // interface behavior. Analyze the expanded requests until every alternating
     // language boundary has been prepared; cache native elaboration by key.
+    // Each pass lowers every SV module again, so a successful pass replaces
+    // the warnings of the previous one. A failing pass may stop before the
+    // modules that warned, so its warnings join the previous pass's.
+    let mut pass_warnings = Vec::new();
     let external = loop {
+        let mut warnings = Vec::new();
         let borrowed_sources = sources
             .iter()
             .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -819,12 +827,26 @@ pub fn parse_mixed(
             Some(&mut resolver),
             sv_top_parameters,
             &requests,
-        )
-        .map_err(|error| match error {
-            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-            celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
-        })?;
+            &mut warnings,
+        );
+        let external = match external {
+            Ok(external) => external,
+            Err(error) => {
+                for warning in warnings {
+                    if !pass_warnings.contains(&warning) {
+                        pass_warnings.push(warning);
+                    }
+                }
+                sv_warnings.extend(pass_warnings);
+                return Err(match error {
+                    celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+                    celox_frontend_sv::FrontendError::Analyzer(error) => sv_analysis_error(error),
+                });
+            }
+        };
+        pass_warnings = warnings;
         if pending_sources.is_empty() && pending_requests.is_empty() {
+            sv_warnings.extend(pass_warnings);
             break external;
         }
         external_roots.extend(pending_roots);

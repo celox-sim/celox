@@ -64,6 +64,7 @@ mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
+pub(crate) mod warnings;
 
 use array_compatibility::{
     check_unpacked_array_assignment, net_lvalue_unpacked_shape, selected_unpacked_shape,
@@ -418,6 +419,14 @@ impl Source {
 
     pub fn modules(&self) -> &[Module] {
         &self.modules
+    }
+
+    pub(crate) fn warnings(&self) -> Vec<warnings::AnalyzerWarning> {
+        let mut warnings = Vec::new();
+        for module in &self.modules {
+            warnings::append(&mut warnings, module.constant_functions.warnings());
+        }
+        warnings
     }
 }
 

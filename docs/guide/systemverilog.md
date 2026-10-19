@@ -320,7 +320,10 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   interactive mode, such as the VPI host, end the run at `$stop`.
 - **`$exit`** ends the initial procedures of the program block that calls it
   (24.7). Celox has no program blocks, and a call from anywhere else is
-  ignored, as 24.7 specifies.
+  ignored, as 24.7 specifies, with a compilation warning
+  (`Simulator::warnings()`) at the call. This includes a call in a constant
+  function. Calls in function declarations are diagnosed even when the function
+  is unused; the diagnostic does not depend on constant evaluation executing it.
 - **Immediate cover** executes its pass statement when the condition is true.
   Coverage counters and reports are not exposed. Deferred cover (`#0` / `final`)
   is rejected because its scheduling is not modeled.
@@ -330,8 +333,9 @@ imports, task imports, exports, packed vector arguments (`svBitVecVal` /
   words are written on every activation; in `initial` they are part of the
   initial state. Explicit ranges load in either direction, and `@` file addresses
   are absolute array indices. An address directive outside the requested range
-  is an error. Without directives, a word-count mismatch emits a warning:
-  excess words are ignored, and missing words leave memory unchanged.
+  is an error. Without directives, a word-count mismatch is a compilation
+  warning (`Simulator::warnings()`): excess words are ignored, and missing words
+  leave memory unchanged.
 - **Constant parameters of aggregate type** (unpacked arrays, packed structs
   given by a pattern) are variables that hold their value from the start of
   the simulation; they cannot be used where an elaboration-time constant is

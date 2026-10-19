@@ -38,6 +38,12 @@ pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchem
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
+/// Warnings of the SystemVerilog frontend, in [`CompilationWarning::SystemVerilog`].
+#[cfg(feature = "systemverilog")]
+pub use celox_frontend_sv::{
+    FrontendWarning as SvFrontendWarning, FrontendWarningKind as SvFrontendWarningKind,
+    WarningLocation as SvWarningLocation,
+};
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     BaselineRecord, DesignReflection, NbaRecord, ProcessRecord, ReflectionScope, ReflectionScopeId,

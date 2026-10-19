@@ -5319,3 +5319,156 @@ fn native_interface_bindings_reject_enum_constant_collisions() {
         "{error}"
     );
 }
+
+#[test]
+fn public_analyses_report_constant_function_exit_warnings() {
+    let exit_sites = |ir: &Ir| {
+        ir.warnings()
+            .iter()
+            .map(|warning| match warning {
+                ir::AnalyzerWarning::ExitOutsideProgram { site } => {
+                    let site = site.as_ref().unwrap();
+                    (site.path.clone(), site.start)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let module = "module Top(output int y);
+        function automatic int f(); $exit; return 1; endfunction
+        localparam int N = f();
+        assign y = N;
+    endmodule";
+    let path = Path::new("exit.sv");
+    let expected = vec![(path.to_path_buf(), module.find("$exit").unwrap())];
+    let overrides = HashMap::default();
+    assert_eq!(exit_sites(&analyze_source(module, path).unwrap()), expected);
+    assert_eq!(
+        exit_sites(
+            &analyze_source_with_module_parameter_overrides(module, path, "Top", &overrides)
+                .unwrap()
+        ),
+        expected
+    );
+    assert_eq!(
+        exit_sites(
+            &analyze_source_module_with_parameter_overrides(module, path, "Top", &overrides)
+                .unwrap()
+        ),
+        expected
+    );
+    // A source with an interface is analyzed module by module.
+    let with_interface = format!("interface Bus; logic x; endinterface\n{module}");
+    assert_eq!(
+        exit_sites(&analyze_source(&with_interface, path).unwrap()),
+        vec![(path.to_path_buf(), with_interface.find("$exit").unwrap())]
+    );
+}
+
+#[test]
+fn interface_prototypes_include_package_warnings() {
+    let source = r#"package P;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+    endpackage
+    interface Bus;
+        logic [P::W-1:0] req;
+    endinterface"#;
+    let prototypes = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    assert_eq!(prototypes.len(), 1);
+    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] =
+        prototypes[0].warnings.as_slice()
+    else {
+        panic!("unexpected warnings: {:?}", prototypes[0].warnings);
+    };
+    assert_eq!(site.path, Path::new("bus.sv"));
+    assert_eq!(site.start, source.find("$exit").unwrap());
+}
+
+#[test]
+fn declaration_warnings_are_owned_by_failed_analyses() {
+    let source = r#"module Top(output int y);
+        function automatic int f(); $exit; return 2; endfunction
+        localparam int N = f();
+        always_comb y <= N;
+    endmodule"#;
+    let error = analyze_source(source, Path::new("failed.sv")).unwrap_err();
+    assert_eq!(error.warnings().len(), 1);
+    let clean = analyze_source("module Clean; endmodule", Path::new("clean.sv")).unwrap();
+    assert!(clean.warnings().is_empty());
+    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] = error.warnings() else {
+        panic!("{error:?}");
+    };
+    assert_eq!(site.path, Path::new("failed.sv"));
+    assert_eq!(site.start, source.find("$exit").unwrap());
+    assert_eq!(error.tracking_issue(), 453);
+    assert!(matches!(error.into_error(), AnalyzerError::Unsupported(_)));
+}
+
+#[test]
+fn declaration_warnings_are_scoped_to_the_analyzed_module() {
+    let source = r#"module Warn;
+        function automatic int unused(); $exit; return 1; endfunction
+    endmodule
+    module Clean; endmodule"#;
+    let parsed = ParsedSource::parse(source, Path::new("modules.sv")).unwrap();
+    let packages = ParsedSource::analyze_packages(&[&parsed]).unwrap();
+    let analyze = |name| {
+        parsed
+            .analyze_module(
+                name,
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap()
+    };
+    assert_eq!(analyze("Warn").warnings().len(), 1);
+    assert!(analyze("Clean").warnings().is_empty());
+    assert_eq!(analyze("Warn").warnings().len(), 1);
+}
+
+#[test]
+fn program_functions_do_not_report_outside_program_warnings() {
+    let source = "program P; function automatic int f(); $exit; return 1; endfunction endprogram";
+    let result = analyze_source(source, Path::new("program.sv"));
+    match result {
+        Ok(ir) => assert!(ir.warnings().is_empty()),
+        Err(error) => assert!(error.warnings().is_empty()),
+    }
+}
+
+#[test]
+fn package_errors_own_their_declaration_warnings() {
+    let source = r#"package P;
+        function automatic int f(); $exit; return 1; endfunction
+        localparam int N = f();
+        localparam int BAD = missing();
+    endpackage"#;
+    let path = Path::new("failed-package.sv");
+    let tree = crate::syntax::parse_source(source, path).unwrap();
+    let error = Packages::analyze(&[(&tree, path)]).unwrap_err();
+    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] = error.warnings() else {
+        panic!("{error:?}");
+    };
+    assert_eq!(site.path, path);
+    assert_eq!(site.start, source.find("$exit").unwrap());
+    assert!(std::error::Error::source(&error).is_some());
+    assert!(matches!(error.into_error(), AnalyzerError::Unsupported(_)));
+}
+
+#[test]
+fn interface_shape_errors_keep_owned_function_warnings() {
+    let source = r#"interface Bus;
+        function automatic int unused(); $exit; return 1; endfunction
+        logic req;
+        logic req;
+    endinterface"#;
+    let error = interface_prototypes(&[(source, Path::new("duplicate.sv"))]).unwrap_err();
+    assert_eq!(error.warnings().len(), 1);
+    assert!(matches!(
+        error.into_error(),
+        AnalyzerError::DuplicateInterfaceItem { .. }
+    ));
+}
