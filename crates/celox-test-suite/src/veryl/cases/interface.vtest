@@ -1392,3 +1392,116 @@ module Top (
   (assert_eq o 42)
   (modify (set x 3) (set y 5))
   (assert_eq o 0xFE))
+
+(case test_parameterized_interface_header_imports
+  (source "header_imports.veryl" #"
+package Widths {
+    const DEFAULT: u32 = 8;
+}
+"#)
+  (source "interface.veryl" #"
+import Widths::*;
+interface Bus #(param WIDTH: u32 = DEFAULT) {
+    var data: logic<WIDTH>;
+    modport reader { data: input, }
+}
+"#)
+  (source "top.veryl" #"
+module Reader (bus: modport Bus::reader, y: output logic<16>) {
+    assign y = bus.data;
+}
+module Top (x: input logic<16>, narrow: output logic<16>, wide: output logic<16>) {
+    inst a: Bus;
+    inst b: Bus #(WIDTH: 12);
+    assign a.data = x;
+    assign b.data = x;
+    inst ra: Reader (bus: a, y: narrow);
+    inst rb: Reader (bus: b, y: wide);
+}
+"#)
+  (top Top)
+  (for value (list 0 0xABCD 0xFFFF)
+    (modify (set x value))
+    (assert_eq narrow (trunc 8 value))
+    (assert_eq wide (trunc 12 value))))
+
+(case test_interface_array_direct_function_calls
+  (source "array_functions.veryl" #"
+interface Scale {
+    var base: logic<8>;
+    function scaled (x: input logic<8>) -> logic<8> {
+        return base * x;
+    }
+    modport reader { scaled: import, }
+}
+module Top (x: input logic<8>, y0: output logic<8>, y1: output logic<8>) {
+    inst lanes: Scale [2];
+    assign lanes[0].base = 3;
+    assign lanes[1].base = 7;
+    assign y0 = lanes[0].scaled(x);
+    var values: logic<8> [2];
+    for i in 0..2: calls {
+        assign values[i] = lanes[i].scaled(x);
+    }
+    assign y1 = values[1];
+}
+"#)
+  (top Top)
+  (for value (list 0 20 255)
+    (modify (set x value))
+    (assert_eq y0 (trunc 8 (* value 3)))
+    (assert_eq y1 (trunc 8 (* value 7)))))
+
+(case test_interface_type_parameter
+  (source "type_parameter.veryl" #"
+interface Bus #(param T: type = logic<8>) {
+    var data: T;
+    modport reader { data: input, }
+}
+module Reader (bus: modport Bus::reader, y: output logic<16>) {
+    assign y = bus.data;
+}
+module Relay (bus: modport Bus::reader, y: output logic<16>) {
+    inst r: Reader (bus, y);
+}
+module Top (x: input logic<16>, y: output logic<16>, default_y: output logic<16>) {
+    inst a: Bus #(T: logic<12>);
+    inst b: Bus;
+    assign a.data = x;
+    assign b.data = x;
+    inst r: Relay (bus: a, y);
+    inst d: Relay (bus: b, y: default_y);
+}
+"#)
+  (top Top)
+  (modify (set x 0xABCD))
+  (assert_eq y 0xBCD)
+  (assert_eq default_y 0xCD))
+
+(case test_nested_interface_instance
+  (source "interface_instance.veryl" #"
+interface Lane #(param WIDTH: u32 = 8) {
+    var data: logic<WIDTH>;
+    modport reader { data: input, }
+}
+interface Bus #(param WIDTH: u32 = 8) {
+    var data: logic<WIDTH>;
+    var result: logic<WIDTH>;
+    inst child: Lane #(WIDTH: WIDTH);
+    assign child.data = data;
+    assign result = child.data;
+}
+module Top (x: input logic<16>, y8: output logic<16>, y12: output logic<16>) {
+    inst a: Bus;
+    inst b: Bus #(WIDTH: 12);
+    assign a.data = x;
+    assign b.data = x;
+    assign y8 = a.result;
+    assign y12 = b.result;
+}
+"#)
+  (top Top)
+  (for value (list 0 0xABCD 0xFFFF)
+    (modify (set x value))
+    (assert_eq y8 (trunc 8 value))
+    (assert_eq y12 (trunc 12 value))))
