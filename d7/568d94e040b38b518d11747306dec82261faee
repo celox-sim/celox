@@ -1,1 +1,1 @@
-Address review: preserve compilation warnings in test-runner errors and deduplicate parameterized readmem diagnostics by source site; add regressions and track probe-warning provenance investigation in #1512.
+Fix queue-only unused-mut compilation failure in foreign-codegen configurations by transferring immutable warnings only in the image-loader error branch; validate mirrored cross-codegen and native image integration.
