@@ -9,7 +9,7 @@
     };
     rust-overlay = {
       # Pin the revision explicitly so Renovate can group overlay and Rust updates.
-      url = "github:oxalica/rust-overlay/42076d1c6a0fb405ed04f9a674e4a8f69de62ba3";
+      url = "github:oxalica/rust-overlay/550547cefc67e01a6fd11a09e4096a3c844ca840";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
