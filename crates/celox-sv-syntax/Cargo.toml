@@ -1,0 +1,16 @@
+[package]
+name = "celox-sv-syntax"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Source-aware SystemVerilog lexical analysis and preprocessing for Celox"
+
+[dependencies]
+fxhash.workspace = true
+
+[lints]
+workspace = true
