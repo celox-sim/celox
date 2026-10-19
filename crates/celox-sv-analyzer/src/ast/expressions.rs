@@ -583,7 +583,8 @@ pub(super) fn expr_from_subroutine_call(
             expr_from_tf_call(call, syntax_tree, packed_dimensions)
         }
         sv_parser::SubroutineCall::MethodCall(call) => {
-            let (name, arguments) = native_interfaces::method_call(call, syntax_tree)?;
+            let (name, arguments) =
+                native_interfaces::method_call(call, syntax_tree, packed_dimensions)?;
             expr_from_named_call(name, arguments, syntax_tree, packed_dimensions)
         }
         sv_parser::SubroutineCall::Randomize(_) => Err(unsupported("randomize call")),

@@ -445,3 +445,11 @@ Verilator user coverage so pass actions execute; this adds no coverage-report
 contract to Celox. The readmem corroboration passes Icarus, which warns for
 both short and long files. Verilator 5.052 aborts on the negative-index memory
 in that reproducer; it is not counted as a successful comparison.
+
+### Icarus nested interfaces
+
+Icarus 13.0 reports `Module instantiations are not allowed in interfaces` for
+`interface::test_nested_interface_instance`, whose instantiated target is an
+interface. Verilator 5.052 executes the same emitted Veryl design successfully.
+The [retained diagnostic](verification/repros/interface_nested_icarus.json)
+records this compile limitation.

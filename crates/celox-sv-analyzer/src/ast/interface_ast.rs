@@ -2,6 +2,24 @@
 //! locations; no generated SystemVerilog is parsed to collect an interface.
 use super::*;
 
+type ActiveInstance = (
+    std::path::PathBuf,
+    String,
+    HashMap<String, ConstExpr>,
+    Vec<(String, Type)>,
+);
+thread_local! {
+    static ACTIVE_INSTANCES: std::cell::RefCell<Vec<ActiveInstance>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+struct InstanceGuard;
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        ACTIVE_INSTANCES.with(|instances| {
+            instances.borrow_mut().pop();
+        });
+    }
+}
+
 pub(super) fn module_view(
     interface: &sv_parser::InterfaceDeclarationAnsi,
 ) -> Converted<sv_parser::ModuleDeclarationAnsi> {
@@ -71,6 +89,25 @@ fn module_item(
     let sv_parser::InterfaceOrGenerateItem::Module(item) = item else {
         return Err(unsupported("extern subroutine in interface"));
     };
+    if let sv_parser::ModuleCommonItem::InterfaceInstantiation(instance) = &item.nodes.1 {
+        return Ok(sv_parser::ModuleOrGenerateItem::Module(Box::new(
+            sv_parser::ModuleOrGenerateItemModule {
+                nodes: (
+                    item.nodes.0.clone(),
+                    sv_parser::ModuleInstantiation {
+                        nodes: (
+                            sv_parser::ModuleIdentifier {
+                                nodes: instance.nodes.0.nodes.clone(),
+                            },
+                            instance.nodes.1.clone(),
+                            instance.nodes.2.clone(),
+                            instance.nodes.3.clone(),
+                        ),
+                    },
+                ),
+            },
+        )));
+    }
     let mut common = item.nodes.1.clone();
     common_item(&mut common)?;
     Ok(sv_parser::ModuleOrGenerateItem::ModuleItem(Box::new(
@@ -139,6 +176,7 @@ pub(super) fn analyze(
     path: &Path,
     packages: &packages::Packages,
     overrides: &HashMap<String, ConstExpr>,
+    types: &[(String, Type)],
     interfaces: &ModuleInterfaces,
     declarations_only: bool,
 ) -> Converted<Module> {
@@ -147,20 +185,91 @@ pub(super) fn analyze(
     let mut imported =
         imports::imported_symbols(node.clone(), tree, packages, packages.unit(path))?;
     imported.declarations_only = declarations_only;
+    imported.type_parameter_bindings = type_parameters::bind(node.clone(), tree, types)?;
     let name = module_name_from_node(node.clone(), tree)?;
+    let instance = (
+        path.to_path_buf(),
+        name.clone(),
+        overrides.clone(),
+        types.to_vec(),
+    );
+    ACTIVE_INSTANCES.with(|instances| {
+        let mut instances = instances.borrow_mut();
+        if instances.len() >= 64 {
+            return Err(unsupported("interface instance nesting exceeds 64 levels"));
+        }
+        if instances.contains(&instance) {
+            return Err(unsupported(format!(
+                "recursive interface instantiation `{name}`"
+            )));
+        }
+        instances.push(instance);
+        Ok(())
+    })?;
+    let _instance = InstanceGuard;
+
     let _timescales = timescales::install_for_tree(packages.timescales.clone(), tree)?;
-    Module::from_scope_node_with_parameter_overrides(
-        node,
-        tree,
-        &name,
-        overrides,
-        &InterfaceLookup {
-            local: interfaces,
-            extra: &ModuleInterfaces::default(),
-        },
-        Arc::new(imported),
-        true,
-    )
+    let empty = ModuleInterfaces::default();
+    let lookup = InterfaceLookup {
+        local: interfaces,
+        extra: &empty,
+    };
+    let nested = if node
+        .clone()
+        .into_iter()
+        .any(|node| matches!(node, RefNode::ModuleInstantiation(_)))
+    {
+        native_interfaces::analyze_module(
+            &view,
+            tree,
+            path,
+            packages,
+            native_interfaces::Bindings {
+                values: overrides,
+                types,
+                plan: None,
+                export_symbols: true,
+            },
+            &lookup,
+            imported.clone(),
+        )?
+    } else {
+        None
+    };
+    let mut module = if let Some(module) = nested {
+        module
+    } else {
+        Module::from_scope_node_with_parameter_overrides(
+            node,
+            tree,
+            &name,
+            overrides,
+            &InterfaceLookup {
+                local: interfaces,
+                extra: &ModuleInterfaces::default(),
+            },
+            Arc::new(imported),
+            true,
+        )?
+    };
+    // Carry the constants of nested instances and imported packages with the
+    // interface. Its caller may have no import of their simple names.
+    let symbols = module.symbols.as_mut().unwrap();
+    let mut parameters = module.imported_parameters.clone();
+    parameters.extend(
+        symbols
+            .parameters
+            .iter()
+            .filter(|parameter| {
+                !module
+                    .imported_parameters
+                    .iter()
+                    .any(|imported| imported.name == parameter.name)
+            })
+            .cloned(),
+    );
+    symbols.parameters = parameters;
+    Ok(module)
 }
 
 pub(super) fn signature(
