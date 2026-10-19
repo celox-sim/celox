@@ -10,10 +10,14 @@ Each test has separate `2state` and `4state` rows (`test`, `state_mode`, `result
 The official runner owns metadata parsing, compatible-runner filtering, mode
 priority, library injection, timeouts, expected failures and simulation
 `:assert:` evaluation. The adapter declares only the driver’s supported
-`elaboration` and `simulation` modes. It forwards source files, include
+`parsing`, `elaboration` and `simulation` modes. It forwards source files, include
 directories, defines, an optional explicit top and the selected state mode to
-the Rust driver. Sources without a module still undergo preprocessing and
-parsing; root detection then reports the actual no-root diagnostic. The current
+the Rust driver. Parsing mode stops after preprocessing and syntax parsing; it
+does not build semantic module metadata, select a root, elaborate or simulate.
+The official mode priority still chooses elaboration for default cases and for
+cases that permit both parsing and elaboration. In elaboration and simulation
+modes, sources without a module still undergo preprocessing and parsing; root
+detection then reports the actual no-root diagnostic. The current
 compiler and simulator require a module root, so the driver reports a failure for
 rootless unit, package and interface inputs. The official runner still decides
 the case verdict, including expected failures. There is no `no_top` classification
