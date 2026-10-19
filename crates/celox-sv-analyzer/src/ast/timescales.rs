@@ -120,8 +120,13 @@ pub(super) fn with_interface_instance<T>(name: &str, analyze: impl FnOnce() -> T
             INTERFACE_INSTANCE.with(|current| *current.borrow_mut() = self.0.take());
         }
     }
-    let previous =
-        INTERFACE_INSTANCE.with(|current| current.borrow_mut().replace(name.to_string()));
+    let previous = INTERFACE_INSTANCE.with(|current| {
+        let mut current = current.borrow_mut();
+        let nested = current
+            .as_ref()
+            .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"));
+        current.replace(nested)
+    });
     let _restore = Restore(previous);
     analyze()
 }
@@ -1041,6 +1046,20 @@ pub(super) fn time_divisor(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<u6
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_interface_instances_keep_their_full_path() {
+        super::with_interface_instance("outer", || {
+            super::with_interface_instance("child[2]", || {
+                super::INTERFACE_INSTANCE.with(|current| {
+                    assert_eq!(current.borrow().as_deref(), Some("outer.child[2]"))
+                });
+            });
+            super::INTERFACE_INSTANCE
+                .with(|current| assert_eq!(current.borrow().as_deref(), Some("outer")));
+        });
+        super::INTERFACE_INSTANCE.with(|current| assert!(current.borrow().is_none()));
+    }
+
     use super::*;
     #[test]
     fn current_query_scope_lookup_scales_logarithmically() {

@@ -4739,8 +4739,8 @@ fn rejects_unsupported_interface_uses() {
             "port `p` of `W` drives member `x`, an input of port `p` of `M`",
         ),
         (
-            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b[0].get(1); endmodule",
-            "call of a function of the interface array `b`",
+            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule",
+            "call of a function of the unselected interface array `b`",
         ),
         (
             "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
@@ -5471,4 +5471,45 @@ fn interface_shape_errors_keep_owned_function_warnings() {
         error.into_error(),
         AnalyzerError::DuplicateInterfaceItem { .. }
     ));
+}
+
+#[test]
+fn native_interface_recursive_instances_report_an_error() {
+    let error = analyze_source(
+        "interface I; I child(); endinterface module Top; I h(); endmodule",
+        Path::new("recursive_interface.sv"),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("recursive interface instantiation `I`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn native_interface_type_parameters_keep_order_and_reject_duplicates() {
+    let module = native_interface_module(
+        "interface I #(parameter N = 2, parameter type T = logic [7:0]); T data; endinterface
+         module Top; I #(3, logic [11:0]) h(); endmodule",
+        "Top",
+    );
+    assert_eq!(
+        module
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "h$data")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(12)
+    );
+    let error = elaborate(
+        "interface I #(parameter type T = logic, parameter T = 1); endinterface module Top; I h(); endmodule",
+    ).unwrap_err();
+    assert!(
+        matches!(error, AnalyzerError::DuplicateInterfaceItem { .. }),
+        "{error}"
+    );
 }
