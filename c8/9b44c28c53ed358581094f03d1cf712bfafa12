@@ -1,1 +1,6 @@
-Remove the parameter override TLS and all remaining production analyzer TLS; preserve behavior with explicitly owned analysis contexts.
+Revision history for #1526:
+
+rev 2 (content) 2026-10-19 06:15 UTC — Remove the parameter override TLS and all remaining production analyzer TLS; preserve behavior with explicitly owned analysis contexts.
+rev 1 (initial) 2026-10-19 06:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1526,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"33f0c4ffbec45a836bc63803d04f20fc63249977","timestamp_iso":"2026-10-19T06:15:11Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"33f0c4ffbec45a836bc63803d04f20fc63249977","new_sha":"c89b44c28c53ed358581094f03d1cf712bfafa12","timestamp_iso":"2026-10-19T06:15:11Z","reason":"Remove the parameter override TLS and all remaining production analyzer TLS; preserve behavior with explicitly owned analysis contexts.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/33f0c4ffbec45a836bc63803d04f20fc63249977...c89b44c28c53ed358581094f03d1cf712bfafa12"}]} -->
