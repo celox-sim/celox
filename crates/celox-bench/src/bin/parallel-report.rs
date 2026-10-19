@@ -1,9 +1,9 @@
 //! Capture compiler decisions and real lane execution into an offline report.
-#![allow(clippy::disallowed_macros)]
 
 use celox::{SimBackend, Simulator};
 use clap::{Parser, ValueEnum};
 use serde_json::{Value, json};
+use std::io::Write as _;
 use std::{
     collections::BTreeMap,
     fs,
@@ -201,7 +201,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
         }
         let mut events = self.events.lock().unwrap();
         if events.len().is_multiple_of(100_000) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "Captured {} records; event {}",
                 events.len(),
                 fields.0.get("event").unwrap_or(&Value::Null)
@@ -333,7 +334,8 @@ fn exercise_testbench<B: SimBackend>(
         celox::testbench::compile_initial_testbench(&sim).ok_or("No initial testbench found")?;
     window.active.store(false, Ordering::Relaxed);
     window.running.store(true, Ordering::Relaxed);
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr().lock(),
         "Running {} for up to {ticks} ticks; capture kernel calls {}..{}",
         args.top,
         window.after + 1,

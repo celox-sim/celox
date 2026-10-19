@@ -1,4 +1,5 @@
 disallowed-macros = [
+    { path = "std::thread_local", reason = "production state must be owned and passed explicitly; only test-local instrumentation may opt out" },
     { path = "std::eprintln", reason = "library diagnostics must use tracing or a caller-provided writer" },
 ]
 
