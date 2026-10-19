@@ -280,6 +280,16 @@ pub(super) fn optimize_with_options(
         tracing::debug!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
 
+    let phase_start = timing.then(crate::timing::now);
+    let process_passes = pipeline_builder.process();
+    for process in &mut program.sir.processes {
+        process_passes.run(process, &options);
+    }
+    if let Some(s) = phase_start {
+        let count = program.sir.processes.len();
+        tracing::debug!("[phase] processes ({count} EUs): {:?}", s.elapsed());
+    }
+
     // Lane-partitioned kernels reuse the per-unit pipelines above. Their
     // program-wide facts (identity aliases) come from the sequential kernel.
     super::parallel::optimize_parallel_units(

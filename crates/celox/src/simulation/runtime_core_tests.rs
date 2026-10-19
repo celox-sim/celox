@@ -186,6 +186,58 @@ fn value<B: SimBackend>(sim: &mut Simulation<B>, name: &str) -> u64 {
     u64::try_from(value).unwrap()
 }
 
+#[test]
+fn process_optimization_preserves_state_changes_between_continuations() {
+    for four_state in [false, true] {
+        let mut d = Design::new("OptimizedProcess", four_state);
+        let shared = d.internal("shared", 8, 0);
+        let result = d.output("result", 8, 0);
+        let two = d.constant(2, 8);
+        let three = d.constant(3, 8);
+        let sum = d.module.binary(BinaryOp::Add, two, three, d.ty(8)).unwrap();
+        let body = vec![d.delay(1), d.set(shared, 9)];
+        d.module.process(body).unwrap();
+        let current = d.read(shared);
+        let body = vec![
+            Statement::If {
+                condition: sum,
+                then_body: vec![d.assign(result, sum)],
+                else_body: vec![d.delay(7), d.set(result, 99)],
+            },
+            d.delay(2),
+            d.assign(result, current),
+            d.delay(1),
+            Statement::Finish,
+        ];
+        d.module.process(body).unwrap();
+        let artifact = d.finish();
+        for level in [
+            crate::OptLevel::O0,
+            crate::OptLevel::O1,
+            crate::OptLevel::O2,
+        ] {
+            on_every_backend!(
+                builder(&artifact, four_state).opt_level(level),
+                "OptimizedProcess",
+                |sim| {
+                    sim.run_until(0).unwrap();
+                    assert_eq!(value(&mut sim, "result"), 5);
+                    sim.run_until(1).unwrap();
+                    assert_eq!(value(&mut sim, "shared"), 9);
+                    assert_eq!(value(&mut sim, "result"), 5);
+                    sim.run_until(2).unwrap();
+                    assert_eq!(value(&mut sim, "result"), 9);
+                    assert!(!sim.is_finished());
+                    sim.run_until(20).unwrap();
+                    assert!(sim.is_finished());
+                    assert_eq!(sim.time(), 3);
+                    assert_eq!(value(&mut sim, "result"), 9);
+                }
+            );
+        }
+    }
+}
+
 /// A process writes 0→1→0 to `clk` without suspending: `@(posedge clk)`
 /// and the flip-flops of `clk` see the pulse exactly once.
 fn pulse(four_state: bool) -> FrontendArtifact {
