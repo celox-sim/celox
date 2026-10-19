@@ -6,9 +6,20 @@ use celox::{NativeProgramImage, NativeProgramInstance, Simulator};
 use libloading::{Library, Symbol};
 use veryl_metadata::Metadata;
 
-/// Compile a Veryl source file and its project dependencies into a native image.
+/// Compile a standalone SystemVerilog file or a Veryl file and its project dependencies.
 pub fn compile_native_image(source: &Path, top: &str) -> Result<NativeProgramImage, String> {
-    let simulator = if let Ok(metadata_path) = Metadata::search_from(source) {
+    let simulator = if source
+        .extension()
+        .is_some_and(|extension| extension == "sv")
+    {
+        let contents = std::fs::read_to_string(source)
+            .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+        Simulator::from_sv_sources(vec![(contents.as_str(), source)], top)
+            .four_state(true)
+            .native_force_support(true)
+            .opt_level(celox::OptLevel::O0)
+            .build()
+    } else if let Ok(metadata_path) = Metadata::search_from(source) {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata

@@ -1125,6 +1125,161 @@ fn force_state_is_shared_by_reflected_clock_aliases() {
     clear_runtime();
 }
 
+// These regressions exercise native reflection and VPI writes, rather than
+// portable HDL behavior, so they belong with the VPI API tests.
+#[test]
+fn sv_mixed_clock_reset_aliases_dispatch_both_consumers() {
+    let _serial = lock_vpi();
+    for falling in [false, true] {
+        let source = r#"
+            module ClockChild(input logic clk, input logic [7:0] d, output logic [7:0] q);
+                always_ff @(CLOCK_EDGE clk) q <= d;
+            endmodule
+            module ResetChild(input logic clk, input logic rst, input logic [7:0] d,
+                              output logic [7:0] q);
+                always_ff @(posedge clk or RESET_EDGE rst)
+                    if (RESET_ACTIVE) q <= 0;
+                    else q <= d;
+            endmodule
+            module Top(input logic event_in, input logic other_clk, input logic [7:0] d,
+                       output logic [7:0] clock_q, output logic [7:0] reset_q);
+                ClockChild clock_child(.clk(event_in), .d(d), .q(clock_q));
+                ResetChild reset_child(.clk(other_clk), .rst(event_in), .d(d), .q(reset_q));
+            endmodule
+        "#
+        .replace("CLOCK_EDGE", if falling { "negedge" } else { "posedge" })
+        .replace("RESET_EDGE", if falling { "negedge" } else { "posedge" })
+        .replace("RESET_ACTIVE", if falling { "!rst" } else { "rst" });
+        let simulator = Simulator::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("mixed_roles.sv"))],
+            "Top",
+        )
+        .opt_level(celox::OptLevel::O0)
+        .four_state(true)
+        .build()
+        .unwrap();
+        let runtime = trusted_instance(simulator.shared_code().program_image().clone());
+        assert_eq!(
+            runtime.signal("Top.event_in").unwrap().domain_kind,
+            if falling {
+                celox::DomainKind::ClockNegedge
+            } else {
+                celox::DomainKind::ClockPosedge
+            }
+        );
+        let _session = install_runtime(runtime).unwrap();
+        unsafe {
+            let event = vpi_handle_by_name(c"Top.event_in".as_ptr(), ptr::null_mut());
+            let other = vpi_handle_by_name(c"Top.other_clk".as_ptr(), ptr::null_mut());
+            let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+            let clock_q = vpi_handle_by_name(c"Top.clock_q".as_ptr(), ptr::null_mut());
+            let reset_q = vpi_handle_by_name(c"Top.reset_q".as_ptr(), ptr::null_mut());
+            put_int(event, i32::from(falling));
+            put_int(other, 0);
+            put_int(d, 9);
+            put_int(other, 1);
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -1 },
+            };
+            vpi_get_value(reset_q, &mut value);
+            assert_eq!(value.value.integer, 9);
+            put_int(d, 7);
+            put_int(event, i32::from(!falling));
+            vpi_get_value(clock_q, &mut value);
+            assert_eq!(value.value.integer, 7, "clock consumer, falling={falling}");
+            vpi_get_value(reset_q, &mut value);
+            assert_eq!(value.value.integer, 0, "reset consumer, falling={falling}");
+            for handle in [event, other, d, clock_q, reset_q] {
+                assert_eq!(vpi_free_object(handle), 1);
+            }
+        }
+        clear_runtime();
+    }
+}
+
+#[test]
+fn sv_downstream_clock_copies_do_not_drive_upstream_events() {
+    let _serial = lock_vpi();
+    let source = r#"
+        module Child(input logic clk, input logic [7:0] d, output logic [7:0] q);
+            always_ff @(posedge clk) q <= d;
+        endmodule
+        module Top(input logic clk, input logic [7:0] d, output logic [7:0] q,
+                   output logic monitor);
+            logic internal_monitor;
+            assign monitor = clk;
+            assign internal_monitor = clk;
+            Child child(.clk(clk), .d(d), .q(q));
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("clock_copies.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O0)
+    .four_state(true)
+    .native_force_support(true)
+    .build()
+    .unwrap();
+    let runtime = trusted_instance(simulator.shared_code().program_image().clone());
+    for name in ["Top.monitor", "Top.internal_monitor"] {
+        assert_eq!(
+            runtime.signal(name).unwrap().domain_kind,
+            celox::DomainKind::Other
+        );
+    }
+    let _session = install_runtime(runtime).unwrap();
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(d, 3);
+        put_int(clk, 1);
+        put_int(clk, 0);
+        put_int(d, 7);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        for name in [c"Top.monitor", c"Top.internal_monitor"] {
+            let monitor = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!monitor.is_null());
+            put_int(monitor, 1);
+            vpi_get_value(q, &mut value);
+            assert_eq!(value.value.integer, 3, "deposit must not clock the child");
+            let high = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 1 },
+            };
+            assert_eq!(
+                vpi_put_value(monitor, &high, ptr::null(), VPI_FORCE_FLAG),
+                monitor
+            );
+            vpi_get_value(clk, &mut value);
+            assert_eq!(
+                value.value.integer, 0,
+                "force must not reach upstream clock"
+            );
+            vpi_get_value(q, &mut value);
+            assert_eq!(value.value.integer, 3, "force must not clock the child");
+            assert_eq!(
+                vpi_put_value(monitor, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+                monitor
+            );
+            assert_eq!(vpi_free_object(monitor), 1);
+        }
+        put_int(clk, 1);
+        vpi_get_value(q, &mut value);
+        assert_eq!(value.value.integer, 7, "the source still drives the event");
+        for handle in [clk, d, q] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
 static CALLBACK_VALUE: AtomicI32 = AtomicI32::new(-1);
 static OWNED_CALLBACK_TIME: AtomicUsize = AtomicUsize::new(usize::MAX);
 static VALUE_CHANGE_DRIVE: AtomicBool = AtomicBool::new(false);

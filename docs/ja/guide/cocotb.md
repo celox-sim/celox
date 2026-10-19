@@ -1,9 +1,9 @@
 # celox CLIでcocotbを使う
 
-CeloxはVerylの設計を、VPI経由で通常の
+CeloxはVerylまたはSystemVerilogの設計を、VPI経由で通常の
 [cocotb](https://www.cocotb.org/) テストを実行できるネイティブ実行ファイルへ
 コンパイルできます。生成物にはコンパイル済み設計とCeloxランタイムが含まれるため、
-実行時にVerylソースは不要です。
+実行時にHDLソースは不要です。
 
 ## CLIをビルドする
 
@@ -32,6 +32,15 @@ target/release/celox vpi build src/Top.veryl --top Top -o build/top-sim
 Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソースと依存関係を
 まとめてコンパイルします。Verylプロジェクト外の単独ソースを指定した場合は、
 そのファイルだけをコンパイルします。`-o`を省略した出力先は`celox.out`です。
+
+単独のSystemVerilogソースには`.sv`ファイルを指定します。
+
+```sh
+target/release/celox vpi build src/Top.sv --top Top -o build/top-sim
+```
+
+Celoxが対応するSystemVerilogの範囲で、そのファイル内の子モジュールも含めて
+コンパイルします。`Veryl.toml`や追加のSystemVerilogソースは自動探索しません。
 
 ## cocotbを実行する
 
