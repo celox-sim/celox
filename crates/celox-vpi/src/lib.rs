@@ -1408,45 +1408,83 @@ fn flush_pending_writes() -> bool {
             batch.deposits.insert(*id, value.clone());
         }
         let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
-        let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
-            let active_edges = batch
-                .active_signals
-                .into_iter()
-                .filter_map(|identity| {
-                    let deposit = batch.deposits.get(&identity)?;
-                    let signal = runtime.reflection().signal(deposit.id)?;
-                    if overridden.contains(&identity) {
-                        let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
-                        if !is_active_edge(
-                            signal.domain_kind,
-                            logic_level(&old_value, &old_mask),
-                            logic_level(&deposit.value, &deposit.mask),
-                        ) {
-                            return None;
+        let running = callbacks::is_running();
+        let result: Result<Vec<celox_design::StateAddr>, celox::RuntimeErrorCode> =
+            with_runtime_mut(|runtime| {
+                let active_edges = batch
+                    .active_signals
+                    .into_iter()
+                    .filter_map(|identity| {
+                        let deposit = batch.deposits.get(&identity)?;
+                        let signal = runtime.reflection().signal(deposit.id)?;
+                        if overridden.contains(&identity) {
+                            let (old_value, old_mask) =
+                                runtime.backend().get_four_state(signal.signal);
+                            if !is_active_edge(
+                                signal.domain_kind,
+                                logic_level(&old_value, &old_mask),
+                                logic_level(&deposit.value, &deposit.mask),
+                            ) {
+                                return None;
+                            }
                         }
-                    }
-                    Some(signal.state_address)
-                })
-                .collect::<Vec<_>>();
-            apply_pending_deposits(runtime, &batch.deposits);
-            runtime.settle_active_edges_with_context(
-                &active_edges,
-                RuntimeFormatContext {
+                        Some(signal.state_address)
+                    })
+                    .collect::<Vec<_>>();
+                apply_pending_deposits(runtime, &batch.deposits);
+                let context = RuntimeFormatContext {
                     tb_time: Some(celox_vpi_current_time()),
                     scope: None,
-                },
-            )
-        })
-        .unwrap_or(Ok(()));
-        if let Err(error) = result {
-            callbacks::fail(error.to_string());
-            return false;
-        }
+                };
+                if running {
+                    runtime.eval_comb_with_context(context)?;
+                    Ok(active_edges)
+                } else {
+                    runtime.settle_active_edges_with_context(&active_edges, context)?;
+                    Ok(Vec::new())
+                }
+            })
+            .unwrap_or(Ok(Vec::new()));
+        let active_edges = match result {
+            Ok(active_edges) => active_edges,
+            Err(error) => {
+                callbacks::fail(error.to_string());
+                return false;
+            }
+        };
         process_runtime_events();
         if callbacks::has_error() {
             return false;
         }
-        if callbacks::is_running() {
+        if running {
+            // Input-edge callbacks observe the state before any FF runs. Keep
+            // the compiled evaluate/apply kernel fused: the observation point
+            // is at its entry, not between sampling and committing every FF.
+            callbacks::dispatch_value_changes();
+            if callbacks::finish_requested() {
+                return true;
+            }
+            let wrote_inputs =
+                with_host(|host| borrow_cell(&host.pending_writes, |pending| pending.settle));
+            let result = with_runtime_mut(|runtime| {
+                let context = RuntimeFormatContext {
+                    tb_time: Some(celox_vpi_current_time()),
+                    scope: None,
+                };
+                if wrote_inputs {
+                    runtime.eval_comb_with_context(context)?;
+                }
+                runtime.apply_active_edges_with_context(&active_edges, context)
+            })
+            .unwrap_or(Ok(()));
+            if let Err(error) = result {
+                callbacks::fail(error.to_string());
+                return false;
+            }
+            process_runtime_events();
+            if callbacks::has_error() || callbacks::finish_requested() {
+                return !callbacks::has_error();
+            }
             callbacks::dispatch_value_changes();
             if callbacks::finish_requested() {
                 return true;
