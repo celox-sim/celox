@@ -1,1 +1,6 @@
-Sync after #1564 merged and resolve #1566 conflicts with #1441 so #1566 and dependent #1571 can re-enter the merge queue.
+Revision history for #1571:
+
+rev 2 (rebase) 2026-10-19 22:10 UTC — Sync after #1564 merged and resolve #1566 conflicts with #1441 so #1566 and dependent #1571 can re-enter the merge queue.
+rev 1 (initial) 2026-10-19 22:10 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1571,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"60c03d9e648bd4823537714a070bdfb5a092910b","timestamp_iso":"2026-10-19T22:10:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"60c03d9e648bd4823537714a070bdfb5a092910b","new_sha":"ce9bda77faf54716d08b65c441a658d682598cee","timestamp_iso":"2026-10-19T22:10:30Z","reason":"Sync after #1564 merged and resolve #1566 conflicts with #1441 so #1566 and dependent #1571 can re-enter the merge queue.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/60c03d9e648bd4823537714a070bdfb5a092910b...ce9bda77faf54716d08b65c441a658d682598cee"}]} -->
