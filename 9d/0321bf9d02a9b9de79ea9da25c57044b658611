@@ -1,0 +1,1 @@
+Fix CI regressions in native syntax ownership and semantic consumers; validate emitted common interface and mixed-language cases with CI features.
