@@ -21,44 +21,69 @@ pub(crate) fn append(
     }
 }
 
-/// Function diagnostics belong to the declaration, including functions whose
-/// bodies disappear during constant evaluation. This pass has no side effects.
-pub(crate) fn functions<'a>(
-    nodes: impl IntoIterator<Item = RefNode<'a>>,
-    tree: &SyntaxTree,
-) -> Vec<AnalyzerWarning> {
+/// Function diagnostics belong to declarations, including functions whose
+/// bodies disappear during constant evaluation. Native token ownership keeps
+/// nested opaque program bodies separate from surrounding function scopes.
+fn functions(tree: &SyntaxTree, range: celox_sv_syntax::TokenRange) -> Vec<AnalyzerWarning> {
+    use celox_sv_syntax::{ExprKind, SubroutineKind, UnitKind};
+    let native = tree.declarations();
+    let programs: Vec<_> = native
+        .all_units()
+        .filter(|unit| unit.kind == UnitKind::Program)
+        .map(|unit| unit.tokens)
+        .collect();
+    let functions: Vec<_> = native
+        .subroutines
+        .iter()
+        .filter(|function| {
+            function.kind == SubroutineKind::Function
+                && range.start <= function.tokens.start
+                && function.tokens.end <= range.end
+        })
+        .map(|function| function.tokens)
+        .collect();
+    let called_names = native
+        .expressions
+        .iter()
+        .filter_map(|expression| {
+            if let ExprKind::Call { expression, .. } = &expression.kind {
+                Some(native.expression(*expression).tokens)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     let mut warnings = Vec::new();
-    let mut functions = Vec::new();
-    let mut programs = Vec::new();
-    for node in nodes {
-        if matches!(node, RefNode::ProgramDeclaration(_)) {
-            if let Some(span) = super::procedural::source_span(node, tree) {
-                programs.push(span);
-            }
-        } else if matches!(node, RefNode::FunctionDeclaration(_)) {
-            functions.push(node);
+    for expression in &native.expressions {
+        let tokens = expression.tokens;
+        if !functions
+            .iter()
+            .any(|range| range.start <= tokens.start && tokens.end <= range.end)
+            || programs
+                .iter()
+                .any(|range| range.start <= tokens.start && tokens.end <= range.end)
+        {
+            continue;
         }
-    }
-    for function in functions {
-        for node in function {
-            if let RefNode::SystemTfCall(call) = node
-                && super::system_tf_call_parts(call, tree).is_some_and(|(name, _)| name == "$exit")
-            {
-                let site = super::procedural::source_span(RefNode::SystemTfCall(call), tree);
-                if site.as_ref().is_some_and(|site| {
-                    programs.iter().any(|program| {
-                        program.path == site.path
-                            && program.start <= site.start
-                            && site.end <= program.end
-                    })
-                }) {
+        let name = match &expression.kind {
+            ExprKind::Call {
+                expression: callee, ..
+            } => {
+                let ExprKind::Name(name) = &native.expression(*callee).kind else {
                     continue;
-                }
-                append(
-                    &mut warnings,
-                    [AnalyzerWarning::ExitOutsideProgram { site }],
-                );
+                };
+                name
             }
+            ExprKind::Name(name) if !called_names.contains(&tokens) => name,
+            _ => continue,
+        };
+        if name.spelling == "$exit" {
+            append(
+                &mut warnings,
+                [AnalyzerWarning::ExitOutsideProgram {
+                    site: super::procedural::source_span(tokens, tree),
+                }],
+            );
         }
     }
     warnings
@@ -66,41 +91,49 @@ pub(crate) fn functions<'a>(
 
 pub(crate) fn components(tree: &SyntaxTree) -> HashMap<String, Vec<AnalyzerWarning>> {
     let mut warnings = HashMap::default();
-    for node in tree {
-        let identifier = match &node {
-            RefNode::ModuleDeclarationAnsi(_) => {
-                super::module_name_from_node(node.clone(), tree).ok()
-            }
-            RefNode::ModuleDeclarationNonansi(_) => {
-                super::module_name_from_node(node.clone(), tree).ok()
-            }
-            RefNode::InterfaceDeclarationAnsi(interface) => {
-                super::component_identifier(&interface.nodes.0.nodes.3, tree)
-            }
-            RefNode::InterfaceDeclarationNonansi(interface) => {
-                super::component_identifier(&interface.nodes.0.nodes.3, tree)
-            }
-            _ => None,
-        };
-        if let Some(name) = identifier {
-            append(warnings.entry(name).or_default(), functions(node, tree));
+    for unit in tree.declarations().all_units() {
+        if matches!(
+            unit.kind,
+            celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+        ) {
+            append(
+                warnings
+                    .entry(super::instances::normalize_identifier(&unit.name.spelling))
+                    .or_default(),
+                functions(tree, unit.tokens),
+            );
         }
     }
     warnings
 }
 
 pub(crate) fn packages(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
+    let native = tree.declarations();
     let mut warnings = Vec::new();
-    for node in tree {
-        if matches!(node, RefNode::PackageDeclaration(_)) {
-            append(&mut warnings, functions(node, tree));
+    for unit in native
+        .all_units()
+        .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
+    {
+        append(&mut warnings, functions(tree, unit.tokens));
+    }
+    // Compilation-unit functions have no enclosing design unit.
+    for function in &native.subroutines {
+        if !native.all_units().any(|unit| {
+            unit.tokens.start <= function.tokens.start && function.tokens.end <= unit.tokens.end
+        }) {
+            append(&mut warnings, functions(tree, function.tokens));
         }
     }
-    if let Some(unit) = super::packages::unit_declaration(tree) {
-        append(
-            &mut warnings,
-            functions(RefNode::PackageDeclaration(&unit), tree),
-        );
-    }
     warnings
+}
+
+/// Declaration warnings for a complete compilation unit.
+pub(crate) fn source(tree: &SyntaxTree) -> Vec<AnalyzerWarning> {
+    functions(
+        tree,
+        celox_sv_syntax::TokenRange {
+            start: 0,
+            end: tree.declarations().tokens.len(),
+        },
+    )
 }

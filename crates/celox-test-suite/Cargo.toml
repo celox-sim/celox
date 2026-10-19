@@ -45,7 +45,7 @@ name = "inspect-mismatch-ir"
 required-features = ["emit"]
 
 [dependencies]
-sv-parser.workspace = true
+celox-sv-syntax.workspace = true
 veryl-analyzer = { workspace = true, optional = true }
 veryl-emitter = { workspace = true, optional = true }
 veryl-parser = { workspace = true, optional = true }

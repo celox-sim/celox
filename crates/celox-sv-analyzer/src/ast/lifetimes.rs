@@ -876,14 +876,8 @@ fn expr_is_constant(state: &AnalysisState, expr: &Expr) -> bool {
     }
 }
 
-/// Whether the variables of the subroutines and blocks of the module or
-/// package `node` are automatic by default: `module automatic m;`.
-pub(super) fn automatic_by_default(node: &RefNode<'_>) -> bool {
-    let lifetime = match node {
-        RefNode::ModuleDeclarationAnsi(module) => &module.nodes.0.nodes.2,
-        RefNode::ModuleDeclarationNonansi(module) => &module.nodes.0.nodes.2,
-        RefNode::PackageDeclaration(package) => &package.nodes.2,
-        _ => return false,
-    };
-    matches!(lifetime, Some(sv_parser::Lifetime::Automatic(_)))
+/// Whether the selected native unit declares automatic lifetime by default.
+pub(super) fn automatic_by_default(tree: &SyntaxTree) -> bool {
+    tree.root_unit()
+        .is_ok_and(|unit| unit.lifetime.as_deref() == Some("automatic"))
 }

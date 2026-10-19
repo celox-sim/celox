@@ -72,8 +72,8 @@ celox-sir               = { version = "=0.11.0", path = "crates/celox-sir" } # x
 celox-sir-opt           = { version = "=0.11.0", path = "crates/celox-sir-opt", default-features = false } # x-release-please-version
 celox-slt               = { version = "=0.11.0", path = "crates/celox-slt" } # x-release-please-version
 celox-state-layout      = { version = "=0.11.0", path = "crates/celox-state-layout" } # x-release-please-version
+celox-sv-syntax         = { version = "=0.11.0", path = "crates/celox-sv-syntax" } # x-release-please-version
 celox-sv-analyzer       = { version = "=0.11.0", path = "crates/celox-sv-analyzer" } # x-release-please-version
-celox-sv-syntax       = { version = "=0.11.0", path = "crates/celox-sv-syntax" } # x-release-please-version
 celox-test-suite         = { version = "=0.11.0", path = "crates/celox-test-suite" } # x-release-please-version
 celox-testbench         = { version = "=0.11.0", path = "crates/celox-testbench" } # x-release-please-version
 celox-ts-gen            = { version = "=0.11.0", path = "crates/celox-ts-gen" } # x-release-please-version
@@ -91,7 +91,6 @@ veryl-parser   = { version = "0.22.0", default-features = false }
 veryl-path      = "0.22.0"
 veryl-simulator = "0.22.0"
 veryl-std       = "0.22.0"
-sv-parser = "0.13.5"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
