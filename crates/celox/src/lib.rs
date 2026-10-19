@@ -38,6 +38,12 @@ pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchem
 pub use celox_frontend_core::FrontendArtifactError;
 pub use celox_frontend_sdk as frontend_sdk;
 pub use celox_frontend_sdk::FrontendArtifact;
+/// Warnings of the SystemVerilog frontend, in [`CompilationWarning::SystemVerilog`].
+#[cfg(feature = "systemverilog")]
+pub use celox_frontend_sv::{
+    FrontendWarning as SvFrontendWarning, FrontendWarningKind as SvFrontendWarningKind,
+    WarningLocation as SvWarningLocation,
+};
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     BaselineRecord, DesignReflection, NbaRecord, ProcessRecord, ReflectionScope, ReflectionScopeId,
@@ -197,9 +203,13 @@ pub use host_api::*;
 pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
-pub use simulator::{compile_frontend_to_sir, compile_to_sir};
+pub use simulator::{
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies,
+};
 #[cfg(feature = "systemverilog")]
-pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
+pub use simulator::{
+    compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
+};
 
 #[cfg(test)]
 mod flatting_tests;

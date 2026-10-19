@@ -12,6 +12,7 @@ import {
   classifyFiles,
   cutsRelease,
   isReleaseMergeGroup,
+  rustScopeOutputs,
 } from "./ci-changes.mjs";
 
 const none = {
@@ -147,6 +148,15 @@ test("full validation overrides even an empty valid diff", () => {
       // The whole Rust workspace, with no package scope or filter.
       rust_full: true,
       rust_packages: false,
+      rust_targets: false,
+      rust_builds: false,
+      rust_lint_builds: false,
+      rust_lint_packages: false,
+      rust_lint_features: false,
+      rust_lint_targets: false,
+      rust_doc_libraries: false,
+      rust_sv_tests: true,
+      rust_vpi_e2e: true,
       rust_features: false,
       rust_filter: false,
       rust_libraries: false,
@@ -533,4 +543,57 @@ test("PR branches behind their base ignore unmerged base changes", (t) => {
     runClassifier(base, head, { GITHUB_EVENT_NAME: "pull_request" }, repository),
     { ...none, docs: true, heliodor_arm64: false, release: false },
   );
+});
+
+
+test("test and consumer PRs skip sv-tests; implementation and full runs retain it", () => {
+  for (const path of [
+    "crates/celox/tests/flip_flop.rs",
+    "crates/celox/tests/test_utils/mod.rs",
+    "crates/celox/tests/snapshots/flip_flop__optimized.snap",
+    "crates/celox-test-suite/src/lib.rs",
+    "crates/celox-vpi/src/lib.rs",
+    "crates/celox-napi/src/lib.rs",
+    "crates/lydite/src/lib.rs",
+  ]) {
+    assert.equal(rustScopeOutputs([path]).rust_sv_tests, false, path);
+  }
+  for (const files of [
+    null,
+    ["Cargo.lock"],
+    ["conformance/sv-tests/expected.tsv"],
+    ["crates/celox/examples/sv_tests.rs"],
+    ["crates/celox/src/lib.rs"],
+    ["crates/celox-frontend-sv/src/lib.rs"],
+    ["crates/celox-runtime/src/lib.rs"],
+    ["crates/celox-backend-x86/src/lib.rs"],
+    ["crates/celox/tests/flip_flop.rs", "crates/celox/src/lib.rs"],
+  ]) {
+    assert.equal(rustScopeOutputs(files).rust_sv_tests, true, JSON.stringify(files));
+  }
+  const testOnly = rustScopeOutputs(["crates/celox/tests/flip_flop.rs"]);
+  assert.equal(testOnly.rust_targets, "flip_flop");
+  assert.equal(testOnly.rust_libraries, "");
+  assert.equal(rustScopeOutputs(null).rust_full, true);
+});
+
+
+test("Lydite lint and API documentation remain selected in CI", () => {
+  const scope = rustScopeOutputs(["crates/lydite-ir/src/lib.rs"]);
+  assert.equal(scope.rust_packages, "");
+  assert.ok(scope.rust_lint_packages.split(" ").includes("lydite-ir"));
+  assert.ok(scope.rust_doc_libraries.split(" ").includes("lydite-ir"));
+  const mixed = rustScopeOutputs([
+    "crates/celox/tests/flip_flop.rs", "crates/lydite-ir/src/lib.rs",
+  ]);
+  assert.equal(mixed.rust_targets, "flip_flop");
+  assert.equal(mixed.rust_lint_targets, "");
+});
+
+test("VPI test-only edits do not select the unrelated ignored cocotb end-to-end test", () => {
+  const tests = rustScopeOutputs(["crates/celox-vpi/tests/basic_vpi.rs"]);
+  assert.equal(tests.rust_vpi_e2e, false);
+  for (const path of ["crates/celox-vpi/src/lib.rs", "crates/celox-vpi/tests/cocotb_e2e.rs"])
+    assert.equal(rustScopeOutputs([path]).rust_vpi_e2e, true);
+  assert.equal(rustScopeOutputs(null).rust_vpi_e2e, true);
 });

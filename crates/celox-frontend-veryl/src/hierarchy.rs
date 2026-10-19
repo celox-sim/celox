@@ -48,13 +48,16 @@ pub fn parse_ir_with_external_hierarchy<'a>(
 }
 
 /// Link the explicitly identified Veryl exports without matching SV namesakes.
+/// `native_modules` maps each external module name that stands for a Veryl
+/// body to the index of that body in `ir.components`, so bodies that share a
+/// source name stay distinct.
 pub fn parse_ir_with_external_hierarchy_and_native_modules<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     loop_provenance: &LoopProvenance,
     external: &'a ExternalHierarchy,
     config: &BuildConfig,
     top: &StrId,
-    native_modules: &HashSet<String>,
+    native_modules: &HashMap<String, usize>,
 ) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     parse_external_hierarchy(
         ir,
@@ -72,7 +75,7 @@ fn parse_external_hierarchy<'a>(
     external: &'a ExternalHierarchy,
     config: &BuildConfig,
     top: &StrId,
-    native_modules: Option<&HashSet<String>>,
+    native_modules: Option<&HashMap<String, usize>>,
 ) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     // Token-to-scope resolution uses process-global analyzer state and is not
     // safe while independent compilations run on other test threads. Snapshot
@@ -116,7 +119,7 @@ fn parse_external_hierarchy<'a>(
     let top_name = resource_table::get_str_value(*top).unwrap_or_default();
     let root_ir = name_to_ir.get(top).copied();
     let external_root = external.roots.get(&top_name).copied().filter(|_| {
-        root_ir.is_none() || native_modules.is_none_or(|names| names.contains(&top_name))
+        root_ir.is_none() || native_modules.is_none_or(|names| names.contains_key(&top_name))
     });
     if root_ir.is_none() && external_root.is_none() {
         return Err(ParserError::TopNotFound { name: top_name });
@@ -172,11 +175,36 @@ fn parse_external_hierarchy<'a>(
             binding.package = external_ids[&binding.package];
         }
         module_names.insert(global_id, external_module.sim_module.name.clone());
-        let native_name = resource_table::insert_str(&external_module.sim_module.name);
-        if let Some(&native_module) = name_to_ir.get(&native_name)
-            && native_modules.is_none_or(|names| names.contains(&external_module.sim_module.name))
+        let native_module = match native_modules {
+            Some(names) => match names.get(&external_module.sim_module.name) {
+                Some(&index) => match ir.components.get(index) {
+                    Some(Component::Module(module)) => Some(module),
+                    _ => {
+                        return Err(ParserError::illegal_context(
+                            "external module hierarchy",
+                            format!(
+                                "native module `{}` maps to component {index}, which is not a module",
+                                external_module.sim_module.name
+                            ),
+                            None,
+                        ));
+                    }
+                },
+                None => None,
+            },
+            None => name_to_ir
+                .get(&resource_table::insert_str(
+                    &external_module.sim_module.name,
+                ))
+                .copied(),
+        };
+        if let Some(native_module) = native_module
             && !module_ir.contains_key(&global_id)
         {
+            module_names.insert(
+                global_id,
+                resource_table::get_str_value(native_module.name).unwrap_or_default(),
+            );
             module_ir.insert(global_id, native_module);
             signature_to_id.insert(native_module.signature.clone(), global_id);
             worklist.push((global_id, native_module));
@@ -276,7 +304,6 @@ fn parse_external_hierarchy<'a>(
     // assignment are identical to the single-threaded construction.
     let resource_snapshot = resource_table::export_tables();
     let text_snapshot = text_table::export_tables();
-    let file_dependencies = crate::file_dependencies::current();
     let tasks = module_ir
         .iter()
         .map(|(&module_id, &ir_module)| {
@@ -319,7 +346,6 @@ fn parse_external_hierarchy<'a>(
             let handles = (0..worker_count)
                 .map(|_| {
                     scope.spawn(|| {
-                        let _files = crate::file_dependencies::install(file_dependencies.clone());
                         resource_table::import_tables(&resource_snapshot);
                         text_table::import_tables(&text_snapshot);
                         let mut parsed = Vec::new();
@@ -508,4 +534,46 @@ fn reject_generic_interface_ports(module: &Module) -> Result<(), ParserError> {
         ),
         Some(&module.token),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veryl_analyzer::{Analyzer, Context, attribute_table};
+    use veryl_parser::Parser;
+
+    #[test]
+    fn rejects_native_module_indices_outside_the_ir() {
+        symbol_table::clear();
+        attribute_table::clear();
+        let code = "module Top {} module Child {}";
+        let metadata = veryl_metadata::Metadata::create_default("prj").unwrap();
+        let parser = Parser::parse(code, &"top.veryl").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        assert!(analyzer.analyze_pass1("prj", &parser.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        let mut ir = veryl_analyzer::ir::Ir::default();
+        let mut context = Context::default();
+        assert!(
+            analyzer
+                .analyze_pass2(&parser.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        let config = BuildConfig::default();
+        let external = crate::external_signatures(&ir, &config).unwrap();
+        let native = [("Child".to_string(), ir.components.len())]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let error = parse_ir_with_external_hierarchy_and_native_modules(
+            &ir,
+            &LoopProvenance::default(),
+            &external,
+            &config,
+            &resource_table::insert_str("Top"),
+            &native,
+        )
+        .err()
+        .expect("an out-of-range index must be rejected");
+        assert!(error.to_string().contains("not a module"), "{error}");
+    }
 }

@@ -1,6 +1,14 @@
 use super::*;
 
 sv_backends! {
+    fn bits_of_generate_local_array_element_localparam(sim) {
+        @case "generate::bits_of_generate_local_array_element_localparam";
+    }
+
+    fn bits_of_generate_local_array_elements(sim) {
+        @case "generate::bits_of_generate_local_array_elements";
+    }
+
     fn genvar_shadows_module_localparam(sim) {
         @case "generate::genvar_shadows_module_localparam";
     }

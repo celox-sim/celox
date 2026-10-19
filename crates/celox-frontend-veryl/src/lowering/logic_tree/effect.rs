@@ -208,7 +208,10 @@ fn collect_system_function_effect(
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::Stop,
             active,
             None,
         ) => active,
@@ -227,11 +230,14 @@ fn collect_system_function_effect(
             Some(active)
         }
         (
-            RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish,
+            RuntimeEventKind::Display
+            | RuntimeEventKind::Write
+            | RuntimeEventKind::Finish
+            | RuntimeEventKind::Stop,
             _,
             Some(_),
         ) => {
-            unreachable!("display/write/finish has no explicit guard")
+            unreachable!("display/write/finish/stop has no explicit guard")
         }
     }
     .map(|node| -> Result<NodeId, ParserError> {
@@ -249,7 +255,10 @@ fn collect_system_function_effect(
             guard,
             emit_on_true: matches!(
                 kind,
-                RuntimeEventKind::Display | RuntimeEventKind::Write | RuntimeEventKind::Finish
+                RuntimeEventKind::Display
+                    | RuntimeEventKind::Write
+                    | RuntimeEventKind::Finish
+                    | RuntimeEventKind::Stop
             ),
             args: observer_args.clone(),
             fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
@@ -2008,7 +2017,7 @@ fn collect_function_body_effects(
             iter_store.insert(id, loop_store);
         }
         iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let _loop_range = super::LoopRangeScope::enter(for_stmt);
+        let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
         let iter_store_before = iter_store.fork();
 
         let observer_start = collector.observers.len();
@@ -2932,7 +2941,7 @@ fn collect_dynamic_for_effects(
         iter_store.insert(id, loop_store);
     }
     iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let _loop_range = super::LoopRangeScope::enter(for_stmt);
+    let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
     let observer_start = collector.observers.len();
     let saved = collector.loop_effects.take();
     collector.loop_effects = Some(Vec::new());

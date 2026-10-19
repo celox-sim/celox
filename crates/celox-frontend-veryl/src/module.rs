@@ -1,3 +1,4 @@
+use crate::logic_tree::node::SLTNodeArena;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -28,7 +29,7 @@ use celox_design::{
 use celox_sir::{BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator};
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathTarget, NodeId, RangeStore,
-    SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTNodeFacts,
+    SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArenaEditError, SLTNodeFacts,
     SLTNodeFactsError,
 };
 use num_bigint::BigUint;
@@ -906,9 +907,13 @@ impl<'a> ModuleParser<'a> {
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
             initial_memory_values,
-            ff_parser: FfParser::new(module, *config),
+            ff_parser: FfParser::new(module, config.clone()),
             parallel_lanes: config.parallel_lanes,
-            arena: SLTNodeArena::new(),
+            arena: {
+                let mut arena = SLTNodeArena::new();
+                arena.file_dependencies = config.file_dependencies.clone();
+                arena
+            },
             reset_clock_map: HashMap::default(),
             loop_candidates,
             external_modules,
@@ -1193,7 +1198,7 @@ impl<'a> ModuleParser<'a> {
             })?;
             // LHS: output.dst (AssignDestination).
             let mut current_offset = 0usize;
-            let mut destination_arena = SLTNodeArena::<VarId>::new();
+            let mut destination_arena = SLTNodeArena::<VarId>::with_context_from(&self.arena);
             let mut destination_store = SymbolicStore::default();
             let preview_rhs_node = destination_arena.alloc(SLTNode::Input {
                 variable: child_port_id,
@@ -1420,7 +1425,7 @@ impl<'a> ModuleParser<'a> {
             module_id,
             input_ports,
             output_ports,
-            arena: glue_arena,
+            arena: glue_arena.into_inner(),
         };
 
         let mut glue_widths = HashMap::default();
@@ -1742,7 +1747,7 @@ impl<'a> ModuleParser<'a> {
             module_id,
             input_ports,
             output_ports,
-            arena: glue_arena,
+            arena: glue_arena.into_inner(),
         };
         let mut glue_widths = HashMap::default();
         for (id, variable) in &self.module.variables {
@@ -1796,9 +1801,14 @@ impl<'a> ModuleParser<'a> {
         radix: u32,
         context: &mut veryl_analyzer::Context,
     ) -> Result<ModuleInitialMemoryValue, ParserError> {
-        let image = readmem_image(self.module, filename_arg, output, radix, |dst| {
-            dst.index.eval_value(context)
-        })?;
+        let image = readmem_image(
+            self.module,
+            filename_arg,
+            output,
+            &self.arena.file_dependencies,
+            radix,
+            |dst| dst.index.eval_value(context),
+        )?;
         Ok(ModuleInitialMemoryValue {
             address: image.var_id,
             data: InitialMemoryData::Writes(image.runs),
@@ -2059,7 +2069,7 @@ impl<'a> ModuleParser<'a> {
             runtime_event_sites,
             initial_memory_values: self.initial_memory_values,
             comb_boundaries,
-            arena: self.arena,
+            arena: self.arena.into_inner(),
             store: self.store,
             reset_clock_map: self.reset_clock_map,
         })
@@ -2341,6 +2351,7 @@ pub(crate) fn readmem_image(
     module: &veryl_analyzer::ir::Module,
     filename_arg: &SystemFunctionInput,
     output: &[AssignDestination],
+    dependencies: &crate::FileDependencyCollector,
     radix: u32,
     index_values: impl FnOnce(&AssignDestination) -> Option<Vec<usize>>,
 ) -> Result<ReadmemImage, ParserError> {
@@ -2405,6 +2416,7 @@ pub(crate) fn readmem_image(
     }
 
     let InitialMemoryData::Writes(runs) = read_memory_file(
+        dependencies,
         filename_arg,
         radix,
         element_width,
@@ -2422,6 +2434,7 @@ pub(crate) fn readmem_image(
 }
 
 pub(crate) fn read_memory_file(
+    dependencies: &crate::FileDependencyCollector,
     filename_arg: &SystemFunctionInput,
     radix: u32,
     element_width: usize,
@@ -2441,7 +2454,7 @@ pub(crate) fn read_memory_file(
             Some(&filename_arg.0.comptime().token),
         ));
     };
-    let path = resolve_readmem_path(&filename, &filename_arg.0.comptime().token);
+    let path = resolve_readmem_path(&filename, &filename_arg.0.comptime().token, dependencies);
     let timing = readmem_timing_enabled();
     let total_start = timing.then(Instant::now);
     if timing {
@@ -2508,11 +2521,12 @@ pub(crate) fn read_memory_file(
 fn resolve_readmem_path(
     filename: &str,
     token: &veryl_parser::token_range::TokenRange,
+    dependencies: &crate::FileDependencyCollector,
 ) -> std::path::PathBuf {
     let source_path = token.beg.source.to_string();
     let source_path = (!source_path.is_empty()).then(|| std::path::Path::new(&source_path));
     let cwd = std::env::current_dir().ok();
-    resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref())
+    resolve_readmem_path_with_fallback(filename, source_path, cwd.as_deref(), dependencies)
 }
 
 fn static_string_expr(expr: &Expression) -> Option<String> {
@@ -2690,10 +2704,11 @@ fn resolve_readmem_path_with_fallback(
     filename: &str,
     source_path: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,
+    dependencies: &crate::FileDependencyCollector,
 ) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(filename);
     if path.is_absolute() {
-        crate::file_dependencies::record_absolute(&path);
+        dependencies.record(&path, true);
         return path;
     }
 
@@ -2701,14 +2716,14 @@ fn resolve_readmem_path_with_fallback(
         .and_then(std::path::Path::parent)
         .map(|parent| parent.join(&path))
         .unwrap_or_else(|| path.clone());
-    crate::file_dependencies::record(&source_relative);
+    dependencies.record(&source_relative, false);
     if source_relative.exists() {
         return source_relative;
     }
 
     if let Some(cwd) = cwd {
         let cwd_relative = cwd.join(&path);
-        crate::file_dependencies::record(&cwd_relative);
+        dependencies.record(&cwd_relative, false);
         if cwd_relative.exists() {
             return cwd_relative;
         }
@@ -2728,13 +2743,14 @@ mod tests {
     use veryl_metadata::Metadata;
     use veryl_parser::Parser;
 
+    use super::SLTNodeArena;
     use super::{
         collect_glue_sources, collect_parent_output_address_sources,
         resolve_readmem_path_with_fallback, uses_named_external_port_associations,
     };
     use crate::{GlueAddr, HashMap};
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
-    use celox_slt::{SLTForFoldGroupState, SLTNode, SLTNodeArena};
+    use celox_slt::{SLTForFoldGroupState, SLTNode};
 
     #[test]
     fn selected_positional_external_ports_are_not_treated_as_formal_names() {
@@ -2859,6 +2875,7 @@ module Top (
             "test/hex/boot.hex",
             Some(&source_dir.join("testbench.veryl")),
             Some(tmp.path()),
+            &Default::default(),
         );
 
         assert_eq!(resolved, data_dir.join("boot.hex"));
@@ -2879,6 +2896,7 @@ module Top (
             "test/hex/boot.hex",
             Some(&source_dir.join("testbench.veryl")),
             Some(tmp.path()),
+            &Default::default(),
         );
 
         assert_eq!(resolved, source_data_dir.join("boot.hex"));

@@ -251,6 +251,37 @@
   (run_until 3)
   (assert_eq seen 3))
 
+; IEEE 1800-2023 20.3: `$time` is the simulation time in the caller's time
+; unit, rounded, and `$stime` its low 32 bits. Combinational logic reads it
+; when its inputs change, not when only the time does: `$time` is no
+; variable of its implicit sensitivity (9.2.2.2.1).
+(case time_functions_report_the_time_in_the_caller_unit
+  (source "time.sv" #"
+                module Top(input logic clk, input logic [7:0] a,
+                           output logic [63:0] y);
+                    initial $display("initial %0d", $time);
+                    always_ff @(posedge clk) $display("edge %0d %0d", $time, $stime);
+                    always_comb y = a + $time;
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (expect_output "initial 0\n")
+  (modify (set clk 0) (set a 0))
+  (run_until 3)
+  (assert_eq y 0)
+  (modify (set clk 1))
+  (run_until 3)
+  (expect_output "edge 3 3\n")
+  (modify (set clk 0) (set a 2))
+  (run_until 3)
+  (assert_eq y 5)
+  (run_until 40)
+  (modify (set clk 1) (set a 4))
+  (run_until 40)
+  (expect_output "edge 40 40\n")
+  (assert_eq y 44))
+
 (case finish_in_an_always_process_ends_the_simulation
   (source "finish.sv" #"
                 module Top(output logic [7:0] ticks);
@@ -408,6 +439,62 @@
       initial begin @(posedge clk); #0; observed=q; derived_seen=derived; q=9; end
     endmodule"#)
   (top Top) (run_until 1) (assert_eq observed 1) (assert_eq derived_seen 2) (assert_eq q 9))
+
+(case blocking_ff_clock_edges_trigger_their_domains_before_inactive_work
+  (source "blocking_clocks.sv" #"
+      module Top(output bit [7:0] cnt, cnt_gated, cnt_derived, seen);
+        bit clk, clk2, en = 1'b1, q = 1'b1;
+        wire gated = clk2 & en;
+        wire derived = ~q;
+        always #5 clk = ~clk;
+        always @(posedge clk) begin clk2 = ~clk2; q = ~q; end
+        always_ff @(posedge clk2) cnt <= cnt + 8'd1;
+        always_ff @(posedge gated) cnt_gated <= cnt_gated + 8'd1;
+        always_ff @(posedge derived) cnt_derived <= cnt_derived + 8'd1;
+        initial forever begin @(posedge clk); #0; seen = seen + 8'd1; end
+      endmodule"#)
+  (top Top)
+  (run_until 50)
+  (assert_eq seen 5)
+  (assert_eq cnt 3 "a blocking clock edge triggers its domain")
+  (assert_eq cnt_gated 3 "so does a clock computed from it")
+  (assert_eq cnt_derived 3 "and a falling one through an inverter"))
+
+(case nonblocking_assignments_in_processes_update_in_the_nba_region
+  (source "process_nba.sv" #"
+      module Top(output logic [7:0] q, early, late, bus, hi, lo, d, sampled);
+        logic clk = 1'b0;
+        always #5 clk = ~clk;
+        initial begin
+          q = 8'd0;
+          bus = 8'd0;
+          #1;
+          q <= 8'd1;
+          q <= 8'd2;
+          #0 early = q;
+          bus[7:4] <= 4'ha;
+          {hi, lo} <= 16'h1234;
+          #1 late = q;
+        end
+        // A stimulus process and a register sampling it at the same edge.
+        initial begin
+          d = 8'd0;
+          forever @(posedge clk) d <= d + 8'd1;
+        end
+        always_ff @(posedge clk) sampled <= d;
+      endmodule"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq early 0 "a nonblocking update lands after the inactive region")
+  (assert_eq q 2 "the last update of a time slot wins")
+  (assert_eq bus 0xa0)
+  (assert_eq hi 0x12)
+  (assert_eq lo 0x34)
+  (run_until 2)
+  (assert_eq late 2)
+  (run_until 26)
+  (assert_eq d 3)
+  (assert_eq sampled 2 "the register samples the value before the edge's update"))
 
 (case nonblocking_ff_stores_remain_pending_during_inactive_work
   (source "nonblocking.sv" #"module Top(output bit [7:0] q, observed, derived_seen);
@@ -684,6 +771,62 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
  module Top(output wire[7:0]qualified,imported);Qualified a(qualified);Imported b(imported);initial #2 $finish;endmodule
  "#)(top Top)(run_until 0)(assert_eq qualified 0)(assert_eq imported 0)(run_until 1)(assert_eq qualified 0)(assert_eq imported 0)(run_to_finish))
 
+(case edge_waits_wake_on_rising_and_falling_edges
+  (source "edge.sv" #"
+                module Top(output logic [7:0] seen);
+                    logic clk = 1'b0;
+                    initial begin
+                        #3 clk = 1'b1;
+                        #3 clk = 1'b0;
+                        #3 clk = 1'b1;
+                    end
+                    initial begin
+                        seen = 8'd0;
+                        forever @(edge clk) seen = seen + 8'd1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 2)
+  (assert_eq seen 0)
+  (run_until 3)
+  (assert_eq seen 1)
+  (run_until 6)
+  (assert_eq seen 2 "a falling edge is an edge")
+  (run_until 9)
+  (assert_eq seen 3))
+
+(case min_typ_max_delays_wait_the_typical_value
+  (source "mintypmax.sv" #"
+                module Top(output logic [7:0] a);
+                    initial begin
+                        a = 8'd1;
+                        #(2:5:9) a = 8'd2;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 4)
+  (assert_eq a 1)
+  (run_until 5)
+  (assert_eq a 2))
+
+(case long_process_loops_finish_within_one_time_slot
+  (source "long_loop.sv" #"
+                module Top(output logic [31:0] count);
+                    initial begin
+                        count = 32'd0;
+                        for (int i = 0; i < 200000; i++) count = count + 32'd1;
+                        #1 count = count + 32'd1;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq count 200000)
+  (run_until 1)
+  (assert_eq count 200001))
+
 (case initial_blocks_run_at_time_zero
   (source "time_zero.sv" #"
     module Top(output bit [7:0] y);
@@ -717,3 +860,63 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (set clk 1)
   (run_until 3)
   (assert_eq q 2))
+
+; Port actuals read the caller's time. $stime truncates before addition.
+(case time_calls_in_child_port_actuals
+  (source "time_ports.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      Child time_child(.x($time + a), .y(t));
+      Child stime_child(.x($stime + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))
+
+(case time_calls_in_child_port_subroutines
+  (source "time_port_functions.sv" #"
+    module Child(input logic [63:0] x, output logic [63:0] y);
+      assign y = x;
+    endmodule
+    module Top(input logic [63:0] a, output logic [63:0] t, s);
+      function automatic logic [63:0] leaf(); return $time; endfunction
+      function automatic logic [63:0] now(input logic [63:0] bias); return leaf() + bias; endfunction
+      function automatic logic [63:0] with_default(input logic [63:0] stamp = $stime);
+        return stamp;
+      endfunction
+      Child time_child(.x(now(a)), .y(t));
+      Child stime_child(.x(with_default() + a), .y(s));
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a 1))
+  (run_until 0)
+  (assert_eq t 1)
+  (assert_eq s 1)
+  (run_until 3)
+  (modify (set a 4))
+  (run_until 3)
+  (assert_eq t 7)
+  (assert_eq s 7)
+  (run_until 4294967299)
+  (modify (set a 5))
+  (run_until 4294967299)
+  (assert_eq t 4294967304)
+  (assert_eq s 8))

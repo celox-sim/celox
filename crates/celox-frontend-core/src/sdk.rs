@@ -1897,12 +1897,15 @@ pub fn lower_frontend_artifact(
 
     let module_id = ModuleId(0);
     let sim_module = SimModule {
+        time_precision: None,
+        time_scale: celox_design::TimeScale::default(),
         name: artifact.module_name().to_string(),
         variables,
         ff_access_summaries: HashMap::default(),
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
+        split_commit_ff_blocks: HashMap::default(),
         parallel_ff_parts: HashMap::default(),
         glue_blocks: HashMap::default(),
         indexed_instance_names: HashSet::default(),
@@ -1921,6 +1924,7 @@ pub fn lower_frontend_artifact(
         counter_slots,
         wait_sites,
         nba_sites,
+        time_slot: None,
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),

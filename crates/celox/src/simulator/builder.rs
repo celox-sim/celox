@@ -12,6 +12,16 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
+
+#[cfg(feature = "systemverilog")]
+fn sv_compilation_warnings(
+    warnings: Vec<celox_frontend_sv::FrontendWarning>,
+) -> Vec<CompilationWarning> {
+    warnings
+        .into_iter()
+        .map(CompilationWarning::SystemVerilog)
+        .collect()
+}
 use crate::{
     CompilationWarning, FrontendDiagnostic, HashMap, ParserError, SimulatorError,
     SimulatorErrorKind, ir::OptimizedSir, parser,
@@ -127,15 +137,6 @@ pub(super) fn elaborate_parameterized_top(
         .iter()
         .map(|(name, value)| (name.clone(), Value::new(*value, 64, false)))
         .collect::<Vec<_>>();
-    elaborate_parameterized_top_values(ir, context, top, &values)
-}
-
-pub(super) fn elaborate_parameterized_top_values(
-    ir: &mut Ir,
-    context: &mut Context,
-    top: &str,
-    param_overrides: &[(String, Value)],
-) -> Result<(), ParserError> {
     let top_name = resource_table::insert_str(top);
     let Some(top_index) = ir.components.iter().rposition(
         |component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name == top_name),
@@ -143,6 +144,18 @@ pub(super) fn elaborate_parameterized_top_values(
         // Preserve the existing TopNotFound diagnostic from the frontend.
         return Ok(());
     };
+    elaborate_parameterized_module(ir, context, top_index, top, &values)
+}
+
+/// Re-elaborate the module at `top_index` of `ir.components` with parameter
+/// overrides. `top` names it in diagnostics.
+pub(super) fn elaborate_parameterized_module(
+    ir: &mut Ir,
+    context: &mut Context,
+    top_index: usize,
+    top: &str,
+    param_overrides: &[(String, Value)],
+) -> Result<(), ParserError> {
     let top_token = match &ir.components[top_index] {
         veryl_analyzer::ir::Component::Module(module) => module.token,
         _ => unreachable!(),
@@ -281,10 +294,12 @@ fn analyze(
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
     Vec<FrontendDiagnostic>,
+    Vec<CompilationWarning>,
 ) {
     symbol_table::clear();
     attribute_table::clear();
@@ -307,6 +322,7 @@ fn analyze(
                         None,
                     )
                     .into()),
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 );
@@ -346,33 +362,47 @@ fn analyze(
                     Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                 );
             }
         }
     }
     #[cfg(feature = "systemverilog")]
     let mut sv_interface_signatures = Vec::new();
+    // Behaviorless interfaces may never be lowered again. Retain their probe
+    // warnings too, deduplicating calls also encountered during design lowering.
+    #[cfg(feature = "systemverilog")]
+    let mut sv_probe_warnings = Vec::new();
     #[cfg(feature = "systemverilog")]
     if let Some(sv_sources) = sv_sources {
         let references = super::mixed::referenced_sv_components(
             authored_parsers.iter().map(|parser| &parser.veryl),
         );
-        let contracts = celox_frontend_sv::interface_signatures_for(sv_sources, Some(&references))
-            .map_err(|error| match error {
-                celox_frontend_sv::FrontendError::Analyzer(error) => {
-                    parser::sv_analysis_error(error)
-                }
-                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
-            })
-            .and_then(|mut signatures| {
-                signatures.retain(|signature| references.contains(&signature.name));
-                let source = super::mixed::veryl_interface_contracts(&signatures)?;
-                sv_interface_signatures = signatures;
-                Ok(source)
-            });
+        let contracts = celox_frontend_sv::interface_signatures_for(
+            sv_sources,
+            Some(&references),
+            &mut sv_probe_warnings,
+        )
+        .map_err(|error| match error {
+            celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
+            celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+        })
+        .and_then(|mut signatures| {
+            signatures.retain(|signature| references.contains(&signature.name));
+            let source = super::mixed::veryl_interface_contracts(&signatures)?;
+            sv_interface_signatures = signatures;
+            Ok(source)
+        });
         let contracts = match contracts {
             Ok(contracts) => contracts,
-            Err(error) => return (Err(error.into()), errors, Vec::new()),
+            Err(error) => {
+                return (
+                    Err(error.into()),
+                    errors,
+                    Vec::new(),
+                    sv_compilation_warnings(sv_probe_warnings),
+                );
+            }
         };
         if !contracts.is_empty() {
             let parsed = match Parser::parse(&contracts, &Path::new("<sv-interface-contracts>")) {
@@ -382,6 +412,7 @@ fn analyze(
                         Err(SimulatorError::new(SimulatorErrorKind::Syntax(error))),
                         errors,
                         Vec::new(),
+                        sv_compilation_warnings(sv_probe_warnings),
                     );
                 }
             };
@@ -414,7 +445,11 @@ fn analyze(
         && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
     {
         errors.append(&mut context.drain_errors());
-        return (Err(error.into()), errors, Vec::new());
+        #[cfg(feature = "systemverilog")]
+        let warnings = sv_compilation_warnings(sv_probe_warnings);
+        #[cfg(not(feature = "systemverilog"))]
+        let warnings = Vec::new();
+        return (Err(error.into()), errors, Vec::new(), warnings);
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
@@ -473,6 +508,7 @@ fn analyze(
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
     }
@@ -480,6 +516,8 @@ fn analyze(
         build_config.reset_type = rt;
     }
     build_config.parallel_lanes = optimize_options.parallel_lanes();
+    #[cfg(feature = "systemverilog")]
+    let mut sv_warnings = Vec::new();
     let sir = if let Some(external) = external_frontend {
         parser::parse_with_external_hierarchy(
             &top,
@@ -505,7 +543,8 @@ fn analyze(
         {
             if let Some(sv_sources) = sv_sources {
                 (|| {
-                    let mut used_names = super::mixed::component_names(sv_sources)?;
+                    let names = super::mixed::EmittedNames::new(&metadata);
+                    let mut used_names = super::mixed::component_names(sv_sources, names)?;
                     let behavior_sources = super::mixed::attach_sv_interface_behavior(
                         &mut ir,
                         &sv_interface_signatures,
@@ -523,12 +562,14 @@ fn analyze(
                         &joint_sources,
                         &mut context,
                         &mut used_names,
+                        names,
                     )?;
                     let declarations = super::mixed::sv_declaration_contracts(
                         &ir,
                         &mut context,
                         &joint_sources,
                         &requests,
+                        names,
                     )?;
                     parser::parse_mixed(
                         &top,
@@ -544,6 +585,7 @@ fn analyze(
                         &requests,
                         &sv_interface_signatures,
                         &mut used_names,
+                        names,
                         &build_config,
                         ignored_loops,
                         true_loops,
@@ -556,6 +598,7 @@ fn analyze(
                         testbench_random_seed,
                         component_libraries,
                         component_file_base,
+                        &mut sv_warnings,
                     )
                 })()
             } else {
@@ -606,13 +649,37 @@ fn analyze(
             sir
         })
         .map_err(SimulatorError::from);
-    (sir, errors, frontend_diagnostics)
+    #[cfg(feature = "systemverilog")]
+    let elaboration_warnings = {
+        for warning in sv_probe_warnings {
+            if !sv_warnings.contains(&warning) {
+                sv_warnings.push(warning);
+            }
+        }
+        sv_warnings.sort_by(|left, right| {
+            left.location
+                .as_ref()
+                .map(|location| (&location.path, location.line, location.column))
+                .cmp(
+                    &right
+                        .location
+                        .as_ref()
+                        .map(|location| (&location.path, location.line, location.column)),
+                )
+                .then(left.kind.cmp(&right.kind))
+        });
+        sv_compilation_warnings(sv_warnings)
+    };
+    #[cfg(not(feature = "systemverilog"))]
+    let elaboration_warnings = Vec::new();
+    (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
 ///
 /// This is the shared compilation pipeline used by all backends.
 /// Returns verified optimized SIR and any compilation warnings on success.
+/// Use [`compile_to_sir_with_file_dependencies`] to collect external file lookups.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -634,6 +701,50 @@ pub fn compile_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_to_sir_with_file_dependencies(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &Default::default(),
+    )
+}
+
+/// Compile to SIR while recording external file lookups in the supplied collector.
+///
+/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
+/// to retain readmem lookup paths for cache invalidation. Source files must be
+/// tracked separately.
+pub fn compile_to_sir_with_file_dependencies(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -652,6 +763,7 @@ pub fn compile_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        file_dependencies,
     )
 }
 
@@ -766,6 +878,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
     if !artifact.processes().is_empty() {
@@ -777,7 +890,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         );
     }
     let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         None,
         Some(&lowered.external),
@@ -797,6 +910,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -811,6 +925,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
@@ -854,8 +969,9 @@ fn compile_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         None,
         None,
@@ -875,6 +991,7 @@ fn compile_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -889,6 +1006,7 @@ fn compile_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
@@ -982,7 +1100,8 @@ fn compile_sv_to_sir_with_layout_mode(
         build_config.reset_type = reset_type;
     }
     let (component_libraries, component_file_base) = component_runtime_config(&metadata);
-    parser::parse_sv(
+    let mut sv_warnings = Vec::new();
+    let sir = parser::parse_sv(
         sources,
         top,
         param_overrides,
@@ -998,13 +1117,21 @@ fn compile_sv_to_sir_with_layout_mode(
         metadata.test.seed,
         component_libraries,
         component_file_base,
-    )
-    .map(|program| (program, Vec::new()))
-    .map_err(SimulatorError::from)
+        &mut sv_warnings,
+    );
+    let warnings = sv_warnings
+        .into_iter()
+        .map(CompilationWarning::SystemVerilog)
+        .collect();
+    match sir {
+        Ok(program) => Ok((program, warnings)),
+        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+    }
 }
 
 /// Compile a mixed Veryl/SystemVerilog hierarchy to optimized SIR.
 /// Either language may supply the top or instantiate the other language.
+/// Use [`compile_mixed_to_sir_with_file_dependencies`] to collect external file lookups.
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir(
@@ -1029,6 +1156,53 @@ pub fn compile_mixed_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_mixed_to_sir_with_file_dependencies(
+        sources,
+        sv_sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &Default::default(),
+    )
+}
+
+/// Compile to SIR while recording external file lookups in the supplied collector.
+///
+/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
+/// to retain readmem lookup paths for cache invalidation. Source files must be
+/// tracked separately.
+#[cfg(feature = "systemverilog")]
+pub fn compile_mixed_to_sir_with_file_dependencies(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_mixed_to_sir_with_layout_mode(
         sources,
         sv_sources,
@@ -1048,6 +1222,7 @@ pub fn compile_mixed_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        file_dependencies,
     )
 }
 
@@ -1079,8 +1254,9 @@ fn compile_mixed_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    let (sir, errors, frontend_diagnostics) = analyze(
+    let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
         Some(sv_sources),
         None,
@@ -1100,6 +1276,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -1114,6 +1291,7 @@ fn compile_mixed_to_sir_with_layout_mode(
                 .into_iter()
                 .map(CompilationWarning::Frontend),
         )
+        .chain(elaboration_warnings)
         .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
@@ -1160,6 +1338,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     #[cfg(not(feature = "systemverilog"))]
     {
@@ -1182,6 +1361,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         )
     }
     #[cfg(feature = "systemverilog")]
@@ -1204,6 +1384,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -1240,6 +1421,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         ),
     }
 }
@@ -1348,11 +1530,19 @@ mod host {
             }) {
                 return Err(SimulatorError::from(crate::CodegenError::message(
                     "VCD requires packed array storage; compile this native image with VCD enabled",
-                )));
+                ))
+                .with_warnings(std::mem::take(&mut sim.warnings)));
             }
             let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                path,
+                &descs,
+                sim.program.design.time_precision,
+            )
+            .map_err(|_| {
+                SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                    .with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             sim.vcd_writer = Some(vcd_writer);
         }
         let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
@@ -1361,7 +1551,9 @@ mod host {
             tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
         }
         let settle_start = options.diagnostics.phase_timing.then(crate::timing::now);
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        sim.modify(|_| {}).map_err(|error| {
+            SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+        })?;
         if let Some(start) = settle_start {
             tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
         }
@@ -1387,21 +1579,18 @@ mod host {
             all(feature = "x86_64-codegen", not(target_arch = "x86_64"))
         ))]
         {
-            let _ = (
-                image,
-                program,
-                warnings,
-                options,
-                vcd_path,
-                injected_components,
-            );
-            return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+            let _ = (image, program, options, vcd_path, injected_components);
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                .with_warnings(warnings));
         }
 
         // Safety: callers either produced the image in this process or loaded
         // it from an explicitly trusted native-image artifact.
-        let backend = unsafe {
-            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)?
+        let backend = match unsafe {
+            crate::backend::native::NativeBackend::from_image_with_dpi(image, &options.dpi)
+        } {
+            Ok(backend) => backend,
+            Err(error) => return Err(error.with_warnings(warnings)),
         };
         initialize_native_backend(
             backend,
@@ -1495,7 +1684,7 @@ mod host {
     ///
     /// Use [`Simulator::builder()`] or [`Simulation::builder()`](crate::Simulation::builder)
     /// to obtain the appropriate variant. Both share the same configuration methods;
-    /// only `.build()` differs in return type.
+    /// their build methods return the corresponding simulator or timed simulation.
     pub struct SimulatorBuilder<'a, Target = Simulator> {
         sources: Vec<(&'a str, &'a Path)>,
         sv_sources: Vec<(&'a str, &'a Path)>,
@@ -1518,11 +1707,21 @@ mod host {
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
+        file_dependencies: celox_frontend_veryl::FileDependencyCollector,
         _marker: std::marker::PhantomData<Target>,
     }
 
     /// Configuration methods shared by all builder variants.
     impl<'a, Target> SimulatorBuilder<'a, Target> {
+        /// Track external Veryl file lookups in this compilation-owned collector.
+        pub fn file_dependency_collector(
+            mut self,
+            collector: celox_frontend_veryl::FileDependencyCollector,
+        ) -> Self {
+            self.file_dependencies = collector;
+            self
+        }
+
         /// Returns the source files passed to this builder.
         pub fn sources(&self) -> &[(&'a str, &'a Path)] {
             &self.sources
@@ -2011,6 +2210,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2031,6 +2231,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2052,6 +2253,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2078,6 +2280,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2103,6 +2306,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2129,10 +2333,13 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
+    }
 
+    impl<'a, Target> SimulatorBuilder<'a, Target> {
         /// Compile SIR, finalize its state layout, and return the typed artifact
         /// along with the remaining builder state.
         /// Consumes self.
@@ -2177,7 +2384,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
+            let (program, mut warnings) = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2209,6 +2416,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        &self.file_dependencies,
                     )?
                 }
             } else {
@@ -2231,6 +2439,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    &self.file_dependencies,
                 )?
             };
             if let Some(start) = compile_start {
@@ -2263,7 +2472,10 @@ mod host {
             // function fails the build early; the backends reuse the result.
             self.options
                 .dpi
-                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)?;
+                .resolve_ahead(&laid_out.runtime().runtime_schema.extern_functions)
+                .map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut warnings))
+                })?;
 
             Ok((
                 laid_out,
@@ -2273,7 +2485,9 @@ mod host {
                 self.injected_components,
             ))
         }
+    }
 
+    impl<'a> SimulatorBuilder<'a, Simulator> {
         /// Compiles the Veryl source and constructs the simulator.
         /// Uses a custom native backend when its generated code matches the
         /// compilation target, and Cranelift for host-side cross-codegen builds.
@@ -2299,7 +2513,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
             if let Some(s) = phase_start {
@@ -2318,7 +2532,8 @@ mod host {
                 &laid_out,
                 &options,
                 wants_codegen_trace.then_some(&mut trace),
-            )?;
+            )
+            .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if options.trace.output_to_stdout {
                 trace.print();
             }
@@ -2332,12 +2547,21 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2356,7 +2580,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
             if let Some(s) = phase_start {
@@ -2366,7 +2590,8 @@ mod host {
                 );
             }
 
-            let backend = crate::backend::InterpBackend::new(&laid_out, &options)?;
+            let backend = crate::backend::InterpBackend::new(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
@@ -2374,12 +2599,21 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2420,12 +2654,21 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2480,12 +2723,21 @@ mod host {
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2498,7 +2750,7 @@ mod host {
         pub fn compile_native(self) -> Result<NativeCompilation, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
@@ -2509,7 +2761,8 @@ mod host {
                 );
             }
             let backend_start = phase_timing.then(crate::timing::now);
-            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)?;
+            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if let Some(start) = backend_start {
                 tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
@@ -2539,7 +2792,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
             let mut trace = crate::debug::CompilationTrace::default();
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program_with_trace(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
@@ -2554,7 +2807,8 @@ mod host {
             let (image, native_trace) =
                 crate::backend::native::NativeBackend::compile_image_with_codegen_trace(
                     &laid_out, &options,
-                )?;
+                )
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             if let Some(start) = backend_start {
                 tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
@@ -2666,21 +2920,31 @@ mod host {
         pub fn build_wasm(
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-            let (laid_out, warnings, options, vcd_path, injected_components) = self
+            let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-            let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
+            let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(sim)
         }
 
@@ -2713,6 +2977,7 @@ mod host {
                 SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
                     "no initial block found — this module is not a native testbench",
                 )))
+                .with_warnings(std::mem::take(&mut sim.warnings))
             })?;
             Ok(crate::testbench::run_testbench_detailed(
                 &mut sim, &testbench,
@@ -2772,6 +3037,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        &self.file_dependencies,
                     )
                 }
             } else {
@@ -2794,10 +3060,11 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    &self.file_dependencies,
                 )
             };
 
-            let sim_res = program_res.and_then(|(program, warnings)| {
+            let sim_res = program_res.and_then(|(program, mut warnings)| {
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
                 if self.vcd_path.is_some() {
@@ -2819,20 +3086,23 @@ mod host {
                         crate::backend::native::NativeBackend::new_with_codegen_trace(
                             &laid_out,
                             &self.options,
-                        )?;
+                        )
+                        .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
                     trace.native_optimized_sir = Some(native_trace.optimized_sir);
                     trace.mir = Some(native_trace.mir);
                     trace.reactive_event_graph = Some(native_trace.reactive_graph);
                     trace.native_state_layout = Some(native_trace.state_layout);
                     backend
                 } else {
-                    crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
+                    crate::backend::native::NativeBackend::new(&laid_out, &self.options)
+                        .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?
                 };
                 #[cfg(not(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
                 )))]
-                let backend = JitBackend::new(&laid_out, &self.options, None)?;
+                let backend = JitBackend::new(&laid_out, &self.options, None)
+                    .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
 
                 let mut sim =
                     Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
@@ -2840,7 +3110,9 @@ mod host {
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
                 sim.apply_initial_values();
-                sim.modify(|_| {}).map_err(SimulatorError::from)?;
+                sim.modify(|_| {}).map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 Ok(sim)
             });
 
@@ -2864,6 +3136,7 @@ mod host {
             SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
                 "no initial block found — this module is not a native testbench",
             )))
+            .with_warnings(std::mem::take(&mut sim.warnings))
         })?;
         let result = crate::testbench::run_testbench(&mut sim, &testbench);
         if let Some(start) = testbench_start {
@@ -2889,6 +3162,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2909,6 +3183,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2931,98 +3206,123 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
 
-        /// Compiles the Veryl source and constructs the timed simulation wrapper.
-        pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
+        /// Compiles the design using the host's default backend.
+        pub fn build(self) -> Result<crate::Simulation, SimulatorError> {
+            #[cfg(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            ))]
+            {
+                self.build_native()
+            }
+            #[cfg(not(any(
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+            )))]
+            {
+                self.build_cranelift()
+            }
+        }
+
+        /// Compiles a timed simulation using the Cranelift JIT backend.
+        pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                |program, options| {
+                    let mut trace = crate::debug::CompilationTrace::default();
+                    let wants_trace = options.trace.pre_optimized_clif
+                        || options.trace.post_optimized_clif
+                        || options.trace.native;
+                    let backend =
+                        JitBackend::new(program, options, wants_trace.then_some(&mut trace))?;
+                    if options.trace.output_to_stdout {
+                        trace.print();
+                    }
+                    Ok(backend)
+                },
+            )
+        }
+
+        /// Compiles a timed simulation using the host's native backend.
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        pub fn build_native(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
+        {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                crate::backend::native::NativeBackend::new,
+            )
+        }
+
+        /// Compiles a timed simulation using the Wasmtime WASM backend.
+        pub fn build_wasm(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>
+        {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::wasm_runtime::WasmBackend::new,
+            )
+        }
+
+        /// Builds a timed simulation using the interpreter backend.
+        pub fn build_interpreter(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
+            self.build_with_backend(
+                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::InterpBackend::new,
+            )
+        }
+
+        fn build_with_backend<B: crate::SimBackend>(
+            mut self,
+            layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+            compile: impl FnOnce(
+                &crate::ir::LaidOutProgram,
+                &SimulatorOptions,
+            ) -> Result<B, SimulatorError>,
+        ) -> Result<crate::Simulation<B>, SimulatorError> {
             self.options.emit_triggers = true;
-            self.enforce_native_force_optimizer();
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            )))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-            let layout_mode = if self.vcd_path.is_some() {
-                crate::backend::memory_layout::MemoryLayoutMode::Packed
-            } else {
-                layout_mode
-            };
-            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
-                compile_frontend_to_sir_with_layout_mode(
-                    artifact,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    None,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    layout_mode,
-                )?
-            } else {
-                compile_hdl_to_sir_with_layout_mode(
-                    &self.sources,
-                    &self.sv_sources,
-                    self.top,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    None,
-                    self.metadata,
-                    self.clock_type,
-                    self.reset_type,
-                    &self.param_overrides,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    &self.injected_components.manifests(),
-                    layout_mode,
-                    !self.options.native_force_support,
-                    self.options.allow_always_ff_function_effects,
-                )?
-            };
-            let mut laid_out =
-                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-            if self.vcd_path.is_some() {
-                laid_out.enable_vcd_tracking();
-            }
-
-            if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
-            }
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
-            let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            )))]
-            let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
-
+            let (laid_out, mut warnings, options, vcd_path, injected_components) =
+                self.into_laid_out_program(layout_mode)?;
+            let backend = compile(&laid_out, &options)
+                .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
+            // Initial kernels must keep their time-zero gates until the timed
+            // scheduler starts them; ordinary Simulator builders release them.
             let mut sim = Simulator::with_backend_and_program_for_simulation(
                 backend,
                 laid_out.into_runtime(),
                 warnings,
             );
-            sim.components.set_injected(self.injected_components);
-            sim.diagnostics = self.options.diagnostics.clone();
-            if let Some(path) = self.vcd_path {
-                let descs = sim.build_vcd_descs(self.options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            sim.components.set_injected(injected_components);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new_with_time_precision(
+                    path,
+                    &descs,
+                    sim.program.design.time_precision,
+                )
+                .map_err(|_| {
+                    SimulatorError::from(crate::RuntimeErrorCode::InternalError)
+                        .with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            sim.modify(|_| {}).map_err(|error| {
+                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+            })?;
             Ok(crate::Simulation::new(sim))
         }
     }

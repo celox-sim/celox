@@ -30,6 +30,7 @@ enum Entry {
 /// `directions` gives the argument directions of the subroutines a body
 /// may call.
 pub(super) fn keep_static_locals<'b, T>(
+    state: &AnalysisState,
     statics: &HashMap<String, T>,
     directions: &Directions,
     bodies: impl IntoIterator<Item = &'b mut Vec<Stmt>>,
@@ -40,12 +41,20 @@ pub(super) fn keep_static_locals<'b, T>(
         return Ok((kept, initializers));
     }
     for body in bodies {
-        keep_in(body, statics, directions, &mut kept, &mut initializers)?;
+        keep_in(
+            state,
+            body,
+            statics,
+            directions,
+            &mut kept,
+            &mut initializers,
+        )?;
     }
     Ok((kept, initializers))
 }
 
 fn keep_in<T>(
+    state: &AnalysisState,
     stmts: &mut Vec<Stmt>,
     statics: &HashMap<String, T>,
     directions: &Directions,
@@ -57,6 +66,7 @@ fn keep_in<T>(
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
             && entry(
+                state,
                 name,
                 init.as_ref(),
                 &stmts[index + 1..],
@@ -83,23 +93,30 @@ fn keep_in<T>(
                 else_body,
                 ..
             } => {
-                keep_in(then_body, statics, directions, kept, initializers)?;
-                keep_in(else_body, statics, directions, kept, initializers)?;
+                keep_in(state, then_body, statics, directions, kept, initializers)?;
+                keep_in(state, else_body, statics, directions, kept, initializers)?;
             }
             Stmt::Case { items, default, .. } => {
                 for item in items {
-                    keep_in(&mut item.body, statics, directions, kept, initializers)?;
+                    keep_in(
+                        state,
+                        &mut item.body,
+                        statics,
+                        directions,
+                        kept,
+                        initializers,
+                    )?;
                 }
                 if let Some(default) = default {
-                    keep_in(default, statics, directions, kept, initializers)?;
+                    keep_in(state, default, statics, directions, kept, initializers)?;
                 }
             }
             Stmt::Loop {
                 init, step, body, ..
             } => {
-                keep_in(init, statics, directions, kept, initializers)?;
-                keep_in(step, statics, directions, kept, initializers)?;
-                keep_in(body, statics, directions, kept, initializers)?;
+                keep_in(state, init, statics, directions, kept, initializers)?;
+                keep_in(state, step, statics, directions, kept, initializers)?;
+                keep_in(state, body, statics, directions, kept, initializers)?;
             }
             _ => {}
         }
@@ -110,6 +127,7 @@ fn keep_in<T>(
 
 /// Reject a static local of `subroutine` that keeps its value between calls.
 pub(super) fn check_subroutine_statics(
+    state: &AnalysisState,
     subroutine: &Subroutine,
     statics: &HashSet<String>,
     directions: &Directions,
@@ -126,6 +144,7 @@ pub(super) fn check_subroutine_statics(
                 && result.is_ok()
             {
                 result = entry(
+                    state,
                     name,
                     init.as_ref(),
                     &stmts[index + 1..],
@@ -221,6 +240,7 @@ fn source_name(name: &str) -> &str {
 /// Whether the statements after the declaration of the static local `name`
 /// read the value it holds on entry.
 fn entry(
+    state: &AnalysisState,
     name: &str,
     init: Option<&Expr>,
     after: &[Stmt],
@@ -229,7 +249,7 @@ fn entry(
 ) -> Result<Entry, AnalyzerError> {
     // A static initializer runs once, before simulation starts; one that is
     // not constant could only run on every entry instead.
-    if init.is_some_and(|init| !expr_is_constant(init)) {
+    if init.is_some_and(|init| !expr_is_constant(state, init)) {
         return Err(AnalyzerError::Unsupported(format!(
             "static variable `{}` with an initializer that is not constant (declare it \
              `automatic`)",
@@ -527,6 +547,16 @@ impl Flow<'_> {
                 }
                 Ok(Exits::next(written))
             }
+            Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => {
+                self.read(expr, written)?;
+                Ok(Exits::next(written))
+            }
+            Stmt::WaitEvent(items) => {
+                for item in items {
+                    self.read(&item.expr, written)?;
+                }
+                Ok(Exits::next(written))
+            }
         }
     }
 
@@ -605,7 +635,10 @@ impl Flow<'_> {
     /// output or inout argument.
     fn call_writes(&self, expr: &Expr) -> bool {
         let mut writes = false;
-        visit_calls(expr, &mut |name, args| {
+        visit_calls(expr, &mut |callee, args| {
+            let Callee::Subroutine(name) = callee else {
+                return;
+            };
             let directions = self.directions.get(name);
             writes |= args.iter().enumerate().any(|(index, arg)| {
                 arg.as_ref().is_some_and(|arg| expr_reads(arg, self.name))
@@ -621,7 +654,7 @@ impl Flow<'_> {
 }
 
 /// The expressions of `stmt` itself, not of the statements it contains.
-fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
+pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
     match stmt {
         Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => vec![rhs],
         Stmt::If { condition, .. } => vec![condition],
@@ -660,18 +693,18 @@ fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             })
             .collect(),
         Stmt::Local { init, .. } => init.iter().collect(),
+        Stmt::Delay { amount: expr, .. } | Stmt::Wait(expr) => vec![expr],
+        Stmt::WaitEvent(items) => items.iter().map(|item| &item.expr).collect(),
         Stmt::Break | Stmt::Continue => Vec::new(),
     }
 }
 
-/// Call `f` with the name and arguments of every subroutine call in `expr`.
-fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e str, &'e [Option<Expr>])) {
+/// Call `f` with the callee and arguments of every call in `expr`.
+pub(super) fn visit_calls<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Callee, &'e [Option<Expr>])) {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => {}
         Expr::Call { callee, args, .. } => {
-            if let Callee::Subroutine(name) = callee {
-                f(name, args);
-            }
+            f(callee, args);
             for arg in args.iter().flatten() {
                 visit_calls(arg, f);
             }
@@ -780,7 +813,7 @@ fn const_expr_reads(expr: &ConstExpr, name: &str) -> bool {
 
 /// Whether `expr` has the same value wherever it is evaluated: it reads no
 /// variable and calls nothing that is not constant.
-fn expr_is_constant(expr: &Expr) -> bool {
+fn expr_is_constant(state: &AnalysisState, expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
             ConstExpr::Ident(_) | ConstExpr::Function { .. } => false,
@@ -803,50 +836,48 @@ fn expr_is_constant(expr: &Expr) -> bool {
         // A call is constant when it folds, as a pure system function or a
         // constant function of constant arguments does.
         Expr::Call { args, .. } => {
-            args.iter().flatten().all(expr_is_constant)
-                && expr_to_const(expr.clone())
-                    .and_then(|call| eval_ast_const_expr(&call, &HashMap::default()))
+            args.iter()
+                .flatten()
+                .all(|expr| expr_is_constant(state, expr))
+                && expr_to_const(state, expr.clone())
+                    .and_then(|call| eval_ast_const_expr(state, &call, &HashMap::default()))
                     .is_some()
         }
         Expr::Literal(_) => true,
         Expr::Select { expr, msb, lsb, .. } => {
-            expr_is_constant(expr) && constant(msb) && constant(lsb)
+            expr_is_constant(state, expr) && constant(msb) && constant(lsb)
         }
-        Expr::Concat(parts) => parts.iter().all(expr_is_constant),
+        Expr::Concat(parts) => parts.iter().all(|expr| expr_is_constant(state, expr)),
         Expr::RepeatConcat { count, parts } => {
-            constant(count) && parts.iter().all(expr_is_constant)
+            constant(count) && parts.iter().all(|expr| expr_is_constant(state, expr))
         }
-        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr_is_constant(expr),
-        Expr::Binary { left, right, .. } => expr_is_constant(left) && expr_is_constant(right),
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr_is_constant(state, expr),
+        Expr::Binary { left, right, .. } => {
+            expr_is_constant(state, left) && expr_is_constant(state, right)
+        }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_is_constant(condition)
-                && expr_is_constant(then_expr)
-                && expr_is_constant(else_expr)
+            expr_is_constant(state, condition)
+                && expr_is_constant(state, then_expr)
+                && expr_is_constant(state, else_expr)
         }
         Expr::Inside { expr, items } => {
-            expr_is_constant(expr)
+            expr_is_constant(state, expr)
                 && items.iter().all(|item| match item {
-                    InsideItem::Value(value) => expr_is_constant(value),
+                    InsideItem::Value(value) => expr_is_constant(state, value),
                     InsideItem::Range { low, high } => {
-                        expr_is_constant(low) && expr_is_constant(high)
+                        expr_is_constant(state, low) && expr_is_constant(state, high)
                     }
                 })
         }
     }
 }
 
-/// Whether the variables of the subroutines and blocks of the module or
-/// package `node` are automatic by default: `module automatic m;`.
-pub(super) fn automatic_by_default(node: &RefNode<'_>) -> bool {
-    let lifetime = match node {
-        RefNode::ModuleDeclarationAnsi(module) => &module.nodes.0.nodes.2,
-        RefNode::ModuleDeclarationNonansi(module) => &module.nodes.0.nodes.2,
-        RefNode::PackageDeclaration(package) => &package.nodes.2,
-        _ => return false,
-    };
-    matches!(lifetime, Some(sv_parser::Lifetime::Automatic(_)))
+/// Whether the selected native unit declares automatic lifetime by default.
+pub(super) fn automatic_by_default(tree: &SyntaxTree) -> bool {
+    tree.root_unit()
+        .is_ok_and(|unit| unit.lifetime.as_deref() == Some("automatic"))
 }

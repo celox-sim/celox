@@ -439,7 +439,8 @@ export class Simulation<P = Record<string, unknown>> {
 	 *
 	 * When `maxSteps` is provided, the Rust run loop takes at most that many
 	 * steps and a `SimulationTimeoutError` is thrown if the budget is
-	 * exhausted before reaching `endTime`.
+	 * exhausted before reaching `endTime`. A design that executes `$stop`
+	 * returns normally; use `isStopped()` to detect the suspension.
 	 */
 	runUntil(endTime: number, opts?: { maxSteps?: number }): void {
 		this.ensureAlive();
@@ -451,7 +452,8 @@ export class Simulation<P = Record<string, unknown>> {
 			this._state.dirty = false;
 			return;
 		}
-		const max = opts.maxSteps;
+		// Normalize zero-step budgets before interpreting the native result.
+		const max = Math.max(0, Math.trunc(opts.maxSteps) || 0);
 		if (!this._handle.runUntilBounded) {
 			throw new Error("This simulation does not support bounded runs");
 		}
@@ -463,9 +465,14 @@ export class Simulation<P = Record<string, unknown>> {
 			const next = this._handle.nextEventTime();
 			if (next == null || next > endTime) return;
 		}
+		const wasStopped = this.isStopped();
 		if (!this._handle.runUntilBounded(endTime, max)) {
-			// A step took the pending inputs unless none was allowed.
-			if (max > 0) this._state.dirty = false;
+			if (max > 0) {
+				// A resumed slot can stop or exhaust the budget before pending
+				// host writes are consumed. Keep them eligible for lazy evaluation.
+				if (!wasStopped) this._state.dirty = false;
+				if (this.isStopped()) return;
+			}
 			throw new SimulationTimeoutError(
 				`runUntil: exceeded ${max} steps at time ${this._handle.time()} (target ${endTime})`,
 				this._handle.time(),
@@ -515,6 +522,16 @@ export class Simulation<P = Record<string, unknown>> {
 	}
 
 	/**
+	 * Whether the last `step()` or `runUntil()` returned early because a
+	 * process of the design executed `$stop`. The next call continues the
+	 * simulation after the `$stop`.
+	 */
+	isStopped(): boolean {
+		this.ensureAlive();
+		return this._handle.isStopped?.() ?? false;
+	}
+
+	/**
 	 * Step until `condition()` returns true.
 	 *
 	 * @returns The simulation time when the condition became true.
@@ -546,8 +563,10 @@ export class Simulation<P = Record<string, unknown>> {
 	/**
 	 * Wait for `count` rising edges of the given clock.
 	 *
-	 * Detects actual 0→1 transitions by reading the clock signal directly
-	 * from the shared buffer (clock ports are excluded from the DUT proxy).
+	 * Detects actual posedges by reading the clock signal directly from the
+	 * shared buffer (clock ports are excluded from the DUT proxy). In a
+	 * four-state simulation, a change from x or z to 1 and from 0 to x or z
+	 * is a posedge too (IEEE 1800-2023 Table 9-2).
 	 * The clock must have been registered via `addClock`.
 	 *
 	 * @returns The simulation time after the edges are observed.
@@ -569,12 +588,20 @@ export class Simulation<P = Record<string, unknown>> {
 			throw new Error(`No layout entry for clock '${clock}'.`);
 		}
 		const view = new DataView(this._buffer);
-		const readClk = () => view.getUint8(sig.offset);
+		// The level of the clock's LSB: 0, 1, or 2 plus the value bit for x
+		// and z, whose mask plane follows the value plane.
+		const maskOffset = sig.is4state ? sig.offset + sig.byteSize : -1;
+		const readClk = () => {
+			const value = view.getUint8(sig.offset) & 1;
+			return maskOffset < 0
+				? value
+				: value | ((view.getUint8(maskOffset) & 1) << 1);
+		};
 		let prev = readClk();
 		let remaining = count;
 		return this.waitUntil(() => {
 			const curr = readClk();
-			if (prev === 0 && curr !== 0) remaining--;
+			if (prev !== 1 && curr !== 0 && (prev & curr & 2) === 0) remaining--;
 			prev = curr;
 			return remaining <= 0;
 		}, opts);

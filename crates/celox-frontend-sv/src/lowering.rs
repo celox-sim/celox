@@ -11,9 +11,10 @@ use std::path::Path;
 
 use celox_design::{
     BinaryOp, BitAccess, DisplaySizing, DomainKind, ExternFunction, ExternSignature, ExternType,
-    InitialStateData, InitialStateValue, ModuleId, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH,
-    PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventKind,
-    RuntimeEventSite, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    InitialStateData, InitialStateValue, ModuleId, NbaSite, PROCESS_DELAY_WIDTH,
+    PROCESS_STATUS_WIDTH, PortTypeKind, ProcessSlots, RegionedVarAddrBase, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, STABLE_REGION, TIME_SLOT_WIDTH, TriggerSet, UnaryOp,
+    VarAtomBase, WORKING_REGION, WaitSite,
 };
 use celox_frontend_core::process::PROCESS_RESUME_WIDTH;
 use celox_frontend_core::symbolic::artifact::{
@@ -43,6 +44,8 @@ mod procedural;
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
 const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
+/// The name of a module's [`SimModule::time_slot`].
+const TIME_SLOT: &str = "$time";
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrontendError {
@@ -90,6 +93,12 @@ impl SvVariable {
             module_affiliated: !self.hidden,
         }
     }
+
+    /// A hidden variable other than the time slot, whose value the lowered
+    /// code computes. The time slot is state the scheduler writes.
+    fn is_scratch(&self) -> bool {
+        self.hidden && self.path != [TIME_SLOT]
+    }
 }
 
 #[derive(Clone)]
@@ -119,7 +128,7 @@ struct AnalyzedSvModule {
     /// positional port and parameter connections.
     interfaces: std::sync::Arc<sv::ModuleInterfaces>,
     /// The packages declared in all sources, analyzed once.
-    packages: std::sync::Arc<sv::Packages>,
+    packages: std::rc::Rc<sv::Packages>,
 }
 
 #[derive(Clone)]
@@ -139,9 +148,9 @@ pub(crate) struct LoweredSvInstance {
 pub(crate) struct LoweredSvParameterOverride {
     pub name: String,
     pub value: Option<sv::ir::ConstExpr>,
-    /// The data type bound to a `parameter type`, as source text.
-    pub type_text: Option<String>,
-    pub pattern_text: Option<String>,
+    /// The data type resolved in the instantiating scope.
+    pub bound_type: Option<sv::ast::Type>,
+    pub bound_pattern: Option<sv::ast::BoundPattern>,
 }
 
 #[derive(Clone)]
@@ -205,45 +214,47 @@ pub struct InterfaceSignature {
 pub fn interface_signatures(
     sources: &[(&str, &Path)],
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    interface_signatures_for(sources, None)
+    interface_signatures_for(sources, None, &mut Vec::new())
 }
 
+/// The signatures of the interfaces in `names`, or of every interface.
+/// Lowering an interface for its signature reports its warnings in
+/// `warnings`; lowering the design reports them again.
 pub fn interface_signatures_for(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    let (mut prototypes, signature_sources) = sv::interface_prototypes(sources)?;
-    if let Some(names) = names {
-        prototypes.retain(|prototype| names.contains(&prototype.name));
+    let mut found = Vec::new();
+    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    append_error_warnings(&signatures, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    signatures
+}
+
+fn append_error_warnings<T>(
+    result: &Result<T, FrontendError>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    if let Err(FrontendError::Analyzer(error)) = result {
+        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
     }
+}
+
+fn interface_signatures_collecting(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    let prototypes = sv::interface_prototypes_for(sources, names)?;
     if prototypes.is_empty() {
         return Ok(Vec::new());
     }
-    let probe_path = Path::new("<interface-signatures>");
-    let mut all_sources = signature_sources
-        .iter()
-        .zip(sources)
-        .map(|(code, (_, path))| (code.as_str(), *path))
-        .collect::<Vec<_>>();
-    all_sources.extend(
-        prototypes
-            .iter()
-            .map(|prototype| (prototype.probe_source.as_str(), probe_path)),
-    );
-    let probe_roots = prototypes
-        .iter()
-        .map(|prototype| prototype.probe_name.as_str())
-        .collect::<Vec<_>>();
-    let analyzed = analyze_sources(&all_sources, &probe_roots)?;
     prototypes
         .into_iter()
         .map(|prototype| {
-            let lowered = specialize_module(
-                &analyzed[&prototype.probe_name],
-                &LoweredSvModuleKey::base(prototype.probe_name),
-                false,
-                false,
-            )?;
+            warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
+            let lowered = lower_module(&prototype.module, false, true, false, warnings)?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -361,25 +372,8 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::elaborate_interfaces_with_metadata_and_roots(
-        sources,
-        &bindings,
-        selected_roots.as_deref(),
-    )?;
-    let elaborated = elaboration.sources;
-    let root_names = elaboration.root_names;
-    let elaborated_sources: Vec<(&str, &Path)>;
-    let sources = match &elaborated {
-        Some(codes) => {
-            elaborated_sources = codes
-                .iter()
-                .zip(sources)
-                .map(|(code, (_, path))| (code.as_str(), *path))
-                .collect();
-            elaborated_sources.as_slice()
-        }
-        None => sources,
-    };
+    let elaboration = sv::plan_interfaces(sources, &bindings)?;
+    let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
         .iter()
@@ -417,14 +411,19 @@ fn analyze_sources_with_requests(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
-    let packages = match roots {
+    let mut packages = match roots {
         Some(roots) => {
             let roots = roots
                 .iter()
                 .map(|root| {
                     root_names
                         .get(*root)
-                        .map(String::as_str)
+                        .map(|name| {
+                            elaboration
+                                .modules
+                                .get(name)
+                                .map_or(name.as_str(), |plan| plan.original.as_str())
+                        })
                         .or_else(|| {
                             requests
                                 .iter()
@@ -438,13 +437,24 @@ fn analyze_sources_with_requests(
         }
         None => sv::ParsedSource::analyze_packages(&parsed)?,
     };
-    let packages = std::sync::Arc::new(packages);
+    packages.set_interface_plan(elaboration.clone());
+    let packages = std::rc::Rc::new(packages);
     for (source, code, path) in &sources {
         let implicit_net_permissions: HashMap<_, _> =
             sv::source_module_implicit_net_permissions(code, path)?
                 .into_iter()
                 .collect();
-        for module_name in source.module_names().iter().cloned() {
+        let mut module_names = source.module_names().to_vec();
+        module_names.extend(
+            elaboration
+                .modules
+                .iter()
+                .filter(|(name, plan)| {
+                    *name != &plan.original && source.module_names().contains(&plan.original)
+                })
+                .map(|(name, _)| name.clone()),
+        );
+        for module_name in module_names {
             if !declarations.is_empty() && foreign.roots.contains_key(&module_name) {
                 continue;
             }
@@ -456,12 +466,17 @@ fn analyze_sources_with_requests(
                 name,
                 AnalyzedSvModule {
                     interface_ports: elaboration
-                        .interface_ports
-                        .get(module_name.split('$').next().unwrap())
-                        .cloned()
+                        .modules
+                        .get(&module_name)
+                        .map(|plan| plan.ports.iter().map(|port| port.name.clone()).collect())
                         .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
-                        .get(&module_name)
+                        .get(
+                            elaboration
+                                .modules
+                                .get(&module_name)
+                                .map_or(module_name.as_str(), |plan| plan.original.as_str()),
+                        )
                         .copied()
                         .unwrap_or(true),
                     name: module_name,
@@ -709,6 +724,19 @@ fn validate_net_driver_ranges(
     Ok(())
 }
 
+/// Report the warnings of analyzing the packages the modules share, before
+/// lowering a module can fail.
+fn package_warnings(
+    analyzed: &HashMap<String, AnalyzedSvModule>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) {
+    if let Some(module) = analyzed.values().next() {
+        warnings.extend(crate::warning::analyzer_warnings(
+            module.packages.warnings(),
+        ));
+    }
+}
+
 /// The packages that declare variables, lowered as the modules of their one
 /// instance each, numbered from `first`.
 fn lower_package_states(
@@ -716,6 +744,7 @@ fn lower_package_states(
     first: usize,
     four_state: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
     let mut states = packages.state_modules().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
@@ -723,7 +752,12 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let lowered = lower_module(module, four_state, true, ff_parts)?;
+            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings)?;
+            lowered.sim_module.time_precision = Some(
+                celox_design::TimePrecision::try_from(packages.global_time_precision())
+                    .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+            );
+            lowered.sim_module.time_scale = scope_time_scale(packages, module.name())?;
             // Declaration initializers run before every `initial` block
             // (IEEE 1800-2023 10.5); one that is not folded into an initial
             // value would run among them.
@@ -1148,6 +1182,7 @@ pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign(
         sources,
@@ -1155,6 +1190,7 @@ pub fn prepare_external_hierarchy(
         &ExternalHierarchy::default(),
         &[],
         four_state,
+        warnings,
     )
 }
 
@@ -1166,6 +1202,7 @@ pub fn prepare_external_hierarchy_with_foreign(
     foreign: &ExternalHierarchy,
     declarations: &[(&str, &Path)],
     four_state: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     prepare_external_hierarchy_with_foreign_resolver(
         sources,
@@ -1176,14 +1213,46 @@ pub fn prepare_external_hierarchy_with_foreign(
         None,
         None,
         &[],
+        warnings,
     )
 }
 
 pub type ForeignModuleResolver<'a> =
     dyn FnMut(&str, &[(String, SvParameterValue)]) -> Result<ExternalModule, ParserError> + 'a;
 
+/// Appends the warnings of the lowered modules to `warnings`, also when
+/// lowering fails after them.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_external_hierarchy_with_foreign_resolver(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ExternalHierarchy, FrontendError> {
+    let mut found = Vec::new();
+    let hierarchy = prepare_external_hierarchy_collecting(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        &mut found,
+    );
+    append_error_warnings(&hierarchy, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    hierarchy
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_external_hierarchy_collecting(
     sources: &[(&str, &Path)],
     root_names: &HashSet<String>,
     foreign: &ExternalHierarchy,
@@ -1192,6 +1261,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     mut resolver: Option<&mut ForeignModuleResolver<'_>>,
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1200,6 +1270,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
     )?;
+    package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -1207,6 +1278,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     let dummy_ir = dummy.analyze_module(
         "__celox_foreign",
         &HashMap::default(),
+        &[],
         &[],
         &sv::ModuleInterfaces::default(),
         &sv::Packages::default(),
@@ -1294,8 +1366,8 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 .map(|(name, value)| LoweredSvParameterOverride {
                     name: name.clone(),
                     value: Some(value.expression()),
-                    type_text: None,
-                    pattern_text: None,
+                    bound_type: None,
+                    bound_pattern: None,
                 })
                 .collect();
             requested_roots.insert(name.clone(), key.clone());
@@ -1309,8 +1381,8 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                 .map(|(name, value)| LoweredSvParameterOverride {
                     name: name.clone(),
                     value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
-                    type_text: None,
-                    pattern_text: None,
+                    bound_type: None,
+                    bound_pattern: None,
                 })
                 .collect();
         }
@@ -1370,8 +1442,8 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
                         .map(|(name, value)| LoweredSvParameterOverride {
                             name: name.clone(),
                             value: Some(value.expression()),
-                            type_text: None,
-                            pattern_text: None,
+                            bound_type: None,
+                            bound_pattern: None,
                         })
                         .collect();
                     requested_roots.insert(name.clone(), dependency.clone());
@@ -1393,7 +1465,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false)?;
+        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name)
@@ -1428,7 +1500,10 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            Ok((module_id, specialize_module(base, key, four_state, false)?))
+            Ok((
+                module_id,
+                specialize_module(base, key, four_state, false, warnings)?,
+            ))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
@@ -1455,6 +1530,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         modules.insert(
             module_id,
@@ -1487,8 +1563,13 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
             packages: Vec::new(),
         });
     };
-    let package_states =
-        lower_package_states(&any_module.packages, module_ids.len(), four_state, false)?;
+    let package_states = lower_package_states(
+        &any_module.packages,
+        module_ids.len(),
+        four_state,
+        false,
+        warnings,
+    )?;
     // How often the design instantiates these modules is not known here;
     // assembly checks the drivers of package variables across instances.
     let mut sim_modules: HashMap<ModuleId, SimModule> = modules
@@ -1569,8 +1650,48 @@ pub fn schedule_sources(
     parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    let mut found = Vec::new();
+    let scheduled = schedule_sources_collecting(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        &mut found,
+    );
+    append_error_warnings(&scheduled, &mut found);
+    crate::warning::append_unique_warnings(sources, warnings, found);
+    scheduled
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_sources_collecting(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources, &[top])?;
+    package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -1579,8 +1700,8 @@ pub fn schedule_sources(
             .map(|(name, value)| LoweredSvParameterOverride {
                 name: name.clone(),
                 value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
-                type_text: None,
-                pattern_text: None,
+                bound_type: None,
+                bound_pattern: None,
             })
             .collect(),
     };
@@ -1601,7 +1722,7 @@ pub fn schedule_sources(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-        let lowered = specialize_module(base, &key, four_state, false)?;
+        let lowered = specialize_module(base, &key, four_state, false, warnings)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -1628,7 +1749,7 @@ pub fn schedule_sources(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
-            let lowered = specialize_module(base, key, four_state, parallel.enabled())
+            let lowered = specialize_module(base, key, four_state, parallel.enabled(), warnings)
                 .map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
@@ -1663,6 +1784,7 @@ pub fn schedule_sources(
             &module_ids,
             &lowered_modules,
             four_state,
+            warnings,
         )?;
         module_names.insert(module_id, key.name.clone());
         modules.insert(module_id, sim_module);
@@ -1673,6 +1795,7 @@ pub fn schedule_sources(
         module_ids.len(),
         four_state,
         parallel.enabled(),
+        warnings,
     )?;
     validate_package_variable_drivers([&root_key], &module_ids, &lowered_modules)?;
     let mut packages = Vec::new();
@@ -1762,41 +1885,68 @@ fn specialize_module(
     key: &LoweredSvModuleKey,
     four_state: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    // A `parameter type` is bound by rewriting its default in the module source.
-    let type_overrides: Vec<(String, String)> = key
+    // Type bindings are already resolved in the caller scope.
+    let type_overrides: Vec<_> = key
         .parameter_overrides
         .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.type_text.clone()?)))
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_type.clone()?)))
         .collect();
     let pattern_overrides: Vec<_> = key
         .parameter_overrides
         .iter()
-        .filter_map(|parameter| Some((parameter.name.clone(), parameter.pattern_text.clone()?)))
+        .filter_map(|parameter| Some((parameter.name.clone(), parameter.bound_pattern.clone()?)))
         .collect();
-    let pattern_source = module
-        .source
-        .with_pattern_parameter_overrides(&module.name, &pattern_overrides)?;
-    let source = pattern_source.as_ref().unwrap_or(&module.source);
-    let ir = source.analyze_module(
+    let analyzed = module.source.analyze_module(
         &module.name,
         &overrides,
         &type_overrides,
+        &pattern_overrides,
         &module.interfaces,
         &module.packages,
-    )?;
+    );
+    if let Err(error) = &analyzed {
+        warnings.extend(crate::warning::analyzer_warnings(error.warnings()));
+    }
+    let ir = analyzed?;
+    warnings.extend(crate::warning::analyzer_warnings(ir.warnings()));
     let specialized = ir
         .modules()
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(
+    let mut lowered = lower_module(
         specialized,
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
-    )
+        warnings,
+    )?;
+    lowered.sim_module.time_precision = Some(
+        celox_design::TimePrecision::try_from(module.packages.global_time_precision())
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
+    );
+    lowered.sim_module.time_scale = scope_time_scale(&module.packages, &module.name)?;
+    Ok(lowered)
+}
+
+fn scope_time_scale(
+    packages: &sv::Packages,
+    name: &str,
+) -> Result<celox_design::TimeScale, sv::AnalyzerError> {
+    let Some((unit, precision)) = packages.scope_time_scale(name) else {
+        return Ok(celox_design::TimeScale::default());
+    };
+    let convert = |exponent: i32| {
+        celox_design::TimePrecision::try_from(exponent)
+            .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))
+    };
+    Ok(celox_design::TimeScale {
+        unit: convert(unit)?,
+        precision: convert(precision)?,
+    })
 }
 
 fn lower_module(
@@ -1804,8 +1954,16 @@ fn lower_module(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed, ff_parts)
+    lower_module_with_overrides(
+        module,
+        &[],
+        four_state,
+        implicit_nets_allowed,
+        ff_parts,
+        warnings,
+    )
 }
 
 /// `ff_parts` additionally keeps every `always_ff` process as an
@@ -1816,6 +1974,7 @@ fn lower_module_with_overrides(
     four_state: bool,
     implicit_nets_allowed: bool,
     ff_parts: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
@@ -1952,6 +2111,7 @@ fn lower_module_with_overrides(
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            split_commit_ff_blocks,
             reset_clock_map,
             parallel_ff_parts,
             event_vars,
@@ -1967,6 +2127,7 @@ fn lower_module_with_overrides(
             &constants,
             &parameter_types,
             four_state,
+            warnings,
         );
         let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
         (
@@ -1977,7 +2138,7 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
-    let (initial_values, processes) = lower_initial_processes(
+    let (initial_values, processes, wait_sites, nba_sites) = lower_initial_processes(
         module,
         &mut variables,
         &mut name_to_id,
@@ -1987,6 +2148,7 @@ fn lower_module_with_overrides(
         &mut runtime_event_sites,
         &mut runtime_errors,
         &mut extern_functions,
+        warnings,
     )?;
     initial_memory_values.extend(initial_values);
 
@@ -2060,12 +2222,15 @@ fn lower_module_with_overrides(
         source: module.clone(),
         implicit_nets_allowed,
         sim_module: SimModule {
+            time_precision: None,
+            time_scale: celox_design::TimeScale::default(),
             name,
             variables: shared_variables,
             ff_access_summaries: HashMap::default(),
             eval_only_ff_blocks,
             apply_ff_blocks,
             eval_apply_ff_blocks,
+            split_commit_ff_blocks,
             parallel_ff_parts,
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
@@ -2082,8 +2247,9 @@ fn lower_module_with_overrides(
             processes,
             package_bindings: HashMap::default(),
             counter_slots: Vec::new(),
-            wait_sites: Vec::new(),
-            nba_sites: Vec::new(),
+            wait_sites,
+            nba_sites,
+            time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
         variables,
         port_order,
@@ -2122,7 +2288,12 @@ fn evaluated_parameter_overrides(
             continue;
         };
         if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
-            sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+            sv::typecheck::eval_const_integral_literal_with_types(
+                value,
+                &constants,
+                &HashMap::default(),
+            )
+            .ok_or_else(|| {
                 sv::AnalyzerError::Unsupported(format!(
                     "non-integer module parameter override `{}`",
                     parameter.name
@@ -2157,8 +2328,8 @@ fn lower_parameter_overrides(
             LoweredSvParameterOverride {
                 name: parameter.name().to_string(),
                 value,
-                type_text: parameter.type_text().map(str::to_string),
-                pattern_text: parameter.pattern_text().map(str::to_string),
+                bound_type: parameter.bound_type().cloned(),
+                bound_pattern: parameter.bound_pattern().cloned(),
             }
         })
         .collect()
@@ -2351,6 +2522,7 @@ pub(crate) fn attach_instance_glue(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -2410,8 +2582,67 @@ pub(crate) fn attach_instance_glue(
         )?;
         resolved_instances.push((instance, child_id, child, connections));
     }
+    // Materialize state-reading input actuals as continuous assignments in
+    // the parent, including reads through callees and omitted defaults.
+    // Stateful lowering guards activation, so time alone (or an unrelated
+    // input) cannot reevaluate a time-only actual.
+    let mut port_assignments = Vec::new();
+    {
+        let mut pm = procedural::ProcModule::new(
+            &lowered.source,
+            &mut parent_variables,
+            &mut signal_names,
+            &lowered.constants,
+            &lowered.parameter_types,
+            four_state,
+            warnings,
+        );
+        for (_, _, child, connections) in &mut resolved_instances {
+            for connection in connections {
+                let Some(actual) = &connection.actual_expr else {
+                    continue;
+                };
+                if !pm.reads_simulation_state(&[sv::ir::Stmt::Eval(actual.clone())]) {
+                    continue;
+                }
+                let Some(port) =
+                    child
+                        .port_order
+                        .iter()
+                        .map(|id| &child.variables[id])
+                        .find(|var| {
+                            var.path.join(".") == connection.formal
+                                && var.kind == VariableKind::Input
+                        })
+                else {
+                    continue;
+                };
+                let (id, name) = pm.temp(
+                    "port_time",
+                    port.width,
+                    port.signed,
+                    four_state && port.is_4state,
+                );
+                port_assignments.push((
+                    id,
+                    vec![sv::ir::Stmt::Assign {
+                        lhs: sv::ir::LValue::Ident(name.clone()),
+                        rhs: actual.clone(),
+                        nonblocking: false,
+                    }],
+                ));
+                connection.actual_expr = Some(sv::ir::Expr::Ident(name));
+            }
+        }
+        for id in &pm.created {
+            module
+                .variables
+                .insert(*id, pm.variables[id].to_symbolic_variable());
+        }
+    }
     let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
         &lowered.source,
+        &port_assignments,
         &mut parent_variables,
         &mut signal_names,
         &lowered.constants,
@@ -2419,6 +2650,7 @@ pub(crate) fn attach_instance_glue(
         four_state,
         &mut module.runtime_errors,
         &mut module.extern_functions,
+        warnings,
     )
     .map_err(|error| match error {
         sv::AnalyzerError::MemoryFile(detail) => ParserError::MemoryFile {
@@ -2502,6 +2734,8 @@ pub(crate) fn attach_instance_glue(
             .variables
             .insert(id, parent_variables[&id].to_symbolic_variable());
     }
+    // Combinational processes may read the time too.
+    module.time_slot = signal_names.get(TIME_SLOT).copied();
     for (instance, child_id, child, connections) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -2740,9 +2974,18 @@ fn lower_initial_processes(
     runtime_event_sites: &mut Vec<RuntimeEventSite>,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
-) -> Result<(Vec<InitialStateValue<SourceVarId>>, Vec<SymbolicProcess>), sv::AnalyzerError> {
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> Result<
+    (
+        Vec<InitialStateValue<SourceVarId>>,
+        Vec<SymbolicProcess>,
+        Vec<WaitSite<SourceVarId>>,
+        Vec<NbaSite<SourceVarId>>,
+    ),
+    sv::AnalyzerError,
+> {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -2753,6 +2996,7 @@ fn lower_initial_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     let mut arena = SLTNodeArena::new();
     let mut seed = comb::Store::default();
@@ -2772,6 +3016,12 @@ fn lower_initial_processes(
             .get(&(1, index))
             .copied()
             .unwrap_or(0x4d59_5df4);
+        // An `always` process never finishes, so it is never folded into
+        // initial state.
+        if process.repeats() {
+            runtime.push((process, random_seed));
+            continue;
+        }
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {
@@ -2790,7 +3040,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new()));
+        return Ok((values, Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -2840,17 +3090,27 @@ fn lower_initial_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     pm.runtime_event_sites = std::mem::take(runtime_event_sites);
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
+    let mut wait_sites = Vec::new();
+    let mut nba_sites = Vec::new();
     let processes = runtime
         .into_iter()
         .zip(slots)
-        .map(|((process, random_seed), slots)| {
+        .enumerate()
+        .map(|(index, ((process, random_seed), slots))| {
+            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
+                process.body(),
+                slots,
+                index,
+            )?;
+            wait_sites.extend(kernel.wait_sites);
+            nba_sites.extend(kernel.nba_sites);
             Ok(SymbolicProcess {
-                kernel: ff::Ff::new(&mut pm, random_seed)
-                    .lower_initial_kernel(process.body(), slots)?,
+                kernel: kernel.unit,
                 slots,
             })
         })
@@ -2858,11 +3118,12 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?))
+    Ok((values, processes?, wait_sites, nba_sites))
 }
 
 fn lower_comb_processes(
     module: &sv::ir::Module,
+    port_assignments: &[(SourceVarId, Vec<sv::ir::Stmt>)],
     variables: &mut HashMap<SourceVarId, SvVariable>,
     name_to_id: &mut HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
@@ -2870,6 +3131,7 @@ fn lower_comb_processes(
     four_state: bool,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<
     (
         Vec<LogicPath<SourceVarId>>,
@@ -2891,6 +3153,7 @@ fn lower_comb_processes(
         constants,
         parameter_types,
         four_state,
+        warnings,
     );
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
@@ -2908,13 +3171,14 @@ fn lower_comb_processes(
                 continue;
             }
         }
-        if pm.uses_random(process.body()) {
+        if pm.reads_simulation_state(process.body()) {
             pm.runtime_event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
                     process.sensitivity_body(),
                     process.kind(),
+                    &[],
                     &mut arena,
                 )?,
             );
@@ -2974,6 +3238,17 @@ fn lower_comb_processes(
             observers.push(observer);
         }
         sites.append(&mut comb.sites);
+    }
+    for (target, body) in port_assignments {
+        pm.runtime_event_sites = std::mem::take(&mut sites);
+        comb_blocks.extend(ff::Ff::new(&mut pm, 0).lower_comb_process(
+            body,
+            &[],
+            sv::ir::CombProcessKind::ContinuousAssign,
+            &[*target],
+            &mut arena,
+        )?);
+        sites = std::mem::take(&mut pm.runtime_event_sites);
     }
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
@@ -4674,9 +4949,11 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
                 arena.alloc(SLTNode::Binary(count, op, one)).ok()?
             }
         }
-        // The random number functions need process state, and the analyzer
-        // folds the other functions to constants.
-        SystemFunction::Random
+        // The random number and time functions need process state, and the
+        // analyzer folds the other functions to constants.
+        SystemFunction::Time
+        | SystemFunction::Stime
+        | SystemFunction::Random
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
         | SystemFunction::Timeunit
@@ -6249,6 +6526,10 @@ type SvFfBlocks = (
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
     HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    HashMap<
+        TriggerSet<SourceVarId>,
+        celox_frontend_core::symbolic::artifact::SplitCommit<RegionedVarAddr>,
+    >,
     HashMap<SourceVarId, SourceVarId>,
     HashMap<
         TriggerSet<SourceVarId>,
@@ -6345,6 +6626,8 @@ fn lower_ff_processes(
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
+    let mut active_ff_blocks = HashMap::default();
+    let mut nba_ff_blocks: HashMap<_, ExecutionUnit<RegionedVarAddr>> = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
 
@@ -6406,8 +6689,13 @@ fn lower_ff_processes(
         }
         let sites_before = pm.runtime_event_sites.len();
         let extern_calls_before = pm.extern_calls;
-        let (eval_only, apply, targets) =
-            ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
+        let ff::FfProcessUnits {
+            eval: eval_only,
+            apply,
+            active,
+            nba,
+            targets,
+        } = ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =
@@ -6425,7 +6713,9 @@ fn lower_ff_processes(
                 });
         }
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
-        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set, apply);
+        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
+        insert_or_merge_ff_unit(&mut active_ff_blocks, trigger_set.clone(), active);
+        insert_or_merge_ff_unit(&mut nba_ff_blocks, trigger_set, nba);
     }
     // Every process of a trigger evaluates against the pre-edge state before
     // any of them commits (IEEE 1800-2023 10.4.2), so the combined unit runs
@@ -6439,10 +6729,23 @@ fn lower_ff_processes(
     // One process is the whole trigger group.
     parallel_ff_parts.retain(|_, parts| parts.len() > 1);
 
+    let split_commit_ff_blocks = active_ff_blocks
+        .into_iter()
+        .map(|(trigger_set, active)| {
+            let nba = nba_ff_blocks
+                .remove(&trigger_set)
+                .expect("every trigger group has both commits");
+            (
+                trigger_set,
+                celox_frontend_core::symbolic::artifact::SplitCommit { active, nba },
+            )
+        })
+        .collect();
     Ok((
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
+        split_commit_ff_blocks,
         reset_clock_map,
         parallel_ff_parts,
         event_vars,

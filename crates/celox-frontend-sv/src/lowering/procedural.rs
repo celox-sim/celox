@@ -44,6 +44,9 @@ pub(super) struct ProcModule<'a> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
+    /// Where the warnings found while lowering go. A process lowered more
+    /// than once repeats its warnings; the frontend reports each once.
+    warnings: &'a mut Vec<crate::warning::PendingWarning>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -62,6 +65,7 @@ impl<'a> ProcModule<'a> {
         constants: &'a HashMap<String, i128>,
         parameter_types: &'a HashMap<String, (usize, bool)>,
         four_state: bool,
+        warnings: &'a mut Vec<crate::warning::PendingWarning>,
     ) -> Self {
         let next_id = SourceVarId(
             variables
@@ -140,12 +144,14 @@ impl<'a> ProcModule<'a> {
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
             unpacked_bounds,
+            warnings,
         }
     }
 
-    /// Whether a process calls a random number function, including through
-    /// user subroutines and omitted argument defaults.
-    pub fn uses_random(&self, body: &[sv::ir::Stmt]) -> bool {
+    /// Whether a process calls a system function that reads the state of
+    /// the simulation, such as `$urandom` or `$time`, including through user
+    /// subroutines and omitted argument defaults.
+    pub fn reads_simulation_state(&self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -154,7 +160,7 @@ impl<'a> ProcModule<'a> {
         while let Some((callee, args)) = calls.pop() {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
-                    if function.is_effectful() {
+                    if function.reads_simulation_state() {
                         return true;
                     }
                     continue;
@@ -332,11 +338,12 @@ impl<'a> ProcModule<'a> {
     /// the values of its optional start and finish addresses: the file is
     /// read when the design is compiled.
     pub fn readmem(
-        &self,
+        &mut self,
         format: sv::ir::MemoryFormat,
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         start: Option<i128>,
         finish: Option<i128>,
+        site: Option<&sv::ir::SourceSpan>,
     ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
         let radix = format.base();
@@ -417,9 +424,14 @@ impl<'a> ProcModule<'a> {
             finish,
         )
         .map_err(|error| sv::AnalyzerError::MemoryFile(format!("{name}: {}", error.message)))?;
-        if let Some(warning) = parsed.warning {
-            tracing::warn!(task = name, file = filename, "{warning}");
-        }
+        let warning =
+            parsed
+                .warning
+                .map(|detail| crate::FrontendWarningKind::MemoryFileWordCount {
+                    task: name.to_string(),
+                    file: unescape(filename),
+                    detail,
+                });
         let writes = parsed.writes;
         let word_mask = (BigUint::from(1u8) << element_width) - BigUint::from(1u8);
         let mut words = Vec::new();
@@ -446,7 +458,15 @@ impl<'a> ProcModule<'a> {
                 });
             }
         }
+        if let Some(warning) = warning {
+            self.warn(warning, site);
+        }
         Ok((id, words))
+    }
+
+    /// Report a warning of the statement at `site`.
+    pub fn warn(&mut self, kind: crate::FrontendWarningKind, site: Option<&sv::ir::SourceSpan>) {
+        self.warnings.push((kind, site.cloned()));
     }
 
     /// Register a runtime event site and return its local number.
@@ -497,6 +517,22 @@ impl<'a> ProcModule<'a> {
     ) -> (SourceVarId, String) {
         let name = format!("{purpose}@t{}", self.temp_counter);
         self.temp_counter += 1;
+        let id = self.hidden(name.clone(), width, signed, is_4state);
+        (id, name)
+    }
+
+    /// The hidden variable through which the module's processes read the
+    /// simulation time, which the scheduler stores into it
+    /// (`RuntimeSchema::time_slots`). Its name is no SystemVerilog
+    /// identifier.
+    pub fn time_slot(&mut self) -> String {
+        if !self.name_to_id.contains_key(TIME_SLOT) {
+            self.hidden(TIME_SLOT.to_string(), TIME_SLOT_WIDTH, false, false);
+        }
+        TIME_SLOT.to_string()
+    }
+
+    fn hidden(&mut self, name: String, width: usize, signed: bool, is_4state: bool) -> SourceVarId {
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(
             id,
@@ -518,9 +554,34 @@ impl<'a> ProcModule<'a> {
                 hidden: true,
             },
         );
-        self.name_to_id.insert(name.clone(), id);
+        self.name_to_id.insert(name, id);
         self.created.push(id);
-        (id, name)
+        id
+    }
+
+    /// A hidden variable with the shape of `id`, two-state when `two_state`.
+    pub fn shadow(
+        &mut self,
+        id: SourceVarId,
+        purpose: &str,
+        two_state: bool,
+    ) -> (SourceVarId, String) {
+        let name = format!("{purpose}@t{}", self.temp_counter);
+        self.temp_counter += 1;
+        let mut variable = self.variables[&id].clone();
+        variable.path = vec![name.clone()];
+        variable.source = None;
+        variable.hidden = true;
+        variable.domain_kind = DomainKind::Other;
+        if two_state {
+            variable.is_4state = false;
+            variable.type_kind = PortTypeKind::Bit;
+        }
+        let shadow = next_var_id(&mut self.next_id);
+        self.variables.insert(shadow, variable);
+        self.name_to_id.insert(name.clone(), shadow);
+        self.created.push(shadow);
+        (shadow, name)
     }
 
     /// A hidden one-bit copy of the event signal `signal`, sensed as `kind`.
@@ -562,11 +623,12 @@ impl<'a> ProcModule<'a> {
         self.subroutines.get(name)
     }
 
-    /// Whether a call of `callee` has effects: a user subroutine or a DPI
-    /// import, or an effectful system function such as `$urandom`.
+    /// Whether a call of `callee` has effects or reads the state of the
+    /// simulation: a user subroutine or a DPI import, or a system function
+    /// such as `$urandom` or `$time`.
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
-            sv::ir::Callee::System(function) => function.is_effectful(),
+            sv::ir::Callee::System(function) => function.reads_simulation_state(),
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -790,8 +852,8 @@ pub(super) enum SystemTaskKind {
     /// `$display` and `$write`, with the radix of their `b`, `o` and `h`
     /// variants (`d` otherwise).
     Print(RuntimeEventKind, char),
-    /// `$finish`.
-    Finish,
+    /// `$finish` and `$stop`, with their event kind.
+    Control(RuntimeEventKind),
     /// `$error`, `$warning`, `$info`: a message, then execution continues.
     Message,
     /// `$fatal`: a message, then the simulation ends with an error.
@@ -811,8 +873,8 @@ impl SystemTaskKind {
 }
 
 /// How a task reports, for the tasks that report: `$readmemh`/`$readmemb`
-/// load memory instead, and the analyzer rewrites `$printtimescale` into a
-/// `$display`.
+/// load memory instead, the analyzer rewrites `$printtimescale` into a
+/// `$display`, and `$exit` outside a program block does nothing.
 pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKind> {
     use sv::ir::SystemTask;
     Some(match task {
@@ -820,12 +882,13 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
             SystemTaskKind::Print(RuntimeEventKind::Display, radix.letter())
         }
         SystemTask::Write(radix) => SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter()),
-        SystemTask::Finish => SystemTaskKind::Finish,
+        SystemTask::Finish => SystemTaskKind::Control(RuntimeEventKind::Finish),
+        SystemTask::Stop => SystemTaskKind::Control(RuntimeEventKind::Stop),
         SystemTask::Severity(_) => SystemTaskKind::Message,
         SystemTask::Fatal => SystemTaskKind::Fatal,
         SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
         SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
-        SystemTask::Readmem(_) | SystemTask::Printtimescale => return None,
+        SystemTask::Readmem(_) | SystemTask::Printtimescale | SystemTask::Exit => return None,
     })
 }
 
@@ -863,7 +926,7 @@ pub(super) fn system_task_template(
             &args[1..]
         }
         SystemTaskKind::Assertion(_) => &args[1..],
-        SystemTaskKind::Finish => &[][..],
+        SystemTaskKind::Control(_) => &[][..],
         _ => args,
     };
     let (mut template, values) = match args.first() {

@@ -138,10 +138,135 @@ pub struct VpiHandleObject {
 
 pub type VpiHandle = *mut VpiHandleObject;
 
-thread_local! {
-    static RUNTIME: RefCell<Option<NativeProgramInstance>> = const { RefCell::new(None) };
-    static FORCED_VALUES: RefCell<HashMap<NativeSignalIdentity, ForcedValue>> = RefCell::new(HashMap::default());
-    static PENDING_WRITES: RefCell<PendingWrites> = RefCell::new(PendingWrites::default());
+/// State owned by one VPI simulation session. The C ABI selects one session
+/// per process because standard VPI entry points carry no host context.
+#[derive(Default)]
+struct VpiHost {
+    runtime: RefCell<Option<NativeProgramInstance>>,
+    forced_values: RefCell<HashMap<NativeSignalIdentity, ForcedValue>>,
+    pending_writes: RefCell<PendingWrites>,
+    callbacks: RefCell<callbacks::CallbackState>,
+    vlog: RefCell<Option<callbacks::VlogStorage>>,
+}
+
+struct HostRegistration {
+    owner: std::thread::ThreadId,
+    // An owning Rc reference, accessed only after checking the owner thread.
+    address: usize,
+}
+
+static ACTIVE_HOST: std::sync::Mutex<Option<HostRegistration>> = std::sync::Mutex::new(None);
+
+/// Owns the active process VPI session. Keep this guard alive while calling VPI
+/// or plugin code. A session and all its callbacks stay on the installing thread.
+#[must_use = "keep the VPI session alive while invoking plugins"]
+pub struct VpiSession {
+    host: std::rc::Rc<VpiHost>,
+    registered: bool,
+}
+
+impl VpiSession {
+    // The C loader has no Rust caller to retain a guard. Transfer its lifetime
+    // to the explicit celox_vpi_clear_runtime/clear_runtime boundary instead.
+    fn detach(mut self) {
+        self.registered = false;
+    }
+}
+
+impl Drop for VpiSession {
+    fn drop(&mut self) {
+        if self.registered {
+            unregister_host(std::rc::Rc::as_ptr(&self.host) as usize);
+        }
+    }
+}
+
+fn unregister_host(address: usize) {
+    let registration = {
+        let mut active = ACTIVE_HOST
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active.as_ref().is_some_and(|host| {
+            host.owner == std::thread::current().id() && host.address == address
+        }) {
+            // Safety: this registration owns a live Rc and the owner-thread
+            // check above excludes cross-thread access to its RefCell fields.
+            let host = unsafe { &*(address as *const VpiHost) };
+            let mut callbacks = host.callbacks.borrow_mut();
+            if callbacks.running {
+                // Keep this host selected through all remaining callback phases.
+                // Reentrant installation must fail until the run unwinds.
+                callbacks.finish = true;
+                callbacks.detach_on_stop = true;
+                None
+            } else {
+                active.take()
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(registration) = registration {
+        // Safety: registration owns one Rc reference created by into_raw. Only
+        // the owner thread can remove it. Dispatch clones its own Rc before
+        // releasing the registry lock, so reentrant teardown cannot invalidate
+        // a host still in use. No registry lock is held while dropping state.
+        drop(unsafe { std::rc::Rc::from_raw(registration.address as *const VpiHost) });
+    }
+}
+
+fn borrow_cell<T, R>(cell: &RefCell<T>, operation: impl FnOnce(&T) -> R) -> R {
+    operation(&cell.borrow())
+}
+
+fn borrow_cell_mut<T, R>(cell: &RefCell<T>, operation: impl FnOnce(&mut T) -> R) -> R {
+    operation(&mut cell.borrow_mut())
+}
+
+fn host_is_active() -> bool {
+    ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .is_some_and(|host| host.owner == std::thread::current().id())
+}
+
+fn with_host<R>(operation: impl FnOnce(&VpiHost) -> R) -> R {
+    let host = {
+        let active = ACTIVE_HOST
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        active
+            .as_ref()
+            .filter(|host| host.owner == std::thread::current().id())
+            .map(|host| {
+                let pointer = host.address as *const VpiHost;
+                // Safety: the owning registration stays live under the lock and
+                // only its owner thread touches this non-Send Rc. The cloned Rc
+                // keeps the host alive across callbacks and reentrant teardown.
+                unsafe {
+                    std::rc::Rc::increment_strong_count(pointer);
+                    std::rc::Rc::from_raw(pointer)
+                }
+            })
+    };
+    // An unbound/foreign-thread C call sees an empty host, never another
+    // thread's non-Send simulation state.
+    let host = host.unwrap_or_default();
+    operation(&host)
+}
+
+impl Drop for VpiHost {
+    fn drop(&mut self) {
+        for registration in std::mem::take(self.callbacks.get_mut())
+            .callbacks
+            .into_values()
+        {
+            // Safety: the host owns queued callback handles; firing callbacks
+            // were removed from the registry before entering plugin code.
+            drop(unsafe { Box::from_raw(registration.handle) });
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -190,18 +315,24 @@ fn logic_level(value: &BigUint, mask: &BigUint) -> LogicLevel {
     }
 }
 
-fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
-    match celox_design::edges::polarity(kind) {
-        Some(true) => {
-            matches!(old, LogicLevel::Zero) && !matches!(new, LogicLevel::Zero)
-                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::One)
+impl LogicLevel {
+    /// The edge level of [`celox_design::edges`].
+    fn edge_level(self) -> u8 {
+        use celox_design::edges::LEVEL_UNKNOWN;
+        match self {
+            LogicLevel::Zero => 0,
+            LogicLevel::One => 1,
+            LogicLevel::X => LEVEL_UNKNOWN | 1,
+            LogicLevel::Z => LEVEL_UNKNOWN,
         }
-        Some(false) => {
-            matches!(old, LogicLevel::One) && !matches!(new, LogicLevel::One)
-                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::Zero)
-        }
-        None => false,
     }
+}
+
+/// Whether a write from `old` to `new` is an active edge of a domain of
+/// `kind` (IEEE 1800-2023 Table 9-2). A domain without an edge has none.
+fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
+    celox_design::edges::polarity(kind).is_some()
+        && celox_design::edges::settled_edge::<true>(Some(kind), old.edge_level(), new.edge_level())
 }
 
 fn record_pending_write(
@@ -272,19 +403,51 @@ fn apply_pending_deposits(
 }
 
 /// Install an instance explicitly. This is primarily useful to an embedding
-/// runtime which has already selected the attached image.
-pub fn install_runtime(instance: NativeProgramInstance) {
-    callbacks::reset();
-    FORCED_VALUES.with_borrow_mut(HashMap::clear);
-    PENDING_WRITES.with_borrow_mut(|pending| *pending = PendingWrites::default());
-    RUNTIME.with_borrow_mut(|runtime| *runtime = Some(instance));
+/// runtime which has already selected the attached image. Retain the returned
+/// guard for the entire plugin lifetime. Overlapping sessions are rejected,
+/// including installation from a callback before its current host has stopped.
+pub fn install_runtime(instance: NativeProgramInstance) -> Result<VpiSession, String> {
+    let mut host = VpiHost::default();
+    *host.runtime.get_mut() = Some(instance);
+    let host = std::rc::Rc::new(host);
+    let mut active = ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if active.is_some() {
+        return Err("a VPI session is already active; VPI supports one host per process".into());
+    }
+    let pointer = std::rc::Rc::into_raw(host.clone());
+    *active = Some(HostRegistration {
+        owner: std::thread::current().id(),
+        address: pointer as usize,
+    });
+    Ok(VpiSession {
+        host,
+        registered: true,
+    })
 }
 
+/// Unregister the current thread's host. During callback dispatch this requests
+/// finish and defers unregistration until the callback run returns.
 pub fn clear_runtime() {
-    RUNTIME.with_borrow_mut(|runtime| *runtime = None);
-    FORCED_VALUES.with_borrow_mut(HashMap::clear);
-    PENDING_WRITES.with_borrow_mut(|pending| *pending = PendingWrites::default());
-    callbacks::reset();
+    let address = {
+        let active = ACTIVE_HOST
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        active
+            .as_ref()
+            .filter(|host| host.owner == std::thread::current().id())
+            .map(|host| host.address)
+    };
+    if let Some(address) = address {
+        unregister_host(address);
+    }
+}
+
+/// Release a session installed by the C executable loader on this thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn celox_vpi_clear_runtime() {
+    clear_runtime();
 }
 
 /// Run VPI simulation regions until `vpiFinish` or until no future activity
@@ -293,17 +456,37 @@ pub fn run_callbacks() -> bool {
     run_callbacks_result().unwrap_or(false)
 }
 
+// A Rust-side failure must not leave the process ABI bound to an abandoned
+// scheduler. Inner RefCell borrows unwind before this outer guard is dropped.
+struct CallbackRunCleanup;
+
+impl Drop for CallbackRunCleanup {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = false));
+            clear_runtime();
+        }
+    }
+}
+
 /// Run callbacks while preserving fatal DUT diagnostics for executable hosts.
 pub fn run_callbacks_result() -> Result<bool, String> {
+    if callbacks::is_running() {
+        return Err("VPI callback dispatch is already running".into());
+    }
+    let _cleanup = CallbackRunCleanup;
     process_runtime_events();
     if let Some(error) = callbacks::take_error() {
         return Err(error);
     }
     let finished = callbacks::run();
-    if let Some(error) = callbacks::take_error() {
-        Err(error)
-    } else {
-        Ok(finished)
+    let error = callbacks::take_error();
+    if with_host(|host| borrow_cell(&host.callbacks, |state| state.detach_on_stop)) {
+        clear_runtime();
+    }
+    match error {
+        Some(error) => Err(error),
+        None => Ok(finished),
     }
 }
 
@@ -312,20 +495,23 @@ pub extern "C" fn celox_vpi_load_current_executable() -> i32 {
     // Safety: the VPI host only loads the image attached to its own trusted
     // executable artifact.
     match unsafe { NativeProgramInstance::from_current_executable() } {
-        Ok(instance) => {
-            install_runtime(instance);
-            1
-        }
+        Ok(instance) => match install_runtime(instance) {
+            Ok(session) => {
+                session.detach();
+                1
+            }
+            Err(_) => 0,
+        },
         Err(_) => 0,
     }
 }
 
 fn with_runtime<R>(operation: impl FnOnce(&NativeProgramInstance) -> R) -> Option<R> {
-    RUNTIME.with_borrow(|runtime| runtime.as_ref().map(operation))
+    with_host(|host| borrow_cell(&host.runtime, |runtime| runtime.as_ref().map(operation)))
 }
 
 fn with_runtime_mut<R>(operation: impl FnOnce(&mut NativeProgramInstance) -> R) -> Option<R> {
-    RUNTIME.with_borrow_mut(|runtime| runtime.as_mut().map(operation))
+    with_host(|host| borrow_cell_mut(&host.runtime, |runtime| runtime.as_mut().map(operation)))
 }
 
 fn c_string(value: &str) -> CString {
@@ -609,8 +795,9 @@ fn object_type(object: ObjectRef) -> i32 {
 ///
 /// `reference` must be a live handle returned by this library.
 pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
-    if matches!(property, VPI_TIME_UNIT | VPI_TIME_PRECISION) {
-        return -12;
+    if reference.is_null() && matches!(property, VPI_TIME_UNIT | VPI_TIME_PRECISION) {
+        return with_runtime(|runtime| runtime.time_precision().exponent())
+            .unwrap_or_else(|| celox_design::TimePrecision::default().exponent());
     }
     if reference.is_null() {
         return 0;
@@ -631,6 +818,23 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
         return 0;
     };
     match property {
+        VPI_TIME_UNIT | VPI_TIME_PRECISION => with_runtime(|runtime| {
+            let reflection = runtime.reflection();
+            let scope = match object {
+                ObjectRef::Scope(id) => reflection.scope(id),
+                ObjectRef::Signal(id) => reflection
+                    .signal(id)
+                    .and_then(|signal| reflection.scope(signal.parent)),
+            };
+            scope.map_or(0, |scope| {
+                if property == VPI_TIME_UNIT {
+                    scope.time_scale.unit.exponent()
+                } else {
+                    scope.time_scale.precision.exponent()
+                }
+            })
+        })
+        .unwrap_or(0),
         VPI_TYPE => object_type(object),
         VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
         VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {
@@ -715,7 +919,9 @@ fn value_bits(id: ReflectionSignalId) -> Option<(BigUint, BigUint, usize)> {
         ))
     })
     .flatten()?;
-    if let Some(forced) = FORCED_VALUES.with_borrow(|forced| forced.get(&identity).cloned()) {
+    if let Some(forced) =
+        with_host(|host| borrow_cell(&host.forced_values, |forced| forced.get(&identity).cloned()))
+    {
         return Some((forced.value, forced.mask, width));
     }
     with_runtime(|runtime| {
@@ -1019,7 +1225,9 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     };
     if flags == VPI_RELEASE_FLAG {
-        let released = FORCED_VALUES.with_borrow_mut(|forced| forced.remove(&identity));
+        let released = with_host(|host| {
+            borrow_cell_mut(&host.forced_values, |forced| forced.remove(&identity))
+        });
         let succeeded = released.is_none_or(|released| {
             with_runtime_mut(|runtime| {
                 let Some(signal) = runtime.reflection().signal(id).cloned() else {
@@ -1040,17 +1248,19 @@ pub unsafe extern "C" fn vpi_put_value(
                 let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
                 let old_level = logic_level(&old_value, &old_mask);
                 let new_level = logic_level(&released_value, &released_mask);
-                PENDING_WRITES.with_borrow_mut(|pending| {
-                    record_pending_write(
-                        pending,
-                        id,
-                        identity,
-                        released_value.clone(),
-                        released_mask.clone(),
-                        signal.domain_kind,
-                        old_level,
-                        new_level,
-                    );
+                with_host(|host| {
+                    borrow_cell_mut(&host.pending_writes, |pending| {
+                        record_pending_write(
+                            pending,
+                            id,
+                            identity,
+                            released_value.clone(),
+                            released_mask.clone(),
+                            signal.domain_kind,
+                            old_level,
+                            new_level,
+                        );
+                    })
                 });
                 runtime
                     .backend_mut()
@@ -1094,8 +1304,8 @@ pub unsafe extern "C" fn vpi_put_value(
         }
     }
     let force_deposited = if flags == VPI_FORCE_FLAG {
-        let deposited = FORCED_VALUES
-            .with_borrow(|forced| {
+        let deposited = with_host(|host| {
+            borrow_cell(&host.forced_values, |forced| {
                 forced.get(&identity).map(|forced| {
                     (
                         forced.deposited_value.clone(),
@@ -1103,22 +1313,25 @@ pub unsafe extern "C" fn vpi_put_value(
                     )
                 })
             })
-            .or_else(|| {
-                with_runtime(|runtime| {
-                    let signal = runtime.reflection().signal(id)?;
-                    Some(runtime.backend().get_four_state(signal.signal))
-                })
-                .flatten()
-            });
+        })
+        .or_else(|| {
+            with_runtime(|runtime| {
+                let signal = runtime.reflection().signal(id)?;
+                Some(runtime.backend().get_four_state(signal.signal))
+            })
+            .flatten()
+        });
         let Some((deposited_value, deposited_mask)) = deposited else {
             return ptr::null_mut();
         };
         Some((deposited_value, deposited_mask))
-    } else if FORCED_VALUES.with_borrow_mut(|forced| {
-        forced.get_mut(&identity).is_some_and(|forced| {
-            forced.deposited_value = bits.clone();
-            forced.deposited_mask = mask.clone();
-            true
+    } else if with_host(|host| {
+        borrow_cell_mut(&host.forced_values, |forced| {
+            forced.get_mut(&identity).is_some_and(|forced| {
+                forced.deposited_value = bits.clone();
+                forced.deposited_mask = mask.clone();
+                true
+            })
         })
     }) {
         return reference;
@@ -1141,33 +1354,37 @@ pub unsafe extern "C" fn vpi_put_value(
                 .backend_mut()
                 .set_four_state(signal.signal, bits.clone(), mask.clone());
         }
-        PENDING_WRITES.with_borrow_mut(|pending| {
-            record_pending_write(
-                pending,
-                id,
-                identity,
-                bits.clone(),
-                mask.clone(),
-                signal.domain_kind,
-                old_level,
-                new_level,
-            );
+        with_host(|host| {
+            borrow_cell_mut(&host.pending_writes, |pending| {
+                record_pending_write(
+                    pending,
+                    id,
+                    identity,
+                    bits.clone(),
+                    mask.clone(),
+                    signal.domain_kind,
+                    old_level,
+                    new_level,
+                );
+            })
         });
         true
     })
     .unwrap_or(false);
     if succeeded {
         if let Some((deposited_value, deposited_mask)) = force_deposited {
-            FORCED_VALUES.with_borrow_mut(|forced| {
-                forced.insert(
-                    identity,
-                    ForcedValue {
-                        value: bits,
-                        mask,
-                        deposited_value,
-                        deposited_mask,
-                    },
-                );
+            with_host(|host| {
+                borrow_cell_mut(&host.forced_values, |forced| {
+                    forced.insert(
+                        identity,
+                        ForcedValue {
+                            value: bits,
+                            mask,
+                            deposited_value,
+                            deposited_mask,
+                        },
+                    );
+                })
             });
         }
     }
@@ -1180,7 +1397,7 @@ pub unsafe extern "C" fn vpi_put_value(
 }
 
 fn flush_pending_writes() -> bool {
-    let pending = PENDING_WRITES.with_borrow_mut(std::mem::take);
+    let pending = with_host(|host| borrow_cell_mut(&host.pending_writes, std::mem::take));
     if !pending.settle {
         return true;
     }
@@ -1236,7 +1453,8 @@ fn flush_pending_writes() -> bool {
             }
             let mut callback_iterations = 0usize;
             loop {
-                let callback_pending = PENDING_WRITES.with_borrow_mut(std::mem::take);
+                let callback_pending =
+                    with_host(|host| borrow_cell_mut(&host.pending_writes, std::mem::take));
                 if !callback_pending.settle {
                     break;
                 }
@@ -1248,7 +1466,9 @@ fn flush_pending_writes() -> bool {
                     return false;
                 }
                 let overrides = callback_pending.deposits.clone();
-                PENDING_WRITES.with_borrow_mut(|pending| *pending = callback_pending);
+                with_host(|host| {
+                    borrow_cell_mut(&host.pending_writes, |pending| *pending = callback_pending)
+                });
                 if !flush_pending_writes() {
                     return false;
                 }
@@ -1315,7 +1535,9 @@ fn process_runtime_events() {
                 let _ = output.write_all(b"\n");
                 callbacks::fail(celox_message_diagnostic(&message));
             }
-            RuntimeEvent::Finish => callbacks::request_finish(),
+            // Like `vpiStop` in `vpi_control`, `$stop` ends a run that has
+            // no interactive mode.
+            RuntimeEvent::Finish | RuntimeEvent::Stop => callbacks::request_finish(),
             RuntimeEvent::Missed { count } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -1353,4 +1575,31 @@ fn celox_message_diagnostic(message: &[u8]) -> String {
     std::str::from_utf8(message)
         .map(str::to_owned)
         .unwrap_or_else(|_| message.escape_ascii().to_string())
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_unwind_releases_the_host_registration() {
+        let host = std::rc::Rc::new(VpiHost::default());
+        *ACTIVE_HOST.lock().unwrap() = Some(HostRegistration {
+            owner: std::thread::current().id(),
+            address: std::rc::Rc::into_raw(host.clone()) as usize,
+        });
+        let session = VpiSession {
+            host: host.clone(),
+            registered: true,
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _cleanup = CallbackRunCleanup;
+            host.callbacks.borrow_mut().running = true;
+            panic!("exercise scheduler unwind cleanup");
+        }));
+        assert!(result.is_err());
+        assert!(!host_is_active());
+        assert!(!host.callbacks.borrow().running);
+        drop(session);
+    }
 }

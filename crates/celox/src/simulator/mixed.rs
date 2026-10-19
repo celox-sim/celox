@@ -19,17 +19,54 @@ fn fresh_name(prefix: &str, used: &mut fxhash::FxHashSet<String>, next: &mut usi
     }
 }
 
+/// SystemVerilog sees Veryl declarations by the names the Veryl emitter gives
+/// them, so SV written against the emitted code links unchanged.
+#[derive(Clone, Copy)]
+pub(crate) struct EmittedNames {
+    project: veryl_parser::resource_table::StrId,
+    omit_project_prefix: bool,
+}
+
+impl EmittedNames {
+    pub(crate) fn new(metadata: &veryl_metadata::Metadata) -> Self {
+        Self {
+            project: veryl_parser::resource_table::insert_str(&metadata.project.name),
+            omit_project_prefix: metadata.build.omit_project_prefix,
+        }
+    }
+
+    /// The emitted name of a top-level declaration. SV declarations seen
+    /// through `$sv` keep their own names.
+    pub(crate) fn symbol(&self, symbol: &veryl_analyzer::symbol::Symbol) -> String {
+        let name = symbol.token.text.to_string();
+        let Some(&project) = symbol.namespace.paths.first() else {
+            return name;
+        };
+        let project_text = project.to_string();
+        if project_text == "$sv" || (self.omit_project_prefix && project == self.project) {
+            return name;
+        }
+        format!("{project_text}_{name}").replace("$std_", "__std_")
+    }
+
+    pub(crate) fn module(&self, module: &veryl_analyzer::ir::Module) -> String {
+        veryl_analyzer::symbol_table::get(module.signature.symbol)
+            .map(|symbol| self.symbol(&symbol))
+            .unwrap_or_else(|| module.name.to_string())
+    }
+}
+
 pub(super) fn component_names(
     sources: &[(&str, &std::path::Path)],
+    names: EmittedNames,
 ) -> Result<fxhash::FxHashSet<String>, ParserError> {
-    let mut names =
+    let mut used =
         celox_frontend_sv::component_names(sources).map_err(crate::parser::sv_analysis_error)?;
-    names.extend(
-        veryl_analyzer::symbol_table::get_all()
-            .iter()
-            .map(|symbol| symbol.token.text.to_string()),
-    );
-    Ok(names)
+    for symbol in veryl_analyzer::symbol_table::get_all() {
+        used.insert(symbol.token.text.to_string());
+        used.insert(names.symbol(&symbol));
+    }
+    Ok(used)
 }
 
 pub(super) fn referenced_sv_components<'a>(
@@ -942,6 +979,7 @@ pub(super) fn sv_declaration_contracts(
     context: &mut veryl_analyzer::Context,
     sources: &[(&str, &std::path::Path)],
     requests: &[celox_frontend_sv::SvModuleRequest],
+    names: EmittedNames,
 ) -> Result<String, ParserError> {
     use veryl_analyzer::{
         ir::{Component, Signature, TypeKind, VarKind},
@@ -962,18 +1000,12 @@ pub(super) fn sv_declaration_contracts(
     }));
     for component in &ir.components {
         if let Component::Module(module) = component
-            && referenced.contains(&module.name.to_string())
-            && !authored.contains_key(&module.name.to_string())
+            && referenced.contains(&names.module(module))
         {
             for (ty, _) in module.port_types.values() {
                 if let TypeKind::Modport(signature, _) = &ty.kind {
-                    needed_interfaces.insert(
-                        symbol_table::get(signature.symbol)
-                            .unwrap()
-                            .token
-                            .text
-                            .to_string(),
-                    );
+                    needed_interfaces
+                        .insert(names.symbol(&symbol_table::get(signature.symbol).unwrap()));
                 }
             }
         }
@@ -987,7 +1019,8 @@ pub(super) fn sv_declaration_contracts(
         if symbol.namespace.to_string() == "$sv" || property.is_proto {
             continue;
         }
-        if !needed_interfaces.contains(&symbol.token.text.to_string()) {
+        let name = names.symbol(symbol);
+        if !needed_interfaces.contains(&name) {
             continue;
         }
         let signature = Signature::new(symbol.id);
@@ -1003,7 +1036,7 @@ pub(super) fn sv_declaration_contracts(
             continue;
         };
         let parameters = sv_parameters(&property.parameters, &interface.variables, context)?;
-        source.push_str(&format!("interface {}{parameters};\n", symbol.token.text));
+        source.push_str(&format!("interface {name}{parameters};\n"));
         let mut variables = interface.variables.values().collect::<Vec<_>>();
         variables.sort_by_key(|variable| variable.id);
         for variable in variables {
@@ -1055,9 +1088,10 @@ pub(super) fn sv_declaration_contracts(
         let Component::Module(module) = component else {
             continue;
         };
-        if !referenced.contains(&module.name.to_string())
-            || authored.contains_key(&module.name.to_string())
-        {
+        let emitted = names.module(module);
+        // An authored SV module of the same name is a duplicate definition;
+        // the SV analyzer reports it when the foreign roots are linked.
+        if !referenced.contains(&emitted) || authored.contains_key(&emitted) {
             continue;
         }
         if module
@@ -1067,9 +1101,10 @@ pub(super) fn sv_declaration_contracts(
         {
             continue;
         }
-        let Some(symbol) = symbols.iter().find(|symbol| {
-            symbol.token.text == module.name && matches!(symbol.kind, SymbolKind::Module(_))
-        }) else {
+        let Some(symbol) = symbols
+            .iter()
+            .find(|symbol| symbol.id == module.signature.symbol)
+        else {
             continue;
         };
         let SymbolKind::Module(property) = &symbol.kind else {
@@ -1086,7 +1121,7 @@ pub(super) fn sv_declaration_contracts(
                 let interface = symbol_table::get(signature.symbol).unwrap();
                 ports.push(format!(
                     "{}.{modport} {name}{}",
-                    interface.token.text,
+                    names.symbol(&interface),
                     sv_array(ty)
                 ));
             } else if let Some(id) = module.ports.get(&path) {
@@ -1106,8 +1141,7 @@ pub(super) fn sv_declaration_contracts(
         }
         let parameters = sv_parameters(&property.parameters, &module.variables, context)?;
         source.push_str(&format!(
-            "module {}{parameters}({}); endmodule\n",
-            module.name,
+            "module {emitted}{parameters}({}); endmodule\n",
             ports.join(", ")
         ));
     }
@@ -1339,6 +1373,7 @@ pub(crate) fn specialize_sv_instances(
     sources: &[(&str, &std::path::Path)],
     context: &mut veryl_analyzer::Context,
     used_names: &mut fxhash::FxHashSet<String>,
+    names: EmittedNames,
 ) -> Result<Vec<celox_frontend_sv::SvModuleRequest>, ParserError> {
     use veryl_analyzer::{ir::*, symbol::SymbolKind, symbol_table};
     use veryl_parser::resource_table;
@@ -1374,6 +1409,7 @@ pub(crate) fn specialize_sv_instances(
         requests: &mut Vec<celox_frontend_sv::SvModuleRequest>,
         used_names: &mut fxhash::FxHashSet<String>,
         next_alias: &mut usize,
+        names: EmittedNames,
     ) -> Result<(), ParserError> {
         let mut evaluation = veryl_analyzer::Context::default();
         evaluation.inherit(context);
@@ -1398,7 +1434,9 @@ pub(crate) fn specialize_sv_instances(
                 continue;
             };
             if let Component::Module(child) = std::sync::Arc::make_mut(&mut instance.component) {
-                walk(child, interfaces, context, requests, used_names, next_alias)?;
+                walk(
+                    child, interfaces, context, requests, used_names, next_alias, names,
+                )?;
                 continue;
             }
             let Component::SystemVerilog(component) = instance.component.as_ref() else {
@@ -1513,7 +1551,7 @@ pub(crate) fn specialize_sv_instances(
                     };
                     signature.normalize();
                     let symbol = symbol_table::get(signature.symbol).unwrap();
-                    bindings.push((formal.clone(), symbol.token.text.to_string()));
+                    bindings.push((formal.clone(), names.symbol(&symbol)));
                     for (name, value) in &signature.parameters {
                         let ValueVariant::Numeric(value) = value else {
                             return Err(unsupported("foreign interface type parameter"));
@@ -1552,15 +1590,19 @@ pub(crate) fn specialize_sv_instances(
                 &mut requests,
                 used_names,
                 &mut next_alias,
+                names,
             )?;
         }
     }
     Ok(requests)
 }
 
+/// Specialize the native module at `index` of `base.components`, which SV
+/// instantiates as `name`.
 pub(crate) fn specialize_foreign_module(
     base: &veryl_analyzer::ir::Ir,
     context: &mut veryl_analyzer::Context,
+    index: usize,
     name: &str,
     parameters: &[(String, celox_frontend_sv::SvParameterValue)],
     used_names: &mut fxhash::FxHashSet<String>,
@@ -1579,16 +1621,11 @@ pub(crate) fn specialize_foreign_module(
         })
         .collect::<Vec<_>>();
     if !ordinary.is_empty() {
-        super::builder::elaborate_parameterized_top_values(&mut ir, context, name, &ordinary)?;
+        super::builder::elaborate_parameterized_module(&mut ir, context, index, name, &ordinary)?;
     }
-    let module = ir
-        .components
-        .iter()
-        .find_map(|component| match component {
-            Component::Module(module) if module.name.to_string() == name => Some(module),
-            _ => None,
-        })
-        .ok_or_else(|| unsupported(format!("missing native module `{name}`")))?;
+    let Some(Component::Module(module)) = ir.components.get(index) else {
+        return Err(unsupported(format!("missing native module `{name}`")));
+    };
     let mut signature = module.signature.clone();
     let mut modports: fxhash::FxHashMap<_, Signature> = fxhash::FxHashMap::default();
     let mut interface_values = fxhash::FxHashMap::default();
@@ -1760,7 +1797,7 @@ pub(crate) fn specialize_foreign_module(
     };
     specialized.eval_assign(context);
     specialized.name = resource_table::insert_str(&fresh_name(
-        &format!("__celox_foreign_{name}"),
+        &format!("__celox_foreign_{}", specialized.name),
         used_names,
         &mut 0,
     ));
@@ -1940,7 +1977,7 @@ mod tests {
         let mut sibling = child.clone();
         sibling.name = resource_table::insert_str("__sv_logic_bus_0");
         module.declarations.push(Declaration::Inst(sibling));
-        let mut names = component_names(&sources).unwrap();
+        let mut names = component_names(&sources, EmittedNames::new(&metadata)).unwrap();
         let generated =
             attach_sv_interface_behavior(&mut ir, &signatures, &mut context, &mut names).unwrap();
         assert_eq!(generated.len(), 1);

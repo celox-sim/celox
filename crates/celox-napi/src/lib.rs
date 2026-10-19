@@ -684,6 +684,7 @@ struct CachedBuild {
     state_schema: Arc<celox::StateSchema>,
     /// Pre-computed VCD signal descriptors so VCD works on cache hits.
     vcd_descs: Vec<celox::VcdSignalDesc>,
+    time_precision: celox_design::TimePrecision,
     /// Derived clock domains per event, valid for every backend sharing
     /// `shared_code`.
     derived_ticks: celox::DerivedTickPlans<DefaultEvent>,
@@ -957,8 +958,9 @@ impl HandleBackend {
             )
             .map_or_else(
                 |halt| match halt {
-                    // A bare backend reports no `$finish`; settle next time.
-                    celox::Halt::Finish => Ok(false),
+                    // A bare backend reports no `$finish` or `$stop`; settle
+                    // next time.
+                    celox::Halt::Finish | celox::Halt::Stop => Ok(false),
                     celox::Halt::Error(error) => Err(error),
                 },
                 |outcome| {
@@ -1126,6 +1128,7 @@ impl NativeSimulatorHandle {
         let state_fingerprint = sim.state_fingerprint();
         let state_schema = sim.state_schema();
         let vcd_descs = sim.build_vcd_descs(four_state);
+        let time_precision = sim.program().design.time_precision;
         let runtime_errors = runtime_errors_by_name(sim.program());
         let derived_ticks = sim.derived_tick_plans();
         let event_edges = sim.event_edges();
@@ -1155,6 +1158,7 @@ impl NativeSimulatorHandle {
                 state_fingerprint,
                 state_schema: Arc::clone(&state_schema),
                 vcd_descs: vcd_descs.clone(),
+                time_precision,
                 derived_ticks: Arc::clone(&derived_ticks),
                 event_edges: Arc::clone(&event_edges),
             });
@@ -1165,7 +1169,7 @@ impl NativeSimulatorHandle {
         // Create VcdWriter if requested
         let vcd_writer = if let Some(path) = vcd_path {
             Some(
-                celox::VcdWriter::new(path, &vcd_descs)
+                celox::VcdWriter::new_with_time_precision(path, &vcd_descs, time_precision)
                     .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
             )
         } else {
@@ -1261,8 +1265,12 @@ impl NativeSimulatorHandle {
         )));
         let vcd_writer = if let Some(path) = vcd_path {
             Some(
-                celox::VcdWriter::new(path, &cached.vcd_descs)
-                    .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
+                celox::VcdWriter::new_with_time_precision(
+                    path,
+                    &cached.vcd_descs,
+                    cached.time_precision,
+                )
+                .map_err(|e| Error::from_reason(format!("Failed to create VCD: {}", e)))?,
             )
         } else {
             None
@@ -2095,6 +2103,17 @@ impl NativeSimulationHandle {
             .as_ref()
             .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
         Ok(sim.is_finished())
+    }
+
+    /// Returns whether the last step or run returned early because a process
+    /// of the design executed `$stop`. The next step continues it.
+    #[napi]
+    pub fn is_stopped(&self) -> Result<bool> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("Simulation has been disposed"))?;
+        Ok(sim.is_stopped())
     }
 
     /// Evaluate combinational logic.
@@ -4330,6 +4349,35 @@ mod tests {
             build_cache_key(&s1, "Top", &opts, None),
             build_cache_key(&s2, "Top", &opts, None),
         );
+    }
+
+    #[test]
+    fn cached_waveforms_retain_explicit_time_precision() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "module CachedPrecision(y: output logic) {}";
+        let sources = make_sources(&[(source, "cached_precision.veryl")]);
+        let key = build_cache_key(&sources, "CachedPrecision", &default_opts(), None);
+        let sim = celox::Simulator::builder(source, "CachedPrecision")
+            .vcd(dir.path().join("initial.vcd"))
+            .build()
+            .unwrap();
+        let handle = NativeSimulatorHandle::build_and_cache(sim, None, Some(key.clone())).unwrap();
+        drop(handle);
+        let mut cached = JIT_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key)
+            .unwrap();
+        // A frontend with a non-default scale supplies this cached metadata.
+        Arc::get_mut(&mut cached).unwrap().time_precision =
+            celox_design::TimePrecision::try_from(-15).unwrap();
+        let path = dir.path().join("cached.vcd");
+        let mut handle = NativeSimulatorHandle::from_cached(&cached, path.to_str()).unwrap();
+        handle.dump(123.0).unwrap();
+        handle.vcd_writer.as_mut().unwrap().flush().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("$timescale 1fs $end"), "{text}");
+        assert!(text.contains("#123\n"));
     }
 
     #[test]

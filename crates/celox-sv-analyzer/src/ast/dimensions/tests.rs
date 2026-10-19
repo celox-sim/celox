@@ -2,9 +2,52 @@ use std::path::Path;
 
 use super::*;
 
+fn native_calls(tree: &SyntaxTree) -> Vec<celox_sv_syntax::ExprId> {
+    use celox_sv_syntax::ExprKind;
+    let native = tree.declarations();
+    let mut calls = native
+        .expression_nodes()
+        .filter_map(|(id, expression)| {
+            let ExprKind::Call {
+                expression: callee, ..
+            } = &expression.kind
+            else {
+                return None;
+            };
+            let ExprKind::Name(name) = &native.expression(*callee).kind else {
+                return None;
+            };
+            SystemFunction::from_name(&name.spelling)
+                .filter(|f| f.is_data_query())
+                .map(|_| (id, expression.tokens.start))
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|(_, start)| *start);
+    calls.into_iter().map(|(id, _)| id).collect()
+}
+fn query_number(
+    root: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+    context: Option<&PackedDimensions>,
+) -> Option<usize> {
+    let mut context = context
+        .cloned()
+        .unwrap_or_else(|| PackedDimensions::new(HashMap::default(), env, aliases));
+    context.const_env = env.clone().into();
+    context.type_aliases = aliases.clone();
+    query_value(root, tree, &context)
+        .ok()
+        .flatten()
+        .and_then(|value| expr_to_const(&tree.state, value))
+        .and_then(|value| eval_ast_const_expr(&tree.state, &value, env))
+        .and_then(|value| usize::try_from(value).ok())
+}
+
 #[test]
 fn function_result_queries_preserve_expression_bodies() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top(output int y);
             localparam logic [31:0] P = 32'bx;
@@ -19,19 +62,17 @@ fn function_result_queries_preserve_expression_bodies() {
         Path::new("function_result_query.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(module.parameters());
-    let node = tree
-        .into_iter()
-        .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-        .unwrap();
-    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &env).unwrap();
+    let env = const_env_from_parameters(&tree.state, module.parameters());
+    let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
-    let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
+    dimensions.parameter_values =
+        parameter_value_env(&tree.state, module.parameters(), &env).into();
+    let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
     assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
 }
 
@@ -58,20 +99,19 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                      + $unpacked_dimensions(pair_t);
         endmodule
     "#;
-    let tree = crate::syntax::parse_source(code, Path::new("query_context.sv")).unwrap();
+    let tree =
+        crate::source_tree::parse_scope_fixture(code, Path::new("query_context.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(module.parameters());
-    let node = tree
-        .into_iter()
-        .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-        .unwrap();
-    let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &env).unwrap();
+    let env = const_env_from_parameters(&tree.state, module.parameters());
+    let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
-    let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
+    dimensions.parameter_values =
+        parameter_value_env(&tree.state, module.parameters(), &env).into();
+    let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
     dimensions
         .function_return_types
         .extend(functions.iter().map(|(name, f)| {
@@ -88,30 +128,11 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
             )
         }));
     dimensions.functions = Arc::new(functions);
-    let calls: Vec<_> = tree
-        .into_iter()
-        .filter_map(|node| match node {
-            RefNode::SystemTfCall(call) => Some(call),
-            _ => None,
-        })
-        .collect();
+    let calls: Vec<_> = native_calls(&tree);
     let query = |dimensions: &PackedDimensions| {
         calls
             .iter()
-            .map(|call| {
-                unpacked_dimensions_call_value(call, &tree, &env, &aliases, Some(dimensions))
-                    .map(|count| (count, false))
-                    .or_else(|| {
-                        size_system_function_call_type(
-                            call,
-                            &tree,
-                            &env,
-                            &aliases,
-                            Some(dimensions),
-                        )
-                        .map(|ty| (ty.width, ty.signed))
-                    })
-            })
+            .map(|call| query_number(*call, &tree, &env, &aliases, Some(dimensions)))
             .collect::<Vec<_>>()
     };
     SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
@@ -122,43 +143,42 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
     let reused = query(&dimensions);
     assert_eq!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()), 0);
     assert_eq!(reused, discovered);
-    // Private query metadata includes the operand's signedness. A function's
-    // first return dimension remains 2 even though its inlined body is 8 bits.
+    // A function's first return dimension remains 2 even though its body is 8 bits.
     assert_eq!(
         reused,
         vec![
-            Some((8, true)),
-            Some((2, true)),
-            Some((4, false)),
-            Some((4, false)),
-            Some((16, false)),
-            Some((36, false)),
-            Some((3, false)),
-            Some((4, false)),
-            Some((4, true)),
-            Some((4, true)),
-            Some((8, true)),
-            Some((2, true)),
-            Some((4, true)),
-            Some((1, false)),
-            Some((5, false)),
-            Some((5, false)),
-            Some((4, false)),
-            Some((4, false)),
-            Some((3, false)),
-            Some((5, false)),
-            Some((2, false)),
-            Some((1, false)),
-            Some((0, false)),
-            Some((0, false)),
-            Some((0, false)),
+            Some(8),
+            Some(2),
+            Some(4),
+            Some(4),
+            Some(16),
+            Some(36),
+            Some(3),
+            Some(4),
+            Some(4),
+            Some(4),
+            Some(8),
+            Some(2),
+            Some(4),
+            Some(1),
+            Some(5),
+            Some(5),
+            Some(4),
+            Some(4),
+            Some(3),
+            Some(5),
+            Some(2),
+            Some(1),
+            Some(0),
+            Some(0),
+            Some(0),
         ]
     );
 }
 
 #[test]
 fn preliminary_function_scope_discovers_shadowing_formals() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top;
             logic [7:0] x;
@@ -170,17 +190,12 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         Path::new("preliminary_scope.sv"),
     )
     .unwrap();
-    let call = tree
-        .into_iter()
-        .find_map(|node| match node {
-            RefNode::SystemTfCall(call) => Some(call),
-            _ => None,
-        })
-        .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let call = native_calls(&tree)[0];
     let dimensions = PackedDimensions::default();
     assert!(!dimensions.scope_types_complete);
     SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
-    let ty = size_system_function_call_type(
+    let ty = query_number(
         call,
         &tree,
         &HashMap::default(),
@@ -188,7 +203,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         Some(&dimensions),
     )
     .unwrap();
-    assert_eq!(ty.width, 4);
+    assert_eq!(ty, 4);
     assert!(SYNTAX_TYPE_DISCOVERIES.with(|count| count.get()) > 0);
 }
 
@@ -236,44 +251,33 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
             endmodule
         "#
         );
-        let tree = crate::syntax::parse_source(&code, Path::new("typedef_shadow.sv")).unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(&code, Path::new("typedef_shadow.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
         let module = &source.modules()[0];
-        let env = const_env_from_parameters(module.parameters());
-        let node = tree
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
-        let aliases = type_aliases_from_module_node_with_env(node.clone(), &tree, &env).unwrap();
+        let env = const_env_from_parameters(&tree.state, module.parameters());
+        let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             module.ports(),
             module.signals(),
             &env,
             &aliases,
         );
-        let item = generate::items(node, &tree, &env, &aliases)
+        let item = generate::items(&tree, &env, &aliases)
             .unwrap()
             .into_iter()
             .find(|item| {
-                item.node
-                    .node()
-                    .into_iter()
-                    .any(|node| matches!(node, RefNode::SystemTfCall(_)))
+                matches!(
+                    tree.declarations().body_item(item.id).kind,
+                    celox_sv_syntax::BodyItemKind::Assign(_)
+                )
             })
             .unwrap();
-        let call = item
-            .node
-            .node()
-            .into_iter()
-            .find_map(|node| match node {
-                RefNode::SystemTfCall(call) => Some(call),
-                _ => None,
-            })
-            .unwrap();
+        let call = native_calls(&tree)[0];
         let mut local = item.dimensions(&dimensions);
         let query = |dimensions: &PackedDimensions| {
-            size_system_function_call_type(call, &tree, &item.env, &aliases, Some(dimensions))
-                .map(|ty| (ty.width, ty.signed))
+            query_number(call, &tree, &item.env, &aliases, Some(dimensions))
         };
         let discovered = query(&local);
         local.scope_types_complete = true;
@@ -285,7 +289,7 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
             "{declaration}"
         );
         assert_eq!(reused, discovered, "{declaration}");
-        assert_eq!(reused.unwrap().0, expected_width, "{declaration}");
+        assert_eq!(reused.unwrap(), expected_width, "{declaration}");
     }
 }
 
@@ -302,13 +306,10 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
             end
         endmodule
     "#;
-    let tree = crate::syntax::parse_source(code, Path::new("nonansi_validation.sv")).unwrap();
-    let node = tree
-        .into_iter()
-        .find(|node| matches!(node, RefNode::ModuleDeclarationNonansi(_)))
-        .unwrap();
+    let tree =
+        crate::source_tree::parse_scope_fixture(code, Path::new("nonansi_validation.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     crate::ast::validation::reject_silently_ignored_constructs(
-        node,
         &tree,
         &HashMap::default(),
         &HashMap::default(),
@@ -327,20 +328,12 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
             assign y = N + $unpacked_dimensions(f());
         endmodule
     "#;
-    let tree = crate::syntax::parse_source(source, Path::new("dpi_query.sv")).unwrap();
+    let tree = crate::source_tree::parse_scope_fixture(source, Path::new("dpi_query.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     Source::from_syntax(&tree).unwrap();
-    for call in tree.into_iter().filter_map(|node| match node {
-        RefNode::SystemTfCall(call) => Some(call),
-        _ => None,
-    }) {
+    for call in native_calls(&tree) {
         assert_eq!(
-            unpacked_dimensions_call_value(
-                call,
-                &tree,
-                &HashMap::default(),
-                &HashMap::default(),
-                None
-            ),
+            query_number(call, &tree, &HashMap::default(), &HashMap::default(), None),
             Some(0)
         );
     }
@@ -354,17 +347,13 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
             assign y = $unpacked_dimensions(a[0][index_value +: 1]);
         endmodule
     "#;
-    let tree = crate::syntax::parse_source(source, Path::new("runtime_query_range.sv")).unwrap();
-    Source::from_syntax(&tree).unwrap();
-    let call = tree
-        .into_iter()
-        .find_map(|node| match node {
-            RefNode::SystemTfCall(call) => Some(call),
-            _ => None,
-        })
+    let tree = crate::source_tree::parse_scope_fixture(source, Path::new("runtime_query_range.sv"))
         .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    Source::from_syntax(&tree).unwrap();
+    let call = native_calls(&tree)[0];
     assert_eq!(
-        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &HashMap::default(), None),
+        query_number(call, &tree, &HashMap::default(), &HashMap::default(), None),
         Some(1)
     );
 }
@@ -379,32 +368,18 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
         "module Top; typedef logic [7:0] byte_t; byte_t a [0:1], b [0:$unpacked_dimensions(a)];",
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
-        let tree = crate::syntax::parse_source(&code, Path::new("preceding_query.sv")).unwrap();
-        let module = tree
-            .into_iter()
-            .find(|node| {
-                matches!(
-                    node,
-                    RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-                )
-            })
+        let tree = crate::source_tree::parse_scope_fixture(&code, Path::new("preceding_query.sv"))
             .unwrap();
-        let aliases = type_aliases_from_module_node(module, &tree).unwrap();
-        let calls = tree
-            .into_iter()
-            .filter_map(|node| match node {
-                RefNode::SystemTfCall(call) => Some(call),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let aliases = type_aliases_from_scope(&tree).unwrap();
+        let calls = native_calls(&tree);
         assert_eq!(
-            unpacked_dimensions_call_value(calls[0], &tree, &HashMap::default(), &aliases, None),
+            query_number(calls[0], &tree, &HashMap::default(), &aliases, None),
             Some(1),
             "{declaration}",
         );
         assert_eq!(
-            size_system_function_call_type(calls[1], &tree, &HashMap::default(), &aliases, None)
-                .map(|ty| ty.width),
+            query_number(calls[1], &tree, &HashMap::default(), &aliases, None),
             Some(if declaration.contains("b [") { 16 } else { 2 }),
             "{declaration}",
         );
@@ -420,16 +395,12 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
         let tree =
-            crate::syntax::parse_source(&code, Path::new("array_parameter_query.sv")).unwrap();
-        let calls = tree
-            .into_iter()
-            .filter_map(|node| match node {
-                RefNode::SystemTfCall(call) => Some(call),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            crate::source_tree::parse_scope_fixture(&code, Path::new("array_parameter_query.sv"))
+                .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let calls = native_calls(&tree);
         assert_eq!(
-            unpacked_dimensions_call_value(
+            query_number(
                 calls[0],
                 &tree,
                 &HashMap::default(),
@@ -440,14 +411,13 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
             "{declaration}"
         );
         assert_eq!(
-            size_system_function_call_type(
+            query_number(
                 calls[1],
                 &tree,
                 &HashMap::default(),
                 &HashMap::default(),
                 None
-            )
-            .map(|ty| ty.width),
+            ),
             Some(2),
             "{declaration}"
         );
@@ -456,7 +426,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
 
 #[test]
 fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
-    let tree = crate::syntax::parse_source(
+    let tree = crate::source_tree::parse_scope_fixture(
         r#"
         package P;
             typedef logic [7:0] row_t [0:1];
@@ -470,20 +440,78 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
         Path::new("imported_query.sv"),
     )
     .unwrap();
-    let package = tree
+    let tree = AnalysisContext::unspecialized(&tree);
+    let aliases = type_aliases_from_scope(&tree).unwrap();
+    // The aliases came from P; the query belongs to Top's native source unit.
+    let module_scope = tree
+        .root_scopes()
+        .unwrap()
         .into_iter()
-        .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
-        .unwrap();
-    let aliases = type_aliases_from_module_node(package, &tree).unwrap();
-    let call = tree
-        .into_iter()
-        .find_map(|node| match node {
-            RefNode::SystemTfCall(call) => Some(call),
-            _ => None,
+        .find(|handle| {
+            handle.unit(tree.declarations()).unwrap().kind == celox_sv_syntax::UnitKind::Module
         })
         .unwrap();
+    let tree = tree.scoped(module_scope).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let call = native_calls(&tree)[0];
     assert_eq!(
-        unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &aliases, None),
+        query_number(call, &tree, &HashMap::default(), &aliases, None),
         Some(0)
     );
+}
+
+#[test]
+fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
+    let tree = crate::source_tree::parse_scope_fixture(
+        r#"
+        module Top #(parameter logic [255:0] P = '0,
+                     parameter logic [3:0] Q = '0)(output int y);
+            if (P === 256'h8000000000000000000000000000000000000000000000000000000000000000) begin : g
+                logic [12:0] data;
+            end else if (Q === 4'bxz01) begin : g
+                logic [8:0] data;
+            end else begin : g
+                logic [4:0] data;
+            end
+            assign y = $bits(g.data);
+        endmodule
+        "#,
+        Path::new("explicit_generate_dimensions.sv"),
+    )
+    .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let wide = HashMap::from_iter([(
+        "P".into(),
+        ConstExpr::Literal(
+            "256'h8000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+    )]);
+    let four_state = HashMap::from_iter([("Q".into(), ConstExpr::Literal("4'bxz01".into()))]);
+    let wide_context = AnalysisContext::new(&tree, &wide);
+    let four_state_context = AnalysisContext::new(&tree, &four_state);
+    let default_context = AnalysisContext::unspecialized(&tree);
+    let target = native_calls(&tree)[0];
+    let celox_sv_syntax::ExprKind::Call { arguments, .. } =
+        &tree.declarations().expression(target).kind
+    else {
+        panic!()
+    };
+    let operand = arguments[0].value.unwrap();
+    // Keep the contexts alive together and revisit each specialization, so the
+    // recursive discovery cannot depend on whichever binding was installed last.
+    for (context, expected) in [
+        (&wide_context, 13),
+        (&default_context, 5),
+        (&four_state_context, 9),
+        (&wide_context, 13),
+        (&default_context, 5),
+    ] {
+        let dimensions =
+            query_context_for_operand(operand, context, &PackedDimensions::default()).unwrap();
+        let data = dimensions.get("g.data").unwrap();
+        assert_eq!(
+            eval_ast_const_expr(&context.state, &data.packed[0].width, &dimensions.const_env),
+            Some(expected),
+        );
+    }
 }

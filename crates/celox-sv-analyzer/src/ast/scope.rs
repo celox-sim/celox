@@ -15,6 +15,8 @@ use super::*;
 /// The symbols of a scope, independent of the syntax they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ScopeSymbols {
+    /// Declaration inspection omits executable bodies; it is not simulation validation.
+    pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
     /// markers.
     pub const_env: HashMap<String, i128>,
@@ -22,6 +24,9 @@ pub(super) struct ScopeSymbols {
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
     pub type_aliases: HashMap<String, Type>,
+    /// Bound type parameters, keyed by native declaration ownership.
+    pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
+    pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
     pub enum_constants: EnumMemberConstants,
     pub functions: HashMap<String, Function>,
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
@@ -34,74 +39,94 @@ pub(super) struct ScopeSymbols {
     /// Array parameters and constant variables, which are constant signals
     /// copied into each scope, and their initializers.
     pub signals: Vec<Signal>,
+    pub ports: Vec<Port>,
     /// Package variables: each scope's signal denotes the package's object.
     pub state_signals: Vec<Signal>,
     pub initial_processes: Vec<InitialProcess>,
+    pub comb_processes: Vec<CombProcess>,
+    pub ff_processes: Vec<FfProcess>,
     /// The names imports make visible, and the qualified names they denote.
     pub aliases: HashMap<String, String>,
+    /// Hierarchical interface member paths bound to semantic signal names.
+    pub interface_members: HashMap<String, String>,
+    pub interface_types: HashMap<String, String>,
+    pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
+    pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
+    pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
+    pub interface_instances:
+        HashMap<interface_binding::InstanceKey, interface_binding::InstanceBinding>,
     /// The names the imports of a generate block bind there to another
-    /// declaration than outside it, by the source offset of the block.
-    pub generate_imports: HashMap<usize, HashMap<String, String>>,
+    /// declaration than outside it, by the native body identity of the block.
+    pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
 }
 
-thread_local! {
-    static IMPORTED: RefCell<Arc<ScopeSymbols>> = RefCell::new(Arc::default());
-    static PACKAGE: RefCell<Option<String>> = const { RefCell::new(None) };
+#[derive(Default)]
+pub(super) struct State {
+    imported: RefCell<Arc<ScopeSymbols>>,
+    package: RefCell<Option<String>>,
 }
 
 /// Restores the previously analyzed package when dropped.
 pub(super) struct InPackage {
     previous: Option<String>,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for InPackage {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        PACKAGE.with(|current| *current.borrow_mut() = previous);
+        *self.state.scope.package.borrow_mut() = previous;
     }
 }
 
 /// Analyze the package `name` until the guard is dropped: inside it, `p::x`
 /// with `p` the package names its own item `x`.
-pub(super) fn enter_package(name: &str) -> InPackage {
-    let previous = PACKAGE.with(|current| current.borrow_mut().replace(name.to_string()));
-    InPackage { previous }
+pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> InPackage {
+    let previous = state.scope.package.borrow_mut().replace(name.to_string());
+    InPackage {
+        previous,
+        state: state.clone(),
+    }
 }
 
 /// The name a reference to item `name` of `package` has in the scope being
 /// analyzed: `package::name`, or `name` inside the package itself.
-pub(super) fn qualified_name(package: &str, name: &str) -> String {
-    PACKAGE.with(|current| {
-        if current.borrow().as_deref() == Some(package) {
+pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -> String {
+    {
+        if state.scope.package.borrow().as_deref() == Some(package) {
             name.to_string()
         } else {
             format!("{package}::{name}")
         }
-    })
+    }
 }
 
 /// Restores the previously imported symbols when dropped.
 pub(super) struct Installed {
     previous: Arc<ScopeSymbols>,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
         let previous = std::mem::take(&mut self.previous);
-        IMPORTED.with(|current| *current.borrow_mut() = previous);
+        *self.state.scope.imported.borrow_mut() = previous;
     }
 }
 
 /// Make `symbols` the symbols the scope being analyzed imports, until the
 /// guard is dropped.
-pub(super) fn install(symbols: Arc<ScopeSymbols>) -> Installed {
-    let previous = IMPORTED.with(|current| std::mem::replace(&mut *current.borrow_mut(), symbols));
-    Installed { previous }
+pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymbols>) -> Installed {
+    let previous = state.scope.imported.replace(symbols);
+    Installed {
+        previous,
+        state: state.clone(),
+    }
 }
 
 /// The symbols the scope being analyzed imports.
-pub(super) fn imported() -> Arc<ScopeSymbols> {
-    IMPORTED.with(|current| current.borrow().clone())
+pub(super) fn imported(state: &AnalysisState) -> Arc<ScopeSymbols> {
+    state.scope.imported.borrow().clone()
 }
 
 /// The name a constant-environment marker key describes, with the marker
@@ -127,8 +152,11 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
             return Some((prefix, name));
         }
     }
-    // `__parameter::dimension::{index}::{bound}::{name}`
-    if let Some(rest) = key.strip_prefix("__parameter::dimension::") {
+    // `__{parameter,variable}::dimension::{index}::{bound}::{name}`
+    if let Some(rest) = key
+        .strip_prefix("__parameter::dimension::")
+        .or_else(|| key.strip_prefix("__variable::dimension::"))
+    {
         let mut parts = rest.splitn(3, "::");
         let (index, bound, name) = (parts.next()?, parts.next()?, parts.next()?);
         let prefix_len = key.len() - name.len();
@@ -160,6 +188,12 @@ impl ScopeSymbols {
                 self.parameters.push(parameter.clone());
             }
         }
+        extend_missing(&mut self.interface_members, &other.interface_members);
+        extend_missing(&mut self.interface_types, &other.interface_types);
+        extend_missing(&mut self.interface_arrays, &other.interface_arrays);
+        extend_missing(&mut self.interface_scopes, &other.interface_scopes);
+        self.interface_declarations
+            .extend(other.interface_declarations.iter().copied());
         extend_missing(&mut self.type_aliases, &other.type_aliases);
         extend_missing(
             &mut self.enum_constants.numbers,
@@ -213,6 +247,10 @@ impl ScopeSymbols {
                 self.initial_processes.push(process.clone());
             }
         }
+        self.ports.extend(other.ports.iter().cloned());
+        self.comb_processes
+            .extend(other.comb_processes.iter().cloned());
+        self.ff_processes.extend(other.ff_processes.iter().cloned());
         for import in &other.dpi_imports {
             if !self
                 .dpi_imports
@@ -300,6 +338,7 @@ impl ScopeSymbols {
                         .collect(),
                     initializer: process.initializer,
                     synthetic: process.synthetic,
+                    repeats: process.repeats,
                 })
                 .collect();
             self.signals.push(signal);
@@ -370,6 +409,19 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            declarations_only: self.declarations_only,
+            interface_instances: self.interface_instances.clone(),
+            interface_types: self.interface_types.clone(),
+            interface_arrays: self.interface_arrays.clone(),
+            interface_scopes: self.interface_scopes.clone(),
+            interface_declarations: self.interface_declarations.clone(),
+            interface_members: self
+                .interface_members
+                .iter()
+                .map(|(path, name)| (path.clone(), rename.name(name)))
+                .collect(),
+            type_parameter_bindings: self.type_parameter_bindings.clone(),
+            pattern_parameter_bindings: self.pattern_parameter_bindings.clone(),
             const_env,
             parameter_values: self
                 .parameter_values
@@ -462,6 +514,18 @@ impl ScopeSymbols {
                 .iter()
                 .map(|import| import.renamed(rename.name(import.name())))
                 .collect(),
+            ports: self
+                .ports
+                .iter()
+                .map(|port| {
+                    Port::new(
+                        rename.name(&port.name),
+                        port.direction,
+                        rename.r#type(port.r#type.clone()),
+                        port.is_net,
+                    )
+                })
+                .collect(),
             signals: self
                 .signals
                 .iter()
@@ -480,6 +544,18 @@ impl ScopeSymbols {
                     ..signal.clone()
                 })
                 .collect(),
+            comb_processes: self
+                .comb_processes
+                .iter()
+                .cloned()
+                .map(|process| rename.comb_process(process))
+                .collect(),
+            ff_processes: self
+                .ff_processes
+                .iter()
+                .cloned()
+                .map(|process| rename.ff_process(process))
+                .collect(),
             initial_processes: self
                 .initial_processes
                 .iter()
@@ -497,6 +573,7 @@ impl ScopeSymbols {
                         .collect(),
                     initializer: process.initializer,
                     synthetic: process.synthetic,
+                    repeats: process.repeats,
                 })
                 .collect(),
             aliases: HashMap::default(),
@@ -538,6 +615,37 @@ pub(super) struct Renamer<'a> {
 }
 
 impl Renamer<'_> {
+    pub fn comb_process(&self, mut process: CombProcess) -> CombProcess {
+        process.condition = process.condition.map(|expr| self.const_expr(expr));
+        process.body = process
+            .body
+            .into_iter()
+            .map(|stmt| self.stmt(stmt))
+            .collect();
+        process.sensitivity_body = process
+            .sensitivity_body
+            .into_iter()
+            .map(|stmt| self.stmt(stmt))
+            .collect();
+        for assignment in &mut process.assignments {
+            assignment.lhs = self.lvalue(assignment.lhs.clone());
+            assignment.rhs = self.expr(assignment.rhs.clone());
+        }
+        process
+    }
+
+    pub fn ff_process(&self, mut process: FfProcess) -> FfProcess {
+        process.body = process
+            .body
+            .into_iter()
+            .map(|stmt| self.stmt(stmt))
+            .collect();
+        for event in &mut process.events {
+            event.signal = self.name(&event.signal);
+        }
+        process
+    }
+
     pub fn name(&self, name: &str) -> String {
         self.names
             .get(name)

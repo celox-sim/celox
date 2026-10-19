@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:14: error: Module instantiations are not allowed in interfaces.\n",
+      "expectation": "Simulation",
+      "name": "interface::test_nested_interface_instance",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "veryl",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

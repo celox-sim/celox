@@ -19,6 +19,8 @@
 //!   event count u32, then per event: scheduled event
 //!   periodic count u32, then per marker: scheduled event | count u64
 //!   high count u32, then per event: event str
+//!   (only with FLAG_UNKNOWN_EVENTS) unknown count u32, then per event:
+//!   event str
 //!   processes (version 2):
 //!     wakeup count u32, then per wakeup: process str | time u64
 //!     waiter count u32, then per waiter:
@@ -47,6 +49,9 @@ const MAGIC: &[u8; 8] = b"CXSTATE\0";
 const VERSION: u16 = 2;
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
+/// The schedule lists events whose signal was x or z. Set only when there are
+/// any, so other files keep their earlier encoding.
+const FLAG_UNKNOWN_EVENTS: u16 = 1 << 2;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +99,11 @@ pub struct ScheduleRecord {
     /// the number of identical such events.
     pub periodic: Vec<(ScheduledEvent, u64)>,
     /// Event paths whose signal was high when edge detection last sampled it.
+    /// An x counts as high.
     pub high_events: Vec<String>,
+    /// Event paths whose signal was x or z when edge detection last sampled
+    /// it.
+    pub unknown_events: Vec<String>,
     /// Scheduling state of the design's processes.
     pub processes: ProcessRecord,
 }
@@ -210,8 +219,11 @@ impl StateFile {
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
         }
-        if self.schedule.is_some() {
+        if let Some(schedule) = &self.schedule {
             flags |= FLAG_SCHEDULE;
+            if !schedule.unknown_events.is_empty() {
+                flags |= FLAG_UNKNOWN_EVENTS;
+            }
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -253,6 +265,12 @@ impl StateFile {
             put_len(w, schedule.high_events.len())?;
             for event in &schedule.high_events {
                 put_str(w, event)?;
+            }
+            if !schedule.unknown_events.is_empty() {
+                put_len(w, schedule.unknown_events.len())?;
+                for event in &schedule.unknown_events {
+                    put_str(w, event)?;
+                }
             }
             if let Some(processes) = processes {
                 put_processes(w, processes)?;
@@ -322,6 +340,13 @@ impl StateFile {
             let high_events = (0..get_u32(r)?)
                 .map(|_| get_str(r))
                 .collect::<Result<_, _>>()?;
+            let unknown_events = if flags & FLAG_UNKNOWN_EVENTS != 0 {
+                (0..get_u32(r)?)
+                    .map(|_| get_str(r))
+                    .collect::<Result<_, _>>()?
+            } else {
+                Vec::new()
+            };
             let processes = if version >= 2 {
                 get_processes(r)?
             } else {
@@ -333,6 +358,7 @@ impl StateFile {
                 events,
                 periodic,
                 high_events,
+                unknown_events,
                 processes,
             })
         } else {
@@ -682,6 +708,7 @@ mod tests {
                 events: vec![event.clone()],
                 periodic: vec![(event, 1)],
                 high_events: vec!["clk".into()],
+                unknown_events: vec!["rst".into()],
                 processes: ProcessRecord {
                     wakeups: vec![("$process[0].status".into(), 20)],
                     waiters: vec![WaiterRecord {

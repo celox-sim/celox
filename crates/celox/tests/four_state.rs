@@ -503,4 +503,25 @@ fn test_x_literal_encoding(sim) {
     @case "four_state::test_x_literal_encoding";
 }
 
+// ==========================================================================
+// Edges of internally driven clocks and resets (IEEE 1800-2023 Table 9-2)
+// ==========================================================================
+
+fn test_four_state_register_clock_edges_follow_table_9_2(sim) {
+    // Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+    @ignore_on(veryl);
+    @case "four_state::test_four_state_register_clock_edges_follow_table_9_2";
+}
+
+fn test_four_state_comb_clock_edges_follow_table_9_2(sim) {
+    // Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+    @ignore_on(veryl);
+    @case "four_state::test_four_state_comb_clock_edges_follow_table_9_2";
+}
+
+fn test_four_state_internal_async_reset_edges_follow_table_9_2(sim) {
+    // Veryl 0.22.0's simulator misses edges through x and z, such as x -> 0.
+    @ignore_on(veryl);
+    @case "four_state::test_four_state_internal_async_reset_edges_follow_table_9_2";
+}
 }

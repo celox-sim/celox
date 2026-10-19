@@ -46,7 +46,7 @@ fn caps_aggregate_nested_generate_expansion() {
             endmodule
         "#
         );
-        let syntax = syntax::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
+        let syntax = source_tree::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
         let result = ast::Source::from_syntax(&syntax);
         if accepted {
             result.expect("small nested loops should expand");
@@ -1405,6 +1405,7 @@ fn resolves_imported_constant_parameter_part_selects() {
         .analyze_module(
             "Top",
             &HashMap::default(),
+            &[],
             &[],
             &ModuleInterfaces::default(),
             &packages,
@@ -3485,6 +3486,107 @@ fn rejects_unlowered_constructs() {
     assert!(matches!(error, AnalyzerError::Unsupported(_)), "{error:?}");
 }
 
+/// Timing constructs that remain unimplemented are rejected with their
+/// own construct names, not as a generic timing control.
+#[test]
+fn rejects_unimplemented_timing_constructs() {
+    for (body, construct) in [
+        ("initial begin fork #1; join end", "fork-join block"),
+        ("initial wait fork;", "wait fork statement"),
+        // The `event` data type is rejected before its uses.
+        ("event e; initial @e;", "unsupported internal data type"),
+        ("event e; initial ->e;", "unsupported internal data type"),
+        (
+            "logic clk, en; initial @(posedge clk iff en);",
+            "iff-qualified event",
+        ),
+        (
+            "logic a, b; initial a = #1 b;",
+            "intra-assignment timing control",
+        ),
+        (
+            "logic a, b; initial a <= #1 b;",
+            "intra-assignment timing control",
+        ),
+        ("initial begin : b disable b; end", "disable statement"),
+        ("initial #1.5;", "delay value"),
+        (
+            "logic a; initial @* a = 1;",
+            "`@*` event control in a process",
+        ),
+        ("logic a, y; always_latch y = a;", "always_latch process"),
+        (
+            "task automatic t; #1; endtask",
+            "delay control in a subroutine",
+        ),
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let error = analyze_source(&code, Path::new("timing.sv"))
+            .expect_err(&format!("`{body}` must be rejected"));
+        assert!(
+            matches!(&error, AnalyzerError::Unsupported(text) if text.starts_with(construct)),
+            "`{body}`: {error:?}"
+        );
+    }
+    assert_eq!(
+        AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
+        1444
+    );
+}
+
+/// `always_comb` and `always_ff` bodies may not suspend (IEEE 1800-2023
+/// 9.2.2.2, 9.2.2.4).
+#[test]
+fn rejects_timing_controls_in_always_comb_and_always_ff() {
+    for body in [
+        "logic a; always_comb begin #1 a = 1; end",
+        "logic clk, a; always_ff @(posedge clk) begin @(a); end",
+        "logic clk, a; always_ff @(posedge clk) wait (a);",
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let error = analyze_source(&code, Path::new("timing.sv"))
+            .expect_err(&format!("`{body}` must be rejected"));
+        assert!(
+            matches!(error, AnalyzerError::TimingControlOutsideProcess { .. }),
+            "`{body}`: {error:?}"
+        );
+    }
+}
+
+/// An `always` that is neither combinational nor edge-triggered RTL is a
+/// process that repeats its statement.
+#[test]
+fn analyzes_always_processes() {
+    for body in [
+        "logic clk; always #5 clk = ~clk;",
+        "logic a, b, y; always @(a or b) y = a & b;",
+        "logic clk, q; always @(posedge clk) begin #1 q = ~q; end",
+        "logic x; always x = ~x;",
+    ] {
+        let code = format!("module Top; {body} endmodule");
+        let ir = analyze_source(&code, Path::new("process.sv"))
+            .unwrap_or_else(|error| panic!("`{body}`: {error}"));
+        let module = &ir.modules()[0];
+        assert!(
+            module
+                .initial_processes()
+                .iter()
+                .any(|process| process.repeats()),
+            "`{body}` must be an always process"
+        );
+    }
+}
+
+/// Delays, event controls and waits in an `initial` block keep their
+/// statement structure in the IR.
+#[test]
+fn analyzes_timing_controls_in_initial_blocks() {
+    let code = "module Top(input logic clk, output logic [7:0] y);\n\
+                initial begin #3; @(posedge clk or negedge clk, y); @(edge clk); #(1:2:3); wait (y > 1); end\n\
+                endmodule";
+    analyze_source(code, Path::new("timing.sv")).expect("timing controls in an initial block");
+}
+
 #[test]
 fn analyzes_veryl_emitted_fifo_with_runtime_casts() {
     analyze_source(
@@ -3630,9 +3732,69 @@ fn imports_a_dpi_function_declared_in_a_package() {
     );
 }
 
-fn elaborate(source: &str) -> Result<Option<String>, AnalyzerError> {
-    elaborate_interfaces(&[(source, Path::new("interfaces.sv"))])
-        .map(|sources| sources.map(|mut sources| sources.remove(0)))
+fn native_interface_module(source: &str, name: &str) -> ir::Module {
+    let parsed = ParsedSource::parse(source, Path::new("interfaces.sv")).unwrap();
+    let packages = ParsedSource::analyze_packages(&[&parsed]).unwrap();
+    parsed
+        .analyze_module(
+            name,
+            &HashMap::default(),
+            &[],
+            &[],
+            &ModuleInterfaces::default(),
+            &packages,
+        )
+        .unwrap()
+        .modules()[0]
+        .clone()
+}
+
+fn assert_interface_member(
+    plan: &NativeInterfacePlan,
+    module: &str,
+    port: &str,
+    member: &str,
+    direction: ir::PortDirection,
+) {
+    let port = plan.modules[module]
+        .ports
+        .iter()
+        .find(|p| p.name == port)
+        .unwrap();
+    assert!(
+        port.members
+            .iter()
+            .any(|(name, value)| name == member && ir::PortDirection::from(*value) == direction),
+        "{port:?}"
+    );
+}
+
+fn elaborate(source: &str) -> Result<Option<NativeInterfacePlan>, AnalyzerError> {
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[])?;
+    Ok((!plan.modules.is_empty()).then_some(plan))
+}
+
+fn native_interface_sources(sources: &[(&str, &Path)]) -> Result<Vec<ir::Module>, AnalyzerError> {
+    let parsed = sources
+        .iter()
+        .map(|(code, path)| ParsedSource::parse(code, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let packages = ParsedSource::analyze_packages(&parsed.iter().collect::<Vec<_>>())?;
+    let mut modules = Vec::new();
+    for source in &parsed {
+        for name in source.module_names() {
+            let ir = source.analyze_module(
+                name,
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )?;
+            modules.extend(ir.modules().iter().cloned());
+        }
+    }
+    Ok(modules)
 }
 
 #[test]
@@ -3643,8 +3805,7 @@ fn leaves_sources_without_interfaces_unchanged() {
 
 #[test]
 fn expands_interface_instances_ports_and_generic_ports() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface Bus #(parameter int W = 4);
             logic [W-1:0] data;
             modport w(output data);
@@ -3660,40 +3821,31 @@ fn expands_interface_instances_ports_and_generic_ports() {
             Pass p(.bus(b), .v(v));
             assign y = b.data;
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // The instance becomes a localparam and a signal per member.
-        "localparam int b$W = 6;",
-        "var logic [b$W-1:0] b$data;",
-        "assign y = b$data;",
-        // The port becomes a member port and a parameter.
-        "parameter int bus$W = 4",
-        "output var logic [bus$W-1:0] bus$data",
-        "assign bus$data = v;",
-        // The generic port is bound in a copy of the module.
-        "Pass$Bus #(.bus$W(b$W)) p (.bus$data(b$data), .v(v));",
-        "module Pass$Bus #(",
-        "Writer #(.bus$W(bus$W)) u (.bus$data(bus$data), .v(v));",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
-    // The copy stays beside the original, under the same directives.
-    assert!(
-        elaborated.find("module Pass$Bus") < elaborated.find("module Top"),
-        "{elaborated}"
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "Writer", "bus", "data", ir::PortDirection::Output);
+    assert!(plan.modules.contains_key("Pass$Bus"));
+    let top = native_interface_module(source, "Top");
+    assert_eq!(
+        top.signals()
+            .iter()
+            .find(|s| s.name() == "b$data")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(6)
+    );
+    assert_eq!(top.instances()[0].module_name(), "Pass$Bus");
+    assert_eq!(
+        top.instances()[0].port_connections()[0].actual_expr(),
+        Some(&ir::Expr::Ident("b$data".into()))
     );
 }
 
 #[test]
 fn expands_interface_parameters_functions_and_grouped_ports() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface Counter;
             parameter W = 4;
             logic [W-1:0] state;
@@ -3725,36 +3877,31 @@ fn expands_interface_parameters_functions_and_grouped_ports() {
             Pair p(.a(named), .b(ordered), .o(o));
             Scaler u(.u(util), .v(v), .o(s));
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // A body `parameter` without a parameter port list can be overridden.
-        "localparam named$W = 8;",
-        "localparam ordered$W = 6;",
-        "parameter c$W = 4",
-        // A member an imported function assigns is driven through the port.
-        "output var logic [c$W-1:0] c$state",
-        "named$state = v;",
-        // A port without a header repeats the interface of the previous one.
-        "input var logic [b$W-1:0] b$state",
-        "assign o = a$state + b$state;",
-        // A port that carries only a parameter and a function disappears.
-        "Scaler #(.u$K(util$K)) u (.v(v), .o(s));",
-        "assign o = u$scaled(v);",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "Loader", "c", "state", ir::PortDirection::Output);
+    assert_interface_member(&plan, "Pair", "a", "state", ir::PortDirection::Input);
+    assert_interface_member(&plan, "Pair", "b", "state", ir::PortDirection::Input);
+    assert!(plan.modules["Scaler"].ports[0].members.is_empty());
+    assert_eq!(plan.modules["Scaler"].ports[0].parameters, ["K"]);
+    let top = native_interface_module(source, "Top");
+    for (name, width) in [("named$state", 8), ("ordered$state", 6)] {
+        assert_eq!(
+            top.signals()
+                .iter()
+                .find(|s| s.name() == name)
+                .unwrap()
+                .r#type()
+                .resolved_width(),
+            Some(width)
         );
     }
 }
 
 #[test]
 fn expands_nested_references_functions_and_written_arguments() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface Cfg #(parameter int N = 2);
         endinterface
         interface Lane;
@@ -3785,34 +3932,38 @@ fn expands_nested_references_functions_and_written_arguments() {
             Reader r(.l(rows[cfg.N - 1]), .o(o));
             assign rows[cfg.N - 2].i0 = v;
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // References inside selects and instance dimensions are rewritten.
-        "var logic [rows$bits()-1:0] rows$i0[cfg$N];",
-        "assign rows$i0[cfg$N - 2] = v;",
-        ".l$i0(rows$i0[cfg$N - 1])",
-        // Loop helper names cannot collide with the items `i0` and `g0`.
-        "for (genvar rows$$i0 = 0; rows$$i0 < (cfg$N); rows$$i0++) begin : rows$$g0",
-        "assign rows$g0[rows$$i0] = rows$inc(rows$i0[rows$$i0]);",
-        // A function a declaration calls is declared with the port.
-        "function automatic int l$bits();",
-        // An actual of an `output` subroutine argument is written.
-        "output var logic [l$bits()-1:0] l$i0",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "Driver", "l", "i0", ir::PortDirection::Output);
+    assert!(
+        plan.modules["Reader"].ports[0]
+            .functions
+            .contains(&"bits".into())
+    );
+    let top = native_interface_module(source, "Top");
+    assert_eq!(
+        top.signals()
+            .iter()
+            .filter(|s| s.name().ends_with("$i0"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        top.instances()[0].port_connections()[0].actual_expr(),
+        Some(&ir::Expr::Ident("rows[2]$i0".into()))
+    );
+    assert!(
+        top.signals()
+            .iter()
+            .filter(|s| s.name().ends_with("$i0"))
+            .all(|s| s.r#type().resolved_width() == Some(4))
+    );
 }
 
 #[test]
 fn infers_writes_through_child_ports_and_scoped_subroutines() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface Bus;
             logic [7:0] x;
             logic [7:0] y;
@@ -3849,38 +4000,30 @@ fn infers_writes_through_child_ports_and_scoped_subroutines() {
             assign g[1].a = v;
             assign o = g[1].b;
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // Actuals of child outputs are written; the module's own `touch`
-        // reads its argument, whatever a package declares.
-        "output var logic [7:0] p$x",
-        "output var logic [7:0] p$y",
-        "input var logic [7:0] p$z",
-        // The items of a generate region are placed in the array loop.
-        "for (genvar g$$i0 = 0; g$$i0 < (2); g$$i0++) begin : g$$g0",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
-    let top = &elaborated[elaborated.find("module Top").unwrap()..];
-    assert!(!top.contains("generate"), "{elaborated}");
-    assert_eq!(
-        elaborate("interface I; endinterface interface I; endinterface"),
-        Err(AnalyzerError::DuplicateModule {
-            name: "I".to_string()
-        })
-    );
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "M", "p", "x", ir::PortDirection::Output);
+    assert_interface_member(&plan, "M", "p", "y", ir::PortDirection::Output);
+    assert_interface_member(&plan, "M", "p", "z", ir::PortDirection::Input);
+    let top = native_interface_module(source, "Top");
+    assert!(top.instances().is_empty());
+    assert_eq!(top.comb_processes().len(), 5);
+    assert!(matches!(
+        plan_interfaces(
+            &[(
+                "interface I; endinterface interface I; endinterface",
+                Path::new("duplicate.sv")
+            )],
+            &[]
+        ),
+        Err(AnalyzerError::DuplicateModule { .. })
+    ));
 }
 
 #[test]
 fn interface_functions_write_members_through_subroutine_arguments() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface S;
             logic [7:0] state;
             function automatic void put(output logic [7:0] d, input logic [7:0] v);
@@ -3894,14 +4037,18 @@ fn interface_functions_write_members_through_subroutine_arguments() {
         module L(S.m s, input logic [7:0] v);
             always_comb s.load(v);
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "L", "s", "state", ir::PortDirection::Output);
+    assert!(plan.modules["L"].ports[0].functions.contains(&"put".into()));
     assert!(
-        elaborated.contains("output var logic [7:0] s$state"),
-        "{elaborated}"
+        plan.modules["L"].ports[0]
+            .functions
+            .contains(&"load".into())
     );
+    let module = native_interface_module(source, "L");
+    assert_eq!(module.ports()[1].name(), "s$state");
 }
 
 #[test]
@@ -3925,9 +4072,10 @@ fn rejects_invalid_and_colliding_interface_declarations() {
                 .to_string()
         ))
     );
-    assert_eq!(
-        elaborate(
-            r#"
+    // Interface typedefs retain their declaration scopes even when their
+    // unqualified names collide with another interface or the caller.
+    let module = native_interface_module(
+        r#"
             package pa; typedef logic [7:0] word_t; endpackage
             package pb; typedef logic [3:0] word_t; endpackage
             interface A; import pa::*; word_t d; modport r(input d); endinterface
@@ -3936,35 +4084,47 @@ fn rejects_invalid_and_colliding_interface_declarations() {
                 assign o = a.d;
                 assign q = b.d;
             endmodule
-            "#
-        ),
-        Err(AnalyzerError::Unsupported(
-            "package items `pa::word_t` and `pb::word_t` in module `M`, one of them imported through an interface"
-                .to_string()
-        ))
+            "#,
+        "M",
     );
-    assert_eq!(
-        elaborate(
-            r#"
+    for (name, width) in [("a$d", 8), ("b$d", 4)] {
+        assert_eq!(
+            module
+                .ports()
+                .iter()
+                .find(|port| port.name() == name)
+                .unwrap()
+                .r#type()
+                .resolved_width(),
+            Some(width)
+        );
+    }
+    let module = native_interface_module(
+        r#"
             package pa; typedef logic [7:0] word_t; endpackage
             interface A; import pa::*; word_t d; modport r(input d); endinterface
             module M(A.r a, output logic [7:0] o);
                 typedef logic [3:0] word_t;
                 assign o = a.d;
             endmodule
-            "#
-        ),
-        Err(AnalyzerError::Unsupported(
-            "declaration of `word_t` in module `M`, which hides the package item `pa::word_t` of an interface it uses"
-                .to_string()
-        ))
+            "#,
+        "M",
+    );
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|port| port.name() == "a$d")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(8)
     );
 }
 
 #[test]
 fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface Bus;
             logic [7:0] x;
             logic [7:0] y;
@@ -4000,24 +4160,22 @@ fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
                 assign h.x = v[3:0];
             end
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // `a.touch` is the input-only function of `T`.
-        "input var logic [7:0] p$y",
-        // Each generate block has its own `h`.
-        "var logic [7:0] h$x;",
-        "var logic [3:0] h$x;",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
 
-    let sources = elaborate_interfaces(&[
+    assert_interface_member(&plan, "M", "p", "y", ir::PortDirection::Input);
+    let top = native_interface_module(source, "Top");
+    assert_eq!(
+        top.signals()
+            .iter()
+            .find(|s| s.name() == "g1.h$x")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(8)
+    );
+    assert!(!top.signals().iter().any(|s| s.name().starts_with("g2.")));
+    let sources = native_interface_sources(&[
         (
             "package pk; typedef logic [5:0] word_t; endpackage
              import pk::*;
@@ -4029,24 +4187,23 @@ fn resolves_interface_handles_by_scope_and_carries_unit_imports() {
             Path::new("module.sv"),
         ),
     ])
-    .unwrap()
     .unwrap();
-    assert!(
-        sources[1].contains("module M import pk::*;"),
-        "{}",
-        sources[1]
-    );
-    assert!(
-        sources[1].contains("input var word_t p$x"),
-        "{}",
-        sources[1]
+    let module = sources.iter().find(|module| module.name() == "M").unwrap();
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|p| p.name() == "p$x")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(6)
     );
 }
 
 #[test]
 fn keeps_generate_branches_imports_and_uncalled_writers_in_scope() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         package pa;
             function automatic void touch(input logic [7:0] v);
             endfunction
@@ -4080,48 +4237,42 @@ fn keeps_generate_branches_imports_and_uncalled_writers_in_scope() {
             R r(.p(b), .o(o));
             S s(.p(b));
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // The items of a bare generate item stay in its branch.
-        "if (1) begin",
-        "end else begin",
-        "i++) begin",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
-    // `R` never calls `set`, and `pb::touch` is not imported into `S`.
-    assert!(
-        !elaborated.contains("output var logic [7:0] p$x"),
-        "{elaborated}"
-    );
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
 
-    // A compilation-unit import after a module is copied into it.
-    let elaborated = elaborate(
-        r#"
+    assert_interface_member(&plan, "R", "p", "x", ir::PortDirection::Input);
+    assert_interface_member(&plan, "S", "p", "x", ir::PortDirection::Input);
+    assert!(!plan.modules["R"].ports[0].functions.contains(&"set".into()));
+    let top = native_interface_module(source, "Top");
+    assert_eq!(
+        top.signals()
+            .iter()
+            .filter(|s| s.name().ends_with("$x"))
+            .count(),
+        3
+    );
+    let source = r#"
         package pk; typedef logic [5:0] word_t; endpackage
         module M(I p, output logic [5:0] o); assign o = p.x; endmodule
         import pk::*;
         interface I; word_t x; endinterface
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(
-        elaborated.contains("module M import pk::*;"),
-        "{elaborated}"
+        "#;
+    let module = native_interface_module(source, "M");
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|p| p.name() == "p$x")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(6)
     );
 }
 
 #[test]
 fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         package pk; typedef logic [3:0] word_t; endpackage
         interface I;
             import pk::*;
@@ -4145,22 +4296,27 @@ fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
             end
             C c(.p(p), .clk, .o);
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    for expected in [
-        // Imports precede the parameter port list the expansion adds.
-        "module C import pk::*; #(",
-        // The write is to the instance in `g`, not to port `p` of `M`.
-        "input var p$data_t p$data",
-        ".clk, .o)",
-    ] {
-        assert!(
-            elaborated.contains(expected),
-            "missing `{expected}` in:\n{elaborated}"
-        );
-    }
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "M", "p", "data", ir::PortDirection::Input);
+    let module = native_interface_module(source, "M");
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|p| p.name() == "p$data")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(8)
+    );
+    assert!(
+        module.instances()[0]
+            .port_connections()
+            .iter()
+            .any(|p| p.formal() == "clk")
+    );
     // A port declares the types in its header, before the member ports.
     assert_eq!(
         elaborate(
@@ -4204,8 +4360,7 @@ fn resolves_declaration_dependencies_scopes_and_implicit_connections() {
 
 #[test]
 fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         package pa;
             function automatic void touch(input logic [7:0] v);
             endfunction
@@ -4238,19 +4393,15 @@ fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
             endfunction
             always_comb touch(p.x);
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    let module = |name: &str| {
-        let start = elaborated.find(&format!("module {name}(")).unwrap();
-        let end = start + elaborated[start..].find("endmodule").unwrap();
-        elaborated[start..end].to_string()
-    };
-    let (l, c, s) = (module("L"), module("C"), module("S"));
-    // An imported function that loads a member drives it.
-    let loaded = elaborate(
-        r#"
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "L", "p", "mem", ir::PortDirection::Output);
+    assert_interface_member(&plan, "C", "p", "hi", ir::PortDirection::Output);
+    assert_interface_member(&plan, "C", "p", "lo", ir::PortDirection::Output);
+    assert_interface_member(&plan, "C", "p", "idx", ir::PortDirection::Input);
+    assert_interface_member(&plan, "S", "p", "x", ir::PortDirection::Input);
+    let source = r#"
         interface I;
             logic [7:0] mem [4];
             function automatic void load();
@@ -4261,38 +4412,23 @@ fn infers_writes_of_memory_loads_concatenations_and_scoped_imports() {
         module L(I.m p);
             initial p.load();
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    assert!(
-        loaded.contains("output var logic [7:0] p$mem[4]"),
-        "{loaded}"
-    );
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "L", "p", "mem", ir::PortDirection::Output);
     assert_eq!(
         elaborate("interface I; logic x; modport m(input x, output x); endinterface"),
         Err(AnalyzerError::DuplicateModportItem {
-            interface: "I".to_string(),
-            modport: "m".to_string(),
-            name: "x".to_string(),
+            interface: "I".into(),
+            modport: "m".into(),
+            name: "x".into()
         })
     );
-    for (text, expected) in [
-        (&l, "output var logic [7:0] p$mem[4]"),
-        (&c, "output var logic [7:0] p$hi"),
-        (&c, "output var logic [7:0] p$lo"),
-        (&c, "input var logic [1:0] p$idx"),
-        // `pb::touch` is imported only inside `g`.
-        (&s, "input var logic [7:0] p$x"),
-    ] {
-        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
-    }
 }
 
 #[test]
 fn resolves_scoped_handles_imports_and_grouped_instances() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         package pa; typedef logic [7:0] word_t; endpackage
         package pb; typedef logic [3:0] word_t; endpackage
         interface I;
@@ -4326,13 +4462,19 @@ fn resolves_scoped_handles_imports_and_grouped_instances() {
             end
             F a(), b();
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    // `c` in `g1` is an `A`, whose `touch` only reads `p.x`.
-    assert!(elaborated.contains("input var word_t p$x"), "{elaborated}");
-    assert!(!elaborated.contains("endfunctionvar"), "{elaborated}");
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    assert_interface_member(&plan, "M", "p", "x", ir::PortDirection::Input);
+    // The plan above checks scoped imports; grouped instance lowering is
+    // independent of procedural package imports (not supported yet).
+    let module = native_interface_module(
+        "interface F; logic [7:0] y; endinterface module M; F a(), b(); endmodule",
+        "M",
+    );
+    for name in ["a$y", "b$y"] {
+        assert!(module.signals().iter().any(|signal| signal.name() == name));
+    }
     assert_eq!(
         elaborate("interface I; logic x; logic x; endinterface"),
         Err(AnalyzerError::DuplicateInterfaceItem {
@@ -4354,18 +4496,14 @@ fn resolves_scoped_handles_imports_and_grouped_instances() {
 
 #[test]
 fn separates_type_names_unit_subroutines_and_macros_by_file() {
-    // A module type may share the name of an interface port.
-    let elaborated = elaborate(
-        "module bus(input logic a); endmodule
-         interface I; logic x; endinterface
-         module M(I bus); bus u(.a(bus.x)); endmodule",
-    )
-    .unwrap()
-    .unwrap();
-    assert!(elaborated.contains("bus u(.a(bus$x))"), "{elaborated}");
-
-    // Compilation-unit functions of another file are not visible.
-    let sources = elaborate_interfaces(&[
+    let source = "module bus(input logic a); endmodule interface I; logic x; endinterface module M(I bus); bus u(.a(bus.x)); endmodule";
+    let module = native_interface_module(source, "M");
+    assert_eq!(module.instances()[0].module_name(), "bus");
+    assert_eq!(
+        module.instances()[0].port_connections()[0].actual_expr(),
+        Some(&ir::Expr::Ident("bus$x".into()))
+    );
+    let sources = native_interface_sources(&[
         (
             "function automatic void touch(output logic [7:0] v); v = 0; endfunction
              module N(); endmodule",
@@ -4378,53 +4516,39 @@ fn separates_type_names_unit_subroutines_and_macros_by_file() {
             Path::new("module.sv"),
         ),
     ])
-    .unwrap()
     .unwrap();
-    assert!(
-        sources[1].contains("input var logic [7:0] p$x"),
-        "{}",
-        sources[1]
+    let module = sources.iter().find(|module| module.name() == "M").unwrap();
+    assert_eq!(module.ports()[0].direction(), ir::PortDirection::Input);
+    let module = native_interface_module(
+        "`define DRIVE assign x = 1;\ninterface I; logic x; `DRIVE endinterface module M(); I h(); endmodule",
+        "M",
     );
-
-    // The expansion of a macro would keep the names it emits.
-    assert_eq!(
-        elaborate(
-            "`define DRIVE assign x = 1;
-             interface I; logic x; `DRIVE endinterface
-             module M(); I h(); endmodule"
-        ),
-        Err(AnalyzerError::Unsupported(
-            "macro or compiler directive in interface `I`".to_string()
-        ))
-    );
-
-    // Compilation-unit items are visible only in their own file, after
-    // their declaration.
-    let interface = "function automatic logic source(); return 1; endfunction
-         interface I; logic x; assign x = source(); endinterface";
-    assert!(
-        elaborate(&format!("{interface}\nmodule M(); I h(); endmodule"))
-            .unwrap()
-            .is_some()
-    );
-    let message = "compilation-unit item in interface `I`, which a module of another source file or before it uses";
-    assert_eq!(
-        elaborate_interfaces(&[
+    assert_eq!(module.assignments().len(), 1);
+    // Interface bodies retain the compilation unit that declared them.
+    let interface = "function automatic logic source(); return 1; endfunction interface I; logic x; assign x = source(); endinterface";
+    for sources in [
+        vec![
             (interface, Path::new("interface.sv")),
             ("module M(); I h(); endmodule", Path::new("module.sv")),
-        ]),
-        Err(AnalyzerError::Unsupported(message.to_string()))
-    );
-    assert_eq!(
-        elaborate(&format!("module M(); I h(); endmodule\n{interface}")),
-        Err(AnalyzerError::Unsupported(message.to_string()))
-    );
+        ],
+        vec![
+            ("module M(); I h(); endmodule", Path::new("module.sv")),
+            (interface, Path::new("interface.sv")),
+        ],
+    ] {
+        let modules = native_interface_sources(&sources).unwrap();
+        let module = modules.iter().find(|module| module.name() == "M").unwrap();
+        assert!(module.signals().iter().any(|signal| signal.name() == "h$x"));
+        assert_eq!(module.assignments().len(), 1);
+    }
+    let module =
+        native_interface_module(&format!("module M(); I h(); endmodule\n{interface}"), "M");
+    assert_eq!(module.assignments().len(), 1);
 }
 
 #[test]
 fn resolves_sibling_generic_ports_and_struct_fields() {
-    let elaborated = elaborate(
-        r#"
+    let source = r#"
         interface A;
             function automatic void touch(output logic [7:0] v);
                 v = 0;
@@ -4452,14 +4576,33 @@ fn resolves_sibling_generic_ports_and_struct_fields() {
             G g(.api(b), .p(q));
             S s(.bus(q), .o(o));
         endmodule
-        "#,
-    )
-    .unwrap()
-    .unwrap();
-    // `api` is bound to `B`, whose `touch` only reads `p.x`.
+        "#;
+    let plan = plan_interfaces(&[(source, Path::new("interfaces.sv"))], &[]).unwrap();
+
+    let generic = plan
+        .modules
+        .values()
+        .find(|module| module.original == "G")
+        .unwrap();
     assert!(
-        elaborated.contains("input var logic [7:0] p$x"),
-        "{elaborated}"
+        generic
+            .ports
+            .iter()
+            .find(|port| port.name == "p")
+            .unwrap()
+            .members
+            .contains(&("x".into(), ast::PortDirection::Input))
+    );
+    let module = native_interface_module(source, "S");
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|p| p.name() == "bus$x")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(8)
     );
     // A struct field `h` is not a generate-qualified instance.
     assert!(
@@ -4491,16 +4634,11 @@ fn resolves_sibling_generic_ports_and_struct_fields() {
             "interface I; logic x; endinterface interface J; endinterface
              module C(I p, J q); endmodule
              module M(); I a(); C c(.p(a)); endmodule",
-            "unconnected interface port `q` of instance of `C`",
+            "missing interface actual of `C.q`",
         ),
         (
             "interface I; if (1) begin logic x; end logic y; assign y = genblk1.x; endinterface",
             "reference to the implicit generate block name `genblk1` in interface `I`",
-        ),
-        (
-            "interface I; logic x; endinterface
-             module M(output logic y); if (1) begin : g I h(); end assign y = g.h.x; endmodule",
-            "hierarchical reference to interface instance `h` through a generate block",
         ),
         (
             "interface I; endinterface module Top; I h(,); endmodule",
@@ -4517,10 +4655,7 @@ fn resolves_sibling_generic_ports_and_struct_fields() {
 
 #[test]
 fn keeps_qualified_names_comments_and_preceding_imports() {
-    // A qualified package function, a backtick in a comment and a struct
-    // field chain through a generate block name are no unit items, macros or
-    // generate-qualified instances.
-    let sources = elaborate_interfaces(&[
+    let sources = native_interface_sources(&[
         (
             "package pk;
                  typedef logic [3:0] word_t;
@@ -4548,23 +4683,28 @@ fn keeps_qualified_names_comments_and_preceding_imports() {
             Path::new("module.sv"),
         ),
     ])
-    .unwrap()
     .unwrap();
-    assert!(sources[1].contains("pk::source()"), "{}", sources[1]);
-
-    // A compilation-unit import before the interface and the module is
-    // copied, as packages are inlined only for imports in a module.
-    let elaborated = elaborate(
-        "package pk; typedef logic [3:0] word_t; endpackage
-         import pk::*;
-         interface I; word_t x; endinterface
-         module M(I p, output logic [3:0] o); assign o = p.x; endmodule",
-    )
-    .unwrap()
-    .unwrap();
+    let module = sources.iter().find(|module| module.name() == "M").unwrap();
+    assert!(module.signals().iter().any(|signal| signal.name() == "a$x"));
     assert!(
-        elaborated.contains("module M import pk::*;"),
-        "{elaborated}"
+        module
+            .signals()
+            .iter()
+            .any(|signal| signal.name() == "g.h$x")
+    );
+    let module = native_interface_module(
+        "package pk; typedef logic [3:0] word_t; endpackage import pk::*; interface I; word_t x; endinterface module M(I p, output logic [3:0] o); assign o = p.x; endmodule",
+        "M",
+    );
+    assert_eq!(
+        module
+            .ports()
+            .iter()
+            .find(|p| p.name() == "p$x")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(4)
     );
 }
 
@@ -4599,13 +4739,13 @@ fn rejects_unsupported_interface_uses() {
             "port `p` of `W` drives member `x`, an input of port `p` of `M`",
         ),
         (
-            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b[0].get(1); endmodule",
-            "call of a function of the interface array `b`",
+            "module Top(output logic [7:0] o); Bus b [2] (); assign o = b.get(1); endmodule",
+            "call of a function of the unselected interface array `b`",
         ),
         (
             "module M(Bus p, output logic [7:0] o); assign o = p.x; endmodule
              module Top(output logic [7:0] o); Bus b(); M u(.p(b.r), .o(o)); endmodule",
-            "modport `r` selected in the connection of port `p` of `M`, which does not declare it",
+            "modport mismatch at `M.p`",
         ),
         (
             "module C(Bus p, input logic [7:0] q); endmodule
@@ -4614,18 +4754,7 @@ fn rejects_unsupported_interface_uses() {
         ),
         (
             "module Top(output logic [7:0] o); Bus h(); logic [7:0] h$x; assign o = h.x; endmodule",
-            "identifier `h$x` containing `$` in a design with interfaces, which interface elaboration reserves for generated names",
-        ),
-        (
-            "module M(Bus.r p, output logic [7:0] o);
-                 function automatic logic [7:0] f(input logic [7:0] p); return p; endfunction
-                 assign o = f(p.x);
-             endmodule",
-            "declaration of `p` in module `M`, which shadows an interface",
-        ),
-        (
-            "module Top(output logic [7:0] o); Bus \\b.0 (); assign o = \\b.0 .x; endmodule",
-            "escaped identifier `\\b.0` that is not a simple identifier in a design with interfaces",
+            "interface binding collides with declaration `h$x`",
         ),
         (
             "module M(Bus.r p, output logic [7:0] o); assign o = p.peek(); endmodule",
@@ -4646,19 +4775,20 @@ fn rejects_unsupported_interface_uses() {
         ),
     ] {
         let source = format!("{BUS}{body}");
+        let actual = if message.starts_with("use of interface")
+            || message.starts_with("interface binding collides")
+        {
+            analyze_source(&source, Path::new("interfaces.sv")).map(|_| None)
+        } else {
+            elaborate(&source)
+        };
         assert_eq!(
-            elaborate(&source),
+            actual,
             Err(AnalyzerError::Unsupported(message.to_string())),
             "{body}"
         );
     }
     for (interface, message) in [
-        (
-            "interface I; logic x; logic y; function automatic logic f(); return x; endfunction
-             assign y = f(); endinterface
-             module Top(); I a [2] (); endmodule",
-            "call of function `f` of interface `I`, which accesses members, in the logic of the instance array `a`",
-        ),
         (
             "interface I(input logic clk); endinterface",
             "ports of interface `I`",
@@ -4688,6 +4818,46 @@ fn rejects_unsupported_interface_uses() {
             elaborate(interface),
             Err(AnalyzerError::Unsupported(message.to_string())),
             "{interface}"
+        );
+    }
+}
+
+#[test]
+fn interface_bindings_preserve_local_shadowing_and_escaped_names() {
+    let module = native_interface_module(
+        r"interface Bus; logic [7:0] x; endinterface
+          module M(Bus p, output logic [7:0] o);
+            function automatic logic [7:0] f(input logic [7:0] p); return p; endfunction
+            assign o = f(p.x);
+          endmodule",
+        "M",
+    );
+    let function = module.subroutines().iter().find(|f| f.name == "f").unwrap();
+    assert_eq!(function.params[0].source_name, "p");
+    assert!(module.ports().iter().any(|p| p.name() == "p$x"));
+    let module = native_interface_module(
+        r"interface Bus; logic [7:0] x; endinterface
+          module Top(output logic [7:0] o); Bus \b.0 (); assign o = \b.0 .x; endmodule",
+        "Top",
+    );
+    assert_eq!(
+        module.assignments()[0].rhs(),
+        &ir::Expr::Ident(r"\b.0$x".into())
+    );
+}
+
+#[test]
+fn interface_array_functions_bind_their_own_member_symbols() {
+    let module = native_interface_module(
+        "interface I; logic x; logic y; function automatic logic f(); return x; endfunction
+         assign y = f(); endinterface module Top(); I a [2] (); endmodule",
+        "Top",
+    );
+    assert_eq!(module.assignments().len(), 2);
+    for (index, assignment) in module.assignments().iter().enumerate() {
+        assert!(
+            matches!(assignment.rhs(), ir::Expr::Call { callee: ir::Callee::Subroutine(name), .. }
+            if name == &format!("a[{index}]$f"))
         );
     }
 }
@@ -4987,10 +5157,11 @@ fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
 fn named_constant_calls_retain_parameter_dependencies() {
     let source = "module Top #(parameter W=8, parameter N=f(.value(W)))(); function automatic integer f(input integer value); return value+1; endfunction endmodule";
     let syntax =
-        crate::syntax::parse_source(source, std::path::Path::new("named_dependency.sv")).unwrap();
+        crate::source_tree::parse_source(source, std::path::Path::new("named_dependency.sv"))
+            .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
-    let _functions = module.install_constant_functions();
+    let state = module.constant_function_state();
     let expression: ir::ConstExpr = module
         .parameters()
         .iter()
@@ -5001,5 +5172,839 @@ fn named_constant_calls_retain_parameter_dependencies() {
         .clone()
         .into();
     let values = fxhash::FxHashMap::from_iter([("W".to_string(), 16i128)]);
-    assert_eq!(typecheck::eval_const_expr(&expression, &values), Some(17));
+    assert_eq!(
+        typecheck::eval_const_expr_in_env(
+            &expression,
+            &ast::const_functions::Environment {
+                constants: &values,
+                functions: &state.const_functions
+            }
+        ),
+        Some(17)
+    );
+}
+
+#[test]
+fn interface_signatures_preserve_declaration_dependencies_without_lowering_processes() {
+    let source = r#"
+        interface Bus #(parameter W = 8);
+            localparam N = W * 2;
+            logic [N-1:0] data;
+            initial forever #1 data = ~data;
+        endinterface
+    "#;
+    let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    let module = &signatures[0].module;
+    let port = &module.ports()[0];
+    assert_eq!(port.name(), "h$data");
+    let values = fxhash::FxHashMap::from_iter([("h$N".to_string(), 64)]);
+    assert_eq!(
+        typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
+        Some(63),
+    );
+}
+
+#[test]
+fn interface_signatures_only_analyze_requested_declarations() {
+    let source = r#"
+        interface Selected; logic value; endinterface
+        interface Unselected; real value; endinterface
+    "#;
+    let selected = fxhash::FxHashSet::from_iter(["Selected".to_string()]);
+    let signatures =
+        crate::interface_prototypes_for(&[(source, Path::new("interfaces.sv"))], Some(&selected))
+            .unwrap();
+    assert_eq!(signatures.len(), 1);
+    assert_eq!(signatures[0].name, "Selected");
+}
+
+#[test]
+fn native_interface_header_inspection_keeps_driven_nets() {
+    let module = native_interface_module(
+        "interface I; logic x; endinterface module Top(input logic a, output logic y); I i(); wire w; assign w = a; assign i.x = w; assign y = i.x; endmodule",
+        "Top",
+    );
+    assert_eq!(module.assignments().len(), 3);
+}
+
+#[test]
+fn native_interface_array_ports_keep_their_bounds() {
+    let module = native_interface_module(
+        "interface I; logic [7:0] x; modport r(input x); endinterface module M #(parameter N=2)(I.r p[N], output logic [15:0] y); assign y = {p[0].x, p[1].x}; endmodule",
+        "M",
+    );
+    assert!(module.ports().iter().any(|port| port.name() == "p$0$x"));
+    assert!(module.ports().iter().any(|port| port.name() == "p$1$x"));
+}
+
+#[test]
+fn native_interface_array_ports_reject_incompatible_shapes() {
+    let source = "interface I; logic x; endinterface module M(I p[2]); endmodule";
+    let parsed = ParsedSource::parse(source, Path::new("array-port.sv")).unwrap();
+    let packages = ParsedSource::analyze_packages(&[&parsed]).unwrap();
+    let error = parsed
+        .analyze_module(
+            "M",
+            &HashMap::from_iter([("p$$dimension0".into(), ir::ConstExpr::Literal("3".into()))]),
+            &[],
+            &[],
+            &ModuleInterfaces::default(),
+            &packages,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported("interface array dimension mismatch at `M.p`".into())
+    );
+    let error = analyze_source(
+        "interface I; logic x; endinterface module C(I p[4]); endmodule module Top; I a[2][2](); C c(.p(a)); endmodule", Path::new("array-rank.sv"),
+    ).unwrap_err();
+    assert_eq!(
+        error,
+        AnalyzerError::Unsupported("interface array rank mismatch at `C.p`".into())
+    );
+}
+
+#[test]
+fn native_interface_port_views_do_not_repeat_instance_initializers() {
+    let module = native_interface_module(
+        "interface I; logic [7:0] x = 8'd42; endinterface module M(I p, output logic [7:0] y); assign y = p.x; endmodule",
+        "M",
+    );
+    assert!(module.initial_processes().is_empty());
+}
+
+#[test]
+fn native_interface_bindings_reject_authored_subroutine_collisions() {
+    for declaration in [
+        "function automatic int h$f(); return 99; endfunction",
+        "localparam h$f = 99;",
+        "typedef logic h$f;",
+    ] {
+        let source = format!(
+            "interface I; function automatic int f(); return 7; endfunction endinterface
+             module Top(output int y); I h(); {declaration} assign y = h.f(); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("collision.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("interface binding collides with declaration `h$f`"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn interface_signatures_skip_unrequested_unsupported_syntax() {
+    for unselected in [
+        "interface Unselected #(parameter type T = logic); T value; endinterface",
+        "interface Unselected(input logic clk); logic value; endinterface",
+        "interface Unselected; enum { A, B } value; endinterface",
+        "interface Unselected; interface Nested; logic value; endinterface endinterface",
+    ] {
+        let source = format!("interface Selected; logic value; endinterface {unselected}");
+        let files = [(source.as_str(), Path::new("selected.sv"))];
+        let selected = fxhash::FxHashSet::from_iter(["Selected".to_string()]);
+        let signatures = crate::interface_prototypes_for(&files, Some(&selected)).unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].name, "Selected");
+        assert!(
+            crate::interface_prototypes_for(&files, Some(&Default::default()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn native_interface_bindings_reject_enum_constant_collisions() {
+    let source = "interface I; parameter f = 7; endinterface
+        module Top(output int y); I h(); typedef enum int {h$f = 3} E; assign y = h$f; endmodule";
+    let error = analyze_source(source, Path::new("enum_collision.sv")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interface binding collides with declaration `h$f`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn native_package_bindings_feed_reexports_header_imports_and_unit_visibility() {
+    for declaration in ["import p::*;", "import \"DPI-C\" function int f();"] {
+        let code = format!(
+            "package p; endpackage module M; if(1) {declaration} parameter int N=1; \
+             function int local_function(); localparam HIDDEN=2; endfunction endmodule"
+        );
+        let source = ParsedSource::parse(&code, Path::new("atomic-branch.sv")).unwrap();
+        assert_eq!(source.module_interfaces()["M"].parameters, ["N"]);
+    }
+
+    let code = r#"
+        `define USE(package_name) import package_name::*;
+        package p;
+            parameter int VALUE = 7;
+            typedef logic [VALUE:0] word;
+        endpackage
+        package q;
+            import p::*;
+            export p::VALUE, p::word;
+        endpackage
+        `USE(q)
+        module Top import q::VALUE; #(parameter N = VALUE)(output p::word y);
+            assign y = N;
+            if (1) begin : g
+                import q::*;
+                word z;
+                assign z = VALUE;
+            end
+        endmodule
+    "#;
+    let ir = analyze_source(code, Path::new("native-package-bindings.sv")).unwrap();
+    let module = &ir.modules()[0];
+    assert_eq!(module.parameters()[0].resolved_value(), Some(7));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+    assert_eq!(module.signals()[0].r#type().resolved_width(), Some(8));
+
+    let code = r"package \p.q ; parameter int \v.w = 9; endpackage
+                 import \p.q ::\v.w ;
+                 module Top #(parameter N=\v.w )(); endmodule";
+    let ir = analyze_source(code, Path::new("escaped-package-bindings.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(9));
+}
+
+#[test]
+fn native_package_wildcard_and_all_exports_preserve_transitive_bindings() {
+    for export in ["export p::*;", "export *::*;"] {
+        let code = format!(
+            "package p; parameter int V=11; endpackage \
+             package q; import p::*; localparam int used=V; {export} endpackage \
+             module Top import q::*; #(parameter N=V)(); endmodule"
+        );
+        let ir = analyze_source(&code, Path::new("native-reexport.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
+    }
+}
+
+#[test]
+fn native_typedef_names_and_base_types_bind_into_existing_layouts() {
+    let declarations = ParsedSource::parse(
+        "typedef class C; typedef interface class I; typedef enum E; typedef F; \
+         interface Bus; typedef logic[7:0] word; endinterface \
+         module M; Bus bus(); typedef bus.word View; endmodule",
+        Path::new("forward-and-interface-typedefs.sv"),
+    )
+    .unwrap();
+    assert_eq!(declarations.declarations().type_aliases.len(), 6);
+
+    let code = r#"
+        `define WORD(name) typedef logic[7:0] name;
+        package p; typedef shortint unsigned half; endpackage
+        module Top;
+            `WORD(Word)
+            typedef p::half Half;
+            typedef Word Pair[2];
+            typedef enum logic[1:0] { A, B } Choice;
+            typedef struct packed { Word high; Half low; } Record;
+            Half h; Word w; Pair array; Choice choice; Record record;
+        endmodule
+    "#;
+    let ir = analyze_source(code, Path::new("native-typedefs.sv")).unwrap();
+    let signals = ir.modules()[0].signals();
+    for (name, width) in [
+        ("h", 16),
+        ("w", 8),
+        ("array", 16),
+        ("choice", 2),
+        ("record", 24),
+    ] {
+        let signal = signals.iter().find(|signal| signal.name() == name).unwrap();
+        assert_eq!(signal.r#type().resolved_width(), Some(width), "{name}");
+    }
+    assert!(
+        !signals
+            .iter()
+            .find(|signal| signal.name() == "h")
+            .unwrap()
+            .r#type()
+            .is_signed()
+    );
+}
+
+#[test]
+fn native_time_values_bind_all_statement_groupings_and_macro_literals() {
+    for declaration in [
+        "timeunit `VALUE; timeprecision 1ps;",
+        "timeprecision 1ps; timeunit `VALUE;",
+        "timeunit `VALUE/1ps;",
+        "timeunit `VALUE; timeprecision 1ps; timeunit `VALUE;",
+    ] {
+        let code = format!(
+            "`define VALUE 10.00ns\n`timescale 100ns/1ns\nmodule Top; {declaration} localparam U=$timeunit(), P=$timeprecision(); endmodule\n`resetall\n"
+        );
+        let ir = analyze_source(&code, Path::new("native-time-values.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(-8),
+            "{declaration}"
+        );
+        assert_eq!(
+            ir.modules()[0].parameters()[1].resolved_value(),
+            Some(-12),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn native_typedef_bound_operators_preserve_precedence_and_typed_primaries() {
+    for (declaration, width) in [
+        ("typedef logic [20-3*4-1:0] T;", 8),
+        ("typedef logic [Sizes::N-1:0] T;", 3),
+        ("typedef logic [grow(3)-1:0] T;", 5),
+        ("typedef logic [int'(7):0] T;", 8),
+        ("typedef logic [MASK[0]:0] T;", 2),
+        ("typedef logic [$bits(Eight)-1:0] T;", 8),
+        (
+            "typedef Eight [(Sizes::N==3 ? grow(Sizes::N)+7 : 0)-1:0] T;",
+            96,
+        ),
+        ("typedef logic [2**3-1:0] T;", 8),
+        ("typedef logic [(20-3)-4-1:0] T;", 13),
+        ("typedef logic [20-(3-4)-1:0] T;", 21),
+        ("typedef logic [((1 ? 0 : 1) ? 9 : 4)-1:0] T;", 4),
+        ("typedef Eight T[grow(1)+1];", 32),
+        ("typedef Eight T[Sizes::N-1:0][1+1];", 48),
+    ] {
+        let code = format!(
+            r#"
+            package Sizes; parameter N=3; endpackage
+            module Top;
+              function automatic int grow(input int n); return n+2; endfunction
+              localparam logic [7:0] MASK=8'haf;
+              typedef logic [7:0] Eight;
+              {declaration}
+              T value;
+            endmodule
+        "#
+        );
+        let ir = analyze_source(&code, Path::new("native-bound-operators.sv"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let signal = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "value")
+            .unwrap();
+        assert_eq!(
+            signal.r#type().resolved_width(),
+            Some(width),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn native_parameter_statements_bind_header_body_generate_and_subroutine_values() {
+    let source = r#"
+        `define CALC(x) ((x)*3+1)
+        localparam ROOT=2;
+        module Top #(
+          parameter N=`CALC(ROOT),
+          parameter bit [3:0] FILL='0
+        )(output logic [31:0] value);
+          localparam BASE=N+2;
+          function automatic int f(input int x);
+            localparam K=2*3;
+            return x+K;
+          endfunction
+          if(BASE>0) begin:g
+            localparam G=(BASE ? BASE : 0)+1;
+            assign value=f(G);
+          end
+        endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-parameter-values.sv")).unwrap();
+    let declarations = parsed.declarations();
+    assert_eq!(declarations.parameter_declarations.len(), 4);
+    let ir = analyze_source(source, Path::new("native-parameter-values.sv")).unwrap();
+    for (name, value) in [("N", 7), ("FILL", 0), ("BASE", 9)] {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == name)
+            .unwrap();
+        assert_eq!(parameter.resolved_value(), Some(value), "{name}");
+    }
+    assert_eq!(
+        ir.modules()[0].ports()[0].r#type().resolved_width(),
+        Some(32)
+    );
+
+    // Class headers remain explicitly outside the parameter-default bridge.
+    // Body statements still have native syntax and must not corrupt the next
+    // unit's header identity or positional metadata.
+    let source = "class Unused #(parameter N=3, type T=logic[2:0]); localparam K=N+1; endclass module M #(parameter P=7); endmodule";
+    let parsed = ParsedSource::parse(source, Path::new("unused-class-header.sv")).unwrap();
+    assert_eq!(parsed.declarations().parameter_declarations.len(), 2);
+    assert_eq!(parsed.module_interfaces()["M"].parameters, ["P"]);
+}
+
+#[test]
+fn native_continuous_operators_preserve_runtime_groups_concat_and_typed_leaves() {
+    let source = r#"
+        `define PAIR(x,y) {x,y}
+        module Top(input logic [7:0] a,b,c,input logic choose,output logic[7:0] y,z,w);
+          assign y=choose ? a-(b-c) : a-b-c,
+                 z=(a ~^ b) ^ (~&c),
+                 w=`PAIR(a[3:0],4'(b+1));
+        endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-runtime-operators.sv")).unwrap();
+    let statements = &parsed.declarations().assign_statements;
+    assert_eq!(statements.len(), 1);
+    assert_eq!(statements[0].assignments.len(), 3);
+    let ir = analyze_source(source, Path::new("native-runtime-operators.sv")).unwrap();
+    let assignments = ir.modules()[0].assignments();
+    let ir::Expr::Mux {
+        then_expr,
+        else_expr,
+        ..
+    } = assignments[0].rhs()
+    else {
+        panic!("native conditional")
+    };
+    let ir::Expr::Binary {
+        op: ir::BinaryOp::Sub,
+        right,
+        ..
+    } = &**then_expr
+    else {
+        panic!("grouped subtraction")
+    };
+    assert!(matches!(
+        &**right,
+        ir::Expr::Binary {
+            op: ir::BinaryOp::Sub,
+            ..
+        }
+    ));
+    let ir::Expr::Binary {
+        op: ir::BinaryOp::Sub,
+        left,
+        ..
+    } = &**else_expr
+    else {
+        panic!("left-associated subtraction")
+    };
+    assert!(matches!(
+        &**left,
+        ir::Expr::Binary {
+            op: ir::BinaryOp::Sub,
+            ..
+        }
+    ));
+    assert!(matches!(
+        assignments[1].rhs(),
+        ir::Expr::Binary {
+            op: ir::BinaryOp::BitXor,
+            ..
+        }
+    ));
+    let ir::Expr::Concat(parts) = assignments[2].rhs() else {
+        panic!("native concat")
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(&parts[0], ir::Expr::Select { .. }));
+    assert!(matches!(&parts[1], ir::Expr::Resize { width: 4, .. }));
+
+    let syntax=ParsedSource::parse("module M; wire a,b; assign (strong1,pull0) #(1:2:3,4,5) a=b; initial begin assign b=a; end endmodule",Path::new("native-assign-syntax.sv")).unwrap();
+    assert_eq!(syntax.declarations().assign_statements.len(), 2);
+}
+
+#[test]
+fn native_assign_grammar_retains_existing_unsupported_runtime_diagnostics() {
+    for (expression, diagnostic) in [
+        ("(x+=1)", "assignment used as an expression"),
+        ("tagged Value x", "tagged union expression"),
+        ("++x", "increment or decrement expression"),
+        ("x++", "increment or decrement expression"),
+    ] {
+        let source =
+            format!("module M(input int x,output int y); assign y={expression}; endmodule");
+        ParsedSource::parse(&source, Path::new("unsupported-runtime-expression.sv")).unwrap();
+        let error =
+            analyze_source(&source, Path::new("unsupported-runtime-expression.sv")).unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)),
+            "{expression}: {error}"
+        );
+        assert!(
+            error.to_string().contains(diagnostic),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn native_control_values_preserve_case_ranges_loops_waits_and_packed_alias_types() {
+    let source = r#"
+      module M(input logic[7:0] a,b,c,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        initial begin
+          case(a+b) b+c:y=a; default:y=b; endcase
+          case(a+b) inside [b:c+1]:y=a; default:y=b; endcase
+          while(a+b) y=a;
+          repeat(a+b) y=b;
+          do y=c; while(a+b);
+          for(T[1:0] i=0;i<a;i+=1) y=a;
+          for(var int j=0,k=1,logic[3:0] p=0;j<a;j+=2,k--,++p) y=b;
+          for(y=0;y<a;y+=2) y=b;
+          wait(a+b);
+        end
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-control-values.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let local = module
+        .locals()
+        .iter()
+        .find(|local| local.source_name == "i")
+        .unwrap();
+    assert_eq!(local.r#type.resolved_width(), Some(8));
+    assert!(!local.r#type.is_signed());
+    let mut cases = 0;
+    let mut loops = 0;
+    let mut waits = 0;
+    for process in module.initial_processes() {
+        for statement in process.body() {
+            statement.walk(&mut |statement| match statement {
+                ir::Stmt::Case {
+                    selector, items, ..
+                } => {
+                    assert!(matches!(
+                        selector,
+                        ir::Expr::Binary {
+                            op: ir::BinaryOp::Add,
+                            ..
+                        }
+                    ));
+                    match &items[0].labels[0] {
+                        ir::CaseLabel::Value(value) => assert!(matches!(
+                            value,
+                            ir::Expr::Binary {
+                                op: ir::BinaryOp::Add,
+                                ..
+                            }
+                        )),
+                        ir::CaseLabel::Range { high, .. } => assert!(matches!(
+                            high,
+                            ir::Expr::Binary {
+                                op: ir::BinaryOp::Add,
+                                ..
+                            }
+                        )),
+                    }
+                    cases += 1;
+                }
+                ir::Stmt::Loop { .. } => loops += 1,
+                ir::Stmt::Wait(condition) => {
+                    assert!(matches!(
+                        condition,
+                        ir::Expr::Binary {
+                            op: ir::BinaryOp::Add,
+                            ..
+                        }
+                    ));
+                    waits += 1;
+                }
+                _ => {}
+            });
+        }
+    }
+    assert_eq!((cases, loops, waits), (2, 6, 1));
+}
+
+#[test]
+fn native_local_types_dimensions_and_initializers_reach_procedural_ir() {
+    let source = r#"
+      module M(input logic[3:0] a,b,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        always_comb begin
+          automatic T[1:0] pair={a,b};
+          automatic logic[3:0] words[2]='{a,b};
+          var automatic signed[3:0] value=a-b;
+          y=pair[0]+words[1]+value;
+        end
+      endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-local-values.sv")).unwrap();
+    assert_eq!(
+        parsed
+            .declarations()
+            .statements
+            .iter()
+            .filter(|statement| matches!(
+                statement.kind,
+                celox_sv_syntax::StatementKind::Declaration(
+                    celox_sv_syntax::LocalDeclaration::Variables(_)
+                )
+            ))
+            .count(),
+        3
+    );
+    let ir = analyze_source(source, Path::new("native-local-values.sv")).unwrap();
+    let locals = ir.modules()[0].locals();
+    let pair = locals
+        .iter()
+        .find(|local| local.source_name == "pair")
+        .unwrap();
+    assert_eq!(pair.r#type.resolved_width(), Some(8));
+    assert!(!pair.r#type.is_signed());
+    let words = locals
+        .iter()
+        .find(|local| local.source_name == "words")
+        .unwrap();
+    assert_eq!(words.r#type.unpacked_ranges().len(), 1);
+    let value = locals
+        .iter()
+        .find(|local| local.source_name == "value")
+        .unwrap();
+    assert!(value.r#type.is_signed());
+    assert_eq!(value.r#type.resolved_width(), Some(4));
+    let mut initialized = 0;
+    for statement in ir.modules()[0].comb_processes()[0].body() {
+        statement.walk(&mut |statement| {
+            if matches!(statement, ir::Stmt::Local { init: Some(_), .. }) {
+                initialized += 1;
+            }
+        });
+    }
+    assert_eq!(initialized, 3);
+}
+
+#[test]
+fn native_subroutine_headers_formals_defaults_and_bodies_reach_ir() {
+    let source = r#"
+      module M(input logic[3:0] a,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        function automatic T[1:0] sum(input T[1:0] x,input int bias=1+2);
+          automatic T[1:0] value=x+bias;
+          if(x>0) return value+1; else return value-1;
+        endfunction
+        task drive;input logic[3:0] x;output logic[7:0] result;result=sum(x);endtask
+        function automatic int count(input int n);
+          automatic int total=0;
+          for(int i=0;i<n;i++) total+=i;
+          return total;
+        endfunction
+        localparam int N=count(4);
+        logic[N-1:0] width_probe;
+        always_comb begin drive(a,y);width_probe='0;end
+      endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-subroutines.sv")).unwrap();
+    assert_eq!(parsed.declarations().subroutines.len(), 3);
+    let ir = analyze_source(source, Path::new("native-subroutines.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let sum = module
+        .subroutines()
+        .iter()
+        .find(|routine| routine.name == "sum")
+        .unwrap();
+    let ty = sum.return_type.as_ref().unwrap();
+    assert_eq!(ty.resolved_width(), Some(8));
+    assert!(!ty.is_signed());
+    assert_eq!(sum.params[0].r#type.resolved_width(), Some(8));
+    assert_eq!(sum.params[1].source_name, "bias");
+    assert!(sum.params[1].default.is_some());
+    let mut locals = 0;
+    let mut returns = 0;
+    for statement in &sum.body {
+        statement.walk(&mut |statement| match statement {
+            ir::Stmt::Local { init: Some(_), .. } => locals += 1,
+            ir::Stmt::Return(Some(_)) => returns += 1,
+            _ => {}
+        });
+    }
+    assert_eq!((locals, returns), (1, 2));
+    let drive = module
+        .subroutines()
+        .iter()
+        .find(|routine| routine.name == "drive")
+        .unwrap();
+    assert!(drive.is_task);
+    assert_eq!(drive.params[1].direction, ir::ParamDirection::Output);
+    assert_eq!(
+        module
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "width_probe")
+            .unwrap()
+            .r#type()
+            .resolved_width(),
+        Some(6)
+    );
+}
+
+#[test]
+fn native_named_call_arguments_reach_production_ir_with_source_order() {
+    let source = r#"
+      module M(input int a,output int y);
+        function automatic int g(input int x);return x;endfunction
+        function automatic int f(input int left=1,right=2);return left+right;endfunction
+        assign y=f(.right(a+1),.left(g(a*2)));
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-named-call-ir.sv")).unwrap();
+    let assignment = &ir.modules()[0].assignments()[0];
+    let ir::Expr::Call {
+        callee,
+        args,
+        arg_order,
+    } = assignment.rhs()
+    else {
+        panic!("{assignment:?}")
+    };
+    assert_eq!(callee, &ir::Callee::Subroutine("f".into()));
+    assert_eq!(arg_order, &[1, 0]);
+    let Some(ir::Expr::Call { callee, args, .. }) = &args[0] else {
+        panic!()
+    };
+    assert_eq!(callee, &ir::Callee::Subroutine("g".into()));
+    assert!(matches!(
+        &args[0],
+        Some(ir::Expr::Binary {
+            op: ir::BinaryOp::Mul,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn native_index_selection_preserves_multidimensional_offsets_and_signed_elements() {
+    let source = r#"
+      module M(output logic[3:0] y,z);
+        typedef bit signed[3:0] T;
+        logic [1:0][3:0] x[2];
+        T[1:0] a;
+        assign y=x[1][0], z=a[1];
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-selected-elements.sv")).unwrap();
+    for (assignment, high, low, expected_signed) in [
+        (&ir.modules()[0].assignments()[0], 11, 8, false),
+        (&ir.modules()[0].assignments()[1], 7, 4, true),
+    ] {
+        let ir::Expr::Select {
+            msb, lsb, signed, ..
+        } = assignment.rhs()
+        else {
+            panic!("{assignment:?}")
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(high));
+        assert_eq!(eval_test_const_expr(lsb), Some(low));
+        assert_eq!(*signed, expected_signed);
+    }
+}
+
+#[test]
+fn native_cast_targets_preserve_numeric_signing_alias_and_zero_contracts() {
+    let source = r#"
+      module M(input logic signed[7:0] a,input logic[7:0] b,
+        output logic[31:0] x0,x1,x2,x3,x4,x5,x6);
+        typedef bit signed[3:0] T;
+        localparam WIDTH=5;
+        assign x0=4'(a),x1=unsigned'(a),x2=signed'(b),
+          x3=T'(b),x4=WIDTH'(b),x5=8'('0),x6=T'(0);
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-cast-contracts.sv")).unwrap();
+    let assignments = ir.modules()[0].assignments();
+    for (index, expected_width, expected_signed) in [
+        (0, 4, true),
+        (1, 8, false),
+        (2, 8, true),
+        (3, 4, true),
+        (4, 5, false),
+        (5, 8, false),
+        (6, 4, true),
+    ] {
+        let ir::Expr::Resize { width, signed, .. } = assignments[index].rhs() else {
+            panic!("{:?}", assignments[index].rhs())
+        };
+        assert_eq!(*width, expected_width, "x{index}");
+        assert_eq!(*signed, expected_signed, "x{index}");
+    }
+    let ir::Expr::Resize { expr, .. } = assignments[3].rhs() else {
+        panic!()
+    };
+    let ir::Expr::Resize { expr, signed, .. } = &**expr else {
+        panic!("{expr:?}")
+    };
+    assert!(!signed);
+    assert!(matches!(
+        &**expr,
+        ir::Expr::Unary {
+            op: ir::UnaryOp::ToTwoState,
+            ..
+        }
+    ));
+    let ir::Expr::Resize { expr, .. } = assignments[6].rhs() else {
+        panic!()
+    };
+    assert!(matches!(&**expr, ir::Expr::Literal(value) if value == "0"));
+}
+
+#[test]
+fn native_indexed_ranges_preserve_declared_direction_for_dynamic_bases() {
+    let source = "module M(input logic[7:0] d,input logic[0:7] u,input logic[2:0] i,output logic[1:0] y0,y1,y2,y3);assign y0=d[i+:2],y1=d[i-:2],y2=u[i+:2],y3=u[i-:2];endmodule";
+    let ir = analyze_source(source, Path::new("native-indexed-direction.sv")).unwrap();
+    for (assignment, (high, low)) in
+        ir.modules()[0]
+            .assignments()
+            .iter()
+            .zip([(4, 3), (3, 2), (3, 4), (2, 3)])
+    {
+        let ir::Expr::Select {
+            msb, lsb, signed, ..
+        } = assignment.rhs()
+        else {
+            panic!()
+        };
+        let env = HashMap::from_iter([("i".into(), 3)]);
+        assert_eq!(typecheck::eval_const_expr(msb, &env), Some(high));
+        assert_eq!(typecheck::eval_const_expr(lsb, &env), Some(low));
+        assert!(!signed);
+    }
+}
+
+#[test]
+fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() {
+    let source = r#"module Top(input int value);
+        initial begin
+            $display;
+            $display();
+            $display("value=%0d\n\"quoted\"",, $bits(value) + value);
+            $write("tail\\");
+        end
+    endmodule"#;
+    let ir = analyze_source(source, Path::new("native_system_task_arguments.sv")).unwrap();
+    let body = ir.modules()[0].initial_processes()[0].body();
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[2] else {
+        panic!("expected display");
+    };
+    assert!(
+        matches!(&args[0], crate::ir::SystemTaskArg::Str(text) if text == r#"value=%0d\n\"quoted\""#)
+    );
+    assert!(matches!(args[1], crate::ir::SystemTaskArg::Empty));
+    assert!(matches!(args[2], crate::ir::SystemTaskArg::Expr(_)));
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[3] else {
+        panic!("expected write");
+    };
+    assert!(matches!(&args[0], crate::ir::SystemTaskArg::Str(text) if text == r#"tail\\"#));
+    for call in ["$display(.value(1));", "$display(1,,.value(2));"] {
+        let source = format!("module Top; initial begin {call} end endmodule");
+        assert!(analyze_source(&source, Path::new("named_system_task.sv")).is_err());
+    }
 }

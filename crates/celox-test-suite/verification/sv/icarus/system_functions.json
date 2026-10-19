@@ -279,6 +279,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -622,6 +623,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -1233,6 +1235,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -1256,6 +1259,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -1302,6 +1306,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
@@ -1417,6 +1422,7 @@
         "category": "simulator_compile_limitation",
         "evidence": [
           "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/pattern-bindings-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_unpacked_array_parameters",
