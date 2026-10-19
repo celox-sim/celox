@@ -1,1 +1,6 @@
-Rebase the syntax foundation onto current master for the native parser cutover.
+Revision history for #1555:
+
+rev 2 (rebase) 2026-10-19 14:26 UTC — Rebase the syntax foundation onto current master for the native parser cutover.
+rev 1 (initial) 2026-10-19 14:26 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1555,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"bc0157ad7cc1cd361753f854865cafbeb49cf9af","timestamp_iso":"2026-10-19T14:26:38Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"bc0157ad7cc1cd361753f854865cafbeb49cf9af","new_sha":"8c1fe2781dc0fb953eb2233511957c418afb585c","timestamp_iso":"2026-10-19T14:26:38Z","reason":"Rebase the syntax foundation onto current master for the native parser cutover.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bc0157ad7cc1cd361753f854865cafbeb49cf9af...8c1fe2781dc0fb953eb2233511957c418afb585c"}]} -->
