@@ -149,11 +149,14 @@ test("full validation overrides even an empty valid diff", () => {
       rust_full: true,
       rust_packages: false,
       rust_targets: false,
+      rust_builds: false,
+      rust_lint_builds: false,
       rust_lint_packages: false,
       rust_lint_features: false,
       rust_lint_targets: false,
       rust_doc_libraries: false,
       rust_sv_tests: true,
+      rust_vpi_e2e: true,
       rust_features: false,
       rust_filter: false,
       rust_libraries: false,
@@ -585,4 +588,12 @@ test("Lydite lint and API documentation remain selected in CI", () => {
   ]);
   assert.equal(mixed.rust_targets, "flip_flop");
   assert.equal(mixed.rust_lint_targets, "");
+});
+
+test("VPI test-only edits do not select the unrelated ignored cocotb end-to-end test", () => {
+  const tests = rustScopeOutputs(["crates/celox-vpi/tests/basic_vpi.rs"]);
+  assert.equal(tests.rust_vpi_e2e, false);
+  for (const path of ["crates/celox-vpi/src/lib.rs", "crates/celox-vpi/tests/cocotb_e2e.rs"])
+    assert.equal(rustScopeOutputs([path]).rust_vpi_e2e, true);
+  assert.equal(rustScopeOutputs(null).rust_vpi_e2e, true);
 });

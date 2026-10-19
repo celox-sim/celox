@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { dirname, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { classifyFiles } from "./ci-changes.mjs";
 
@@ -106,6 +107,7 @@ export function rustTestScope(files, packages) {
   const sources = new Set();
   const wholeTests = new Set();
   const binaries = new Map();
+  const moduleFilters = new Map();
   const addBinary = (name, binary) => {
     if (!binaries.has(name)) binaries.set(name, new Set());
     binaries.get(name).add(binary);
@@ -125,6 +127,38 @@ export function rustTestScope(files, packages) {
     const owner = owners.find((pkg) => path.startsWith(`${pkg.dir}/`));
     if (!owner) return { full: true };
     const inner = path.slice(owner.dir.length + 1);
+    const sharedCase = /^src\/(veryl|sv)\/cases\/([^/]+)\.vtest$/.exec(inner);
+    if (owner.name === "celox-test-suite" && sharedCase && owner.caseTargets) {
+      const targets = owner.caseTargets[`${sharedCase[1]}/${sharedCase[2]}`];
+      // Unknown/deleted groups retain the dependency-graph fallback.
+      if (targets?.length) {
+        wholeTests.add(owner.name); // Catalogue/parser and retained-report checks.
+        for (const target of targets) {
+          addBinary("celox", target);
+          if (target === "systemverilog") {
+            const modules = owner.caseModules?.[sharedCase[2]];
+            if (modules?.length) {
+              if (!moduleFilters.has("celox")) moduleFilters.set("celox", new Set());
+              for (const module of modules) moduleFilters.get("celox")?.add(module);
+            } else moduleFilters.set("celox", null);
+          }
+        }
+        for (const pkg of packages) {
+          // Other catalogue consumers still validate their own tests, but a
+          // script's contents cannot change a Rust library API or its doctests.
+          if (pkg.name !== "celox" && pkg.dependencies.includes(owner.name)) {
+            const pending = [pkg.name];
+            while (pending.length) {
+              const name = pending.pop();
+              if (wholeTests.has(name)) continue;
+              wholeTests.add(name);
+              pending.push(...(dependents.get(name) ?? []));
+            }
+          }
+        }
+        continue;
+      }
+    }
     const test = /^tests\/([^/]+)\.rs$/.exec(inner);
     // Insta prefixes snapshots with their integration-test binary name.
     const snapshot = /^tests\/snapshots\/([^/]+?)__[^/]+\.snap(?:\.new)?$/.exec(inner);
@@ -137,6 +171,14 @@ export function rustTestScope(files, packages) {
       inner.startsWith("tests/frontends/systemverilog/")
     ) {
       addBinary(owner.name, "systemverilog");
+      const module = /^tests\/frontends\/systemverilog\/(\w+)\.rs$/.exec(inner)?.[1];
+      // The adapter and unknown shared helpers affect every SV module.
+      if (module && owner.svTestModules?.includes(module)) {
+        if (!moduleFilters.has(owner.name)) moduleFilters.set(owner.name, new Set());
+        moduleFilters.get(owner.name)?.add(module);
+      } else {
+        moduleFilters.set(owner.name, null);
+      }
     } else if (/^(?:tests|benches|examples)\//.test(inner)) {
       wholeTests.add(owner.name);
     } else {
@@ -206,18 +248,38 @@ export function rustTestScope(files, packages) {
     if (selected.has(name)) continue;
     selected.add(name);
     for (const binary of [...names].sort()) {
-      terms.push(`binary_id(${name}::${binary})`);
+      const modules = moduleFilters.get(name);
+      const selector = `binary_id(${name}::${binary})`;
+      // A direct edit to systemverilog.rs already selects the entire binary.
+      const wholeBinary = files.some((file) => file.replace(/^\.\//, "") === `${byName.get(name).dir}/tests/${binary}.rs`);
+      terms.push(binary === "systemverilog" && modules?.size && !wholeBinary
+        ? `(${selector} & test(/^(${[...modules].sort().join("|")})::/))`
+        : selector);
     }
   }
 
   // Cargo accepts `pkg/feature` only when a selected package can see `pkg`.
-  const features = (names) => {
+  const features = (names, external = new Set(names).has("celox-test-suite")) => {
     const visible = new Set(names);
     for (const name of names) {
       for (const dep of byName.get(name).dependencies) visible.add(dep);
     }
-    return CI_FEATURES.filter((feature) => visible.has(feature.split("/")[0]));
+    return CI_FEATURES.filter((feature) =>
+      visible.has(feature.split("/")[0]) &&
+      (!feature.startsWith("celox-test-suite/") || external));
   };
+  const wholePackages = [...selected].filter((name) => affected.has(name) || wholeTests.has(name)).sort();
+  const builds = [];
+  if (wholePackages.length) builds.push({
+    packages: wholePackages, targets: [],
+    features: features(wholePackages, selected.has("celox-test-suite")),
+  });
+  for (const name of [...selected].sort()) {
+    if (!affected.has(name) && !wholeTests.has(name)) builds.push({
+      packages: [name], targets: [...(binaries.get(name) ?? [])].sort(),
+      features: features([name], selected.has("celox-test-suite")),
+    });
+  }
   return {
     full: false,
     packages: [...selected].sort(),
@@ -228,6 +290,10 @@ export function rustTestScope(files, packages) {
     targets: affected.size === 0 && wholeTests.size === 0 && selected.size === 1
       ? [...binaries.get([...selected][0])].sort()
       : [],
+    // Cargo target flags apply to every -p in an invocation. Split packages
+    // with specific test binaries from whole-package consumers; otherwise one
+    // additional package silently makes Cargo compile all integration tests.
+    builds,
     libraries: [...libraries].sort(),
     libraryFeatures: features(libraries),
   };
@@ -262,5 +328,69 @@ export function readWorkspace(root) {
       { cwd: root, encoding: "utf8" },
     ),
   );
-  return workspacePackages(metadata, root);
+  const packages = workspacePackages(metadata, root);
+  const suite = packages.find((pkg) => pkg.name === "celox-test-suite");
+  const celox = metadata.packages.find((pkg) => pkg.name === "celox");
+  if (suite && celox && !packages.find((pkg) => pkg.name === "celox").libraryDependencies.includes(suite.name)) {
+    const caseTargets = {};
+    for (const target of celox.targets.filter((t) => t.kind.includes("test"))) {
+      const text = rustTestSources(target.src_path).join("\n");
+      const language = target.name === "systemverilog" ? "sv" : "veryl";
+      for (const [, group] of text.matchAll(/"([\w-]+)::[\w-]+"/g)) {
+        (caseTargets[`${language}/${group}`] ??= new Set()).add(target.name);
+      }
+    }
+    suite.caseTargets = Object.fromEntries(Object.entries(caseTargets)
+      .map(([key, names]) => [key, [...names].sort()]));
+    const pkg = packages.find((pkg) => pkg.name === "celox");
+    const svRoot = readFileSync(join(root, pkg.dir, "tests/systemverilog.rs"), "utf8");
+    const svSources = rustTestSources(join(root, pkg.dir, "tests/systemverilog.rs"));
+    pkg.svTestModules = [...svRoot.matchAll(/#\[path = "frontends\/systemverilog\/(\w+)\.rs"\]\s*mod \1;/g)]
+      .map(([, name]) => name)
+      .filter((name) => {
+        const text = readFileSync(join(root, pkg.dir, `tests/frontends/systemverilog/${name}.rs`), "utf8");
+        if (!/sv_backends!|#\[test\]/.test(text)) return false;
+        return !svSources
+          .some((source) => new RegExp(`(?:crate|super)::${name}::`).test(source));
+      });
+    suite.caseModules = {};
+    for (const key of Object.keys(caseTargets).filter((key) => key.startsWith("sv/"))) {
+      const group = key.slice(3);
+      const reference = new RegExp(`"${group}::[\\w-]+"`);
+      // Only narrow when every reference belongs to a known test module.
+      const modules = [...svRoot.matchAll(/#\[path = "frontends\/systemverilog\/(\w+)\.rs"\]\s*mod \1;/g)]
+        .map(([, name]) => name)
+        .filter((name) => rustTestSources(join(root, pkg.dir, `tests/frontends/systemverilog/${name}.rs`))
+          .some((text) => reference.test(text)));
+      if (!reference.test(svRoot) && modules.length && modules.every((name) => pkg.svTestModules.includes(name)))
+        suite.caseModules[group] = modules;
+    }
+  }
+  return packages;
+}
+
+// Follow literal Rust module declarations, including shared macro files. Any
+// unreadable source aborts scope analysis rather than dropping a consumer.
+function rustTestSources(file, seen = new Set()) {
+  file = resolve(file);
+  if (seen.has(file)) return [];
+  seen.add(file);
+  const text = readFileSync(file, "utf8");
+  const sources = [text];
+  for (const match of text.matchAll(/((?:#\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/g)) {
+    const [, attributes, name] = match;
+    const path = /#\[path\s*=\s*"([^"]+)"\]/.exec(attributes)?.[1];
+    const base = dirname(file);
+    const moduleBase = /(?:^|\/)(?:mod|lib|main)\.rs$/.test(file)
+      ? base : file.replace(/\.rs$/, "");
+    const candidates = path ? [join(base, path)] : [
+      join(moduleBase, `${name}.rs`), join(moduleBase, name, "mod.rs"),
+      // Integration tests are crate roots even though their name isn't lib.rs.
+      join(base, `${name}.rs`), join(base, name, "mod.rs"),
+    ];
+    const child = candidates.find(existsSync);
+    if (!child) throw new Error(`Cannot resolve test module ${name} from ${file}`);
+    sources.push(...rustTestSources(child, seen));
+  }
+  return sources;
 }
