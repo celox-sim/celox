@@ -10,9 +10,10 @@ use super::*;
 /// to MIR phi nodes or the assignment map: all semantic decisions belong to
 /// SSA destruction planning and verification, before x86 encoding starts.
 pub(super) fn emit_parallel_copy_plan(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     edge: Option<&EdgeCopyPlan>,
 ) -> Result<(), EmitError> {
+    let context = asm.context;
     let Some(edge) = edge else {
         return Ok(());
     };
@@ -43,13 +44,17 @@ pub(super) fn emit_parallel_copy_plan(
                     ));
                 }
                 match location {
-                    ParallelCopyDestination::Register(register) => {
-                        asm.mov(qword_ptr(scratch_operand(0)), preg_to_reg64(register))?
-                    }
+                    ParallelCopyDestination::Register(register) => asm.mov(
+                        qword_ptr(scratch_operand(&context, 0)),
+                        preg_to_reg64(register),
+                    )?,
                     ParallelCopyDestination::Stack(slot) => {
                         let offset = checked_parallel_copy_offset(slot, 0)?;
-                        asm.movq(xmm0, qword_ptr(mem_operand(BaseReg::StackFrame, offset)))?;
-                        asm.movq(qword_ptr(scratch_operand(0)), xmm0)?;
+                        asm.movq(
+                            xmm0,
+                            qword_ptr(mem_operand(&context, BaseReg::StackFrame, offset)),
+                        )?;
+                        asm.movq(qword_ptr(scratch_operand(&context, 0)), xmm0)?;
                     }
                 }
                 temporary_live = true;
@@ -62,13 +67,17 @@ pub(super) fn emit_parallel_copy_plan(
                     ));
                 }
                 match location {
-                    ParallelCopyDestination::Register(register) => {
-                        asm.mov(preg_to_reg64(register), qword_ptr(scratch_operand(0)))?
-                    }
+                    ParallelCopyDestination::Register(register) => asm.mov(
+                        preg_to_reg64(register),
+                        qword_ptr(scratch_operand(&context, 0)),
+                    )?,
                     ParallelCopyDestination::Stack(slot) => {
                         let offset = checked_parallel_copy_offset(slot, 0)?;
-                        asm.movq(xmm0, qword_ptr(scratch_operand(0)))?;
-                        asm.movq(qword_ptr(mem_operand(BaseReg::StackFrame, offset)), xmm0)?;
+                        asm.movq(xmm0, qword_ptr(scratch_operand(&context, 0)))?;
+                        asm.movq(
+                            qword_ptr(mem_operand(&context, BaseReg::StackFrame, offset)),
+                            xmm0,
+                        )?;
                     }
                 }
                 temporary_live = false;
@@ -85,11 +94,12 @@ pub(super) fn emit_parallel_copy_plan(
 }
 
 fn emit_single_parallel_copy(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     destination: ParallelCopyDestination,
     source: ParallelCopySource,
     stack_adjustment: i32,
 ) -> Result<(), EmitError> {
+    let context = asm.context;
     match (destination, source) {
         (ParallelCopyDestination::Register(dst), ParallelCopySource::Register(src)) => {
             asm.mov(preg_to_reg64(dst), preg_to_reg64(src))?;
@@ -98,7 +108,7 @@ fn emit_single_parallel_copy(
             let offset = checked_parallel_copy_offset(slot, stack_adjustment)?;
             asm.mov(
                 preg_to_reg64(dst),
-                qword_ptr(mem_operand(BaseReg::StackFrame, offset)),
+                qword_ptr(mem_operand(&context, BaseReg::StackFrame, offset)),
             )?;
         }
         (ParallelCopyDestination::Register(dst), ParallelCopySource::Immediate(value)) => {
@@ -107,7 +117,7 @@ fn emit_single_parallel_copy(
         (ParallelCopyDestination::Stack(slot), ParallelCopySource::Register(src)) => {
             let offset = checked_parallel_copy_offset(slot, stack_adjustment)?;
             asm.mov(
-                qword_ptr(mem_operand(BaseReg::StackFrame, offset)),
+                qword_ptr(mem_operand(&context, BaseReg::StackFrame, offset)),
                 preg_to_reg64(src),
             )?;
         }
@@ -118,10 +128,14 @@ fn emit_single_parallel_copy(
             let destination_offset = checked_parallel_copy_offset(dst, stack_adjustment)?;
             asm.movq(
                 xmm0,
-                qword_ptr(mem_operand(BaseReg::StackFrame, source_offset)),
+                qword_ptr(mem_operand(&context, BaseReg::StackFrame, source_offset)),
             )?;
             asm.movq(
-                qword_ptr(mem_operand(BaseReg::StackFrame, destination_offset)),
+                qword_ptr(mem_operand(
+                    &context,
+                    BaseReg::StackFrame,
+                    destination_offset,
+                )),
                 xmm0,
             )?;
         }
@@ -137,11 +151,11 @@ fn emit_single_parallel_copy(
             })?;
             let high_offset = checked_parallel_copy_offset(slot, high_adjustment)?;
             asm.mov(
-                dword_ptr(mem_operand(BaseReg::StackFrame, low_offset)),
+                dword_ptr(mem_operand(&context, BaseReg::StackFrame, low_offset)),
                 value as u32,
             )?;
             asm.mov(
-                dword_ptr(mem_operand(BaseReg::StackFrame, high_offset)),
+                dword_ptr(mem_operand(&context, BaseReg::StackFrame, high_offset)),
                 (value >> 32) as u32,
             )?;
         }
@@ -169,10 +183,11 @@ pub(super) enum EmittedBranchCondition {
 }
 
 pub(super) fn emit_branch_predicate(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     predicate: BranchPredicate,
     assignment: &AssignmentMap,
 ) -> Result<EmittedBranchCondition, IcedError> {
+    let context = asm.context;
     match predicate {
         BranchPredicate::Compare { lhs, rhs, kind } => {
             asm.cmp(
@@ -191,7 +206,7 @@ pub(super) fn emit_branch_predicate(
             Ok(EmittedBranchCondition::Compare(kind))
         }
         BranchPredicate::MemoryNonZero { base, offset, size } => {
-            let memory = mem_operand(base, offset);
+            let memory = mem_operand(&context, base, offset);
             match size {
                 OpSize::S8 => asm.cmp(byte_ptr(memory), 0)?,
                 OpSize::S16 => asm.cmp(word_ptr(memory), 0)?,
@@ -204,7 +219,7 @@ pub(super) fn emit_branch_predicate(
 }
 
 fn emit_condition_jump(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     label: CodeLabel,
     condition: EmittedBranchCondition,
     jump_when_true: bool,
@@ -225,7 +240,7 @@ pub(super) struct BlockLabels {
 
 impl BlockLabels {
     pub(super) fn new(
-        asm: &mut CodeAssembler,
+        asm: &mut EmitAssembler,
         func: &MFunction,
         assignment: &AssignmentMap,
         plan: &SsaDestructionPlan,
@@ -281,7 +296,7 @@ impl BlockLabels {
 
     pub(super) fn bind(
         &mut self,
-        asm: &mut CodeAssembler,
+        asm: &mut EmitAssembler,
         block: BlockId,
         index: usize,
     ) -> Result<(), EmitError> {
@@ -525,7 +540,7 @@ pub(super) fn branch_label(labels: &BlockLabels, block: BlockId) -> Result<CodeL
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_branch_with_edge_copies(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     labels: &BlockLabels,
     plan: &SsaDestructionPlan,
     predecessor: BlockId,
