@@ -148,6 +148,14 @@ impl NativeProgramInstance {
         self.eval_comb_checked(RuntimeFormatContext::default())
     }
 
+    /// Settle combinational logic with foreign-interface diagnostic context.
+    pub fn eval_comb_with_context(
+        &mut self,
+        context: RuntimeFormatContext<'_>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.eval_comb_checked(context)
+    }
+
     /// Settle foreign writes and commit all active source domains together.
     ///
     /// Callers apply the raw signal values first and pass the addresses whose
@@ -166,9 +174,22 @@ impl NativeProgramInstance {
         active_edges: &[StateAddr],
         context: RuntimeFormatContext<'_>,
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.eval_comb_checked(context)?;
+        self.apply_active_edges_with_context(active_edges, context)
+    }
+
+    /// Run already-settled source domains, then settle their consumers. Foreign
+    /// hosts can notify input edges after settling and before this call, while
+    /// retaining the fused evaluate/apply kernel for a single active domain.
+    /// If a callback writes an input, settle its combinational consumers again
+    /// before calling this method.
+    pub fn apply_active_edges_with_context(
+        &mut self,
+        active_edges: &[StateAddr],
+        context: RuntimeFormatContext<'_>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
         let start_seq = (!self.runtime_schema().runtime_event_sites.is_empty())
             .then(|| crate::simulator::runtime_event_write_seq_for_backend(&self.backend));
-        self.eval_comb_checked(context)?;
         let mut seen = crate::HashSet::default();
         let mut events = Vec::new();
         for address in active_edges {
