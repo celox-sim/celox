@@ -19,7 +19,7 @@ synthesis and is tested at the design level.
 | Modules | ANSI ports, `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Packages | types, parameters, enums and functions, through `import p::*;`, `import p::x;` and `p::x` |
-| Interfaces | interfaces with parameters, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; explicit and implicit named interface connections (`.bus(bus)` and `.bus`); modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`) |
+| Interfaces | interfaces with value and type parameters, header package imports, `localparam`s, `typedef`s, variables and nets, logic (`assign`, `always_comb`, `always_ff`, generate) and functions; interface instances and instance arrays, also inside generate blocks and other interfaces; interface ports with or without a modport, generic `interface` and `interface.mp` ports, and arrays of interface ports; explicit and implicit named interface connections (`.bus(bus)` and `.bus`); modport `input` / `output` members and imported functions; access to members, parameters and functions through an instance or port (`h[i].m`, `h.P`, `h.f(...)`, `h[i].f(...)` with a constant element index) |
 
 ### Data and expressions
 
@@ -100,15 +100,15 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 
 Interfaces are supported within the limits below:
 
-- **Declarations:** ports on an interface, tasks, type parameters, implicit nets,
-  enums and instances inside an interface, and virtual interfaces are unsupported.
+- **Declarations:** ports on an interface, tasks, implicit nets,
+  enums and module instances inside an interface, and virtual interfaces are unsupported.
   Macros and compiler directives inside an interface are also unsupported.
 - **Modports and connections:** `inout`, `ref`, expression ports, `export` and
   clocking modports are unsupported. A connection cannot name a modport if the
   receiving port declares none. Writes through a port without a modport are
   unsupported, as are member connections from such a port to a non-ANSI module.
-- **Function calls:** calls through interface arrays are unsupported, as are
-  calls from an interface instance array's logic to a function that accesses
+- **Function calls:** calls through an unselected interface array or a run-time
+  element selection are unsupported, as are calls from an interface instance array's logic to a function that accesses
   members. Calls through a port to an imported function that writes members are
   unsupported inside generate constructs, functions and tasks.
 - **Declaration dependencies:** member references in parameter, constant, type
@@ -191,6 +191,10 @@ without a modport has every member, as an output when the module or a child
 writes it. A top module with an interface port therefore has ports such as
 `bus$data`. A module with a generic `interface` port is copied once per
 interface it is connected to, as `M$I`.
+
+Interface type parameters are specialized per instance and forwarded through
+modport ports. Nested interface instances retain their own members and
+parameters; recursive specializations and nesting beyond 64 levels are rejected.
 
 ### Block-local variables
 

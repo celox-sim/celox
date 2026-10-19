@@ -3,6 +3,8 @@ use super::*;
 
 pub(super) struct Bindings<'a> {
     pub values: &'a HashMap<String, ConstExpr>,
+    pub types: &'a [(String, Type)],
+    pub export_symbols: bool,
     pub plan: Option<&'a interfaces::NativeModulePlan>,
 }
 
@@ -142,6 +144,14 @@ pub(super) fn analyze_module(
                     .map(|name| (name.to_string(), value.clone()))
             })
             .collect::<HashMap<_, _>>();
+        let types = bindings
+            .types
+            .iter()
+            .filter_map(|(name, ty)| {
+                name.strip_prefix(&prefix)
+                    .map(|name| (name.to_string(), ty.clone()))
+            })
+            .collect::<Vec<_>>();
         let dimensions = formal_dimensions(declaration, &port.name, tree)?;
         let array_symbols = array_scope
             .as_ref()
@@ -185,6 +195,7 @@ pub(super) fn analyze_module(
                     definition_path,
                     packages,
                     &values,
+                    &types,
                     interfaces.extra,
                     imported.declarations_only,
                 )
@@ -197,7 +208,7 @@ pub(super) fn analyze_module(
                 &symbol_prefix,
                 &mut imported,
             );
-            let mut bound = symbols.renamed(&names);
+            let mut bound = instance_symbols(symbols, &names);
             let functions = port
                 .functions
                 .iter()
@@ -363,20 +374,23 @@ pub(super) fn analyze_module(
             &dimensions,
             true,
         )?;
-        let values = bindings
-            .into_iter()
-            .map(|binding| {
+        let mut values = HashMap::default();
+        let mut types = Vec::new();
+        for binding in bindings {
+            if let Some(ty) = binding.bound_type {
+                types.push((binding.name, ty));
+            } else {
                 let value = binding
                     .value
-                    .ok_or_else(|| unsupported("interface type or pattern parameter binding"))?;
+                    .ok_or_else(|| unsupported("interface pattern parameter binding"))?;
                 let value = substitute_typed_parameter_literals(
                     value,
                     &current.const_env,
                     &parameter_types_from_const_env(&current.const_env),
                 );
-                Ok((binding.name, value))
-            })
-            .collect::<Converted<HashMap<_, _>>>()?;
+                values.insert(binding.name, value);
+            }
+        }
         for instance in instantiation.nodes.2.contents() {
             let handle =
                 identifier_text(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0), tree)
@@ -435,6 +449,7 @@ pub(super) fn analyze_module(
                         definition_path,
                         packages,
                         &values,
+                        &types,
                         interfaces.extra,
                         imported.declarations_only,
                     )
@@ -482,7 +497,7 @@ pub(super) fn analyze_module(
                             .insert(format!("{local_handle}.{member}"), bound.clone());
                     }
                 }
-                let bound = symbols.renamed(&names);
+                let bound = instance_symbols(symbols, &names);
                 imported
                     .initial_processes
                     .extend(bound.initial_processes.iter().cloned());
@@ -588,6 +603,23 @@ pub(super) fn analyze_module(
                         ));
                     }
                     let handle = &actuals.elements[0];
+                    for parameter in &port.type_parameters {
+                        let bound = active_scope
+                            .interface_members
+                            .get(&format!("{handle}.{parameter}"))
+                            .ok_or_else(|| {
+                                unsupported(format!(
+                                    "unbound interface type parameter `{handle}.{parameter}`"
+                                ))
+                            })?;
+                        let ty = active_scope.type_aliases.get(bound).ok_or_else(|| {
+                            unsupported(format!("interface type parameter `{handle}.{parameter}`"))
+                        })?;
+                        parameters.push(ParameterOverride::type_override(
+                            format!("{}${parameter}", port.name),
+                            ty.clone(),
+                        ));
+                    }
                     for parameter in &port.parameters {
                         let bound = active_scope
                             .interface_members
@@ -648,13 +680,14 @@ pub(super) fn analyze_module(
             )));
         }
     }
-    let module = Module::from_module_node_with_parameter_overrides(
+    let module = Module::from_scope_node_with_parameter_overrides(
         RefNode::ModuleDeclarationAnsi(&view),
         tree,
         &name,
         &overrides,
         interfaces,
         Arc::new(imported),
+        bindings.export_symbols,
     )?;
     let mut names = HashSet::default();
     for name in module
@@ -894,6 +927,22 @@ fn connection_lvalue(expr: Expr) -> Converted<LValue> {
     }
 }
 
+// Nested handles are private to the interface whose body has already been
+// analyzed. Export its bound objects and processes without leaking those
+// lexical handle paths into the caller.
+fn instance_symbols(
+    symbols: &scope::ScopeSymbols,
+    names: &HashMap<String, String>,
+) -> scope::ScopeSymbols {
+    let mut bound = symbols.renamed(names);
+    bound.interface_members.clear();
+    bound.interface_types.clear();
+    bound.interface_arrays.clear();
+    bound.interface_scopes.clear();
+    bound.interface_instances.clear();
+    bound
+}
+
 fn binding_names(
     module: &Module,
     symbols: &scope::ScopeSymbols,
@@ -917,13 +966,20 @@ fn binding_names_with_prefix(
             .iter()
             .map(|parameter| parameter.name.clone()),
     );
+    names.extend(
+        symbols
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name.contains('$'))
+            .map(|parameter| parameter.name.clone()),
+    );
     names.extend(module.signals.iter().map(|signal| signal.name.clone()));
     names.extend(module.ports.iter().map(|port| port.name.clone()));
     names.extend(symbols.type_aliases.keys().cloned());
     names.extend(symbols.functions.keys().cloned());
     names.extend(symbols.enum_constants.numbers.keys().cloned());
     names.retain(|name| !name.contains("::"));
-    names
+    let mut names: HashMap<_, _> = names
         .into_iter()
         .map(|name| {
             let bound = format!("{prefix}${name}");
@@ -932,7 +988,14 @@ fn binding_names_with_prefix(
                 .insert(format!("{handle}.{name}"), bound.clone());
             (name, bound)
         })
-        .collect()
+        .collect();
+    // An imported package constant is not an instance-local declaration.
+    // Bind references in exported parameter defaults to its qualified name;
+    // the caller need not import the package's simple name itself.
+    for (alias, target) in &symbols.aliases {
+        names.entry(alias.clone()).or_insert_with(|| target.clone());
+    }
+    names
 }
 
 fn remove_interface_ports(
@@ -1015,6 +1078,7 @@ fn connection_expression<'a>(
 pub(super) fn method_call<'a>(
     call: &'a sv_parser::MethodCall,
     tree: &SyntaxTree,
+    dimensions: &PackedDimensions,
 ) -> Converted<(String, Option<&'a sv_parser::ListOfArguments>)> {
     let sv_parser::MethodCallRoot::Primary(root) = &call.nodes.0 else {
         return Err(unsupported("method call"));
@@ -1022,11 +1086,7 @@ pub(super) fn method_call<'a>(
     let sv_parser::Primary::Hierarchical(root) = root.as_ref() else {
         return Err(unsupported("interface method root"));
     };
-    if !root.nodes.2.nodes.1.nodes.0.is_empty() || root.nodes.2.nodes.2.is_some() {
-        return Err(unsupported("indexed interface method root"));
-    }
-    let handle = identifier_text(RefNode::PrimaryHierarchical(root), tree)
-        .ok_or_else(|| unsupported("interface method root"))?;
+    let handle = primary_handle_key(root, tree, &dimensions.const_env, &dimensions.type_aliases)?;
     let (identifier, arguments) = match &call.nodes.2 {
         sv_parser::MethodCallBody::User(method) => (
             &method.nodes.0,
@@ -1115,6 +1175,18 @@ fn actual_handle_key(
     let sv_parser::Primary::Hierarchical(primary) = primary.as_ref() else {
         return Err(unsupported("interface handle expression"));
     };
+    primary_handle_key(primary, tree, env, aliases)
+}
+
+fn primary_handle_key(
+    primary: &sv_parser::PrimaryHierarchical,
+    tree: &SyntaxTree,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<String> {
+    if primary.nodes.2.nodes.2.is_some() {
+        return Err(unsupported("range selection of interface handle"));
+    }
     let mut handle = identifier_text(RefNode::HierarchicalIdentifier(&primary.nodes.1), tree)
         .ok_or_else(|| unsupported("interface handle"))?;
     for bit in &primary.nodes.2.nodes.1.nodes.0 {

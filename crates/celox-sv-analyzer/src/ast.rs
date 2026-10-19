@@ -336,8 +336,20 @@ impl Source {
                         packages.unit(path),
                     )?;
                     imported.declarations_only = bindings.declarations_only;
+                    let own_types = bindings
+                        .types
+                        .iter()
+                        .filter(|(name, _)| {
+                            !interface_plan.is_some_and(|plan| {
+                                plan.ports
+                                    .iter()
+                                    .any(|port| name.starts_with(&format!("{}$", port.name)))
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
                     imported.type_parameter_bindings =
-                        type_parameters::bind(node.clone(), syntax_tree, bindings.types)?;
+                        type_parameters::bind(node.clone(), syntax_tree, &own_types)?;
                     imported.pattern_parameter_bindings = type_parameters::bind_patterns(
                         node.clone(),
                         syntax_tree,
@@ -350,6 +362,8 @@ impl Source {
                         packages,
                         native_interfaces::Bindings {
                             values: bindings.values,
+                            types: bindings.types,
+                            export_symbols: false,
                             plan: interface_plan,
                         },
                         &interfaces,
