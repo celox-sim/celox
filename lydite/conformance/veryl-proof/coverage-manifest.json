@@ -12576,6 +12576,26 @@
       ]
     },
     {
+      "case": "synth_dynamic_loop::test_static_nested_loop_local_bindings_are_distinct",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/synth_dynamic_loop.vtest",
+        "script_sha256": "cf445a6c564cd9ae24e1f3c1da66494aa56fe840c9fcfba46fa5bc10ee6bb500"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "3688f3e39f151b22b0f3520204d43a5475e57ccf5650417dcff1b6f1e4a34905",
+          "protocol_sha256": "79201837adf0b16fe994ec2e31b26461e193d36597a6d6dddf7dc36f9dfc6aab",
+          "reads": 3,
+          "commands": 11,
+          "operations": 3,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "system_function::test_comb_function_body_bits_size_system_functions",
       "expectation": "Simulation",
       "category": "Functions",
