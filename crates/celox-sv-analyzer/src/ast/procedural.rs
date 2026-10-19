@@ -944,6 +944,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                                 self.tree,
                                 system_functions::CallSite::Statement(self.body),
                             )?)],
+                            site: source_span(RefNode::SystemTfCall(system_call), self.tree),
                         }]);
                     }
                     system_functions::SystemCall::Task(task) => task,
@@ -972,7 +973,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 };
                 // Keep Veryl's assertion calls as calls: their message arguments
                 // execute even on success, unlike an SV assertion's fail action.
-                Ok(vec![Stmt::SystemTask { task, args }])
+                Ok(vec![Stmt::SystemTask {
+                    task,
+                    args,
+                    site: source_span(RefNode::SystemTfCall(system_call), self.tree),
+                }])
             }
             _ => Err(unsupported("method or randomize call")),
         }
@@ -1487,6 +1492,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             vec![Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
                 args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
+                site: None,
             }]
         });
         Ok(vec![Stmt::If {
@@ -2316,4 +2322,47 @@ pub(super) fn written_names<'s>(stmts: impl IntoIterator<Item = &'s Stmt>) -> Ha
         });
     }
     names
+}
+
+/// The span of `node` in the source text before preprocessing, if all of it
+/// comes from one file.
+pub(super) fn source_span(
+    node: RefNode<'_>,
+    tree: &SyntaxTree,
+) -> Option<crate::procedural::SourceSpan> {
+    let origin = |offset| {
+        tree.get_origin(&Locate {
+            offset,
+            line: 0,
+            len: 1,
+        })
+    };
+    let mut span: Option<crate::procedural::SourceSpan> = None;
+    for child in node {
+        let RefNode::Locate(locate) = child else {
+            continue;
+        };
+        if locate.len == 0 {
+            continue;
+        }
+        let (path, start) = origin(locate.offset)?;
+        let (last_path, last) = origin(locate.offset + locate.len - 1)?;
+        if last_path != path || span.as_ref().is_some_and(|span| span.path != *path) {
+            return None;
+        }
+        let end = last + 1;
+        span = Some(match span {
+            None => crate::procedural::SourceSpan {
+                path: path.clone(),
+                start,
+                end,
+            },
+            Some(span) => crate::procedural::SourceSpan {
+                start: span.start.min(start),
+                end: span.end.max(end),
+                ..span
+            },
+        });
+    }
+    span
 }
