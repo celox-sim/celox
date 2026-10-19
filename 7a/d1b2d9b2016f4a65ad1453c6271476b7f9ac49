@@ -1,0 +1,6 @@
+Revision history for #1442:
+
+rev 2 (content) 2026-10-19 18:24 UTC — Rebase the dependent multi-source support onto the revised #1441, remove an extra trailing blank line in the existing SV fixture, and record the new validation results.
+rev 1 (initial) 2026-10-19 18:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1442,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"448355f91d5d0defb7f7d68cec8b10d1e42f1880","timestamp_iso":"2026-10-19T18:24:24Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"448355f91d5d0defb7f7d68cec8b10d1e42f1880","new_sha":"99eb505d8726975d6b42fbdb4b54da88d1146626","timestamp_iso":"2026-10-19T18:24:24Z","reason":"Rebase the dependent multi-source support onto the revised #1441, remove an extra trailing blank line in the existing SV fixture, and record the new validation results.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/448355f91d5d0defb7f7d68cec8b10d1e42f1880...99eb505d8726975d6b42fbdb4b54da88d1146626"}]} -->
