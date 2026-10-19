@@ -4,7 +4,7 @@ use super::*;
 
 pub(in crate::ast) fn validate_skipped_patterns(
     initializer: &sv_parser::ConstantParamExpression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let patterns: Vec<_> = initializer
@@ -50,7 +50,7 @@ pub(in crate::ast) fn validate_skipped_patterns(
                     &name,
                     call.nodes.2.as_ref().map(|paren| &paren.nodes.1),
                     tree,
-                    &const_functions::argument_names(),
+                    &const_functions::argument_names(&tree.state.const_functions),
                 )?;
                 for (position, argument) in bindings.into_iter().enumerate() {
                     let Some(pattern) = argument.and_then(pattern_expression) else {
@@ -93,7 +93,7 @@ pub(in crate::ast) fn validate_skipped_patterns(
 
 fn cast_shape(
     target: &sv_parser::CastingType,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<VariableDimensions> {
     // Retain aggregate metadata for named types; a numeric size cast supplies
@@ -116,7 +116,7 @@ fn cast_shape(
 fn validate_element(
     pattern: &sv_parser::AssignmentPatternExpression,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
     checked: &mut HashSet<*const sv_parser::AssignmentPattern>,
 ) -> Converted<()> {
@@ -131,7 +131,7 @@ fn validate_element(
 fn validate_shape(
     pattern: &sv_parser::AssignmentPattern,
     shape: &VariableDimensions,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
     checked: &mut HashSet<*const sv_parser::AssignmentPattern>,
 ) -> Converted<()> {
@@ -151,7 +151,8 @@ fn validate_shape(
     }
     let (left, right, count, element) =
         if let Some((dimension, rest)) = shape.unpacked.split_first() {
-            let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+            let (left, right, count) =
+                dimension_bounds(&tree.state, &dimension.left, &dimension.right, dims)?;
             (
                 left,
                 right,
@@ -164,7 +165,8 @@ fn validate_shape(
         } else if let Some((dimension, rest)) = shape.packed.split_first()
             && !rest.is_empty()
         {
-            let (left, right, count) = dimension_bounds(&dimension.left, &dimension.right, dims)?;
+            let (left, right, count) =
+                dimension_bounds(&tree.state, &dimension.left, &dimension.right, dims)?;
             (
                 left,
                 right,
@@ -175,7 +177,7 @@ fn validate_shape(
                 },
             )
         } else {
-            let width = shape_width(shape, dims)
+            let width = shape_width(&tree.state, shape, dims)
                 .ok_or_else(|| unsupported("assignment pattern target width"))?;
             (
                 width as i128 - 1,
@@ -207,7 +209,7 @@ fn sparse_items<'p>(
     count: usize,
     low: i128,
     high: i128,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Vec<&'p sv_parser::Expression>> {
     let wrong_count = || unsupported("assignment pattern items do not match the target shape");
@@ -223,7 +225,7 @@ fn sparse_items<'p>(
             let (times, items) = &repeat.nodes.0.nodes.1;
             let times =
                 selects::indexed_select_base(RefNode::ConstantExpression(times), tree, dims)?;
-            let times = eval(&times, dims)
+            let times = eval(&tree.state, &times, dims)
                 .and_then(|times| usize::try_from(times).ok())
                 .ok_or_else(|| unsupported("assignment pattern repetition count"))?;
             let values = items.nodes.1.contents();
@@ -244,7 +246,7 @@ fn sparse_items<'p>(
                             tree,
                             dims,
                         )?;
-                        let index = eval(&index, dims)
+                        let index = eval(&tree.state, &index, dims)
                             .ok_or_else(|| unsupported("assignment pattern index key"))?;
                         if !(low..=high).contains(&index) {
                             return Err(unsupported("assignment pattern index outside the target"));

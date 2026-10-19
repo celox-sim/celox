@@ -45,7 +45,7 @@ pub(super) struct BodyState<'a> {
 
 /// Converts the statements of one procedural body.
 pub(super) struct BodyBuilder<'s, 't, 'a> {
-    tree: &'t SyntaxTree,
+    tree: &'t AnalysisContext<'t>,
     dims: PackedDimensions,
     scopes: Vec<Scope>,
     state: &'s mut BodyState<'a>,
@@ -106,7 +106,7 @@ fn int_type() -> Type {
 
 impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn new(
-        tree: &'t SyntaxTree,
+        tree: &'t AnalysisContext<'t>,
         dims: &PackedDimensions,
         state: &'s mut BodyState<'a>,
         body: system_functions::Body,
@@ -199,7 +199,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             source_name: source.to_string(),
             r#type: crate::ir::Type::from_ast(
                 scoped_type(r#type, &self.dims.const_env),
-                &self.dims.const_env,
+                &const_functions::Environment {
+                    constants: &*self.dims.const_env,
+                    functions: &self.tree.state.const_functions,
+                },
             ),
         });
         self.scopes
@@ -435,7 +438,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             expr_from_expression_for_lvalue(rhs, &written, self.tree, &self.dims)?
         } else {
             let value = expr_from_expression_with_types(rhs, self.tree, &self.dims)?;
-            assignment_op_expr(&written, op, value, &self.dims)?
+            assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
         };
         // A two-state member of a four-state packed struct drops unknown bits.
         if matches!(
@@ -445,7 +448,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 ..
             }
         ) {
-            rhs = coerce_procedural_assignment_rhs(rhs, &written, &self.dims);
+            rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -466,7 +469,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             _ => return Err(unsupported("increment or decrement operator")),
         };
         let (written, lhs) = self.lvalue(lvalue)?;
-        let mut rhs = assignment_op_expr(&written, op, Expr::Literal("1".to_string()), &self.dims)?;
+        let mut rhs = assignment_op_expr(
+            &self.tree.state,
+            &written,
+            op,
+            Expr::Literal("1".to_string()),
+            &self.dims,
+        )?;
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -547,7 +556,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             sv_parser::StatementItem::SubroutineCallStatement(call) => {
                 self.subroutine_call_statement(call)
             }
-            sv_parser::StatementItem::ConditionalStatement(stmt) => self.conditional(stmt),
+            sv_parser::StatementItem::ConditionalStatement(stmt) => {
+                self.conditional(&self.tree.state, stmt)
+            }
             sv_parser::StatementItem::CaseStatement(stmt) => self.case(stmt),
             sv_parser::StatementItem::LoopStatement(stmt) => self.loop_statement(stmt),
             sv_parser::StatementItem::JumpStatement(jump) => match &**jump {
@@ -845,6 +856,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let entry = self.take_binding(name, None, parameter.packed_ranges.len());
             types.remove(name);
             if !parameters::bind_parameter(
+                &self.tree.state,
                 &mut self.dims.const_env,
                 &mut types,
                 &mut self.dims.parameter_values,
@@ -1090,6 +1102,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     fn conditional(
         &mut self,
+        state: &AnalysisState,
         stmt: &sv_parser::ConditionalStatement,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let condition = self.cond_predicate(&stmt.nodes.2.nodes.1)?;
@@ -1111,8 +1124,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 // call's display, output or module-variable effects optional.
                 None
             } else {
-                expr_to_const(condition.clone())
-                    .and_then(|condition| eval_ast_const_expr(&condition, &self.dims.const_env))
+                expr_to_const(state, condition.clone()).and_then(|condition| {
+                    eval_ast_const_expr(state, &condition, &self.dims.const_env)
+                })
             };
             if let Some(value) = constant {
                 // Implicit sensitivity is syntactic even for unreachable
@@ -1394,9 +1408,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let (left, right) = bounds
                 .get(position)
                 .ok_or_else(|| unsupported("foreach index beyond the array dimensions"))?;
-            let left = eval_ast_const_expr(left, &self.dims.const_env)
+            let left = eval_ast_const_expr(&self.tree.state, left, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
-            let right = eval_ast_const_expr(right, &self.dims.const_env)
+            let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let source = identifier_text(RefNode::IndexVariableIdentifier(variable), self.tree)
                 .ok_or_else(|| unsupported("foreach index variable"))?;
@@ -1522,7 +1536,7 @@ fn delay_or_event_control_is_empty(control: &sv_parser::DelayOrEventControl) -> 
 pub(super) fn subroutine_param_declarations<'t>(
     list: Option<&'t sv_parser::TfPortList>,
     items: &'t [sv_parser::TfItemDeclaration],
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<
@@ -1746,7 +1760,7 @@ fn task_syntax<'t>(
 /// Declared shape of formals and body locals, before statement lowering.
 pub(super) fn subroutine_declared_dimensions(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     target_span: (usize, usize),
@@ -1799,7 +1813,7 @@ pub(super) fn subroutine_declared_dimensions(
 /// even when a type query deliberately leaves the subroutine body unexpanded.
 pub(super) fn subroutine_declared_parameter_shapes(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<(String, Vec<VariableDimensions>)> {
@@ -1823,7 +1837,7 @@ pub(super) fn subroutine_declared_parameter_shapes(
 /// items, in declaration order, keyed by their (qualified) names.
 pub(super) fn subroutine_argument_names(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<
@@ -1878,7 +1892,7 @@ pub(super) fn subroutine_argument_names(
 /// bodies.
 pub(super) fn subroutines_from_module_node(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -1900,7 +1914,7 @@ pub(super) fn subroutines_from_module_node(
 /// failing.
 pub(super) fn subroutines_from_module_node_with(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -1922,7 +1936,7 @@ pub(super) fn subroutines_from_module_node_with(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subroutines_with_symbolic_parameters(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -2028,7 +2042,10 @@ pub(super) fn subroutines_with_symbolic_parameters(
                         direction,
                         r#type: crate::ir::Type::from_ast(
                             scoped_type(r#type, &declaration_env),
-                            &item.env,
+                            &const_functions::Environment {
+                                constants: &*item.env,
+                                functions: &tree.state.const_functions,
+                            },
                         ),
                         default,
                     });
@@ -2064,7 +2081,13 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     name: item.name(&syntax.name),
                     is_task: syntax.is_task,
                     return_type: return_type.map(|r#type| {
-                        crate::ir::Type::from_ast(scoped_type(r#type, &declaration_env), &item.env)
+                        crate::ir::Type::from_ast(
+                            scoped_type(r#type, &declaration_env),
+                            &const_functions::Environment {
+                                constants: &*item.env,
+                                functions: &tree.state.const_functions,
+                            },
+                        )
                     }),
                     params: lowered_params,
                     return_var,
@@ -2077,12 +2100,13 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     .chain(&mut subroutine.sensitivity_body)
                 {
                     qualify_stmt(item, stmt);
-                    substitute_stmt_constants(stmt, &declaration_env, literals);
+                    substitute_stmt_constants(&tree.state, stmt, &declaration_env, literals);
                 }
                 for param in &mut subroutine.params {
                     if let Some(default) = &mut param.default {
                         item.expr(default);
                         *default = substitute_expr_constants_with_parameter_literals(
+                            &tree.state,
                             default.clone(),
                             &item.env,
                             literals,
@@ -2090,6 +2114,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                     }
                 }
                 lifetimes::check_subroutine_statics(
+                    &tree.state,
                     &subroutine,
                     &statics,
                     builder.state.subroutine_directions,
@@ -2140,6 +2165,7 @@ pub(super) fn qualify_stmt(item: &generate::Item<'_>, stmt: &mut Stmt) {
 
 /// Replace parameters and genvars by their values.
 pub(super) fn substitute_stmt_constants(
+    state: &AnalysisState,
     stmt: &mut Stmt,
     const_env: &HashMap<String, i128>,
     literals: &HashMap<String, Expr>,
@@ -2147,6 +2173,7 @@ pub(super) fn substitute_stmt_constants(
     stmt.visit_mut(
         &mut |expr| {
             *expr = substitute_expr_constants_with_parameter_literals(
+                state,
                 expr.clone(),
                 const_env,
                 literals,
@@ -2162,7 +2189,7 @@ pub(super) fn substitute_stmt_constants(
 /// Every `initial` process of the active generate items.
 pub(super) fn initial_processes_from_module_node(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -2236,9 +2263,9 @@ pub(super) fn initial_processes_from_module_node(
                 });
             }
             for stmt in &mut body {
-                substitute_stmt_constants(stmt, &item.env, literals);
+                substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
                 qualify_stmt(item, stmt);
-                substitute_stmt_constants(stmt, const_env, parameter_literals);
+                substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
@@ -2291,9 +2318,9 @@ pub(super) fn initial_processes_from_module_node(
             _ => unreachable!("only initial and always constructs are collected"),
         };
         for stmt in &mut body {
-            substitute_stmt_constants(stmt, &item.env, literals);
+            substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
-            substitute_stmt_constants(stmt, const_env, parameter_literals);
+            substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
             creation_order,

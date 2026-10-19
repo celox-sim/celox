@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn comb_processes_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -68,7 +68,7 @@ pub(super) fn comb_processes_from_module_node(
 fn comb_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &SharedMap<Expr>,
@@ -93,7 +93,7 @@ fn comb_processes_from_module_or_generate_item(
 fn comb_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &SharedMap<Expr>,
@@ -107,6 +107,7 @@ fn comb_processes_from_module_common_item(
                     .into_iter()
                     .map(|assignment| {
                         substitute_assignment_constants_with_parameter_literals(
+                            &syntax_tree.state,
                             assignment,
                             const_env,
                             parameter_literals,
@@ -134,7 +135,11 @@ fn comb_processes_from_module_common_item(
                 parameter_literals,
                 state,
             )? {
-                processes.push(substitute_process_constants(process, const_env));
+                processes.push(substitute_process_constants(
+                    &syntax_tree.state,
+                    process,
+                    const_env,
+                ));
             }
         }
         sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) => {
@@ -143,6 +148,7 @@ fn comb_processes_from_module_common_item(
                 net_declaration_assignments(declaration, syntax_tree, packed_dimensions)?
             {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
+                    &syntax_tree.state,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -181,7 +187,7 @@ fn always_dimensions(
 
 fn net_declaration_assignments(
     declaration: &sv_parser::ModuleOrGenerateItemDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
@@ -219,7 +225,7 @@ fn net_declaration_assignments(
 
 fn assignments_from_continuous_assign(
     assign: &sv_parser::ContinuousAssign,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     match assign {
@@ -257,7 +263,12 @@ fn assignments_from_continuous_assign(
                         ..
                     }
                 ) {
-                    coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+                    coerce_procedural_assignment_rhs(
+                        &syntax_tree.state,
+                        rhs,
+                        &lhs,
+                        packed_dimensions,
+                    )
                 } else {
                     rhs
                 };
@@ -300,7 +311,12 @@ fn assignments_from_continuous_assign(
                         ..
                     }
                 ) {
-                    coerce_procedural_assignment_rhs(rhs, &lhs, packed_dimensions)
+                    coerce_procedural_assignment_rhs(
+                        &syntax_tree.state,
+                        rhs,
+                        &lhs,
+                        packed_dimensions,
+                    )
                 } else {
                     rhs
                 };
@@ -313,7 +329,7 @@ fn assignments_from_continuous_assign(
 fn comb_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
     condition: Option<ConstExpr>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
@@ -329,7 +345,12 @@ fn comb_process_from_always_construct(
     );
     let mut body = builder.statement(body)?;
     for stmt in &mut body {
-        procedural::substitute_stmt_constants(stmt, &HashMap::default(), parameter_literals);
+        procedural::substitute_stmt_constants(
+            &syntax_tree.state,
+            stmt,
+            &HashMap::default(),
+            parameter_literals,
+        );
     }
     let sensitivity_body = std::mem::take(&mut builder.sensitivity_body);
     Ok(Some(CombProcess {

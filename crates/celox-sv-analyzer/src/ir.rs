@@ -573,14 +573,21 @@ impl Type {
         self
     }
 
-    pub(crate) fn has_symbolic_ranges(&self) -> bool {
-        let constants = fxhash::FxHashMap::default();
+    pub(crate) fn has_symbolic_ranges(
+        &self,
+        functions: &crate::ast::const_functions::State,
+    ) -> bool {
+        let values = fxhash::FxHashMap::default();
+        let constants = crate::ast::const_functions::Environment {
+            constants: &values,
+            functions,
+        };
         self.packed_ranges.iter().any(|range| {
-            typecheck::eval_const_expr(range.left(), &constants).is_none()
-                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+            typecheck::eval_const_expr_in_env(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr_in_env(range.right(), &constants).is_none()
         }) || self.unpacked_ranges.iter().any(|range| {
-            typecheck::eval_const_expr(range.left(), &constants).is_none()
-                || typecheck::eval_const_expr(range.right(), &constants).is_none()
+            typecheck::eval_const_expr_in_env(range.left(), &constants).is_none()
+                || typecheck::eval_const_expr_in_env(range.right(), &constants).is_none()
         })
     }
 }
@@ -594,7 +601,10 @@ pub enum TypeKind {
 }
 
 impl Type {
-    pub(crate) fn from_ast(r#type: ast::Type, constants: &fxhash::FxHashMap<String, i128>) -> Self {
+    pub(crate) fn from_ast(
+        r#type: ast::Type,
+        constants: &dyn typecheck::ConstantEnvironment,
+    ) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
@@ -610,7 +620,7 @@ impl Type {
 
 fn convert_type(
     r#type: ast::Type,
-    constants: &fxhash::FxHashMap<String, i128>,
+    constants: &dyn typecheck::ConstantEnvironment,
 ) -> (Vec<PackedRange>, Vec<UnpackedRange>, Option<usize>) {
     let packed_ranges: Vec<_> = r#type
         .packed_ranges()
@@ -622,10 +632,10 @@ fn convert_type(
         .iter()
         .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
         .collect();
-    let packed_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
+    let packed_width = typecheck::resolve_packed_width_in_env(&packed_ranges, constants);
     let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
-        let left = typecheck::eval_const_expr(range.left(), constants)?;
-        let right = typecheck::eval_const_expr(range.right(), constants)?;
+        let left = typecheck::eval_const_expr_in_env(range.left(), constants)?;
+        let right = typecheck::eval_const_expr_in_env(range.right(), constants)?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     });

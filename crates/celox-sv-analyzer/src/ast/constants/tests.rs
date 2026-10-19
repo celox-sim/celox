@@ -2,6 +2,7 @@ use super::*;
 use std::{fmt::Write, path::Path};
 
 fn environment(count: usize) -> HashMap<String, i128> {
+    let state = &crate::ast::AnalysisState::default();
     let mut parameter = Parameter::new(
         "P".into(),
         Some(parameters::const_expr_from_i128(-2)),
@@ -15,7 +16,7 @@ fn environment(count: usize) -> HashMap<String, i128> {
         ConstExpr::Literal("7".into()),
         ConstExpr::Literal("0".into()),
     ));
-    let mut env = const_env_from_parameters(&[parameter]);
+    let mut env = const_env_from_parameters(state, &[parameter]);
     env.insert("W".into(), 3);
     env.insert("Q".into(), 9);
     for i in 0..count {
@@ -98,6 +99,8 @@ fn scalar_calls_match_full_context_and_preserve_contextual_operands() {
     ] {
         let code = format!("module Top; localparam int RESULT = f({args}); endmodule");
         let tree = crate::syntax::parse_source(&code, Path::new("call_context.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let state = tree.state.as_ref();
         let primary = (&tree)
             .into_iter()
             .find_map(|node| match node {
@@ -128,7 +131,7 @@ fn scalar_calls_match_full_context_and_preserve_contextual_operands() {
             &PackedDimensions::new(HashMap::default(), &env, &aliases),
         )
         .ok()
-        .and_then(expr_to_const);
+        .and_then(|expr| expr_to_const(state, expr));
         CALL_CONTEXT_COPIES.with(|count| count.set(0));
         let mut lazy = const_expr_from_ref_node_with_env(
             RefNode::ConstantPrimary(primary),
@@ -167,6 +170,7 @@ fn scalar_parameter_calls_make_no_context_copies_through_ast_and_ir() {
             }
             code.push_str("endmodule\n");
             let tree = crate::syntax::parse_source(&code, Path::new("scalar_calls.sv")).unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             CALL_CONTEXT_COPIES.with(|count| count.set(0));
             let source = Source::from_syntax(&tree).unwrap();
             let ir = crate::analyze::analyze_source(source).unwrap();
@@ -189,6 +193,8 @@ fn compare_lazy_and_copied_scalar_call_contexts() {
         Path::new("scalar_call_probe.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let primary = (&tree)
         .into_iter()
         .find_map(|node| match node {
@@ -217,7 +223,7 @@ fn compare_lazy_and_copied_scalar_call_contexts() {
                         &PackedDimensions::new(HashMap::default(), black_box(&env), &aliases),
                     )
                     .ok()
-                    .and_then(expr_to_const)
+                    .and_then(|expr| expr_to_const(state, expr))
                 } else {
                     const_expr_from_ref_node_with_env(
                         RefNode::ConstantPrimary(primary),

@@ -59,64 +59,73 @@ pub(super) struct ScopeSymbols {
     pub generate_imports: HashMap<usize, HashMap<String, String>>,
 }
 
-thread_local! {
-    static IMPORTED: RefCell<Arc<ScopeSymbols>> = RefCell::new(Arc::default());
-    static PACKAGE: RefCell<Option<String>> = const { RefCell::new(None) };
+#[derive(Default)]
+pub(super) struct State {
+    imported: RefCell<Arc<ScopeSymbols>>,
+    package: RefCell<Option<String>>,
 }
 
 /// Restores the previously analyzed package when dropped.
 pub(super) struct InPackage {
     previous: Option<String>,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for InPackage {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        PACKAGE.with(|current| *current.borrow_mut() = previous);
+        *self.state.scope.package.borrow_mut() = previous;
     }
 }
 
 /// Analyze the package `name` until the guard is dropped: inside it, `p::x`
 /// with `p` the package names its own item `x`.
-pub(super) fn enter_package(name: &str) -> InPackage {
-    let previous = PACKAGE.with(|current| current.borrow_mut().replace(name.to_string()));
-    InPackage { previous }
+pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> InPackage {
+    let previous = state.scope.package.borrow_mut().replace(name.to_string());
+    InPackage {
+        previous,
+        state: state.clone(),
+    }
 }
 
 /// The name a reference to item `name` of `package` has in the scope being
 /// analyzed: `package::name`, or `name` inside the package itself.
-pub(super) fn qualified_name(package: &str, name: &str) -> String {
-    PACKAGE.with(|current| {
-        if current.borrow().as_deref() == Some(package) {
+pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -> String {
+    {
+        if state.scope.package.borrow().as_deref() == Some(package) {
             name.to_string()
         } else {
             format!("{package}::{name}")
         }
-    })
+    }
 }
 
 /// Restores the previously imported symbols when dropped.
 pub(super) struct Installed {
     previous: Arc<ScopeSymbols>,
+    state: std::rc::Rc<AnalysisState>,
 }
 
 impl Drop for Installed {
     fn drop(&mut self) {
         let previous = std::mem::take(&mut self.previous);
-        IMPORTED.with(|current| *current.borrow_mut() = previous);
+        *self.state.scope.imported.borrow_mut() = previous;
     }
 }
 
 /// Make `symbols` the symbols the scope being analyzed imports, until the
 /// guard is dropped.
-pub(super) fn install(symbols: Arc<ScopeSymbols>) -> Installed {
-    let previous = IMPORTED.with(|current| std::mem::replace(&mut *current.borrow_mut(), symbols));
-    Installed { previous }
+pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymbols>) -> Installed {
+    let previous = state.scope.imported.replace(symbols);
+    Installed {
+        previous,
+        state: state.clone(),
+    }
 }
 
 /// The symbols the scope being analyzed imports.
-pub(super) fn imported() -> Arc<ScopeSymbols> {
-    IMPORTED.with(|current| current.borrow().clone())
+pub(super) fn imported(state: &AnalysisState) -> Arc<ScopeSymbols> {
+    state.scope.imported.borrow().clone()
 }
 
 /// The name a constant-environment marker key describes, with the marker

@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn ff_processes_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
@@ -56,7 +56,7 @@ pub(super) fn ff_processes_from_module_node(
 
 fn ff_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
@@ -79,7 +79,7 @@ fn ff_processes_from_module_or_generate_item(
 
 fn ff_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
@@ -103,7 +103,7 @@ fn ff_processes_from_module_common_item(
 
 fn ff_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &PackedDimensions,
@@ -127,14 +127,19 @@ fn ff_process_from_always_construct(
     );
     let mut body = builder.statement_or_null(body)?;
     for stmt in &mut body {
-        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(
+            &syntax_tree.state,
+            stmt,
+            const_env,
+            parameter_literals,
+        );
     }
     Ok((!events.is_empty()).then(|| FfProcess::new(events, body)))
 }
 
 fn ff_event_control_and_body<'a>(
     stmt: &'a sv_parser::Statement,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Option<(Vec<FfEvent>, &'a sv_parser::StatementOrNull)> {
     let sv_parser::StatementItem::ProceduralTimingControlStatement(timing) = &stmt.nodes.2 else {
         return None;
@@ -150,7 +155,7 @@ fn ff_event_control_and_body<'a>(
 
 fn ff_events_from_event_control(
     control: &sv_parser::EventControl,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Option<Vec<FfEvent>> {
     let sv_parser::EventControl::EventExpression(control) = control else {
         return None;
@@ -160,7 +165,7 @@ fn ff_events_from_event_control(
 
 fn ff_events_from_event_expression(
     expr: &sv_parser::EventExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Option<Vec<FfEvent>> {
     match expr {
         sv_parser::EventExpression::Expression(expr) => {

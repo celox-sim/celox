@@ -8,6 +8,7 @@ mod tests;
 pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
 
 pub(super) fn simplify_constant_mux_conditions(
+    state: &AnalysisState,
     expr: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Expr {
@@ -18,7 +19,7 @@ pub(super) fn simplify_constant_mux_conditions(
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(state, *expr, const_env)),
             msb,
             lsb,
             signed,
@@ -26,14 +27,14 @@ pub(super) fn simplify_constant_mux_conditions(
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| simplify_constant_mux_conditions(part, const_env))
+                .map(|part| simplify_constant_mux_conditions(state, part, const_env))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| simplify_constant_mux_conditions(part, const_env))
+                .map(|part| simplify_constant_mux_conditions(state, part, const_env))
                 .collect(),
         },
         Expr::Resize {
@@ -41,8 +42,8 @@ pub(super) fn simplify_constant_mux_conditions(
             width,
             signed,
         } => {
-            let expr = simplify_constant_mux_conditions(*expr, const_env);
-            if let Some(constant) = expr_to_const(expr.clone()) {
+            let expr = simplify_constant_mux_conditions(state, *expr, const_env);
+            if let Some(constant) = expr_to_const(state, expr.clone()) {
                 let parameter_types = parameter_types_from_const_env(const_env)
                     .into_iter()
                     .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
@@ -56,7 +57,7 @@ pub(super) fn simplify_constant_mux_conditions(
                 ) {
                     return Expr::Literal(typecheck::format_integral_literal_binary(&literal));
                 }
-                if let Some(value) = eval_ast_const_expr(&constant, const_env) {
+                if let Some(value) = eval_ast_const_expr(state, &constant, const_env) {
                     return Expr::Literal(format_typed_parameter_literal(value, width, signed));
                 }
             }
@@ -68,21 +69,21 @@ pub(super) fn simplify_constant_mux_conditions(
         }
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(state, *expr, const_env)),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(simplify_constant_mux_conditions(*left, const_env)),
+            left: Box::new(simplify_constant_mux_conditions(state, *left, const_env)),
             op,
-            right: Box::new(simplify_constant_mux_conditions(*right, const_env)),
+            right: Box::new(simplify_constant_mux_conditions(state, *right, const_env)),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            let condition = simplify_constant_mux_conditions(*condition, const_env);
-            let mut then_expr = simplify_constant_mux_conditions(*then_expr, const_env);
-            let mut else_expr = simplify_constant_mux_conditions(*else_expr, const_env);
+            let condition = simplify_constant_mux_conditions(state, *condition, const_env);
+            let mut then_expr = simplify_constant_mux_conditions(state, *then_expr, const_env);
+            let mut else_expr = simplify_constant_mux_conditions(state, *else_expr, const_env);
             let parameter_types = parameter_types_from_const_env(const_env);
             let arm_type = |arm: &Expr| {
                 if let Expr::Literal(literal) = arm
@@ -98,7 +99,7 @@ pub(super) fn simplify_constant_mux_conditions(
                         signed: *signed,
                     })
                 } else {
-                    infer_const_expr_type(&expr_to_const(arm.clone())?, &parameter_types)
+                    infer_const_expr_type(&expr_to_const(state, arm.clone())?, &parameter_types)
                 }
             };
             let result_type =
@@ -134,11 +135,13 @@ pub(super) fn simplify_constant_mux_conditions(
             if then_expr == else_expr {
                 return then_expr;
             }
-            if let Some(value) = equivalent_constant_mux_value(&then_expr, &else_expr, const_env) {
+            if let Some(value) =
+                equivalent_constant_mux_value(state, &then_expr, &else_expr, const_env)
+            {
                 return value;
             }
-            match expr_to_const(condition.clone())
-                .and_then(|condition| eval_ast_const_expr(&condition, const_env))
+            match expr_to_const(state, condition.clone())
+                .and_then(|condition| eval_ast_const_expr(state, &condition, const_env))
             {
                 Some(value) => {
                     let (selected, unselected) = if value == 0 {
@@ -186,6 +189,7 @@ pub(super) fn simplify_constant_mux_conditions(
                         signed: result_type.signed,
                     };
                     simplify_constant_mux_conditions(
+                        state,
                         Expr::Resize {
                             expr: Box::new(selected),
                             width: result_type.width,
@@ -202,11 +206,13 @@ pub(super) fn simplify_constant_mux_conditions(
             }
         }
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(simplify_constant_mux_conditions(*expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(state, *expr, const_env)),
             items: items
                 .into_iter()
                 .map(|item| {
-                    item.map(&mut |operand| simplify_constant_mux_conditions(operand, const_env))
+                    item.map(&mut |operand| {
+                        simplify_constant_mux_conditions(state, operand, const_env)
+                    })
                 })
                 .collect(),
         },
@@ -219,7 +225,7 @@ pub(super) fn simplify_constant_mux_conditions(
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(|arg| simplify_constant_mux_conditions(arg, const_env)))
+                .map(|arg| arg.map(|arg| simplify_constant_mux_conditions(state, arg, const_env)))
                 .collect(),
         },
         Expr::Ident(_) | Expr::Literal(_) => expr,
@@ -227,6 +233,7 @@ pub(super) fn simplify_constant_mux_conditions(
 }
 
 pub(super) fn fold_const_integral_expr_preserving_mask(
+    state: &AnalysisState,
     expr: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Expr {
@@ -239,12 +246,13 @@ pub(super) fn fold_const_integral_expr_preserving_mask(
     // conversion. Do not scan every visible binding to fold each such value.
     let parameter_types =
         |name: &str| parameter_type_from_const_env(const_env, name).map(|ty| (ty.width, ty.signed));
-    eval_const_integral_expr_preserving_mask(&expr, const_env, &parameter_types)
+    eval_const_integral_expr_preserving_mask(state, &expr, const_env, &parameter_types)
         .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
         .unwrap_or(expr)
 }
 
 fn eval_const_integral_expr_preserving_mask(
+    state: &AnalysisState,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
@@ -256,14 +264,14 @@ fn eval_const_integral_expr_preserving_mask(
             lsb,
             signed,
         } => {
-            let msb = eval_ast_const_expr(msb, const_env)?;
-            let lsb = eval_ast_const_expr(lsb, const_env)?;
+            let msb = eval_ast_const_expr(state, msb, const_env)?;
+            let lsb = eval_ast_const_expr(state, lsb, const_env)?;
             let width = usize::try_from(msb.checked_sub(lsb)?.checked_add(1)?).ok()?;
             if width > MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
             let operand =
-                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+                eval_const_integral_expr_preserving_mask(state, expr, const_env, parameter_types)?;
             let mut value = num_bigint::BigUint::default();
             let mut mask = num_bigint::BigUint::default();
             for offset in 0..width {
@@ -294,7 +302,7 @@ fn eval_const_integral_expr_preserving_mask(
             signed,
         } => {
             let operand =
-                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+                eval_const_integral_expr_preserving_mask(state, expr, const_env, parameter_types)?;
             typecheck::parse_integral_literal(&resize_integral_literal_for_cast(
                 operand, *width, *signed,
             ))
@@ -303,17 +311,27 @@ fn eval_const_integral_expr_preserving_mask(
             parts
                 .iter()
                 .map(|part| {
-                    eval_const_integral_expr_preserving_mask(part, const_env, parameter_types)
+                    eval_const_integral_expr_preserving_mask(
+                        state,
+                        part,
+                        const_env,
+                        parameter_types,
+                    )
                 })
                 .collect::<Option<Vec<_>>>()?,
         ),
         Expr::RepeatConcat { count, parts } => {
-            let count = usize::try_from(eval_ast_const_expr(count, const_env)?).ok()?;
+            let count = usize::try_from(eval_ast_const_expr(state, count, const_env)?).ok()?;
             let part = concat_integral_literals(
                 parts
                     .iter()
                     .map(|part| {
-                        eval_const_integral_expr_preserving_mask(part, const_env, parameter_types)
+                        eval_const_integral_expr_preserving_mask(
+                            state,
+                            part,
+                            const_env,
+                            parameter_types,
+                        )
                     })
                     .collect::<Option<Vec<_>>>()?,
             )?;
@@ -325,9 +343,13 @@ fn eval_const_integral_expr_preserving_mask(
             concat_integral_literals(std::iter::repeat_n(part, count))
         }
         _ => {
-            let constant: crate::ir::ConstExpr =
-                constant_with_folded_selections_with_lookup(expr, const_env, parameter_types)?
-                    .into();
+            let constant: crate::ir::ConstExpr = constant_with_folded_selections_with_lookup(
+                state,
+                expr,
+                const_env,
+                parameter_types,
+            )?
+            .into();
             typecheck::eval_const_integral_literal_with_lookup(
                 &constant,
                 const_env,
@@ -340,26 +362,29 @@ fn eval_const_integral_expr_preserving_mask(
 // Fold only self-determined operands. Keep arithmetic nodes intact so the
 // constant evaluator can propagate expression widths across compound trees.
 pub(super) fn constant_with_folded_selections(
+    state: &AnalysisState,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<ConstExpr> {
-    constant_with_folded_selections_with_lookup(expr, const_env, &|name| {
+    constant_with_folded_selections_with_lookup(state, expr, const_env, &|name| {
         parameter_types.get(name).copied()
     })
 }
 
 fn constant_with_folded_selections_with_lookup(
+    state: &AnalysisState,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<ConstExpr> {
-    let convert =
-        |expr: &Expr| constant_with_folded_selections_with_lookup(expr, const_env, parameter_types);
+    let convert = |expr: &Expr| {
+        constant_with_folded_selections_with_lookup(state, expr, const_env, parameter_types)
+    };
     match expr {
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
             let literal =
-                eval_const_integral_expr_preserving_mask(expr, const_env, parameter_types)?;
+                eval_const_integral_expr_preserving_mask(state, expr, const_env, parameter_types)?;
             Some(ConstExpr::Literal(
                 typecheck::format_integral_literal_binary(&literal),
             ))
@@ -383,12 +408,13 @@ fn constant_with_folded_selections_with_lookup(
             else_expr: Box::new(convert(else_expr)?),
         }),
         Expr::Call { callee, args, .. } => Some(ConstExpr::call(
+            state,
             callee.clone(),
             args.iter()
                 .map(|arg| convert(arg.as_ref()?))
                 .collect::<Option<Vec<_>>>()?,
         )),
-        _ => expr_to_const(expr.clone()),
+        _ => expr_to_const(state, expr.clone()),
     }
 }
 
@@ -441,6 +467,7 @@ fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128
 }
 
 fn equivalent_constant_mux_value(
+    state: &AnalysisState,
     then_expr: &Expr,
     else_expr: &Expr,
     const_env: &HashMap<String, i128>,
@@ -451,12 +478,12 @@ fn equivalent_constant_mux_value(
         .map(|(name, r#type)| (name.clone(), (r#type.width, r#type.signed)))
         .collect::<HashMap<_, _>>();
     let then_value = typecheck::eval_const_integral_literal_with_types(
-        &expr_to_const(then_expr.clone())?.into(),
+        &expr_to_const(state, then_expr.clone())?.into(),
         const_env,
         &ir_parameter_types,
     )?;
     let else_value = typecheck::eval_const_integral_literal_with_types(
-        &expr_to_const(else_expr.clone())?.into(),
+        &expr_to_const(state, else_expr.clone())?.into(),
         const_env,
         &ir_parameter_types,
     )?;
@@ -473,13 +500,18 @@ mod constant_concat_limits_tests {
 
     #[test]
     fn bounds_repeated_constant_concatenation() {
+        let state = AnalysisState::default();
         for (count, accepted) in [(65_536, true), (65_537, false), (1_000_000_000, false)] {
             let expr = Expr::RepeatConcat {
                 count: ConstExpr::Literal(count.to_string()),
                 parts: vec![Expr::Literal("1'bx".to_string())],
             };
-            let result =
-                eval_const_integral_expr_preserving_mask(&expr, &HashMap::default(), &|_| None);
+            let result = eval_const_integral_expr_preserving_mask(
+                &state,
+                &expr,
+                &HashMap::default(),
+                &|_| None,
+            );
             assert_eq!(result.is_some(), accepted);
             if let Some(result) = result {
                 assert_eq!(result.width, count);
@@ -491,7 +523,7 @@ mod constant_concat_limits_tests {
             parts: vec![Expr::Literal("2'bxz".to_string())],
         };
         assert!(
-            eval_const_integral_expr_preserving_mask(&expr, &HashMap::default(), &|_| None,)
+            eval_const_integral_expr_preserving_mask(&state, &expr, &HashMap::default(), &|_| None,)
                 .is_none()
         );
     }

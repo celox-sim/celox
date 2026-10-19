@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn cast_target_type(
     casting_type: &sv_parser::CastingType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -18,7 +18,7 @@ pub(super) fn cast_target_type(
             };
             let name = reference_name(RefNode::PsTypeIdentifier(identifier), syntax_tree)?;
             if let Some(r#type) = type_aliases.get(&name) {
-                expr_type_from_type(r#type, const_env)
+                expr_type_from_type(&syntax_tree.state, r#type, const_env)
             } else {
                 Some(ExprType {
                     width: usize::try_from(*const_env.get(&name)?)
@@ -39,10 +39,10 @@ pub(super) fn cast_target_type(
                 .flatten()?;
             if let ConstExpr::Ident(name) = &target {
                 if let Some(r#type) = type_aliases.get(name) {
-                    return expr_type_from_type(r#type, const_env);
+                    return expr_type_from_type(&syntax_tree.state, r#type, const_env);
                 }
             }
-            let width = eval_ast_const_expr(&target, const_env)?;
+            let width = eval_ast_const_expr(&syntax_tree.state, &target, const_env)?;
             Some(ExprType {
                 width: usize::try_from(width).ok().filter(|width| *width > 0)?,
                 signed: false,
@@ -55,7 +55,7 @@ pub(super) fn cast_target_type(
 /// Check a skipped cast's target without evaluating its operand.
 pub(super) fn cast_target_is_supported(
     casting_type: &sv_parser::CastingType,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> bool {
@@ -64,6 +64,7 @@ pub(super) fn cast_target_is_supported(
 }
 
 pub(super) fn expr_type_from_type(
+    state: &AnalysisState,
     r#type: &Type,
     const_env: &HashMap<String, i128>,
 ) -> Option<ExprType> {
@@ -74,8 +75,8 @@ pub(super) fn expr_type_from_type(
         .packed_ranges()
         .iter()
         .try_fold(1usize, |width, range| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
+            let left = eval_ast_const_expr(state, range.left(), const_env)?;
+            let right = eval_ast_const_expr(state, range.right(), const_env)?;
             width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
         })?;
     Some(ExprType {
@@ -86,7 +87,7 @@ pub(super) fn expr_type_from_type(
 
 pub(super) fn cast_is_supported(
     cast: &sv_parser::Cast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
@@ -105,7 +106,7 @@ pub(super) fn cast_is_supported(
 pub(super) fn runtime_cast_expr(
     cast: &sv_parser::Cast,
     expr: Expr,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let const_env = &packed_dimensions.const_env;
@@ -118,7 +119,7 @@ pub(super) fn runtime_cast_expr(
         });
     }
     if let sv_parser::CastingType::Signing(signing) = &cast.nodes.0 {
-        let width = expr_static_width(&expr, packed_dimensions)
+        let width = expr_static_width(&syntax_tree.state, &expr, packed_dimensions)
             .ok_or_else(|| unsupported("signedness cast of an operand without a static width"))?;
         return Ok(Expr::Resize {
             expr: Box::new(expr),
@@ -174,7 +175,7 @@ pub(super) fn runtime_cast_expr(
 
 pub(super) fn constant_cast_is_supported(
     cast: &sv_parser::ConstantCast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
@@ -183,7 +184,7 @@ pub(super) fn constant_cast_is_supported(
 
 pub(super) fn cast_zero_type(
     cast: &sv_parser::Cast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -212,7 +213,7 @@ pub(super) fn cast_zero_type(
 
 pub(super) fn constant_cast_const_expr(
     cast: &sv_parser::ConstantCast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
@@ -230,7 +231,7 @@ pub(super) fn constant_cast_const_expr(
 /// Evaluate a constant cast with the scope's four-state parameter literals.
 pub(super) fn constant_cast_with_dimensions(
     cast: &sv_parser::ConstantCast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
     let operand = indexed_select_base(
@@ -250,7 +251,7 @@ pub(super) fn constant_cast_with_dimensions(
 
 pub(super) fn runtime_constant_cast_const_expr(
     cast: &sv_parser::Cast,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
     let operand = indexed_select_base(
@@ -271,7 +272,7 @@ pub(super) fn runtime_constant_cast_const_expr(
 pub(super) fn cast_constant_operand(
     operand: ConstExpr,
     casting_type: &sv_parser::CastingType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ConstExpr> {
@@ -291,7 +292,7 @@ pub(super) fn cast_constant_operand(
             &ir_parameter_types,
         )
         .or_else(|| {
-            let operand_value = eval_ast_const_expr(&operand, const_env)?;
+            let operand_value = eval_ast_const_expr(&syntax_tree.state, &operand, const_env)?;
             let operand_literal = format_typed_parameter_literal(
                 operand_value,
                 operand_type.width,
@@ -334,7 +335,7 @@ pub(super) fn cast_constant_operand(
 
 fn cast_target_is_two_state(
     casting_type: &sv_parser::CastingType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
@@ -381,7 +382,7 @@ fn two_state_integral_literal(value: &str, width: usize, signed: bool) -> Option
 
 fn casting_type_is_numeric_size(
     casting_type: &sv_parser::CastingType,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> bool {
