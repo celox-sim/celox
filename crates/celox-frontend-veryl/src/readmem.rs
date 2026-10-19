@@ -45,8 +45,13 @@ fn prepare_statements(
                         continue;
                     };
                     let instance = source.base_instance(lookup);
-                    let (address, width, data) =
-                        read_hierarchical_memory(filename, reference, lookup, instance)?;
+                    let (address, width, data) = read_hierarchical_memory(
+                        filename,
+                        reference,
+                        lookup,
+                        instance,
+                        &source.file_dependencies,
+                    )?;
                     let InitialStateData::Writes(writes) = data else {
                         unreachable!("read_memory_file always returns write runs");
                     };
@@ -142,6 +147,7 @@ fn read_hierarchical_memory(
     reference: &HierVarRef,
     lookup: &crate::FrontendLookup,
     instance_id: celox_design::InstanceId,
+    dependencies: &crate::FileDependencyCollector,
 ) -> Result<(celox_design::StateAddr, usize, InitialStateData), ParserError> {
     let (address, info) =
         super::testbench::resolve_hierarchical_reference_from(lookup, instance_id, reference)?;
@@ -171,6 +177,7 @@ fn read_hierarchical_memory(
         return Err(invalid("destination element width could not be resolved"));
     }
     let data = super::module::read_memory_file(
+        dependencies,
         filename,
         16,
         info.width / depth,
