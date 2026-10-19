@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn emit_inst(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     inst: &MInst,
     assignment: &AssignmentMap,
     func: &MFunction,
@@ -11,6 +11,7 @@ pub(super) fn emit_inst(
     spill_register_cache: SpillRegisterCache,
     mut continuation_label: Option<&mut CodeLabel>,
 ) -> Result<bool, IcedError> {
+    let context = asm.context;
     let mut bound_continuation = false;
     match inst {
         MInst::ExternArg { index, src } => {
@@ -37,7 +38,8 @@ pub(super) fn emit_inst(
                     }
                 }
                 X86VectorLocation::Stack(stack_offset) => {
-                    let destination = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                    let destination =
+                        xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset));
                     if func.target_features.avx() {
                         asm.vpxor(xmm5, xmm5, xmm5)?;
                         asm.vmovdqu(destination, xmm5)?;
@@ -79,11 +81,16 @@ pub(super) fn emit_inst(
                             }
                             X86VectorLocation::Stack(stack_offset) => {
                                 asm.mov(
-                                    qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                                    qword_ptr(mem_operand(
+                                        &context,
+                                        BaseReg::StackFrame,
+                                        stack_offset,
+                                    )),
                                     low,
                                 )?;
                                 asm.mov(
                                     qword_ptr(mem_operand(
+                                        &context,
                                         BaseReg::StackFrame,
                                         stack_offset
                                             .checked_add(8)
@@ -91,8 +98,11 @@ pub(super) fn emit_inst(
                                     )),
                                     high,
                                 )?;
-                                let source =
-                                    xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                                let source = xmmword_ptr(mem_operand(
+                                    &context,
+                                    BaseReg::StackFrame,
+                                    stack_offset,
+                                ));
                                 // Pack128 otherwise uses legacy scalar/SSE
                                 // instructions. Keep this rare spill reload
                                 // baseline as well, so it cannot introduce an
@@ -104,11 +114,12 @@ pub(super) fn emit_inst(
                 }
                 X86VectorLocation::Stack(stack_offset) => {
                     asm.mov(
-                        qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                        qword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset)),
                         low,
                     )?;
                     asm.mov(
                         qword_ptr(mem_operand(
+                            &context,
                             BaseReg::StackFrame,
                             stack_offset
                                 .checked_add(8)
@@ -120,7 +131,7 @@ pub(super) fn emit_inst(
             }
         }
         MInst::X86Simd(X86SimdInst::Load128 { dst, base, offset }) => {
-            let source = xmmword_ptr(mem_operand(*base, *offset));
+            let source = xmmword_ptr(mem_operand(&context, *base, *offset));
             match assignment
                 .x86_vector(*dst)
                 .expect("verified x86 vector assignment")
@@ -137,13 +148,13 @@ pub(super) fn emit_inst(
                     if func.target_features.avx() {
                         asm.vmovdqu(xmm5, source)?;
                         asm.vmovdqu(
-                            xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                            xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset)),
                             xmm5,
                         )?;
                     } else {
                         asm.movdqu(xmm5, source)?;
                         asm.movdqu(
-                            xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                            xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset)),
                             xmm5,
                         )?;
                     }
@@ -187,7 +198,7 @@ pub(super) fn emit_inst(
                 }
                 (X86VectorLocation::Register(lhs), X86VectorLocation::Stack(rhs)) => {
                     let lhs = x86_vec_to_xmm(lhs);
-                    let rhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, rhs));
+                    let rhs = xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, rhs));
                     if func.target_features.avx() {
                         match op {
                             X86SimdBinaryOp::And => asm.vpand(output, lhs, rhs)?,
@@ -206,7 +217,7 @@ pub(super) fn emit_inst(
                     }
                 }
                 (X86VectorLocation::Stack(lhs), X86VectorLocation::Register(rhs)) => {
-                    let lhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, lhs));
+                    let lhs = xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, lhs));
                     let rhs = x86_vec_to_xmm(rhs);
                     if func.target_features.avx() {
                         asm.vmovdqu(output, lhs)?;
@@ -225,8 +236,8 @@ pub(super) fn emit_inst(
                     }
                 }
                 (X86VectorLocation::Stack(lhs), X86VectorLocation::Stack(rhs)) => {
-                    let lhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, lhs));
-                    let rhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, rhs));
+                    let lhs = xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, lhs));
+                    let rhs = xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, rhs));
                     if func.target_features.avx() {
                         asm.vmovdqu(output, lhs)?;
                         match op {
@@ -245,7 +256,8 @@ pub(super) fn emit_inst(
                 }
             }
             if let X86VectorLocation::Stack(stack_offset) = destination {
-                let destination = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                let destination =
+                    xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset));
                 if func.target_features.avx() {
                     asm.vmovdqu(destination, output)?;
                 } else {
@@ -254,7 +266,7 @@ pub(super) fn emit_inst(
             }
         }
         MInst::X86Simd(X86SimdInst::Store128 { base, offset, src }) => {
-            let destination = xmmword_ptr(mem_operand(*base, *offset));
+            let destination = xmmword_ptr(mem_operand(&context, *base, *offset));
             match assignment
                 .x86_vector(*src)
                 .expect("verified x86 vector assignment")
@@ -268,7 +280,8 @@ pub(super) fn emit_inst(
                     }
                 }
                 X86VectorLocation::Stack(stack_offset) => {
-                    let source = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                    let source =
+                        xmmword_ptr(mem_operand(&context, BaseReg::StackFrame, stack_offset));
                     if func.target_features.avx() {
                         asm.vmovdqu(xmm5, source)?;
                         asm.vmovdqu(destination, xmm5)?;
@@ -332,7 +345,7 @@ pub(super) fn emit_inst(
                 asm.movq(preg_to_reg64(d_preg), register)?;
                 return Ok(false);
             }
-            let mem = mem_operand(*base, *offset);
+            let mem = mem_operand(&context, *base, *offset);
             match size {
                 OpSize::S8 => {
                     let d32 = preg_to_reg32(d_preg);
@@ -366,7 +379,7 @@ pub(super) fn emit_inst(
                 asm.movq(register, preg_to_reg64(s_preg))?;
                 return Ok(false);
             }
-            let mem = mem_operand(*base, *offset);
+            let mem = mem_operand(&context, *base, *offset);
             match size {
                 OpSize::S8 => {
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
@@ -389,7 +402,7 @@ pub(super) fn emit_inst(
             size,
             imm,
         } => {
-            let mem = mem_operand(*base, *offset);
+            let mem = mem_operand(&context, *base, *offset);
             match size {
                 OpSize::S8 => asm.and(byte_ptr(mem), *imm as i32)?,
                 OpSize::S16 => asm.and(word_ptr(mem), *imm as i32)?,
@@ -403,7 +416,7 @@ pub(super) fn emit_inst(
             size,
             imm,
         } => {
-            let mem = mem_operand(*base, *offset);
+            let mem = mem_operand(&context, *base, *offset);
             match size {
                 OpSize::S8 => asm.or(byte_ptr(mem), *imm as i32)?,
                 OpSize::S16 => asm.or(word_ptr(mem), *imm as i32)?,
@@ -444,13 +457,13 @@ pub(super) fn emit_inst(
             let qwords = byte_len / 8;
             let rem = byte_len % 8;
             if rem != 0 {
-                asm.mov(qword_ptr(scratch_operand(0)), rax)?;
+                asm.mov(qword_ptr(scratch_operand(&context, 0)), rax)?;
             }
             if qwords != 0 {
-                asm.mov(qword_ptr(scratch_operand(1)), rcx)?;
+                asm.mov(qword_ptr(scratch_operand(&context, 1)), rcx)?;
             }
-            asm.mov(qword_ptr(scratch_operand(2)), rsi)?;
-            asm.mov(qword_ptr(scratch_operand(3)), rdi)?;
+            asm.mov(qword_ptr(scratch_operand(&context, 2)), rsi)?;
+            asm.mov(qword_ptr(scratch_operand(&context, 3)), rdi)?;
             emit_state_base(asm, rsi)?;
             asm.mov(rdi, rsi)?;
             if *src_offset != 0 {
@@ -483,13 +496,13 @@ pub(super) fn emit_inst(
                 asm.mov(al, byte_ptr(rsi))?;
                 asm.mov(byte_ptr(rdi), al)?;
             }
-            asm.mov(rdi, qword_ptr(scratch_operand(3)))?;
-            asm.mov(rsi, qword_ptr(scratch_operand(2)))?;
+            asm.mov(rdi, qword_ptr(scratch_operand(&context, 3)))?;
+            asm.mov(rsi, qword_ptr(scratch_operand(&context, 2)))?;
             if qwords != 0 {
-                asm.mov(rcx, qword_ptr(scratch_operand(1)))?;
+                asm.mov(rcx, qword_ptr(scratch_operand(&context, 1)))?;
             }
             if rem != 0 {
-                asm.mov(rax, qword_ptr(scratch_operand(0)))?;
+                asm.mov(rax, qword_ptr(scratch_operand(&context, 0)))?;
             }
         }
 
@@ -505,11 +518,11 @@ pub(super) fn emit_inst(
             let rem = byte_len % 8;
             let pattern = u64::from(*value) * 0x0101_0101_0101_0101;
 
-            asm.mov(qword_ptr(scratch_operand(0)), rax)?;
+            asm.mov(qword_ptr(scratch_operand(&context, 0)), rax)?;
             if qwords != 0 {
-                asm.mov(qword_ptr(scratch_operand(1)), rcx)?;
+                asm.mov(qword_ptr(scratch_operand(&context, 1)), rcx)?;
             }
-            asm.mov(qword_ptr(scratch_operand(2)), rdi)?;
+            asm.mov(qword_ptr(scratch_operand(&context, 2)), rdi)?;
             emit_state_base(asm, rdi)?;
             if *dst_offset != 0 {
                 asm.add(rdi, *dst_offset)?;
@@ -530,11 +543,11 @@ pub(super) fn emit_inst(
             if rem % 2 == 1 {
                 asm.mov(byte_ptr(rdi), al)?;
             }
-            asm.mov(rdi, qword_ptr(scratch_operand(2)))?;
+            asm.mov(rdi, qword_ptr(scratch_operand(&context, 2)))?;
             if qwords != 0 {
-                asm.mov(rcx, qword_ptr(scratch_operand(1)))?;
+                asm.mov(rcx, qword_ptr(scratch_operand(&context, 1)))?;
             }
-            asm.mov(rax, qword_ptr(scratch_operand(0)))?;
+            asm.mov(rax, qword_ptr(scratch_operand(&context, 0)))?;
         }
 
         MInst::SparseCommit {
@@ -576,6 +589,7 @@ pub(super) fn emit_inst(
                 let grouped = count - count % SPARSE_SUMMARY_GROUP;
                 let summary_word = |displacement: usize| {
                     qword_ptr(mem_operand_indexed(
+                        &context,
                         BaseReg::SimState,
                         *summary_words_offset + (displacement * 8) as i32,
                         r10,
@@ -642,10 +656,10 @@ pub(super) fn emit_inst(
                     let summary_offset = *summary_words_offset + (summary_index * 8) as i32;
                     asm.mov(
                         rax,
-                        qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
+                        qword_ptr(mem_operand(&context, BaseReg::SimState, summary_offset)),
                     )?;
                     asm.mov(
-                        qword_ptr(mem_operand(BaseReg::SimState, summary_offset)),
+                        qword_ptr(mem_operand(&context, BaseReg::SimState, summary_offset)),
                         0i32,
                     )?;
                     let mut summary_loop = asm.create_label();
@@ -700,6 +714,7 @@ pub(super) fn emit_inst(
             let bit = *active_index % 64;
             asm.bts(
                 qword_ptr(mem_operand(
+                    &context,
                     BaseReg::SimState,
                     active_bits_offset
                         .checked_add(word_offset)
@@ -798,7 +813,7 @@ pub(super) fn emit_inst(
         } => {
             let d_preg = resolve(assignment, *dst);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx, *scale);
+            let mem = mem_operand_indexed(&context, *base, *offset, idx, *scale);
             match size {
                 OpSize::S8 => {
                     asm.movzx(preg_to_reg32(d_preg), byte_ptr(mem))?;
@@ -919,7 +934,7 @@ pub(super) fn emit_inst(
                     .expect("packed lane compare offset must fit i32");
                 asm.movdqu(
                     xmm0,
-                    xmmword_ptr(mem_operand(BaseReg::SimState, chunk_offset)),
+                    xmmword_ptr(mem_operand(&context, BaseReg::SimState, chunk_offset)),
                 )?;
                 if let PackedLaneCompareRhs::Memory { offset, .. } = rhs {
                     let rhs_chunk_offset = offset
@@ -927,7 +942,7 @@ pub(super) fn emit_inst(
                         .expect("packed lane compare RHS offset must fit i32");
                     asm.movdqu(
                         xmm1,
-                        xmmword_ptr(mem_operand(BaseReg::SimState, rhs_chunk_offset)),
+                        xmmword_ptr(mem_operand(&context, BaseReg::SimState, rhs_chunk_offset)),
                     )?;
                 } else {
                     asm.movdqa(xmm1, xmm3)?;
@@ -1147,7 +1162,7 @@ pub(super) fn emit_inst(
         } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx, 1);
+            let mem = mem_operand_indexed(&context, *base, *offset, idx, 1);
             match size {
                 OpSize::S8 => {
                     asm.mov(byte_ptr(mem), preg_to_reg8(s_preg))?;
@@ -1174,7 +1189,7 @@ pub(super) fn emit_inst(
         } => {
             let s_preg = resolve(assignment, *src);
             let idx = preg_to_reg64(resolve(assignment, *index));
-            let mem = mem_operand_indexed(*base, *offset, idx, 1);
+            let mem = mem_operand_indexed(&context, *base, *offset, idx, 1);
             match size {
                 OpSize::S8 => asm.or(byte_ptr(mem), preg_to_reg8(s_preg))?,
                 OpSize::S16 => asm.or(word_ptr(mem), preg_to_reg16(s_preg))?,

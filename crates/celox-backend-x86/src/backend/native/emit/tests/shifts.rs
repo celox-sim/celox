@@ -109,7 +109,7 @@ fn decode_shift(
     assignment.set(VReg(0), dst);
     assignment.set(VReg(1), lhs);
     assignment.set(VReg(2), rhs);
-    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut asm = EmitAssembler::new(64).unwrap();
     emit_shift(
         &mut asm,
         &assignment,
