@@ -885,7 +885,10 @@ fn collect_expression_reads(
                 }
                 collect_select_reads(&reference.select, funcs, active_functions, reads);
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
             collect_expression_reads(inner, funcs, active_functions, reads);
@@ -1064,6 +1067,7 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 }
 
 struct ExprCompiler<'a> {
+    reset_type: veryl_metadata::ResetType,
     lookup: &'a FrontendLookup,
     id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
@@ -1425,6 +1429,10 @@ impl ExprCompiler<'_> {
                 } else {
                     unreachable!("unresolved non-constant testbench variable {var_id:?}");
                 }
+            }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.reset_type);
+                ops.push(TbOpcode::ConstU64(value as u64));
             }
             Factor::Value(comptime) => {
                 if let Ok(val) = comptime.get_value() {
@@ -2638,6 +2646,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     fn convert(&mut self, stmts: &[Statement]) -> Vec<Vec<SemanticStatement<StateAddr>>> {
         let base_instance = self.testbench_source.base_instance(self.lookup);
         let ec = ExprCompiler {
+            reset_type: self.testbench_source.reset_type,
             lookup: self.lookup,
             id_map: &self.testbench_source.id_map,
             constant_strings: &self.testbench_source.constant_strings,
@@ -2668,6 +2677,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             .iter()
             .map(|component| {
                 let ec = ExprCompiler {
+                    reset_type: self.testbench_source.reset_type,
                     lookup: self.lookup,
                     id_map: &self.testbench_source.id_map,
                     constant_strings: &self.testbench_source.constant_strings,
@@ -3361,7 +3371,10 @@ fn validate_testbench_expression(
                     ))
                 }
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             if inner.comptime().r#type.is_string() {
@@ -3692,6 +3705,7 @@ fn validate_testbench_hierarchical_destination(
         resolve_hierarchical_reference_from(lookup, source.base_instance(lookup), &reference)?;
     ExprCompiler::validate_target_bounds_parts(info, &destination.index, &destination.select)?;
     let compiler = ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,
@@ -3724,6 +3738,7 @@ fn validate_testbench_destination(
         validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     ExprCompiler {
+        reset_type: source.reset_type,
         lookup,
         id_map: &source.id_map,
         constant_strings: &source.constant_strings,
@@ -3917,6 +3932,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,
@@ -3937,6 +3953,7 @@ mod tests {
         let lookup = lookup_with_child(dut, q);
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
+            reset_type: source.reset_type,
             lookup: &lookup,
             id_map: &source.id_map,
             constant_strings: &source.constant_strings,

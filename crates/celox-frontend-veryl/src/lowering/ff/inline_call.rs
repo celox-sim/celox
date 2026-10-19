@@ -191,7 +191,10 @@ impl<'a> FfParser<'a> {
                 Factor::SystemFunctionCall(call) => {
                     self.system_call_requires_inline(call, visiting)
                 }
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_requires_inline(lhs, visiting)
@@ -658,6 +661,7 @@ fn collect_expression_variables(expr: &Expression, out: &mut HashSet<VarId>) {
             Factor::SystemFunctionCall(call) => collect_system_call_variables(call, out),
             Factor::HierVariable(_)
             | Factor::Value(_)
+            | Factor::ResetValue(..)
             | Factor::Anonymous(_)
             | Factor::Unknown(_) => {}
         },

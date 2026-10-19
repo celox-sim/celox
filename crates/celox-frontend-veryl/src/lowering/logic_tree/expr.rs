@@ -468,6 +468,7 @@ pub(super) fn eval_function_body_return(
                 | Factor::HierVariable(_)
                 | Factor::FunctionCall(_)
                 | Factor::Value(_)
+                | Factor::ResetValue(..)
                 | Factor::Anonymous(_)
                 | Factor::Unknown(_) => Ok(()),
             },
@@ -2426,7 +2427,10 @@ fn case_target_can_be_recomputed(expression: &Expression) -> bool {
                 .chain(select.0.iter())
                 .chain(select.1.iter().map(|(_, end)| end))
                 .all(case_target_can_be_recomputed),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => true,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => true,
             _ => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
@@ -3514,6 +3518,17 @@ fn eval_factor(
             ),
             Some(&reference.comptime.token),
         )),
+        Factor::ResetValue(kind, polarity, _) => {
+            let value = crate::config::reset_value(*kind, *polarity, arena.reset_type);
+            let node = arena.alloc(SLTNode::Constant(
+                BigUint::from(value as u8),
+                BigUint::from(0u8),
+                1,
+                false,
+            ))?;
+            let node = coerce_node_width(arena, node, context_width, context_signed)?;
+            Ok(((node, HashSet::default()), BoundaryMap::default()))
+        }
         Factor::Value(v) => {
             let (celox_value, mask_xz, effective_width, signed) =
                 celox_value_from_comptime_in_context(v, context_width)

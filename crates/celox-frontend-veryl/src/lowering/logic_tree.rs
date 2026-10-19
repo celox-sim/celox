@@ -1905,7 +1905,10 @@ pub(crate) fn collect_written_expression(
             Factor::SystemFunctionCall(call) => {
                 collect_written_system_function_call(module, call, out)
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {

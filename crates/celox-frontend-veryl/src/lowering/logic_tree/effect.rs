@@ -716,7 +716,10 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                 | SystemFunctionKind::Readmemh(_, _)
                 | SystemFunctionKind::Finish => false,
             },
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => false,
         },
         Expression::Unary(_, inner, _) => expression_contains_runtime_effect(module, inner),
         Expression::Binary(lhs, _, rhs, _) => {
@@ -1141,7 +1144,9 @@ fn collect_factor_effects(
             }
             _ => Ok(()),
         },
-        Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {
+            Ok(())
+        }
     }
 }
 
@@ -2593,7 +2598,10 @@ fn collect_factor_position_inputs(
             }
             Ok(())
         }
-        Factor::SystemFunctionCall(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        Factor::SystemFunctionCall(_)
+        | Factor::ResetValue(..)
+        | Factor::Anonymous(_)
+        | Factor::Unknown(_) => Ok(()),
     }
 }
 

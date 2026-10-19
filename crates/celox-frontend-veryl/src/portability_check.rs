@@ -384,7 +384,10 @@ impl Checker<'_, '_> {
                 Factor::SystemFunctionCall(call) => self.system_call(call),
                 Factor::Variable(_, index, select, _) => self.select(index, select),
                 Factor::HierVariable(x) => self.select(&x.index, &x.select),
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Unary(_, inner, _) => self.expression(inner),
             Expression::Binary(left, _, right, _) => {

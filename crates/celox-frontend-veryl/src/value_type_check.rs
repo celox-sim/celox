@@ -212,7 +212,10 @@ impl Checker<'_> {
             Factor::HierVariable(x) => self.select(&x.index, &x.select),
             Factor::FunctionCall(call) => self.call(call),
             Factor::SystemFunctionCall(call) => self.system_call(call),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         }
     }
 

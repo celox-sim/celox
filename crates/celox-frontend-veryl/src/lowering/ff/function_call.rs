@@ -94,7 +94,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_needs_assignment_snapshot_inner(lhs, visiting)
@@ -312,7 +315,10 @@ impl<'a> FfParser<'a> {
                         }
                         _ => true,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -940,7 +946,10 @@ impl<'a> FfParser<'a> {
                     }
                     Expression::Term(Box::new(Factor::HierVariable(Box::new(reference))))
                 }
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => {
                 let lhs =
@@ -3167,7 +3176,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_references(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 Self::expression_references_any(lhs, candidates)
@@ -3245,7 +3257,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Unsigned(input) => input_contains(input),
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -3359,7 +3374,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_expression_read_variables(lhs, variables, arrays_only);
@@ -3463,7 +3481,10 @@ impl<'a> FfParser<'a> {
                         }
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
