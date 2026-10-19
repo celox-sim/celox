@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn net_lvalue_from_node(
     node: &sv_parser::NetLvalue,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     match node {
@@ -41,7 +41,7 @@ pub(super) fn net_lvalue_from_node(
 
 pub(super) fn variable_lvalue_from_node(
     node: &sv_parser::VariableLvalue,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     match node {
@@ -91,6 +91,7 @@ pub(super) fn variable_lvalue_from_node(
 }
 
 fn constant_packed_indices_in_range(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     dimensions: &PackedDimensions,
@@ -102,7 +103,7 @@ fn constant_packed_indices_in_range(
         return false;
     }
     indices.iter().enumerate().all(|(position, index)| {
-        let Some(index) = eval_ast_const_expr(index, &dimensions.const_env) else {
+        let Some(index) = eval_ast_const_expr(state, index, &dimensions.const_env) else {
             return false;
         };
         let Some(dimension) = variable.packed.get(position) else {
@@ -110,8 +111,8 @@ fn constant_packed_indices_in_range(
             return index == 0;
         };
         let (Some(left), Some(right)) = (
-            eval_ast_const_expr(&dimension.left, &dimensions.const_env),
-            eval_ast_const_expr(&dimension.right, &dimensions.const_env),
+            eval_ast_const_expr(state, &dimension.left, &dimensions.const_env),
+            eval_ast_const_expr(state, &dimension.right, &dimensions.const_env),
         ) else {
             return false;
         };
@@ -146,6 +147,7 @@ fn has_selection(node: RefNode<'_>) -> bool {
 /// Why a select of `name` with constant `indices` and, for a part-select,
 /// `bounds` has no representation.
 fn select_error(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     bounds: Option<(&ConstExpr, &ConstExpr)>,
@@ -171,7 +173,7 @@ fn select_error(
                 .map(|range| (&range.left, &range.right)),
         );
     for (position, (index, (left, right))) in indices.iter().zip(ranges.clone()).enumerate() {
-        if const_expr_is_out_of_range(index, left, right, const_env) {
+        if const_expr_is_out_of_range(state, index, left, right, const_env) {
             return unsupported(format!(
                 "index {} of `{name}` outside its declared range",
                 position + 1
@@ -180,8 +182,8 @@ fn select_error(
     }
     if let Some((msb, lsb)) = bounds
         && let Some((left, right)) = ranges.clone().nth(indices.len())
-        && (const_expr_is_out_of_range(msb, left, right, const_env)
-            || const_expr_is_out_of_range(lsb, left, right, const_env))
+        && (const_expr_is_out_of_range(state, msb, left, right, const_env)
+            || const_expr_is_out_of_range(state, lsb, left, right, const_env))
     {
         return unsupported(format!(
             "part-select of `{name}` outside its declared range"
@@ -192,7 +194,7 @@ fn select_error(
 
 pub(super) fn bit_select_index(
     expression: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
     if dimensions.constant_indexed_base || has_indexed_selection(RefNode::Expression(expression)) {
@@ -216,6 +218,7 @@ pub(super) fn bit_select_index(
         }
         let expr = expr_from_expression_with_types(expression, syntax_tree, dimensions)?;
         expr_to_index_const(
+            &syntax_tree.state,
             expand_expr_calls(
                 expr,
                 &dimensions.functions,
@@ -232,7 +235,7 @@ pub(super) fn bit_select_index(
 pub(super) fn lvalue_from_select(
     name: String,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     require_constant_in_range: bool,
 ) -> Converted<LValue> {
@@ -249,6 +252,7 @@ pub(super) fn lvalue_from_select(
                 packed_dimensions,
             )?;
             expr_to_index_const(
+                &syntax_tree.state,
                 expand_expr_calls(
                     expr,
                     &packed_dimensions.functions,
@@ -260,12 +264,14 @@ pub(super) fn lvalue_from_select(
             )
             .ok_or_else(|| unsupported(format!("index of assignment target `{name}`")))
         })
-        .map(|index| index.map(|index| self_determined_index(index, packed_dimensions)))
+        .map(|index| {
+            index.map(|index| self_determined_index(&syntax_tree.state, index, packed_dimensions))
+        })
         .collect::<Converted<Vec<_>>>()?;
     // Struct members cannot use the raw-vector fallback: an invalid index
     // would otherwise become a different bit or the entire member.
     if require_constant_in_range
-        && !constant_packed_indices_in_range(&name, &indices, packed_dimensions)
+        && !constant_packed_indices_in_range(&syntax_tree.state, &name, &indices, packed_dimensions)
     {
         return Err(unsupported(format!(
             "constant select of `{name}` outside its declared range"
@@ -297,14 +303,32 @@ pub(super) fn lvalue_from_select(
             indices.len(),
             packed_dimensions,
         )?;
-        let (array_slice_width, array_slice_reversed) =
-            unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
-                .map_or((None, false), |(width, reversed)| (Some(width), reversed));
-        (msb, lsb) =
-            flatten_select_range(&name, &indices, msb.clone(), lsb.clone(), packed_dimensions)
-                .ok_or_else(|| {
-                    select_error(&name, &indices, Some((&msb, &lsb)), packed_dimensions)
-                })?;
+        let (array_slice_width, array_slice_reversed) = unpacked_select_range_metadata(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            &msb,
+            &lsb,
+            packed_dimensions,
+        )
+        .map_or((None, false), |(width, reversed)| (Some(width), reversed));
+        (msb, lsb) = flatten_select_range(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            msb.clone(),
+            lsb.clone(),
+            packed_dimensions,
+        )
+        .ok_or_else(|| {
+            select_error(
+                &syntax_tree.state,
+                &name,
+                &indices,
+                Some((&msb, &lsb)),
+                packed_dimensions,
+            )
+        })?;
         return Ok(LValue::Select {
             name,
             msb,
@@ -317,12 +341,15 @@ pub(super) fn lvalue_from_select(
     }
 
     if let Some((array_offset, packed_indices)) =
-        flatten_variable_select(&name, &indices, packed_dimensions)
+        flatten_variable_select(&syntax_tree.state, &name, &indices, packed_dimensions)
     {
         if !packed_indices.is_empty() {
-            if let Some((msb, lsb)) =
-                flatten_packed_select(&name, &packed_indices, packed_dimensions)
-            {
+            if let Some((msb, lsb)) = flatten_packed_select(
+                &syntax_tree.state,
+                &name,
+                &packed_indices,
+                packed_dimensions,
+            ) {
                 let signed = selects_signed_element(&name, packed_indices.len(), packed_dimensions);
                 return Ok(LValue::Select {
                     name,
@@ -390,7 +417,13 @@ pub(super) fn lvalue_from_select(
             .get(&name)
             .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
     {
-        return Err(select_error(&name, &indices, None, packed_dimensions));
+        return Err(select_error(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            None,
+            packed_dimensions,
+        ));
     }
     if indices.len() == 1 {
         let signed = selects_signed_element(&name, 1, packed_dimensions);
@@ -412,7 +445,7 @@ pub(super) fn lvalue_from_select(
 pub(super) fn lvalue_from_constant_select(
     name: String,
     select: &sv_parser::ConstantSelect,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     require_constant_in_range: bool,
 ) -> Converted<LValue> {
@@ -437,10 +470,18 @@ pub(super) fn lvalue_from_constant_select(
                         .ok_or_else(|| unsupported(format!("index of `{name}`")));
                 }
                 let expr = indexed_constant_expression(node, syntax_tree, packed_dimensions)?;
-                let expr = substitute_indexed_parameter_values(expr, packed_dimensions);
-                let expr =
-                    fold_const_integral_expr_preserving_mask(expr, &packed_dimensions.const_env);
+                let expr = substitute_indexed_parameter_values(
+                    &syntax_tree.state,
+                    expr,
+                    packed_dimensions,
+                );
+                let expr = fold_const_integral_expr_preserving_mask(
+                    &syntax_tree.state,
+                    expr,
+                    &packed_dimensions.const_env,
+                );
                 expr_to_index_const(
+                    &syntax_tree.state,
                     expand_expr_calls(
                         expr,
                         &packed_dimensions.functions,
@@ -453,12 +494,14 @@ pub(super) fn lvalue_from_constant_select(
                 .ok_or_else(|| unsupported(format!("index of `{name}`")))
             }
         })
-        .map(|index| index.map(|index| self_determined_index(index, packed_dimensions)))
+        .map(|index| {
+            index.map(|index| self_determined_index(&syntax_tree.state, index, packed_dimensions))
+        })
         .collect::<Converted<Vec<_>>>()?;
     // Struct members cannot use the raw-vector fallback: an invalid index
     // would otherwise become a different bit or the entire member.
     if require_constant_in_range
-        && !constant_packed_indices_in_range(&name, &indices, packed_dimensions)
+        && !constant_packed_indices_in_range(&syntax_tree.state, &name, &indices, packed_dimensions)
     {
         return Err(unsupported(format!(
             "constant select of `{name}` outside its declared range"
@@ -473,14 +516,32 @@ pub(super) fn lvalue_from_constant_select(
             syntax_tree,
             packed_dimensions,
         )?;
-        let (array_slice_width, array_slice_reversed) =
-            unpacked_select_range_metadata(&name, &indices, &msb, &lsb, packed_dimensions)
-                .map_or((None, false), |(width, reversed)| (Some(width), reversed));
-        (msb, lsb) =
-            flatten_select_range(&name, &indices, msb.clone(), lsb.clone(), packed_dimensions)
-                .ok_or_else(|| {
-                    select_error(&name, &indices, Some((&msb, &lsb)), packed_dimensions)
-                })?;
+        let (array_slice_width, array_slice_reversed) = unpacked_select_range_metadata(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            &msb,
+            &lsb,
+            packed_dimensions,
+        )
+        .map_or((None, false), |(width, reversed)| (Some(width), reversed));
+        (msb, lsb) = flatten_select_range(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            msb.clone(),
+            lsb.clone(),
+            packed_dimensions,
+        )
+        .ok_or_else(|| {
+            select_error(
+                &syntax_tree.state,
+                &name,
+                &indices,
+                Some((&msb, &lsb)),
+                packed_dimensions,
+            )
+        })?;
         return Ok(LValue::Select {
             name,
             msb,
@@ -493,12 +554,15 @@ pub(super) fn lvalue_from_constant_select(
     }
 
     if let Some((array_offset, packed_indices)) =
-        flatten_variable_select(&name, &indices, packed_dimensions)
+        flatten_variable_select(&syntax_tree.state, &name, &indices, packed_dimensions)
     {
         if !packed_indices.is_empty() {
-            if let Some((msb, lsb)) =
-                flatten_packed_select(&name, &packed_indices, packed_dimensions)
-            {
+            if let Some((msb, lsb)) = flatten_packed_select(
+                &syntax_tree.state,
+                &name,
+                &packed_indices,
+                packed_dimensions,
+            ) {
                 let signed = selects_signed_element(&name, packed_indices.len(), packed_dimensions);
                 return Ok(LValue::Select {
                     name,
@@ -566,7 +630,13 @@ pub(super) fn lvalue_from_constant_select(
             .get(&name)
             .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
     {
-        return Err(select_error(&name, &indices, None, packed_dimensions));
+        return Err(select_error(
+            &syntax_tree.state,
+            &name,
+            &indices,
+            None,
+            packed_dimensions,
+        ));
     }
     if indices.len() == 1 {
         let signed = selects_signed_element(&name, 1, packed_dimensions);
@@ -588,7 +658,7 @@ pub(super) fn lvalue_from_constant_select(
 pub(super) fn expr_select_from_select(
     base: Expr,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
@@ -596,7 +666,7 @@ pub(super) fn expr_select_from_select(
         .iter()
         .map(|bit_select| {
             bit_select_index(&bit_select.nodes.1, syntax_tree, packed_dimensions)
-                .map(|index| self_determined_index(index, packed_dimensions))
+                .map(|index| self_determined_index(&syntax_tree.state, index, packed_dimensions))
         })
         .collect::<Converted<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
@@ -643,6 +713,7 @@ pub(super) fn expr_select_from_select(
             });
         };
         if let Some(expr) = expr_from_unpacked_select_range(
+            &syntax_tree.state,
             name,
             &indices,
             msb.clone(),
@@ -651,11 +722,23 @@ pub(super) fn expr_select_from_select(
         ) {
             return Ok(expr);
         }
-        (msb, lsb) =
-            flatten_select_range(name, &indices, msb.clone(), lsb.clone(), packed_dimensions)
-                .ok_or_else(|| {
-                    select_error(name, &indices, Some((&msb, &lsb)), packed_dimensions)
-                })?;
+        (msb, lsb) = flatten_select_range(
+            &syntax_tree.state,
+            name,
+            &indices,
+            msb.clone(),
+            lsb.clone(),
+            packed_dimensions,
+        )
+        .ok_or_else(|| {
+            select_error(
+                &syntax_tree.state,
+                name,
+                &indices,
+                Some((&msb, &lsb)),
+                packed_dimensions,
+            )
+        })?;
         return Ok(Expr::Select {
             expr: Box::new(base),
             msb,
@@ -666,11 +749,15 @@ pub(super) fn expr_select_from_select(
 
     if let Expr::Ident(name) = &base {
         if let Some((array_offset, packed_indices)) =
-            flatten_variable_select(name, &indices, packed_dimensions)
+            flatten_variable_select(&syntax_tree.state, name, &indices, packed_dimensions)
         {
             if !packed_indices.is_empty()
-                && let Some((msb, lsb)) =
-                    flatten_packed_select(name, &packed_indices, packed_dimensions)
+                && let Some((msb, lsb)) = flatten_packed_select(
+                    &syntax_tree.state,
+                    name,
+                    &packed_indices,
+                    packed_dimensions,
+                )
             {
                 let signed = selects_signed_element(name, packed_indices.len(), packed_dimensions);
                 return Ok(Expr::Select {
@@ -733,7 +820,13 @@ pub(super) fn expr_select_from_select(
                 .get(name)
                 .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
         {
-            return Err(select_error(name, &indices, None, packed_dimensions));
+            return Err(select_error(
+                &syntax_tree.state,
+                name,
+                &indices,
+                None,
+                packed_dimensions,
+            ));
         }
         let signed = matches!(&base, Expr::Ident(name)
             if selects_signed_element(name, 1, packed_dimensions));
@@ -747,7 +840,9 @@ pub(super) fn expr_select_from_select(
     }
 
     Err(match &base {
-        Expr::Ident(name) => select_error(name, &indices, None, packed_dimensions),
+        Expr::Ident(name) => {
+            select_error(&syntax_tree.state, name, &indices, None, packed_dimensions)
+        }
         _ => unsupported("select of an expression"),
     })
 }
@@ -776,17 +871,18 @@ fn dynamic_indexed_shape(
     name: &str,
     range: &sv_parser::PartSelectRange,
     no_leading_indices: bool,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Option<DynamicIndexed>>> {
     let sv_parser::PartSelectRange::IndexedRange(range) = range else {
         return Ok(None);
     };
     let start = self_determined_index(
+        &syntax_tree.state,
         indexed_select_base(RefNode::Expression(&range.nodes.0), syntax_tree, dimensions)?,
         dimensions,
     );
-    if eval_ast_const_expr(&start, &dimensions.const_env).is_some() {
+    if eval_ast_const_expr(&syntax_tree.state, &start, &dimensions.const_env).is_some() {
         return Ok(None);
     }
     let shape = || {
@@ -796,7 +892,12 @@ fn dynamic_indexed_shape(
             dimensions,
         )
         .ok()?;
-        let width = usize::try_from(eval_ast_const_expr(&width, &dimensions.const_env)?).ok()?;
+        let width = usize::try_from(eval_ast_const_expr(
+            &syntax_tree.state,
+            &width,
+            &dimensions.const_env,
+        )?)
+        .ok()?;
         if width == 0 || !no_leading_indices {
             return None;
         }
@@ -805,8 +906,9 @@ fn dynamic_indexed_shape(
             return None;
         }
         let dimension = &variable.packed[0];
-        let left = eval_ast_const_expr(&dimension.left, &dimensions.const_env)?;
-        let right = eval_ast_const_expr(&dimension.right, &dimensions.const_env)?;
+        let left = eval_ast_const_expr(&syntax_tree.state, &dimension.left, &dimensions.const_env)?;
+        let right =
+            eval_ast_const_expr(&syntax_tree.state, &dimension.right, &dimensions.const_env)?;
         Some(DynamicIndexed {
             start,
             width,
@@ -831,7 +933,7 @@ fn dynamic_indexed_bounds(
     name: &str,
     range: &sv_parser::PartSelectRange,
     no_leading_indices: bool,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(ConstExpr, ConstExpr)>> {
     let Some(Some(shape)) =
@@ -855,6 +957,7 @@ fn dynamic_indexed_bounds(
 }
 
 fn flatten_variable_select(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     packed_dimensions: &PackedDimensions,
@@ -867,6 +970,7 @@ fn flatten_variable_select(
     let mut valid = None;
     for (index, value) in indices[..selected_unpacked_count].iter().enumerate() {
         if const_expr_is_out_of_range(
+            state,
             value,
             &dimensions.unpacked[index].left,
             &dimensions.unpacked[index].right,
@@ -964,6 +1068,7 @@ fn flatten_variable_select(
 }
 
 fn expr_from_unpacked_select_range(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     msb: ConstExpr,
@@ -973,11 +1078,13 @@ fn expr_from_unpacked_select_range(
     let dimensions = packed_dimensions.get(name)?;
     let dimension = dimensions.unpacked.get(indices.len())?;
     if const_expr_is_out_of_range(
+        state,
         &msb,
         &dimension.left,
         &dimension.right,
         &packed_dimensions.const_env,
     ) || const_expr_is_out_of_range(
+        state,
         &lsb,
         &dimension.left,
         &dimension.right,
@@ -985,12 +1092,13 @@ fn expr_from_unpacked_select_range(
     ) {
         return None;
     }
-    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    let (array_offset, packed_indices) =
+        flatten_variable_select(state, name, indices, packed_dimensions)?;
     if !packed_indices.is_empty() {
         return None;
     }
-    let msb_value = eval_ast_const_expr(&msb, &packed_dimensions.const_env)?;
-    let lsb_value = eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?;
+    let msb_value = eval_ast_const_expr(state, &msb, &packed_dimensions.const_env)?;
+    let lsb_value = eval_ast_const_expr(state, &lsb, &packed_dimensions.const_env)?;
     let stride = product_expr(
         &dimensions.unpacked[indices.len() + 1..]
             .iter()
@@ -1049,6 +1157,7 @@ fn expr_from_unpacked_select_range(
 }
 
 fn unpacked_select_range_metadata(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     msb: &ConstExpr,
@@ -1058,11 +1167,13 @@ fn unpacked_select_range_metadata(
     let dimensions = packed_dimensions.get(name)?;
     let dimension = dimensions.unpacked.get(indices.len())?;
     if const_expr_is_out_of_range(
+        state,
         msb,
         &dimension.left,
         &dimension.right,
         &packed_dimensions.const_env,
     ) || const_expr_is_out_of_range(
+        state,
         lsb,
         &dimension.left,
         &dimension.right,
@@ -1070,15 +1181,17 @@ fn unpacked_select_range_metadata(
     ) {
         return None;
     }
-    let (_, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    let (_, packed_indices) = flatten_variable_select(state, name, indices, packed_dimensions)?;
     if !packed_indices.is_empty() {
         return None;
     }
     let msb_offset = eval_ast_const_expr(
+        state,
         &unpacked_index_offset(dimension, msb.clone()),
         &packed_dimensions.const_env,
     )?;
     let lsb_offset = eval_ast_const_expr(
+        state,
         &unpacked_index_offset(dimension, lsb.clone()),
         &packed_dimensions.const_env,
     )?;
@@ -1115,6 +1228,7 @@ fn remaining_unpacked_selection_width(
 }
 
 fn flatten_unpacked_select_range(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     msb: ConstExpr,
@@ -1124,11 +1238,13 @@ fn flatten_unpacked_select_range(
 ) -> Option<(ConstExpr, ConstExpr)> {
     let dimension = dimensions.unpacked.get(indices.len())?;
     if const_expr_is_out_of_range(
+        state,
         &msb,
         &dimension.left,
         &dimension.right,
         &packed_dimensions.const_env,
     ) || const_expr_is_out_of_range(
+        state,
         &lsb,
         &dimension.left,
         &dimension.right,
@@ -1136,7 +1252,8 @@ fn flatten_unpacked_select_range(
     ) {
         return None;
     }
-    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    let (array_offset, packed_indices) =
+        flatten_variable_select(state, name, indices, packed_dimensions)?;
     if !packed_indices.is_empty() {
         return None;
     }
@@ -1195,6 +1312,7 @@ fn flatten_unpacked_select_range(
 }
 
 fn flatten_select_range(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     mut msb: ConstExpr,
@@ -1213,6 +1331,7 @@ fn flatten_select_range(
     }
     if indices.len() < dimensions.unpacked.len() {
         return flatten_unpacked_select_range(
+            state,
             name,
             indices,
             msb,
@@ -1221,14 +1340,17 @@ fn flatten_select_range(
             packed_dimensions,
         );
     }
-    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    let (array_offset, packed_indices) =
+        flatten_variable_select(state, name, indices, packed_dimensions)?;
     let dimension = dimensions.packed.get(packed_indices.len())?;
     if const_expr_is_out_of_range(
+        state,
         &msb,
         &dimension.left,
         &dimension.right,
         &packed_dimensions.const_env,
     ) || const_expr_is_out_of_range(
+        state,
         &lsb,
         &dimension.left,
         &dimension.right,
@@ -1268,7 +1390,7 @@ fn flatten_select_range(
     let prefix_offset = if packed_indices.is_empty() {
         ConstExpr::Literal("0".to_string())
     } else {
-        let (_, offset) = flatten_packed_select(name, &packed_indices, packed_dimensions)?;
+        let (_, offset) = flatten_packed_select(state, name, &packed_indices, packed_dimensions)?;
         offset
     };
     let offset = add_expr(array_offset, prefix_offset);
@@ -1301,6 +1423,7 @@ fn packed_index_in_range(index: &ConstExpr, dimension: &PackedDimension) -> Cons
 }
 
 fn flatten_packed_select(
+    state: &AnalysisState,
     name: &str,
     indices: &[ConstExpr],
     packed_dimensions: &PackedDimensions,
@@ -1312,7 +1435,7 @@ fn flatten_packed_select(
             return None;
         }
         let zero = ConstExpr::Literal("0".to_string());
-        if eval_ast_const_expr(&indices[0], &packed_dimensions.const_env) != Some(0) {
+        if eval_ast_const_expr(state, &indices[0], &packed_dimensions.const_env) != Some(0) {
             return None;
         }
         return Some((zero.clone(), zero));
@@ -1330,6 +1453,7 @@ fn flatten_packed_select(
     for (idx, index) in indices.iter().enumerate() {
         let dimension = &dimensions[idx];
         if const_expr_is_out_of_range(
+            state,
             index,
             &dimension.left,
             &dimension.right,
@@ -1363,7 +1487,9 @@ fn flatten_packed_select(
     let in_range = indices
         .iter()
         .zip(dimensions)
-        .filter(|(index, _)| eval_ast_const_expr(index, &packed_dimensions.const_env).is_none())
+        .filter(|(index, _)| {
+            eval_ast_const_expr(state, index, &packed_dimensions.const_env).is_none()
+        })
         .map(|(index, dimension)| packed_index_in_range(index, dimension))
         .reduce(|left, right| ConstExpr::Binary {
             left: Box::new(left),
@@ -1462,15 +1588,16 @@ fn const_index_has_unknown_value(index: &ConstExpr, dimensions: &PackedDimension
 }
 
 fn const_expr_is_out_of_range(
+    state: &AnalysisState,
     index: &ConstExpr,
     left: &ConstExpr,
     right: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> bool {
     let (Some(index), Some(left), Some(right)) = (
-        eval_ast_const_expr(index, const_env),
-        eval_ast_const_expr(left, const_env),
-        eval_ast_const_expr(right, const_env),
+        eval_ast_const_expr(state, index, const_env),
+        eval_ast_const_expr(state, left, const_env),
+        eval_ast_const_expr(state, right, const_env),
     ) else {
         return false;
     };
@@ -1516,7 +1643,7 @@ fn is_one(expr: &ConstExpr) -> bool {
 // range flattening after recovering those endpoints.
 pub(super) fn part_select_bounds(
     range: &sv_parser::PartSelectRange,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     name: Option<&str>,
     index_count: usize,
     dimensions: &PackedDimensions,
@@ -1557,11 +1684,11 @@ pub(super) fn part_select_bounds(
 
 fn indexed_select_width(
     width: &sv_parser::ConstantExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<i128> {
     let width = indexed_select_base(RefNode::ConstantExpression(width), syntax_tree, dimensions)?;
-    let width = eval_ast_const_expr(&width, &dimensions.const_env)
+    let width = eval_ast_const_expr(&syntax_tree.state, &width, &dimensions.const_env)
         .ok_or_else(|| unsupported("indexed part-select width that is not constant"))?;
     if width <= 0 {
         return Err(unsupported(format!("indexed part-select width {width}")));
@@ -1573,7 +1700,7 @@ fn indexed_select_bounds(
     base: ConstExpr,
     operator: &sv_parser::Symbol,
     width: &sv_parser::ConstantExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     selection: (Option<&str>, usize),
     dimensions: &PackedDimensions,
 ) -> Converted<(ConstExpr, ConstExpr)> {
@@ -1591,8 +1718,8 @@ fn indexed_select_bounds(
                 (&dim.left, &dim.right)
             };
             Some(
-                eval_ast_const_expr(left, &dimensions.const_env)?
-                    < eval_ast_const_expr(right, &dimensions.const_env)?,
+                eval_ast_const_expr(&syntax_tree.state, left, &dimensions.const_env)?
+                    < eval_ast_const_expr(&syntax_tree.state, right, &dimensions.const_env)?,
             )
         })
         .unwrap_or(false);
@@ -1602,7 +1729,7 @@ fn indexed_select_bounds(
         == "+:";
     // The base is self-determined; endpoint arithmetic must not inherit its
     // unsigned type or truncate a carry across the base expression's width.
-    let base = eval_ast_const_expr(&base, &dimensions.const_env)
+    let base = eval_ast_const_expr(&syntax_tree.state, &base, &dimensions.const_env)
         .ok_or_else(|| unsupported("indexed part-select start"))?;
     let overflow = || unsupported("indexed part-select bounds");
     let offset = width - 1;
@@ -1624,7 +1751,7 @@ fn indexed_select_bounds(
 // parser can discard selections, and cannot resolve typedef casts.
 pub(super) fn indexed_select_base(
     base: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
     let mut dimensions = dimensions.clone();
@@ -1633,11 +1760,16 @@ pub(super) fn indexed_select_base(
         RefNode::Expression(base) => {
             let expression = expr_from_expression_with_types(base, syntax_tree, &dimensions)?;
             // Keep both mux arms until typed evaluation determines their common width.
-            let expression = substitute_indexed_parameter_values(expression, &dimensions);
-            expr_to_const(fold_const_integral_expr_preserving_mask(
-                expression,
-                &dimensions.const_env,
-            ))
+            let expression =
+                substitute_indexed_parameter_values(&syntax_tree.state, expression, &dimensions);
+            expr_to_const(
+                &syntax_tree.state,
+                fold_const_integral_expr_preserving_mask(
+                    &syntax_tree.state,
+                    expression,
+                    &dimensions.const_env,
+                ),
+            )
             .ok_or_else(|| unsupported("index expression"))
         }
         RefNode::ConstantExpression(base) => {
@@ -1646,18 +1778,27 @@ pub(super) fn indexed_select_base(
                 syntax_tree,
                 &dimensions,
             )?;
-            let expression = substitute_indexed_parameter_values(expression, &dimensions);
-            expr_to_const(fold_const_integral_expr_preserving_mask(
-                expression,
-                &dimensions.const_env,
-            ))
+            let expression =
+                substitute_indexed_parameter_values(&syntax_tree.state, expression, &dimensions);
+            expr_to_const(
+                &syntax_tree.state,
+                fold_const_integral_expr_preserving_mask(
+                    &syntax_tree.state,
+                    expression,
+                    &dimensions.const_env,
+                ),
+            )
             .ok_or_else(|| unsupported("constant index expression"))
         }
         _ => Err(unsupported("index expression")),
     }
 }
 
-fn substitute_indexed_parameter_values(expression: Expr, dimensions: &PackedDimensions) -> Expr {
+fn substitute_indexed_parameter_values(
+    state: &AnalysisState,
+    expression: Expr,
+    dimensions: &PackedDimensions,
+) -> Expr {
     // Known values come from the current environment, which may include a
     // generate index shadowing a parameter. Supply expressions only for values
     // absent from that numeric environment, including X/Z parameters.
@@ -1667,7 +1808,12 @@ fn substitute_indexed_parameter_values(expression: Expr, dimensions: &PackedDime
         .filter(|(name, _)| !dimensions.const_env.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    substitute_expr_constants_with_parameter_literals(expression, &dimensions.const_env, &values)
+    substitute_expr_constants_with_parameter_literals(
+        state,
+        expression,
+        &dimensions.const_env,
+        &values,
+    )
 }
 
 /// Selections and casts that need declared types and typed expression lowering.
@@ -1690,7 +1836,7 @@ pub(super) fn parameter_initializer_needs_typed_lowering(
 /// Lower only the selected primary so unrelated oversized values remain skipped.
 pub(super) fn validate_parameter_initializer_selections(
     initializer: &sv_parser::ConstantParamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     let mut dimensions = dimensions.clone();
@@ -1701,7 +1847,7 @@ pub(super) fn validate_parameter_initializer_selections(
             syntax_tree,
             &dimensions,
         )?;
-        if eval_ast_const_expr(&expression, &dimensions.const_env).is_none()
+        if eval_ast_const_expr(&syntax_tree.state, &expression, &dimensions.const_env).is_none()
             && !(allow_unknown && const_index_has_unknown_value(&expression, &dimensions))
         {
             return Err(unsupported(
@@ -1712,7 +1858,9 @@ pub(super) fn validate_parameter_initializer_selections(
     };
     let repeat_count = |count: RefNode<'_>| {
         let count = indexed_select_base(count, syntax_tree, &dimensions)?;
-        if !eval_ast_const_expr(&count, &dimensions.const_env).is_some_and(|count| count >= 0) {
+        if !eval_ast_const_expr(&syntax_tree.state, &count, &dimensions.const_env)
+            .is_some_and(|count| count >= 0)
+        {
             return Err(unsupported(
                 "parameter repetition count must be a nonnegative known constant",
             ));
@@ -1744,7 +1892,7 @@ pub(super) fn validate_parameter_initializer_selections(
                             syntax_tree,
                             &dimensions,
                         )?;
-                        eval_ast_const_expr(&expression, &dimensions.const_env)
+                        eval_ast_const_expr(&syntax_tree.state, &expression, &dimensions.const_env)
                             .is_some_and(|size| size > 0)
                     }
                     sv_parser::SliceSize::SimpleType(simple_type) => casts::cast_target_type(
@@ -1851,7 +1999,7 @@ pub(super) fn validate_parameter_initializer_selections(
 /// Check a skipped stream's selector without lowering the streamed value.
 fn validate_streaming_with_range(
     stream: &sv_parser::StreamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     let Some((_, range)) = &stream.nodes.1 else {
@@ -1860,9 +2008,9 @@ fn validate_streaming_with_range(
     let bound = |expression: &sv_parser::Expression| {
         let expression =
             indexed_select_base(RefNode::Expression(expression), syntax_tree, dimensions)?;
-        eval_ast_const_expr(&expression, &dimensions.const_env).ok_or_else(|| {
-            unsupported("streaming with range bound must be a known integral constant")
-        })
+        eval_ast_const_expr(&syntax_tree.state, &expression, &dimensions.const_env).ok_or_else(
+            || unsupported("streaming with range bound must be a known integral constant"),
+        )
     };
     match &range.nodes.1 {
         sv_parser::ArrayRangeExpression::Expression(index) => {
@@ -1916,7 +2064,7 @@ fn validate_streaming_with_range(
 /// result bounded. Reuse typed lowering for declared directions and ranks.
 pub(super) fn bounded_parameter_selection(
     primary: &sv_parser::ConstantPrimary,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     let sv_parser::ConstantPrimary::PsParameter(parameter) = primary else {
@@ -1927,7 +2075,7 @@ pub(super) fn bounded_parameter_selection(
     {
         return None;
     }
-    if expr_static_width(&Expr::Ident(name), dimensions)?
+    if expr_static_width(&tree.state, &Expr::Ident(name), dimensions)?
         > constant_folding::MAX_CONSTANT_CONCAT_BITS
     {
         return None;
@@ -1936,11 +2084,14 @@ pub(super) fn bounded_parameter_selection(
     dimensions.constant_indexed_base = true;
     let expression =
         indexed_constant_expression(RefNode::ConstantPrimary(primary), tree, &dimensions).ok()?;
-    let expression = substitute_indexed_parameter_values(expression, &dimensions);
-    if expr_static_width(&expression, &dimensions)? > constant_folding::MAX_CONSTANT_CONCAT_BITS {
+    let expression = substitute_indexed_parameter_values(&tree.state, expression, &dimensions);
+    if expr_static_width(&tree.state, &expression, &dimensions)?
+        > constant_folding::MAX_CONSTANT_CONCAT_BITS
+    {
         return None;
     }
-    let expression = fold_const_integral_expr_preserving_mask(expression, &dimensions.const_env);
+    let expression =
+        fold_const_integral_expr_preserving_mask(&tree.state, expression, &dimensions.const_env);
     matches!(expression, Expr::Literal(_)).then_some(expression)
 }
 
@@ -1948,7 +2099,7 @@ pub(super) fn bounded_parameter_selection(
 // selection operands have been folded, rather than the index expression context.
 pub(super) fn selected_parameter_initializer(
     initializer: &sv_parser::ConstantParamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
     assignment_width: Option<usize>,
 ) -> Converted<ConstExpr> {
@@ -1966,7 +2117,8 @@ pub(super) fn selected_parameter_initializer(
         syntax_tree,
         &dimensions,
     )?;
-    let expression = substitute_indexed_parameter_values(expression, &dimensions);
+    let expression =
+        substitute_indexed_parameter_values(&syntax_tree.state, expression, &dimensions);
     let types = parameter_types_from_const_env(&dimensions.const_env);
     let integral_types = types
         .iter()
@@ -1974,6 +2126,7 @@ pub(super) fn selected_parameter_initializer(
         .collect();
     let not_constant = || unsupported("parameter initializer that is not constant");
     let constant = constant_folding::constant_with_folded_selections(
+        &syntax_tree.state,
         &expression,
         &dimensions.const_env,
         &integral_types,
@@ -1997,7 +2150,7 @@ fn constant_part_select_bounds(
     range: &sv_parser::ConstantPartSelectRange,
     name: &str,
     index_count: usize,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(ConstExpr, ConstExpr)> {
     let bound = |expression: &sv_parser::ConstantExpression| {
@@ -2036,7 +2189,7 @@ fn constant_part_select_bounds(
 fn unknown_indexed_part_select(
     range: &sv_parser::ConstantIndexedRange,
     stride: &ConstExpr,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     let base = indexed_select_base(
@@ -2048,7 +2201,7 @@ fn unknown_indexed_part_select(
         return Ok(None);
     }
     let width = indexed_select_width(&range.nodes.2, syntax_tree, dimensions)?;
-    let width = eval_ast_const_expr(stride, &dimensions.const_env)
+    let width = eval_ast_const_expr(&syntax_tree.state, stride, &dimensions.const_env)
         .and_then(|stride| width.checked_mul(stride))
         .and_then(|width| usize::try_from(width).ok())
         .filter(|width| *width > 0 && *width <= constant_folding::MAX_CONSTANT_CONCAT_BITS)
@@ -2060,7 +2213,7 @@ fn unknown_indexed_part_select(
 
 fn indexed_constant_expression(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let convert = |node| indexed_constant_expression(node, syntax_tree, dimensions);
@@ -2211,6 +2364,7 @@ fn indexed_constant_expression(
                         .collect::<Converted<Vec<_>>>()?;
                     if indices.iter().zip(&variable.packed).any(|(index, range)| {
                         const_expr_is_out_of_range(
+                            &syntax_tree.state,
                             index,
                             &range.left,
                             &range.right,
@@ -2223,9 +2377,10 @@ fn indexed_constant_expression(
                                 .map(|range| range.width.clone())
                                 .collect::<Vec<_>>(),
                         );
-                        let width = eval_ast_const_expr(&width, &dimensions.const_env)
-                            .and_then(|width| usize::try_from(width).ok())
-                            .ok_or_else(|| unsupported("constant parameter element width"))?;
+                        let width =
+                            eval_ast_const_expr(&syntax_tree.state, &width, &dimensions.const_env)
+                                .and_then(|width| usize::try_from(width).ok())
+                                .ok_or_else(|| unsupported("constant parameter element width"))?;
                         let signing = if selects_signed_element(&name, indices.len(), dimensions) {
                             "s"
                         } else {
@@ -2251,7 +2406,7 @@ fn indexed_constant_expression(
                 {
                     return Err(unsupported(format!("constant select of `{name}`")));
                 }
-                Ok(expr_from_lvalue(&selected, dimensions))
+                Ok(expr_from_lvalue(&syntax_tree.state, &selected, dimensions))
             }
             sv_parser::ConstantPrimary::MintypmaxExpression(grouped) => {
                 match &grouped.nodes.0.nodes.1 {
@@ -2354,7 +2509,7 @@ fn indexed_constant_expression(
 fn selected_constant_concatenation(
     expression: Expr,
     selection: Option<&sv_parser::ConstantRangeExpression>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let bound = |expression| {
@@ -2407,7 +2562,11 @@ fn selected_constant_concatenation(
 /// The bit length and signedness of an expression evaluated in a
 /// self-determined context (IEEE 1800-2023 Table 11-21), or `None` when an
 /// operand's type is not known here.
-fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Option<(usize, bool)> {
+fn self_determined_type(
+    state: &AnalysisState,
+    expr: &ConstExpr,
+    dimensions: &PackedDimensions,
+) -> Option<(usize, bool)> {
     let const_env = &dimensions.const_env;
     match expr {
         ConstExpr::Literal(value) => {
@@ -2422,7 +2581,8 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             let mut width = 1usize;
             for dimension in &variable.packed {
                 let size =
-                    usize::try_from(eval_ast_const_expr(&dimension.width, const_env)?).ok()?;
+                    usize::try_from(eval_ast_const_expr(state, &dimension.width, const_env)?)
+                        .ok()?;
                 width = width.checked_mul(size)?;
             }
             Some((width, variable.signed))
@@ -2442,7 +2602,7 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
         ConstExpr::Function { .. } => None,
         ConstExpr::Unary { op, expr } => match op {
             UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot | UnaryOp::ToTwoState => {
-                self_determined_type(expr, dimensions)
+                self_determined_type(state, expr, dimensions)
             }
             UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor => {
                 Some((1, false))
@@ -2457,12 +2617,12 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor => {
-                let (left_width, left_signed) = self_determined_type(left, dimensions)?;
-                let (right_width, right_signed) = self_determined_type(right, dimensions)?;
+                let (left_width, left_signed) = self_determined_type(state, left, dimensions)?;
+                let (right_width, right_signed) = self_determined_type(state, right, dimensions)?;
                 Some((left_width.max(right_width), left_signed && right_signed))
             }
             BinaryOp::Pow | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => {
-                self_determined_type(left, dimensions)
+                self_determined_type(state, left, dimensions)
             }
             _ => Some((1, false)),
         },
@@ -2471,8 +2631,8 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
             else_expr,
             ..
         } => {
-            let (then_width, then_signed) = self_determined_type(then_expr, dimensions)?;
-            let (else_width, else_signed) = self_determined_type(else_expr, dimensions)?;
+            let (then_width, then_signed) = self_determined_type(state, then_expr, dimensions)?;
+            let (else_width, else_signed) = self_determined_type(state, else_expr, dimensions)?;
             Some((then_width.max(else_width), then_signed && else_signed))
         }
     }
@@ -2481,14 +2641,18 @@ fn self_determined_type(expr: &ConstExpr, dimensions: &PackedDimensions) -> Opti
 /// A select index as the value it has in its self-determined context
 /// (IEEE 1800-2023 11.5.1): the flattening adds it to offsets at the width of
 /// unsized literals, where `j + 2'd1` would not wrap.
-fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
+fn self_determined_index(
+    state: &AnalysisState,
+    index: ConstExpr,
+    dimensions: &PackedDimensions,
+) -> ConstExpr {
     if matches!(
         index,
         ConstExpr::Literal(_) | ConstExpr::Ident(_) | ConstExpr::Select { .. }
     ) {
         return index;
     }
-    let Some((width, signed)) = self_determined_type(&index, dimensions) else {
+    let Some((width, signed)) = self_determined_type(state, &index, dimensions) else {
         return index;
     };
     if width == 0 || width >= 32 {
@@ -2506,7 +2670,7 @@ fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> Con
     // A signed index is computed with its operands sign-extended to the
     // offsets' width, which leaves its low bits as they are except under a
     // logical right shift: shift in zeros from the operand's own width.
-    let index = zero_extend_logical_shifts(index, dimensions);
+    let index = zero_extend_logical_shifts(state, index, dimensions);
     let masked = binary(index, BinaryOp::BitAnd, literal((1 << width) - 1));
     // Sign-extend from the top bit: (x ^ s) - s.
     let sign = literal(1 << (width - 1));
@@ -2519,16 +2683,20 @@ fn self_determined_index(index: ConstExpr, dimensions: &PackedDimensions) -> Con
 
 /// `expr` with the left operand of each logical right shift reduced to its own
 /// width, so that a wider signed context does not shift its sign bits in.
-fn zero_extend_logical_shifts(expr: ConstExpr, dimensions: &PackedDimensions) -> ConstExpr {
-    let go = |expr: Box<ConstExpr>| Box::new(zero_extend_logical_shifts(*expr, dimensions));
+fn zero_extend_logical_shifts(
+    state: &AnalysisState,
+    expr: ConstExpr,
+    dimensions: &PackedDimensions,
+) -> ConstExpr {
+    let go = |expr: Box<ConstExpr>| Box::new(zero_extend_logical_shifts(state, *expr, dimensions));
     match expr {
         ConstExpr::Binary {
             left,
             op: BinaryOp::Shr,
             right,
         } => {
-            let left = zero_extend_logical_shifts(*left, dimensions);
-            let left = match self_determined_type(&left, dimensions) {
+            let left = zero_extend_logical_shifts(state, *left, dimensions);
+            let left = match self_determined_type(state, &left, dimensions) {
                 Some((width, true)) if width < 32 => ConstExpr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::BitAnd,
@@ -2597,6 +2765,7 @@ mod streaming_tests {
             );
             let tree = crate::syntax::parse_source(&code, std::path::Path::new("stream_range.sv"))
                 .unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let stream = tree
                 .into_iter()
                 .find_map(|node| match node {

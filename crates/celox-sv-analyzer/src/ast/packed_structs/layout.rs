@@ -12,7 +12,7 @@ pub(in crate::ast) fn declaration(node: RefNode<'_>) -> Option<&sv_parser::DataT
 
 pub(in crate::ast) fn parse_type(
     data: &sv_parser::DataTypeStructUnion,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
@@ -52,12 +52,12 @@ pub(in crate::ast) fn parse_type(
         // later shadow a parameter used by a member's packed dimensions.
         for range in &mut r#type.packed_ranges {
             range.left = ConstExpr::Literal(format_typed_parameter_literal(
-                eval_ast_const_expr(&range.left, const_env)?,
+                eval_ast_const_expr(&syntax_tree.state, &range.left, const_env)?,
                 128,
                 true,
             ));
             range.right = ConstExpr::Literal(format_typed_parameter_literal(
-                eval_ast_const_expr(&range.right, const_env)?,
+                eval_ast_const_expr(&syntax_tree.state, &range.right, const_env)?,
                 128,
                 true,
             ));
@@ -86,7 +86,8 @@ pub(in crate::ast) fn parse_type(
     let mut width = 0usize;
     // The first declared member occupies the most significant bits.
     for member in members.iter_mut().rev() {
-        let member_width = expr_type_from_type(&member.r#type, const_env)?.width;
+        let member_width =
+            expr_type_from_type(&syntax_tree.state, &member.r#type, const_env)?.width;
         if union {
             // IEEE 1800-2023 7.3.1: hard packed members share all bits
             // and must have the same width.

@@ -13,24 +13,29 @@ pub(super) use scope_views::ScopeViews;
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
 // qualified, and never reach the public analyzer IR.
-thread_local! {
-    static ROOT_SUBROUTINES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub(super) fn root_subroutines_only() -> bool {
-    ROOT_SUBROUTINES.with(std::cell::Cell::get)
+pub(super) fn root_subroutines_only(state: &AnalysisState) -> bool {
+    state.root_subroutines.get()
 }
 
 /// Seed module functions before conditions need to call them. The full pass
 /// still selects generate scopes and reports every generate diagnostic.
-pub(super) fn with_root_subroutines<T>(f: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
+pub(super) fn with_root_subroutines<T>(
+    state: &std::rc::Rc<AnalysisState>,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore {
+        state: std::rc::Rc<AnalysisState>,
+        previous: bool,
+    }
     impl Drop for Restore {
         fn drop(&mut self) {
-            ROOT_SUBROUTINES.with(|flag| flag.set(self.0));
+            self.state.root_subroutines.set(self.previous);
         }
     }
-    let _restore = Restore(ROOT_SUBROUTINES.with(|flag| flag.replace(true)));
+    let _restore = Restore {
+        state: state.clone(),
+        previous: state.root_subroutines.replace(true),
+    };
     f()
 }
 
@@ -48,6 +53,7 @@ fn scope_component(name: &str) -> String {
 
 #[derive(Clone)]
 pub(super) struct Item<'a> {
+    state: std::rc::Rc<AnalysisState>,
     pub node: ScopeItem<'a>,
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
@@ -64,6 +70,7 @@ pub(super) struct Item<'a> {
 /// hold those declarations under their qualified names.
 #[derive(Clone, Copy)]
 struct BlockImports<'s> {
+    state: &'s std::rc::Rc<AnalysisState>,
     names: &'s HashMap<String, String>,
     imports: &'s HashMap<String, String>,
     /// The names the blocks declare or import.
@@ -112,7 +119,7 @@ impl<'s> BlockImports<'s> {
     /// constant function calls none. Calls in the bodies of the functions it
     /// hides keep their definition-site meaning.
     fn install_constant_functions(self) -> Option<const_functions::Installed> {
-        let installed = const_functions::installed();
+        let installed = const_functions::installed(&self.state.const_functions);
         let rebound: Vec<_> = self
             .bindings()
             .filter(|(name, target)| installed.contains(name) || installed.contains(target))
@@ -131,13 +138,14 @@ impl<'s> BlockImports<'s> {
         for (name, target) in rebound {
             visible.alias(name, target);
         }
-        Some(const_functions::install(visible))
+        Some(const_functions::install(self.state, visible))
     }
 }
 
 impl Item<'_> {
     fn block_imports(&self) -> BlockImports<'_> {
         BlockImports {
+            state: &self.state,
             names: &self.names,
             imports: &self.imports,
             shadowed: &self.shadowed,
@@ -163,7 +171,7 @@ impl Item<'_> {
     }
 
     pub fn interface_scope(&self) -> Option<scope::Installed> {
-        let imported = scope::imported();
+        let imported = scope::imported(&self.state);
         if imported.interface_scopes.is_empty() {
             return None;
         }
@@ -189,7 +197,7 @@ impl Item<'_> {
             local.interface_arrays.extend(bindings.arrays.clone());
             local.interface_instances.extend(bindings.instances.clone());
         }
-        Some(scope::install(Arc::new(local)))
+        Some(scope::install(&self.state, Arc::new(local)))
     }
 
     pub fn common(&self) -> Option<&sv_parser::ModuleCommonItem> {
@@ -470,6 +478,7 @@ impl Item<'_> {
 
 #[derive(Clone, Default)]
 struct Scope {
+    state: std::rc::Rc<AnalysisState>,
     path: String,
     in_loop: bool,
     env: SharedMap<i128>,
@@ -484,6 +493,7 @@ struct Scope {
 impl Scope {
     fn block_imports(&self) -> BlockImports<'_> {
         BlockImports {
+            state: &self.state,
             names: &self.names,
             imports: &self.imports,
             shadowed: &self.shadowed,
@@ -492,7 +502,7 @@ impl Scope {
 }
 
 struct Elaborator<'a, 'b> {
-    tree: &'a SyntaxTree,
+    tree: &'a AnalysisContext<'a>,
     module_aliases: &'b HashMap<String, Type>,
     /// The type aliases of the scope being elaborated.
     aliases: Cow<'b, HashMap<String, Type>>,
@@ -503,7 +513,7 @@ struct Elaborator<'a, 'b> {
 
 pub(super) fn items<'a>(
     node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+    tree: &'a AnalysisContext<'a>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
@@ -514,7 +524,7 @@ pub(super) fn items<'a>(
 /// literals needed by subroutines, declarations and generate constructs.
 pub(super) fn subroutine_items<'a>(
     node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+    tree: &'a AnalysisContext<'a>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item<'a>>, AnalyzerError> {
@@ -523,7 +533,7 @@ pub(super) fn subroutine_items<'a>(
         tree,
         env,
         aliases,
-        if root_subroutines_only() {
+        if root_subroutines_only(&tree.state) {
             LiteralUse::RootSubroutines
         } else {
             LiteralUse::Subroutines
@@ -540,7 +550,7 @@ enum LiteralUse {
 
 fn items_with_literal_use<'a>(
     node: RefNode<'a>,
-    tree: &'a SyntaxTree,
+    tree: &'a AnalysisContext<'a>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
@@ -553,17 +563,20 @@ fn items_with_literal_use<'a>(
         functions: HashMap::default(),
         items: Vec::new(),
     };
+    // Nonnumeric integral bindings (wide values and X/Z) are absent from
+    // `env`. Recollect their specialized expressions instead of syntax defaults.
     let parameters =
-        parameters_from_module_node(node.clone(), tree, aliases, env, &HashMap::default())?;
+        parameters_from_module_node(node.clone(), tree, aliases, env, &tree.parameter_overrides)?;
     let references = parameter_literal_references(node.clone(), tree, literal_use);
     let mut literals =
-        parameters::parameter_value_env_for_references(&parameters, env, &references);
+        parameters::parameter_value_env_for_references(&tree.state, &parameters, env, &references);
     if node.clone().into_iter().any(|node| matches!(node, RefNode::ConstantFunctionCall(call) if matches!(&call.nodes.0.nodes.0, sv_parser::SubroutineCall::TfCall(_)))) {
         elaborator.functions = module_constant_functions(node.clone(), tree, env, aliases, &literals);
     }
     // Numeric values and their type markers are already carried by `env`.
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
+        state: tree.state.clone(),
         env: env.clone().into(),
         literals: literals.into(),
         parameter_dimensions: Arc::new(parameter_packed_dimensions(&parameters)),
@@ -610,7 +623,7 @@ fn items_with_literal_use<'a>(
 /// for by the dependency closure rather than expanded as independent roots.
 fn parameter_literal_references(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     literal_use: LiteralUse,
 ) -> HashSet<String> {
     let items: Vec<_> = match node {
@@ -662,7 +675,7 @@ fn parameter_literal_references(
             sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(_)
                 | sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(_)))
             && !node.clone().into_iter().any(|child| matches!(child,
-                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(assignment)))
+                RefNode::ParamAssignment(assignment) if array_parameters::is_array_parameter(&tree.state, assignment)))
         {
             continue;
         }
@@ -702,19 +715,27 @@ impl<'a> Elaborator<'a, '_> {
             ..PackedDimensions::default()
         };
         let Some(mut expr) = expr_to_index_const(
+            &self.tree.state,
             substitute_expr_idents(const_expr_to_expr(expr), &scope.literals),
             &dimensions,
         ) else {
             return Ok(None);
         };
-        Ok(self.expand_constant_calls(&mut expr, scope).map(|()| expr))
+        Ok(self
+            .expand_constant_calls(&self.tree.state, &mut expr, scope)
+            .map(|()| expr))
     }
 
-    fn expand_constant_calls(&self, expr: &mut ConstExpr, scope: &Scope) -> Option<()> {
+    fn expand_constant_calls(
+        &self,
+        state: &AnalysisState,
+        expr: &mut ConstExpr,
+        scope: &Scope,
+    ) -> Option<()> {
         match expr {
             ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
-                    self.expand_constant_calls(arg, scope)?;
+                    self.expand_constant_calls(state, arg, scope)?;
                 }
                 // A block import binds the call to the qualified declaration,
                 // which the installed constant functions evaluate.
@@ -743,38 +764,39 @@ impl<'a> Elaborator<'a, '_> {
                         0,
                         true,
                     );
-                    let expanded = simplify_constant_mux_conditions(expanded, &scope.env);
+                    let expanded = simplify_constant_mux_conditions(state, expanded, &scope.env);
                     // Fold only the call: surrounding case arithmetic still needs
                     // the common comparison width, while function results are self-determined.
-                    *expr = expr_to_const(fold_const_integral_expr_preserving_mask(
-                        expanded, &scope.env,
-                    ))?;
+                    *expr = expr_to_const(
+                        state,
+                        fold_const_integral_expr_preserving_mask(state, expanded, &scope.env),
+                    )?;
                 }
             }
             ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.expand_constant_calls(expr, scope)?
+                self.expand_constant_calls(state, expr, scope)?
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.expand_constant_calls(expr, scope)?;
-                self.expand_constant_calls(msb, scope)?;
-                self.expand_constant_calls(lsb, scope)?;
+                self.expand_constant_calls(state, expr, scope)?;
+                self.expand_constant_calls(state, msb, scope)?;
+                self.expand_constant_calls(state, lsb, scope)?;
             }
             ConstExpr::Select { expr, bit } => {
-                self.expand_constant_calls(expr, scope)?;
-                self.expand_constant_calls(bit, scope)?;
+                self.expand_constant_calls(state, expr, scope)?;
+                self.expand_constant_calls(state, bit, scope)?;
             }
             ConstExpr::Binary { left, right, .. } => {
-                self.expand_constant_calls(left, scope)?;
-                self.expand_constant_calls(right, scope)?;
+                self.expand_constant_calls(state, left, scope)?;
+                self.expand_constant_calls(state, right, scope)?;
             }
             ConstExpr::Mux {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.expand_constant_calls(condition, scope)?;
-                self.expand_constant_calls(then_expr, scope)?;
-                self.expand_constant_calls(else_expr, scope)?;
+                self.expand_constant_calls(state, condition, scope)?;
+                self.expand_constant_calls(state, then_expr, scope)?;
+                self.expand_constant_calls(state, else_expr, scope)?;
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => {}
         }
@@ -783,12 +805,13 @@ impl<'a> Elaborator<'a, '_> {
 
     fn value(
         &self,
+        state: &AnalysisState,
         expr: &sv_parser::ConstantExpression,
         scope: &Scope,
         detail: &str,
     ) -> Result<i128, AnalyzerError> {
         self.expression(expr, scope)?
-            .and_then(|expr| eval_ast_const_expr(&expr, &scope.env))
+            .and_then(|expr| eval_ast_const_expr(state, &expr, &scope.env))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
@@ -811,8 +834,15 @@ impl<'a> Elaborator<'a, '_> {
                 typecheck::eval_const_integral_literal_with_types(&expr, &scope.env, &types)
                     .map(|literal| typecheck::integral_literal_truth(&literal) == Some(true))
                     .or_else(|| {
-                        typecheck::eval_const_expr_with_types(&expr, &scope.env, &types)
-                            .map(|value| value != 0)
+                        typecheck::eval_const_expr_with_types_in_env(
+                            &expr,
+                            &const_functions::Environment {
+                                constants: &*scope.env,
+                                functions: &self.tree.state.const_functions,
+                            },
+                            &|name| types.get(name).copied(),
+                        )
+                        .map(|value| value != 0)
                     })
             })
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
@@ -983,6 +1013,7 @@ impl<'a> Elaborator<'a, '_> {
                         ));
                     }
                     let mut value = self.value(
+                        &self.tree.state,
                         &generate.nodes.1.nodes.1.0.nodes.3,
                         scope,
                         "loop-generate initializer",
@@ -1034,6 +1065,7 @@ impl<'a> Elaborator<'a, '_> {
                             Some((&name, value)),
                         )?;
                         value = next_genvar_value(
+                            &self.tree.state,
                             value,
                             &generate.nodes.1.nodes.1.4,
                             self.tree,
@@ -1064,6 +1096,7 @@ impl<'a> Elaborator<'a, '_> {
 
     fn push(&mut self, node: ScopeItem<'a>, scope: &Scope) {
         self.items.push(Item {
+            state: self.tree.state.clone(),
             node,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
@@ -1322,7 +1355,7 @@ impl<'a> Elaborator<'a, '_> {
                         )
                     {
                         if parameters::contains_unbounded_operand(bound, &scope.env)
-                            && eval_ast_const_expr(bound, &scope.env).is_none()
+                            && eval_ast_const_expr(&self.tree.state, bound, &scope.env).is_none()
                         {
                             return Err(AnalyzerError::Unsupported(
                                 "numeric use of unbounded parameter in generate signal range"
@@ -1332,6 +1365,7 @@ impl<'a> Elaborator<'a, '_> {
                     }
                 }
                 extend_const_env_with_variable_types(
+                    &self.tree.state,
                     &mut scope.env,
                     signals
                         .iter()
@@ -1347,8 +1381,11 @@ impl<'a> Elaborator<'a, '_> {
                     // publish new type metadata; grouped declarations temporarily
                     // bind siblings. Either ends this run before rebuilding it.
                     let base = scope.env.clone();
-                    let mut environment =
-                        parameters::ParameterEnvironment::new(&scope.parameters, &base);
+                    let mut environment = parameters::ParameterEnvironment::new(
+                        &self.tree.state,
+                        &scope.parameters,
+                        &base,
+                    );
                     let mut types = parameter_types_from_const_env(&base);
                     let mut next = index;
                     loop {
@@ -1377,6 +1414,7 @@ impl<'a> Elaborator<'a, '_> {
                                 ))
                             })?;
                         constants::bind_generate_parameter_with_types(
+                            &self.tree.state,
                             parameter,
                             &mut scope.env,
                             &mut scope.literals,
@@ -1422,7 +1460,12 @@ impl<'a> Elaborator<'a, '_> {
                         AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
                     })?;
                 scope.parameters.push(parameter.clone());
-                bind_generate_parameter(parameter, &mut scope.env, &mut scope.literals);
+                bind_generate_parameter(
+                    &self.tree.state,
+                    parameter,
+                    &mut scope.env,
+                    &mut scope.literals,
+                );
             }
             order.complete(index);
         }
@@ -1480,7 +1523,7 @@ impl<'a> Elaborator<'a, '_> {
         // The names the block's imports bind to another declaration than its
         // module does (see `imports::resolve_imports`), before the block's
         // declarations are evaluated with them.
-        let imported = scope::imported();
+        let imported = scope::imported(&self.tree.state);
         if let Some(bindings) = imported
             .generate_imports
             .get(&imports::node_range(RefNode::GenerateBlock(block)).0)
@@ -1625,7 +1668,7 @@ impl<'a> Elaborator<'a, '_> {
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
 fn bind_import(scope: &mut Scope, name: &str, target: &str) {
-    let imported = scope::imported();
+    let imported = scope::imported(&scope.state);
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
     scope.imports.insert(name.to_string(), target.to_string());
@@ -1675,7 +1718,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
         // The exported literal is already evaluated in the package scope.
         // Keep that snapshot when rebuilding declaration-order environments;
         // the initializer may name a package dependency absent from this scope.
-        if let Some(value) = literal.and_then(expr_to_const) {
+        if let Some(value) = literal.and_then(|expr| expr_to_const(&scope.state, expr)) {
             parameter.value = Some(value);
         }
         scope.parameters.push(parameter);
@@ -1686,7 +1729,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
 // itself elaborate generate blocks and recurse into the conditions being decided.
 fn module_constant_functions(
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literals: &HashMap<String, Expr>,
@@ -1810,6 +1853,7 @@ mod tests {
 
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
         let tree = crate::syntax::parse_source(source, Path::new("generate.sv"))?;
+        let tree = AnalysisContext::unspecialized(&tree);
         Source::from_syntax(&tree)
     }
 
@@ -1830,6 +1874,7 @@ mod tests {
             let tree =
                 crate::syntax::parse_source(&code, Path::new("generate_parameter_prefix.sv"))
                     .unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let node = tree
                 .into_iter()
                 .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -1858,6 +1903,7 @@ mod tests {
 
     #[test]
     fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
+        let state = AnalysisState::default();
         let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
         insert_parameter_type_markers(
             &mut base,
@@ -1896,8 +1942,14 @@ mod tests {
                 width.is_some(),
                 true,
             );
-            bind_generate_parameter(parameter.clone(), &mut rebuilt_env, &mut rebuilt_literals);
+            bind_generate_parameter(
+                &state,
+                parameter.clone(),
+                &mut rebuilt_env,
+                &mut rebuilt_literals,
+            );
             constants::bind_generate_parameter_with_types(
+                &state,
                 parameter,
                 &mut cached_env,
                 &mut cached_literals,
@@ -1916,6 +1968,7 @@ mod tests {
             Path::new("generate_name_snapshots.sv"),
         )
         .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let node = tree
             .into_iter()
             .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -1952,6 +2005,7 @@ mod tests {
             );
             let tree =
                 crate::syntax::parse_source(&code, Path::new("scheduled_siblings.sv")).unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let node = tree
                 .into_iter()
                 .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -2196,6 +2250,7 @@ mod tests {
             Path::new("generate_metadata.sv"),
         )
         .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let module = tree
             .into_iter()
             .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -2269,6 +2324,7 @@ mod tests {
             "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
             Path::new("genvar_packed_bounds.sv"),
         ).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let node = tree
             .into_iter()
             .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -2282,7 +2338,7 @@ mod tests {
         )
         .unwrap();
         let mut env = HashMap::default();
-        extend_const_env_with_parameters(&mut env, &parameters);
+        extend_const_env_with_parameters(&tree.state, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
         let active = items(node, &tree, &env, &HashMap::default()).unwrap();
         let iterations: Vec<_> = active
@@ -2323,7 +2379,7 @@ mod tests {
                 panic!("{assignment:?}")
             };
             assert_eq!(
-                eval_ast_const_expr(lsb, &HashMap::default()),
+                eval_ast_const_expr(&AnalysisState::default(), lsb, &HashMap::default()),
                 Some(index as i128),
                 "{assignment:?}"
             );
@@ -2540,6 +2596,7 @@ mod tests {
             endpackage
         "#;
         let tree = crate::syntax::parse_source(code, Path::new("literal_references.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         for node in &tree {
             if matches!(
                 node,
@@ -2592,6 +2649,7 @@ mod tests {
                 code.push_str("endmodule\n");
                 let tree =
                     crate::syntax::parse_source(&code, Path::new("unused_chain.sv")).unwrap();
+                let tree = AnalysisContext::unspecialized(&tree);
                 let node = (&tree)
                     .into_iter()
                     .find(|node| {
@@ -2624,6 +2682,7 @@ mod tests {
     fn referenced_four_state_dependencies_keep_their_full_values() {
         let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
         let tree = crate::syntax::parse_source(code, Path::new("needed_literals.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let node = (&tree)
             .into_iter()
             .find(|node| {
@@ -2638,7 +2697,7 @@ mod tests {
         let parameters =
             parameters_from_module_node(node.clone(), &tree, &aliases, &env, &HashMap::default())
                 .unwrap();
-        let full = parameter_value_env(&parameters, &env);
+        let full = parameter_value_env(&tree.state, &parameters, &env);
         let active = items(node, &tree, &env, &aliases).unwrap();
         for item in active {
             assert_eq!(item.literals.get("B"), full.get("B"));
@@ -2675,6 +2734,7 @@ mod tests {
         "#;
         let tree =
             crate::syntax::parse_source(code, Path::new("subroutine_references.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         for node in &tree {
             if matches!(
                 node,
@@ -2728,6 +2788,7 @@ mod tests {
             endmodule
         "#;
         let tree = crate::syntax::parse_source(code, Path::new("subroutine_literals.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let node = (&tree)
             .into_iter()
             .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -2783,6 +2844,7 @@ mod tests {
                 }
                 writeln!(code, "assign result = P{}; endmodule", count - 1).unwrap();
                 let tree = crate::syntax::parse_source(&code, Path::new("rtl_chain.sv")).unwrap();
+                let tree = AnalysisContext::unspecialized(&tree);
                 let node = (&tree)
                     .into_iter()
                     .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -2835,6 +2897,7 @@ mod tests {
             let code = format!("module Top; {body} endmodule");
             let tree =
                 crate::syntax::parse_source(&code, Path::new("subroutine_diagnostics.sv")).unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
             let node = (&tree)
                 .into_iter()
                 .find(|node| {
