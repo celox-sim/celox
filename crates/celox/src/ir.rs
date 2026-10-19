@@ -841,6 +841,7 @@ impl RuntimeProgram {
         layout: &crate::backend::MemoryLayout,
     ) -> DesignReflection {
         struct ScopeSource {
+            is_instance: bool,
             instance_id: InstanceId,
             name: String,
             full_name: String,
@@ -877,6 +878,7 @@ impl RuntimeProgram {
                     }
                 });
                 ScopeSource {
+                    is_instance: true,
                     instance_id: instance.id,
                     name,
                     full_name,
@@ -885,6 +887,50 @@ impl RuntimeProgram {
                 }
             })
             .collect::<Vec<_>>();
+        // A module instance can own structured variables (interface members,
+        // generate scopes, and aggregate members) without owning child module
+        // instances. Retain their source path segments as navigable scopes.
+        let real_scopes = scope_sources
+            .iter()
+            .map(|scope| scope.full_name.clone())
+            .collect::<crate::HashSet<_>>();
+        let mut member_scopes = HashMap::default();
+        for scope in &scope_sources {
+            let instance = self.design.instance(scope.instance_id).unwrap();
+            for address in instance.state_addresses() {
+                let variable = self.design.variable(address).unwrap();
+                if instance.path_index.get(&variable.path) != Some(&Some(*address)) {
+                    continue;
+                }
+                for depth in 1..variable.path.len() {
+                    let full_name =
+                        format!("{}.{}", scope.full_name, variable.path[..depth].join("."));
+                    if real_scopes.contains(&full_name) {
+                        continue;
+                    }
+                    let parent_name = if depth == 1 {
+                        scope.full_name.clone()
+                    } else {
+                        format!(
+                            "{}.{}",
+                            scope.full_name,
+                            variable.path[..depth - 1].join(".")
+                        )
+                    };
+                    member_scopes
+                        .entry(full_name.clone())
+                        .or_insert_with(|| ScopeSource {
+                            is_instance: false,
+                            instance_id: scope.instance_id,
+                            name: variable.path[depth - 1].clone(),
+                            full_name,
+                            parent_name: Some(parent_name),
+                            module_name: String::new(),
+                        });
+                }
+            }
+        }
+        scope_sources.extend(member_scopes.into_values());
         scope_sources.sort_by(|left, right| left.full_name.cmp(&right.full_name));
 
         let scope_ids = scope_sources
@@ -893,16 +939,6 @@ impl RuntimeProgram {
             .map(|(index, scope)| {
                 (
                     scope.full_name.clone(),
-                    ReflectionScopeId(u32::try_from(index).expect("scope count exceeds u32")),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let instance_scopes = scope_sources
-            .iter()
-            .enumerate()
-            .map(|(index, scope)| {
-                (
-                    scope.instance_id,
                     ReflectionScopeId(u32::try_from(index).expect("scope count exceeds u32")),
                 )
             })
@@ -942,7 +978,7 @@ impl RuntimeProgram {
 
         let event_kinds = self.design.event_kinds();
         let mut signals = Vec::new();
-        for scope in &scope_sources {
+        for scope in scope_sources.iter().filter(|scope| scope.is_instance) {
             let instance = self.design.instance(scope.instance_id).unwrap();
             for state_address in instance.state_addresses() {
                 let variable = self.design.variable(state_address).unwrap();
@@ -956,7 +992,15 @@ impl RuntimeProgram {
                     continue;
                 }
                 let metadata = &self.design.state_objects[state_address];
-                let name = variable.path.join(".");
+                let (name, parents) = variable
+                    .path
+                    .split_last()
+                    .expect("visible variable has a source path");
+                let parent_name = if parents.is_empty() {
+                    scope.full_name.clone()
+                } else {
+                    format!("{}.{}", scope.full_name, parents.join("."))
+                };
                 let array_layout =
                     layout
                         .unpacked_arrays
@@ -974,9 +1018,9 @@ impl RuntimeProgram {
                     _ => SignalDirection::Internal,
                 };
                 signals.push(ReflectionSignal {
-                    full_name: format!("{}.{}", scope.full_name, name),
-                    name,
-                    parent: instance_scopes[&scope.instance_id],
+                    full_name: format!("{parent_name}.{name}"),
+                    name: name.clone(),
+                    parent: scope_ids[&parent_name],
                     state_address: *state_address,
                     signal: SignalRef {
                         offset: layout.offsets[state_address],

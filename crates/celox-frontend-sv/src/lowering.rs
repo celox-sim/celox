@@ -121,7 +121,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
-    interface_ports: HashSet<String>,
+    interface_member_paths: HashMap<String, Vec<String>>,
     source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
@@ -390,7 +390,8 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::plan_interfaces(sources, &bindings)?;
+    let (elaboration, interface_member_paths) =
+        sv::plan_interfaces_with_member_paths(sources, &bindings)?;
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
@@ -487,10 +488,9 @@ fn analyze_sources_with_requests(
             modules.insert(
                 name,
                 AnalyzedSvModule {
-                    interface_ports: elaboration
-                        .modules
+                    interface_member_paths: interface_member_paths
                         .get(&module_name)
-                        .map(|plan| plan.ports.iter().map(|port| port.name.clone()).collect())
+                        .cloned()
                         .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
                         .get(
@@ -1656,25 +1656,9 @@ fn prepare_external_hierarchy_collecting(
             }
         }
     }
-    // Structured paths carry the original interface port identity to foreign
-    // consumers. Ordinary identifiers containing '$' remain a single segment.
     for (key, id) in &module_ids {
-        let Some(base) = analyzed.get(&key.name) else {
-            continue;
-        };
-        for port in &lowered_modules[id].port_order {
-            let variable = modules
-                .get_mut(id)
-                .unwrap()
-                .sim_module
-                .variables
-                .get_mut(port)
-                .unwrap();
-            if let Some((root, member)) = variable.path[0].split_once('$')
-                && base.interface_ports.contains(root)
-            {
-                variable.path = vec![root.to_string(), member.to_string()];
-            }
+        if let Some(base) = analyzed.get(&key.name) {
+            restore_interface_member_paths(&mut modules.get_mut(id).unwrap().sim_module, base);
         }
     }
     Ok(ExternalHierarchy {
@@ -1903,6 +1887,9 @@ fn schedule_sources_collecting(
             .map(|(&module_id, lowered)| (module_id, lowered)),
         &package_states,
     )?;
+    for (key, id) in &module_ids {
+        restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+    }
     let symbolic = SymbolicRtl {
         modules,
         module_names,
@@ -1920,6 +1907,24 @@ fn schedule_sources_collecting(
         trace,
     )
     .map_err(FrontendError::from)
+}
+
+// Use elaboration provenance rather than treating every '$' as a separator:
+// legal authored identifiers may themselves contain '$'.
+fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvModule) {
+    for variable in module.variables.values_mut() {
+        variable.path = variable
+            .path
+            .iter()
+            .flat_map(|segment| {
+                source
+                    .interface_member_paths
+                    .get(segment)
+                    .cloned()
+                    .unwrap_or_else(|| vec![segment.clone()])
+            })
+            .collect();
+    }
 }
 
 fn sv_specialization_limit_error(name: String) -> ParserError {

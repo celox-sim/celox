@@ -3069,14 +3069,26 @@ pub fn plan_interfaces(
     sources: &[(&str, &Path)],
     bindings: &[(String, String, Vec<(String, String)>)],
 ) -> Converted<NativeInterfacePlan> {
+    plan_interfaces_with_member_paths(sources, bindings).map(|(plan, _)| plan)
+}
+
+/// Original paths of flattened interface fields, indexed by bound module name.
+pub type InterfaceMemberPaths = HashMap<String, HashMap<String, Vec<String>>>;
+
+/// Build the interface plan and retain source member paths for reflection.
+pub fn plan_interfaces_with_member_paths(
+    sources: &[(&str, &Path)],
+    bindings: &[(String, String, Vec<(String, String)>)],
+) -> Converted<(NativeInterfacePlan, InterfaceMemberPaths)> {
     let files = sources
         .iter()
         .map(|(code, path)| File::new(code, path))
         .collect::<Converted<Vec<_>>>()?;
     let design = Design::collect(&files)?;
     let mut result = NativeInterfacePlan::default();
+    let mut reflected_paths = HashMap::default();
     if design.interfaces.is_empty() {
-        return Ok(result);
+        return Ok((result, reflected_paths));
     }
     let mut queue = design
         .modules
@@ -3402,6 +3414,18 @@ pub fn plan_interfaces(
                 queue.push((child_name.clone(), generic));
             }
         }
+        let mut member_paths = HashMap::default();
+        for (handle_name, declarations) in &handles.by_name {
+            for (_, handle) in declarations {
+                for member in &design.interfaces[&handle.interface].members {
+                    member_paths.insert(
+                        format!("{handle_name}{SEPARATOR}{}", member.name),
+                        vec![handle_name.clone(), member.name.clone()],
+                    );
+                }
+            }
+        }
+        reflected_paths.insert(bound_name.clone(), member_paths);
         result.modules.insert(
             bound_name,
             NativeModulePlan {
@@ -3411,5 +3435,5 @@ pub fn plan_interfaces(
             },
         );
     }
-    Ok(result)
+    Ok((result, reflected_paths))
 }
