@@ -910,7 +910,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }])
             }
             sv_parser::SubroutineCall::MethodCall(call) => {
-                let (name, arguments) = native_interfaces::method_call(call, self.tree)?;
+                let (name, arguments) =
+                    native_interfaces::method_call(call, self.tree, &self.dims)?;
                 let (args, arg_order) = self.call_arguments(&name, arguments)?;
                 Ok(vec![Stmt::Call {
                     name,

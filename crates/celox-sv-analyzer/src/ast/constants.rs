@@ -1340,8 +1340,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                 // as bus.W as a method call without an argument list. Resolve
                 // it through the bound interface scope before classifying calls.
                 if let sv_parser::SubroutineCall::MethodCall(method) = &call.nodes.0.nodes.0
-                    && let Ok((name, arguments)) =
-                        native_interfaces::method_call(method, syntax_tree)
+                    && let Ok((name, arguments)) = native_interfaces::method_call(
+                        method,
+                        syntax_tree,
+                        &PackedDimensions::new(HashMap::default(), const_env, type_aliases),
+                    )
                     && arguments.is_none()
                     && const_env.contains_key(&name)
                 {
