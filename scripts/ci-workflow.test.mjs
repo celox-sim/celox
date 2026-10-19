@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(
@@ -395,12 +397,25 @@ function cargoArguments(jobName, stepName, env) {
   const step = job(jobName).split(`      - name: ${stepName}\n`)[1];
   assert.ok(step, stepName);
   const script = step.match(/        run: \|\n((?:          [^\n]*\n|\n)*)/)[1];
-  const result = spawnSync("bash", ["-e", "-c", `cargo() { printf '\\036%s' "$@"; };\n${script}`], {
-    env: { ...process.env, ...env }, encoding: "utf8",
-  });
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.split("\x1e").slice(1);
+  const directory = mkdtempSync(join(tmpdir(), "celox-scoped-cargo-"));
+  try {
+    const cargo = join(directory, "cargo");
+    writeFileSync(cargo, "#!/bin/sh\nprintf '\\036%s' \"$@\"\n");
+    chmodSync(cargo, 0o755);
+    const builds = env.BUILDS ?? JSON.stringify([{
+      packages: (env.PACKAGES ?? "").split(" ").filter(Boolean),
+      targets: (env.TARGETS ?? "").split(" ").filter(Boolean),
+      features: (env.FEATURES ?? "").split(",").filter(Boolean),
+    }]);
+    const result = spawnSync("bash", ["-e", "-c", script], {
+      env: { ...process.env, ...env, BUILDS: builds, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8",
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.split("\x1e").slice(1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 test("scoped Cargo commands build only the selected integration targets", () => {
@@ -430,8 +445,15 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
   assert.match(lint, /name: cargo clippy\n        if: .*outputs\.rust_full != 'false'/);
   assert.match(lint, /name: Build Rust API documentation\n        if: .*outputs\.rust_full != 'false'/);
   assert.match(lint, /name: Lint the crates this pull request can affect\n        if: .*outputs\.rust_lint_packages != ''/);
-  assert.match(lint, /PACKAGES: \$\{\{ needs\.changes\.outputs\.rust_lint_packages \}\}/);
-  assert.match(lint, /FEATURES: \$\{\{ needs\.changes\.outputs\.rust_lint_features \}\}/);
-  assert.match(lint, /TARGETS: \$\{\{ needs\.changes\.outputs\.rust_lint_targets \}\}/);
+  assert.match(lint, /BUILDS: \$\{\{ needs\.changes\.outputs\.rust_lint_builds \}\}/);
   assert.match(lint, /name: Build the API documentation this pull request can affect\n        if: .*outputs\.rust_doc_libraries != ''/);
+});
+
+test("cocotb retains Celox features without enabling unrelated adapter features", () => {
+  const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
+    FEATURES: "celox/systemverilog,celox-test-suite/verilator,celox-test-suite/icarus",
+  });
+  assert.deepEqual(args, ["test", "--locked", "-p", "celox-vpi", "--features", "celox/systemverilog", "--test", "cocotb_e2e",
+    "cocotb_drives_an_attached_native_flip_flop", "--", "--exact", "--ignored"]);
+  assert.match(job("rust-tests"), /name: Run cocotb VPI end-to-end test\n        if: needs.changes.outputs.rust_vpi_e2e != 'false'/);
 });
