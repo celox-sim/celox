@@ -14,7 +14,7 @@ class celox(BaseRunner):
         super().__init__(
             name="celox",
             executable=os.environ["CELOX_SV_TESTS_DRIVER"],
-            supported_features={"elaboration", "simulation"},
+            supported_features={"parsing", "elaboration", "simulation"},
         )
         self.url = "https://github.com/celox-sim/celox"
 

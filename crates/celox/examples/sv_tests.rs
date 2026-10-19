@@ -4,7 +4,7 @@
 //! sv-tests. This process reports only compiler/simulator success or failure.
 //!
 //! ```text
-//! sv_tests --mode elaboration|simulation --state-mode 2state|4state \
+//! sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state \
 //!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE...
 //! ```
 
@@ -15,6 +15,7 @@ use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
+    Parsing,
     Elaboration,
     Simulation,
 }
@@ -52,6 +53,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--mode" if mode.is_none() => {
                 mode = Some(match value.as_str() {
+                    "parsing" => Mode::Parsing,
                     "elaboration" => Mode::Elaboration,
                     "simulation" => Mode::Simulation,
                     _ => return Err(format!("unsupported mode: {value}")),
@@ -147,6 +149,15 @@ fn run(options: &Options) -> Result<(), String> {
         .zip(&options.files)
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
+    // ParsedSource also builds semantic module metadata. Parsing-only cases
+    // must stop at the syntax tree, before that analysis or root selection.
+    if options.mode == Mode::Parsing {
+        for (text, path) in &sources {
+            celox_sv_analyzer::syntax::parse_source(text, path)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
     let parsed = sources
         .iter()
         .map(|(text, path)| celox_sv_analyzer::ParsedSource::parse(text, path))
@@ -154,6 +165,7 @@ fn run(options: &Options) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let top = select_top(&parsed, options.top.as_deref())?;
     match options.mode {
+        Mode::Parsing => unreachable!("parsing returned before root selection"),
         Mode::Elaboration => celox::Simulator::from_sv_sources(sources, &top)
             .four_state(options.four_state)
             .build()
@@ -225,7 +237,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "{error}\nusage: sv_tests --mode elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
+                "{error}\nusage: sv_tests --mode parsing|elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
             );
             return ExitCode::from(2);
         }
@@ -278,7 +290,7 @@ mod tests {
         assert_eq!(o.includes, [PathBuf::from("headers")]);
         assert_eq!(o.files, [PathBuf::from("a.sv"), PathBuf::from("b.sv")]);
         for args in [
-            vec!["--mode", "parsing", "--state-mode", "2state", "a.sv"],
+            vec!["--mode", "preprocessing", "--state-mode", "2state", "a.sv"],
             vec!["--mode", "elaboration", "--state-mode", "both", "a.sv"],
             vec![
                 "--mode",
@@ -337,6 +349,45 @@ mod tests {
             includes: Vec::new(),
             files,
         }
+    }
+
+    #[test]
+    fn parsing_stops_before_metadata_roots_elaboration_and_simulation() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, code) in [
+            ("unit.sv", "typedef logic [7:0] Byte;"),
+            ("package.sv", "package P; typedef logic Byte; endpackage"),
+            ("roots.sv", "module A; endmodule module B; endmodule"),
+            ("unresolved.sv", "module Top; Missing child(); endmodule"),
+            ("semantic.sv", "module Top(input MissingType x); endmodule"),
+            ("runtime.sv", "module Top; initial $fatal(1); endmodule"),
+        ] {
+            let path = fixture(dir.path(), name, code);
+            let mut options = fixture_options(vec![path], Mode::Parsing);
+            // Even an explicit nonexistent top is irrelevant to syntax parsing.
+            options.top = Some("Missing".into());
+            run(&options).unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        for code in [
+            "module Top;",
+            "typedef logic [7:0]",
+            "`include \"missing.svh\"\n",
+        ] {
+            let path = fixture(dir.path(), "invalid.sv", code);
+            let options = fixture_options(vec![path], Mode::Parsing);
+            assert!(
+                run(&options)
+                    .unwrap_err()
+                    .to_lowercase()
+                    .contains("parse error")
+            );
+        }
+        assert_eq!(
+            options(&["--mode", "parsing", "--state-mode", "2state", "a.sv"])
+                .unwrap()
+                .mode,
+            Mode::Parsing
+        );
     }
 
     #[test]

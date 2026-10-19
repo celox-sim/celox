@@ -77,6 +77,7 @@ sys.exit(code)
 
     def test_official_metadata_defaults_priority_negative_and_assertions(self):
         self.assertEqual(self.case()["mode"], "elaboration")
+        self.assertEqual(self.case(":type: parsing elaboration\n")["mode"], "elaboration")
         self.assertEqual(self.case(":type: elaboration simulation\n", "// OUTPUT: :assert: 1 == 1")["result"], "pass")
         self.assertEqual(self.case(":type: simulation\n", "// OUTPUT: :assert: 1 == 2")["result"], "fail")
         row = self.case(":type: simulation\n:should_fail_because: invalid\n", "// EXIT: 1")
@@ -85,7 +86,10 @@ sys.exit(code)
         self.assertEqual(self.case(":should_fail_because: invalid\n", "// EXIT: 126")["result"], "fail")
 
     def test_official_skips_and_no_module_is_not_preemptively_skipped(self):
-        self.assertEqual(self.case(":type: parsing\n")["result"], "skip")
+        row = self.case(":type: parsing\n")
+        self.assertEqual((row["mode"], row["result"]), ("parsing", "pass"))
+        self.assertEqual(self.case(":type: parsing\n:should_fail_because: syntax\n", "// EXIT: 1")["result"], "pass")
+        self.assertEqual(self.case(":type: preprocessing\n")["result"], "skip")
         self.assertEqual(self.case(":compatible-runners: other\n")["result"], "skip")
         # The source has no module. Its diagnostic still reaches official judgement.
         row = self.case(body="// OUTPUT: no module diagnostic\n// EXIT: 1")
