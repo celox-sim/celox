@@ -46,6 +46,32 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("y")), 5u8.into());
     }
 
+    fn reports_sv_warnings_of_a_veryl_top(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let veryl = "module Top(y: output logic<8>) { inst child: $sv::Child(y); }";
+            let sv = format!(r#"
+                module Child(output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{}", mem);
+                    assign y = mem[0];
+                endmodule
+            "#, file.display());
+        }
+        @build Simulator::from_mixed_sources(vec![(veryl, Path::new("top.veryl"))], vec![(&sv, Path::new("child.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xaau8.into());
+        let warnings: Vec<_> = sim.warnings().iter().map(ToString::to_string).collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let celox::CompilationWarning::SystemVerilog(warning) = &sim.warnings()[0] else {
+            panic!("{warnings:?}");
+        };
+        assert!(matches!(warning.kind, celox::SvFrontendWarningKind::MemoryFileWordCount { .. }));
+        let location = warning.location.as_ref().unwrap();
+        assert_eq!((location.path.as_str(), location.line), ("child.sv", 4));
+    }
+
     fn resolves_veryl_interface_parameter_types_after_prior_overrides(sim) {
         @setup {
             let veryl = "interface Bus #(param W: u32 = 8, param V: logic<W> = 4) { var req: logic<V>; var rsp: logic<V>; modport slave { req: input, rsp: output, } } module Child(bus: modport Bus::slave) { assign bus.rsp = bus.req; }";
@@ -1571,5 +1597,251 @@ mod pending_interface_functions {
                 assert_eq!(sim.get(y), expected.into());
             }
         }
+    }
+}
+
+/// The probe analyzes the interface for its signature; the signature then
+/// fails the build before the design analyzes it again.
+#[test]
+fn keeps_sv_interface_warnings_when_its_signature_fails() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sv = r#"interface Bus;
+    function automatic int width();
+        $exit;
+        return 8;
+    endfunction
+    localparam int W = width();
+    logic [W-1:0] req;
+    assign req = 1;
+    function automatic logic [W-1:0] get();
+        return req;
+    endfunction
+    modport reader(input req, import get);
+endinterface
+"#;
+    let error = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap_err();
+    assert!(error.to_string().contains("imported function"), "{error}");
+    let warned: Vec<_> = error
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(warning) => Some(&warning.kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        vec![&celox::SvFrontendWarningKind::ExitOutsideProgram]
+    );
+}
+
+/// Warnings in an SV interface point at their call in the interface's file,
+/// under an SV top and under a Veryl top alike.
+#[test]
+fn locates_sv_interface_warnings_at_their_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let bus = format!(
+        r#"interface Bus;
+    function automatic int width();
+        $exit;
+        return 8;
+    endfunction
+    localparam int W = width();
+    logic [W-1:0] mem [0:1];
+    logic [W-1:0] req;
+    initial begin
+        $readmemh("{}", mem);
+        $exit();
+    end
+    assign req = mem[0];
+endinterface
+"#,
+        file.display()
+    );
+    let located = |warnings: &[celox::CompilationWarning]| {
+        warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => {
+                    let location = warning.location.as_ref().unwrap();
+                    Some((
+                        matches!(
+                            warning.kind,
+                            celox::SvFrontendWarningKind::ExitOutsideProgram
+                        ),
+                        location.path.clone(),
+                        location.line,
+                        location.column,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        (true, "bus.sv".to_string(), 3, 9),
+        (false, "bus.sv".to_string(), 10, 9),
+        (true, "bus.sv".to_string(), 11, 9),
+    ];
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(&bus, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(located(sim.warnings()), expected);
+    let top =
+        "module Top(output logic [7:0] y); Bus bus(); assign y = bus.req; initial $exit; endmodule";
+    let sim = Simulator::from_sv_sources(
+        vec![(&bus, Path::new("bus.sv")), (top, Path::new("top.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let mut expected = expected;
+    expected.push((
+        true,
+        "top.sv".to_string(),
+        1,
+        top.find("$exit").unwrap() + 1,
+    ));
+    assert_eq!(located(sim.warnings()), expected);
+}
+
+#[test]
+fn retains_behaviorless_interface_probe_warnings() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    let sv = r#"interface Bus;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+        logic [W-1:0] req;
+    endinterface"#;
+    let sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("bus.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let warnings: Vec<_> = sim
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].kind,
+        celox::SvFrontendWarningKind::ExitOutsideProgram
+    );
+    let location = warnings[0].location.as_ref().unwrap();
+    assert_eq!((location.path.as_str(), location.line), ("bus.sv", 2));
+}
+
+#[test]
+fn keeps_warnings_when_interface_analysis_fails() {
+    let veryl = "module Top(y: output logic<8>) { inst bus: $sv::Bus; assign y = bus.req; }";
+    for sv in [
+        r#"interface Bus;
+            function automatic int width(); $exit; return 8; endfunction
+            localparam int W = width();
+            logic [W-1:0] req;
+            localparam int BAD = missing();
+        endinterface"#,
+        r#"package P;
+            function automatic int width(); $exit; return 8; endfunction
+            localparam int W = width();
+        endpackage
+        interface Bus;
+            logic [P::W-1:0] req;
+            localparam int BAD = missing();
+        endinterface"#,
+    ] {
+        let error = Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bus.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap_err();
+        assert!(error.to_string().contains("constant function"), "{error}");
+        let warnings: Vec<_> = error
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "{error}");
+        assert_eq!(
+            warnings[0].kind,
+            celox::SvFrontendWarningKind::ExitOutsideProgram
+        );
+        let location = warnings[0].location.as_ref().unwrap();
+        assert_eq!((location.path.as_str(), location.line), ("bus.sv", 2));
+    }
+}
+
+#[test]
+fn review_warnings_follow_instantiated_interface_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    let sv = format!(
+        r#"interface Bus #(parameter N = 2);
+        logic [7:0] mem [0:N-1];
+        logic [7:0] req;
+        initial $readmemh("{}", mem);
+        assign req = mem[0];
+    endinterface
+    interface Passive;
+        function automatic int width(); $exit; return 8; endfunction
+        localparam int W = width();
+        logic [W-1:0] req;
+    endinterface"#,
+        file.display()
+    );
+    for n in [1, 2] {
+        let veryl = format!(
+            "module Top(y: output logic<8>) {{ inst bus: $sv::Bus #(N: {n}); inst passive: $sv::Passive; assign y = bus.req ^ passive.req; }}"
+        );
+        let sim = Simulator::from_mixed_sources(
+            vec![(&veryl, Path::new("top.veryl"))],
+            vec![(&sv, Path::new("bus.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .unwrap();
+        let warnings: Vec<_> = sim
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                celox::CompilationWarning::SystemVerilog(warning) => Some(warning),
+                _ => None,
+            })
+            .collect();
+        let lines: Vec<_> = warnings
+            .iter()
+            .map(|warning| warning.location.as_ref().unwrap().line)
+            .collect();
+        assert_eq!(
+            lines,
+            if n == 1 { vec![8] } else { vec![4, 8] },
+            "N={n}: {:?}",
+            sim.warnings()
+        );
     }
 }

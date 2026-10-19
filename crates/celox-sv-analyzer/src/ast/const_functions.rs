@@ -125,6 +125,36 @@ pub(super) fn is_constant_function(name: &str) -> bool {
 /// their bodies cannot be converted, there are none, and the reason is kept
 /// for the calls of them.
 impl ConstantFunctions {
+    pub(crate) fn warnings(&self) -> Vec<super::warnings::AnalyzerWarning> {
+        let mut warnings = Vec::new();
+        for function in self.functions.values() {
+            for statement in &function.body {
+                statement.walk(&mut |statement| {
+                    if let Stmt::SystemTask {
+                        task: crate::system_functions::SystemTask::Exit,
+                        site,
+                        ..
+                    } = statement
+                    {
+                        super::warnings::append(
+                            &mut warnings,
+                            [super::warnings::AnalyzerWarning::ExitOutsideProgram {
+                                site: site.clone(),
+                            }],
+                        );
+                    }
+                });
+            }
+        }
+        warnings.sort_by(|left, right| match (left, right) {
+            (
+                super::warnings::AnalyzerWarning::ExitOutsideProgram { site: left },
+                super::warnings::AnalyzerWarning::ExitOutsideProgram { site: right },
+            ) => left.cmp(right),
+        });
+        warnings
+    }
+
     fn unconverted(error: AnalyzerError) -> Self {
         Self {
             errors: Arc::new(FunctionErrors {
@@ -1159,7 +1189,9 @@ impl Frame<'_> {
                 self.eval(expr)?;
             }
             // Messages have no effect on the value. Unknown and unsupported
-            // system tasks are rejected before elaboration.
+            // system tasks are rejected before elaboration. `$exit` is
+            // ignored outside a program block (IEEE 1800-2023 24.7). Its
+            // diagnostic belongs to the declaration, not to evaluation.
             Stmt::SystemTask { .. } => {}
             // A function has no timing controls (IEEE 1800-2023 13.4).
             Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::Wait(_) => return None,

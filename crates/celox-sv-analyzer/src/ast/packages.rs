@@ -29,6 +29,8 @@ pub struct Packages {
     /// The compilation unit of each source file that declares items outside
     /// its modules and packages.
     units: HashMap<PathBuf, Arc<Unit>>,
+    /// What analyzing the packages warned about.
+    warnings: Vec<super::warnings::AnalyzerWarning>,
 }
 
 /// The compilation-unit scope of a source file.
@@ -120,6 +122,17 @@ impl Packages {
         self.interface_plan = Arc::new(plan);
     }
 
+    pub(crate) fn with_warnings(mut self, warnings: Vec<super::warnings::AnalyzerWarning>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    /// What analyzing the packages warned about, such as constant functions
+    /// that call `$exit`.
+    pub fn warnings(&self) -> &[super::warnings::AnalyzerWarning] {
+        &self.warnings
+    }
+
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
@@ -176,6 +189,20 @@ impl Packages {
     }
 
     pub(crate) fn analyze_with_roots(
+        trees: &[(&SyntaxTree, &Path)],
+        roots: Option<&[&str]>,
+    ) -> Result<Self, AnalyzerError> {
+        let mut warnings = Vec::new();
+        for (tree, _) in trees {
+            super::warnings::append(&mut warnings, super::warnings::packages(tree));
+        }
+        match Self::analyze_with_roots_impl(trees, roots) {
+            Ok(packages) => Ok(packages.with_warnings(warnings)),
+            Err(error) => Err(error.with_warnings(warnings)),
+        }
+    }
+
+    fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
     ) -> Result<Self, AnalyzerError> {
@@ -512,7 +539,7 @@ fn analyze_package_scope(
 /// The compilation-unit scope of `tree` as a package declaration: the items
 /// of the file outside its design elements, which are package items too.
 /// A compilation unit has no keyword of its own, so its keywords are empty.
-fn unit_declaration(tree: &SyntaxTree) -> Option<sv_parser::PackageDeclaration> {
+pub(super) fn unit_declaration(tree: &SyntaxTree) -> Option<sv_parser::PackageDeclaration> {
     let items: Vec<_> = tree
         .into_iter()
         .filter_map(|node| match node {
