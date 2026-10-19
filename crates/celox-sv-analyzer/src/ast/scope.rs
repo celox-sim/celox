@@ -50,11 +50,11 @@ pub(super) struct ScopeSymbols {
     /// Hierarchical interface member paths bound to semantic signal names.
     pub interface_members: HashMap<String, String>,
     pub interface_types: HashMap<String, String>,
-    pub interface_arrays: HashMap<String, native_interfaces::ArrayBinding>,
-    pub interface_scopes: HashMap<String, native_interfaces::ScopeBinding>,
+    pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
+    pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
     pub interface_instances:
-        HashMap<native_interfaces::InstanceKey, native_interfaces::InstanceBinding>,
+        HashMap<interface_binding::InstanceKey, interface_binding::InstanceBinding>,
     /// The names the imports of a generate block bind there to another
     /// declaration than outside it, by the native body identity of the block.
     pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,

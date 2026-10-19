@@ -46,7 +46,7 @@ fn native_scalar_parameter_calls_preserve_chained_values_through_ast_and_ir() {
                 writeln!(code, "localparam int P{i} = f({arg});").unwrap();
             }
             code.push_str("endmodule\n");
-            let tree = crate::migration::parse_source(&code, Path::new("scalar_calls.sv")).unwrap();
+            let tree = crate::source_tree::parse_source(&code, Path::new("scalar_calls.sv")).unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             let source = Source::from_syntax(&tree).unwrap();
             let ir = crate::analyze::analyze_source(source).unwrap();
@@ -125,7 +125,7 @@ fn concat_slice_indices_accept_dynamic_array_elements() {
 
 #[test]
 fn native_constant_calls_preserve_contextual_operand_shapes() {
-    let tree = crate::migration::parse_source(
+    let tree = crate::source_tree::parse_source(
         "module M;parameter N=f(P[0+:W],byte_t'(P),$bits(P));endmodule",
         Path::new("native-call-context.sv"),
     )
@@ -151,7 +151,7 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
         .expression_nodes()
         .find_map(|(id, expr)| match expr.kind {
             celox_sv_syntax::ExprKind::Call { expression, .. }
-                if native_expressions::native_name(
+                if expression_binding::native_name(
                     &tree.state,
                     expression,
                     tree.declarations(),
@@ -164,7 +164,7 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
             _ => None,
         })
         .unwrap();
-    let value = native_constants::bind(root, &tree, &context)
+    let value = constant_binding::bind(root, &tree, &context)
         .unwrap()
         .unwrap();
     let ConstExpr::Function { callee, args, .. } = value else {

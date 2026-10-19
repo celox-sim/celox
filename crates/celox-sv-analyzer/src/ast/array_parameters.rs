@@ -31,7 +31,7 @@ pub(super) fn is_array_parameter(
         || default.is_some_and(|id| {
             matches!(
                 native
-                    .expression(native_expressions::ungroup(id, native))
+                    .expression(expression_binding::ungroup(id, native))
                     .kind,
                 celox_sv_syntax::ExprKind::Pattern { .. }
             )
@@ -49,7 +49,7 @@ fn declared_type(
             "type parameter used as an array value parameter",
         ));
     };
-    native_types::bind(
+    type_binding::bind(
         data_type,
         tree,
         &PackedDimensions::new(HashMap::default(), const_env, type_aliases),
@@ -80,7 +80,7 @@ pub(super) fn array_parameters_from_scope(
             &mut |_| {},
         )?);
     }
-    for id in tree.native_body_membership()? {
+    for id in tree.body_membership()? {
         if let celox_sv_syntax::BodyItemKind::Parameter(id) = tree.declarations().body_item(id).kind
         {
             let authored = tree
@@ -133,13 +133,13 @@ fn array_parameters_from_declaration(
         let ranges = dimensions
             .iter()
             .map(|dimension| {
-                native_constants::unpacked_dimension(dimension, tree, const_env, type_aliases)
+                constant_binding::unpacked_dimension(dimension, tree, const_env, type_aliases)
             })
             .collect::<Converted<Vec<_>>>()?;
         let pattern = parameters::ownership::default(native).filter(|id| {
             matches!(
                 tree.declarations()
-                    .expression(native_expressions::ungroup(*id, tree.declarations()))
+                    .expression(expression_binding::ungroup(*id, tree.declarations()))
                     .kind,
                 celox_sv_syntax::ExprKind::Pattern { .. }
             )

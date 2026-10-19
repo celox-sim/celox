@@ -363,7 +363,7 @@ pub(crate) fn generated_source_declarations(
 ) -> Converted<String> {
     let trees = sources
         .iter()
-        .map(|(code, path)| crate::migration::parse_source(code, path).map(|tree| (tree, *path)))
+        .map(|(code, path)| crate::source_tree::parse_source(code, path).map(|tree| (tree, *path)))
         .collect::<Converted<Vec<_>>>()?;
     let mut scales = Timescales::collect(
         &trees
@@ -1044,7 +1044,7 @@ mod tests {
                 "module M{i}(); timeunit {time}; localparam Q=$timeunit(); endmodule\n"
             ));
         }
-        let tree = crate::migration::parse_source(&code, Path::new("many_queries.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(&code, Path::new("many_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("many_queries.sv"))]).unwrap());
         let tree = AnalysisContext::unspecialized(&tree);
@@ -1072,7 +1072,7 @@ mod tests {
             module Inner(); timeunit 10ns; localparam I=$timeunit(); endmodule
             localparam O=$timeunit(); endmodule
             module Sibling(); timeunit 1ns / 1ps; localparam S=$timeunit(); endmodule";
-        let tree = crate::migration::parse_source(code, Path::new("nested_queries.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(code, Path::new("nested_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("nested_queries.sv"))]).unwrap());
         let tree = AnalysisContext::unspecialized(&tree);
@@ -1202,7 +1202,7 @@ mod tests {
                 "module M{i}(); timeunit 1us / 1ns; M0 child(); endmodule\n"
             ));
         }
-        let tree = crate::migration::parse_source(&code, Path::new("many_scopes.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(&code, Path::new("many_scopes.sv")).unwrap();
         let before = PARENT_CHECKS.with(|count| count.get());
         let design = Timescales::collect(&[(&tree, Path::new("many_scopes.sv"))]).unwrap();
         let checks = PARENT_CHECKS.with(|count| count.get()) - before;
@@ -1230,7 +1230,7 @@ mod tests {
             module Sibling(); endmodule
             `resetall
             package After; endpackage";
-        let tree = crate::migration::parse_source(code, Path::new("nested_scopes.sv")).unwrap();
+        let tree = crate::source_tree::parse_source(code, Path::new("nested_scopes.sv")).unwrap();
         let design = Timescales::collect(&[(&tree, Path::new("nested_scopes.sv"))]).unwrap();
         for (name, unit, precision) in [
             ("Outer", -7, -11),
@@ -1344,19 +1344,19 @@ mod tests {
             "module B(); endmodule module A(); timeunit 1ns / 1ns; endmodule",
             "module A(); timeunit 1ns / 1ns; endmodule package P; endpackage",
         ] {
-            let tree = crate::migration::parse_source(code, Path::new("mixed_times.sv")).unwrap();
+            let tree = crate::source_tree::parse_source(code, Path::new("mixed_times.sv")).unwrap();
             assert!(
                 Timescales::collect(&[(&tree, Path::new("mixed_times.sv"))]).is_err(),
                 "accepted {code}"
             );
         }
-        let explicit = crate::migration::parse_source(
+        let explicit = crate::source_tree::parse_source(
             "module A(); timeunit 1ns / 1ns; endmodule",
             Path::new("a.sv"),
         )
         .unwrap();
         let default =
-            crate::migration::parse_source("module B(); endmodule", Path::new("b.sv")).unwrap();
+            crate::source_tree::parse_source("module B(); endmodule", Path::new("b.sv")).unwrap();
         assert!(
             Timescales::collect(&[
                 (&explicit, Path::new("a.sv")),
@@ -1388,7 +1388,7 @@ mod tests {
                 );
                 let result = crate::analyze_source(&code, Path::new("package_path.sv"));
                 let tree =
-                    crate::migration::parse_source(&code, Path::new("package_path.sv")).unwrap();
+                    crate::source_tree::parse_source(&code, Path::new("package_path.sv")).unwrap();
                 let call = native_calls(&tree)[0];
                 // Exercise both collected design metadata and the local-tree fallback.
                 let local = Timescales::default().query(call, &tree, &HashMap::default());
@@ -1526,17 +1526,17 @@ mod tests {
 
     #[test]
     fn prepared_tree_context_is_restored_after_nested_analysis_and_errors() {
-        let a = crate::migration::parse_source(
+        let a = crate::source_tree::parse_source(
             "module A(); timeunit 1us / 1ns; localparam U=$timeunit(); endmodule",
             Path::new("a.sv"),
         )
         .unwrap();
-        let b = crate::migration::parse_source(
+        let b = crate::source_tree::parse_source(
             "module B(); timeunit 1ns / 1ps; localparam U=$timeunit(); endmodule",
             Path::new("b.sv"),
         )
         .unwrap();
-        let invalid = crate::migration::parse_source(
+        let invalid = crate::source_tree::parse_source(
             "module Invalid(); timeunit 2ns; endmodule",
             Path::new("invalid.sv"),
         )

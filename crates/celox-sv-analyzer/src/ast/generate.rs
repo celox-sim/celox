@@ -5,7 +5,7 @@
 //! remain unsupported; inactive branches are not lowered.
 use super::*;
 use celox_sv_syntax::ExprId;
-mod native;
+mod elaboration;
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -581,7 +581,7 @@ fn items_with_literal_use(
     let references = parameter_literal_references(tree, literal_use)?;
     let mut literals =
         parameters::parameter_value_env_for_references(&tree.state, &parameters, env, &references);
-    if native::needs_functions(tree)? {
+    if elaboration::needs_functions(tree)? {
         elaborator.functions = module_constant_functions(tree, env, aliases, &literals)?;
     }
     // Numeric values and their type markers are already carried by `env`.
@@ -599,7 +599,7 @@ fn items_with_literal_use(
         .unit(tree.declarations())
         .is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
     if is_package {
-        for id in tree.native_body_membership()? {
+        for id in tree.body_membership()? {
             elaborator.push(id, &scope);
         }
     } else {
@@ -615,7 +615,7 @@ fn parameter_literal_references(
     use celox_sv_syntax::{BodyItemKind, ExprKind, LocalDeclaration, StatementKind};
     let native = tree.declarations();
     let mut ranges = Vec::new();
-    for id in tree.native_body_membership()? {
+    for id in tree.body_membership()? {
         let item = native.body_item(id);
         // Scalar initializers are already represented by the parameter binding
         // environment. Array defaults are lowered later and still need literals.
@@ -673,7 +673,7 @@ impl<'a> Elaborator<'a, '_> {
     /// A constant expression in this scope, or `None` when it has no
     /// constant value Celox can determine.
     fn expression(&self, root: ExprId, scope: &Scope) -> Result<Option<ConstExpr>, AnalyzerError> {
-        let Some(expr) = native_constants::expression(
+        let Some(expr) = constant_binding::expression(
             root,
             self.tree.declarations(),
             self.tree,
@@ -841,7 +841,7 @@ impl<'a> Elaborator<'a, '_> {
                         value
                             .variables
                             .iter()
-                            .filter(|variable| native_types::ordinary_variable(variable, native))
+                            .filter(|variable| type_binding::ordinary_variable(variable, native))
                             .map(|variable| (&variable.name, variable.dimensions.as_slice()))
                             .collect(),
                     ),
@@ -1284,7 +1284,7 @@ fn module_constant_functions(
     let dimensions = PackedDimensions::new(HashMap::default(), env, aliases);
     let types = parameter_types_from_const_env(env);
     let mut roots = Vec::new();
-    let mut pending = tree.native_body_membership()?;
+    let mut pending = tree.body_membership()?;
     let mut seen = HashSet::default();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
@@ -1533,7 +1533,7 @@ mod tests {
     use std::path::Path;
 
     fn analyze(source: &str) -> Result<Source, AnalyzerError> {
-        let tree = crate::migration::parse_scope_fixture(source, Path::new("generate.sv"))?;
+        let tree = crate::source_tree::parse_scope_fixture(source, Path::new("generate.sv"))?;
         let tree = AnalysisContext::unspecialized(&tree);
         Source::from_syntax(&tree)
     }
@@ -1552,7 +1552,7 @@ mod tests {
                 writeln!(code, "localparam logic [31:0] P{index} = {value};").unwrap();
             }
             code.push_str("logic [P0-1:0] data; end endmodule");
-            let tree = crate::migration::parse_scope_fixture(
+            let tree = crate::source_tree::parse_scope_fixture(
                 &code,
                 Path::new("generate_parameter_prefix.sv"),
             )
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn generated_items_share_names_but_keep_mutations_in_their_own_snapshot() {
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module Top(); if (1) begin : g logic x; logic y; end endmodule",
             Path::new("generate_name_snapshots.sv"),
         )
@@ -1679,7 +1679,7 @@ mod tests {
             "#
             );
             let tree =
-                crate::migration::parse_scope_fixture(&code, Path::new("scheduled_siblings.sv"))
+                crate::source_tree::parse_scope_fixture(&code, Path::new("scheduled_siblings.sv"))
                     .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             let active = items(
@@ -1910,7 +1910,7 @@ mod tests {
 
     #[test]
     fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             r#"
             module Top();
                 if (1) begin : g
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn genvar_scopes_discard_all_inherited_packed_bounds() {
-        let tree = crate::migration::parse_scope_fixture(
+        let tree = crate::source_tree::parse_scope_fixture(
             "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
             Path::new("genvar_packed_bounds.sv"),
         ).unwrap();
@@ -2257,8 +2257,9 @@ mod tests {
                 function automatic logic f(); return PACKAGE_INPUT; endfunction
             endpackage
         "#;
-        let tree = crate::migration::parse_scope_fixture(code, Path::new("literal_references.sv"))
-            .unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(code, Path::new("literal_references.sv"))
+                .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         for handle in tree.root_scopes().unwrap() {
             let selected = tree.scoped(handle).unwrap();
@@ -2317,7 +2318,7 @@ mod tests {
                 }
                 code.push_str("endmodule\n");
                 let tree =
-                    crate::migration::parse_scope_fixture(&code, Path::new("unused_chain.sv"))
+                    crate::source_tree::parse_scope_fixture(&code, Path::new("unused_chain.sv"))
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
                 let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
@@ -2342,7 +2343,7 @@ mod tests {
     fn referenced_four_state_dependencies_keep_their_full_values() {
         let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
         let tree =
-            crate::migration::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
+            crate::source_tree::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
@@ -2383,7 +2384,7 @@ mod tests {
             endpackage
         "#;
         let tree =
-            crate::migration::parse_scope_fixture(code, Path::new("subroutine_references.sv"))
+            crate::source_tree::parse_scope_fixture(code, Path::new("subroutine_references.sv"))
                 .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         for handle in tree.root_scopes().unwrap() {
@@ -2444,8 +2445,9 @@ mod tests {
                 assign out = RTL_ONLY;
             endmodule
         "#;
-        let tree = crate::migration::parse_scope_fixture(code, Path::new("subroutine_literals.sv"))
-            .unwrap();
+        let tree =
+            crate::source_tree::parse_scope_fixture(code, Path::new("subroutine_literals.sv"))
+                .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
@@ -2497,8 +2499,9 @@ mod tests {
                     writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
                 }
                 writeln!(code, "assign result = P{}; endmodule", count - 1).unwrap();
-                let tree = crate::migration::parse_scope_fixture(&code, Path::new("rtl_chain.sv"))
-                    .unwrap();
+                let tree =
+                    crate::source_tree::parse_scope_fixture(&code, Path::new("rtl_chain.sv"))
+                        .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
                 let active =
                     subroutine_items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
@@ -2545,7 +2548,7 @@ mod tests {
             "if (1) begin : g localparam P=Q; localparam Q=P; end",
         ] {
             let code = format!("module Top; {body} endmodule");
-            let tree = crate::migration::parse_scope_fixture(
+            let tree = crate::source_tree::parse_scope_fixture(
                 &code,
                 Path::new("subroutine_diagnostics.sv"),
             )

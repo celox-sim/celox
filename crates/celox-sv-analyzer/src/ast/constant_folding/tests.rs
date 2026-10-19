@@ -236,7 +236,7 @@ fn numeric_two_state_parameter_values_do_not_scan_visible_type_tables() {
         }
         code.push_str("endmodule\n");
         let tree =
-            crate::migration::parse_source(&code, Path::new("two_state_parameter_scaling.sv"))
+            crate::source_tree::parse_source(&code, Path::new("two_state_parameter_scaling.sv"))
                 .unwrap();
         let source = Source::from_syntax(&tree).unwrap();
         let parameters = source.modules()[0].parameters();

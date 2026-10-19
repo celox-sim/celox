@@ -6,9 +6,9 @@
 
 use super::*;
 
-mod native;
-pub(super) use native::expression as native_expression;
-pub(super) use native::{bind_native, constant_native, typed_shape};
+mod binding;
+pub(super) use binding::expression as native_expression;
+pub(super) use binding::{bind_native, constant_native, typed_shape};
 
 fn eval(state: &AnalysisState, expr: &ConstExpr, dims: &PackedDimensions) -> Option<i128> {
     eval_ast_const_expr(state, expr, &dims.const_env)

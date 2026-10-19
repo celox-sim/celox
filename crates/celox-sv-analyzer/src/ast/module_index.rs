@@ -91,7 +91,7 @@ impl ModuleIndex {
                 let parameters = unit
                     .overridable_parameters()
                     // Preserve the legacy positional binding contract for body
-                    // type parameters during this syntax-only migration.
+                    // type parameters during this syntax-only source_tree.
                     .filter(|parameter| {
                         unit.parameters.is_some()
                             || matches!(

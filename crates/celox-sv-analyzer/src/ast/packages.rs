@@ -221,7 +221,7 @@ impl Packages {
             .map(|(tree, path)| (tree.compilation_scope(), *path))
             .collect();
         for (tree, path) in &units {
-            if tree.native_body_membership()?.is_empty() {
+            if tree.body_membership()?.is_empty() {
                 continue;
             }
             let visibility = unit_visibility(tree)?;
@@ -345,7 +345,7 @@ fn package_variables(name: &str, tree: &SyntaxTree) -> Result<HashSet<String>, A
     use celox_sv_syntax::{BodyItemKind, DataDeclaration};
     let native = tree.declarations();
     let mut variables = HashSet::default();
-    for id in tree.native_body_membership()? {
+    for id in tree.body_membership()? {
         match native.body_item(id).kind {
             BodyItemKind::Data(id) => {
                 if let DataDeclaration::Variables(decl) | DataDeclaration::Constructed(decl) =
@@ -595,7 +595,7 @@ mod tests {
             endmodule
         "#;
         let path = Path::new("package_module_sites.sv");
-        let tree = crate::migration::parse_source(source, path).unwrap();
+        let tree = crate::source_tree::parse_source(source, path).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         for analyzed in [
             Source::from_syntax(&tree).unwrap(),
@@ -645,7 +645,7 @@ mod tests {
             endfunction
         "#;
         let path = Path::new("package_call_sites.sv");
-        let tree = crate::migration::parse_source(source, path).unwrap();
+        let tree = crate::source_tree::parse_source(source, path).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let packages = Packages::analyze(&[(&tree, path)]).unwrap();
         let scopes = [

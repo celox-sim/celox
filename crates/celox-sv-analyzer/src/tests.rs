@@ -46,7 +46,7 @@ fn caps_aggregate_nested_generate_expansion() {
             endmodule
         "#
         );
-        let syntax = migration::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
+        let syntax = source_tree::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
         let result = ast::Source::from_syntax(&syntax);
         if accepted {
             result.expect("small nested loops should expand");
@@ -5157,7 +5157,7 @@ fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
 fn named_constant_calls_retain_parameter_dependencies() {
     let source = "module Top #(parameter W=8, parameter N=f(.value(W)))(); function automatic integer f(input integer value); return value+1; endfunction endmodule";
     let syntax =
-        crate::migration::parse_source(source, std::path::Path::new("named_dependency.sv"))
+        crate::source_tree::parse_source(source, std::path::Path::new("named_dependency.sv"))
             .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
