@@ -1633,7 +1633,7 @@ fn collect_expression_effects(
                 );
                 effects.hierarchical_reads.push((**reference).clone());
             }
-            Factor::Value(_) | Factor::Anonymous(_) => {}
+            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) => {}
         },
         Expression::Unary(_, expression, _) => {
             effects.append(collect_expression_effects(

@@ -62,7 +62,10 @@ pub(crate) fn expression_has_side_effect(expr: &Expression) -> bool {
                 | SystemFunctionKind::Finish => true,
             },
             Factor::HierVariable(_) => false,
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
             expression_has_side_effect(lhs) || expression_has_side_effect(rhs)
@@ -1590,7 +1593,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Finish => {}
                 },
                 Factor::HierVariable(_) => return None,
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_function_input_usage(lhs, usage, active_calls)?;
@@ -1751,7 +1757,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Finish => {}
                 },
                 Factor::HierVariable(_) => {}
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 collect(lhs, candidates, candidate_indices);
@@ -4399,6 +4408,10 @@ impl<'a> FfParser<'a> {
                     ),
                     Some(&reference.comptime.token),
                 ));
+            }
+            Factor::ResetValue(kind, polarity, _) => {
+                let value = crate::config::reset_value(*kind, *polarity, self.config.reset_type);
+                self.op_constant(SIRValue::new(value as u8), 1, ir_builder);
             }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =

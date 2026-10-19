@@ -201,7 +201,10 @@ fn refresh_expression(expr: &mut Expression) {
             }
             Factor::FunctionCall(call) => refresh_call(call),
             Factor::SystemFunctionCall(call) => refresh_system_call(call),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => {}
         },
         Expression::Binary(lhs, _, rhs, _) => {
             refresh_expression(lhs);
