@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
     ffi::{CString, c_char, c_void},
     ptr,
@@ -8,8 +7,9 @@ use std::{
 use fxhash::FxHashMap as HashMap;
 
 use super::{
-    HandleKind, ObjectRef, VpiHandle, VpiValue, handle_mut, new_callback_handle, object_ref,
-    value_bits, vpi_get_value, write_snapshot_value,
+    HandleKind, ObjectRef, VpiHandle, VpiValue, borrow_cell, borrow_cell_mut, handle_mut,
+    host_is_active, new_callback_handle, object_ref, value_bits, vpi_get_value, with_host,
+    write_snapshot_value,
 };
 
 pub const CB_VALUE_CHANGE: i32 = 1;
@@ -68,44 +68,30 @@ pub struct VpiErrorInfo {
     pub line: i32,
 }
 
-struct Registration {
+pub(super) struct Registration {
     data: VpiCbData,
     _time_storage: Option<Box<VpiTime>>,
     _value_storage: Option<Box<VpiValue>>,
-    handle: VpiHandle,
+    pub(super) handle: VpiHandle,
     due: Option<u64>,
     snapshot: Option<(celox::BigUint, celox::BigUint)>,
 }
 
 #[derive(Default)]
-struct CallbackState {
+pub(super) struct CallbackState {
     next_id: u64,
-    callbacks: BTreeMap<u64, Registration>,
+    pub(super) callbacks: BTreeMap<u64, Registration>,
     firing: HashMap<u64, bool>,
     time: u64,
-    finish: bool,
-    running: bool,
+    pub(super) finish: bool,
+    pub(super) running: bool,
+    pub(super) detach_on_stop: bool,
     error: Option<String>,
 }
 
-struct VlogStorage {
+pub(super) struct VlogStorage {
     _args: Vec<CString>,
     arg_ptrs: Vec<*mut c_char>,
-}
-
-thread_local! {
-    static STATE: RefCell<CallbackState> = RefCell::new(CallbackState::default());
-    static VLOG: RefCell<Option<VlogStorage>> = const { RefCell::new(None) };
-}
-
-pub(super) fn reset() {
-    let old = STATE.with_borrow_mut(std::mem::take);
-    for registration in old.callbacks.into_values() {
-        // Safety: reset owns every queued callback handle. It is only called
-        // outside callback execution while replacing the runtime instance.
-        drop(unsafe { Box::from_raw(registration.handle) });
-    }
-    VLOG.with_borrow_mut(|vlog| *vlog = None);
 }
 
 fn callback_signal(data: &VpiCbData) -> Option<celox::ReflectionSignalId> {
@@ -134,32 +120,38 @@ fn callback_delay(data: &VpiCbData) -> u64 {
 }
 
 fn registration_ids(reason: i32) -> Vec<u64> {
-    STATE.with_borrow(|state| {
-        state
-            .callbacks
-            .iter()
-            .filter_map(|(&id, registration)| (registration.data.reason == reason).then_some(id))
-            .collect()
+    with_host(|host| {
+        borrow_cell(&host.callbacks, |state| {
+            state
+                .callbacks
+                .iter()
+                .filter_map(|(&id, registration)| {
+                    (registration.data.reason == reason).then_some(id)
+                })
+                .collect()
+        })
     })
 }
 
 fn changed_values() -> Vec<(u64, celox::BigUint, celox::BigUint)> {
-    STATE.with_borrow(|state| {
-        state
-            .callbacks
-            .iter()
-            .filter_map(|(&id, registration)| {
-                let signal = callback_signal(&registration.data)?;
-                let (value, mask, _) = value_bits(signal)?;
-                registration
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|(previous_value, previous_mask)| {
-                        previous_value != &value || previous_mask != &mask
-                    })
-                    .then_some((id, value, mask))
-            })
-            .collect()
+    with_host(|host| {
+        borrow_cell(&host.callbacks, |state| {
+            state
+                .callbacks
+                .iter()
+                .filter_map(|(&id, registration)| {
+                    let signal = callback_signal(&registration.data)?;
+                    let (value, mask, _) = value_bits(signal)?;
+                    registration
+                        .snapshot
+                        .as_ref()
+                        .is_none_or(|(previous_value, previous_mask)| {
+                            previous_value != &value || previous_mask != &mask
+                        })
+                        .then_some((id, value, mask))
+                })
+                .collect()
+        })
     })
 }
 
@@ -171,7 +163,7 @@ pub(super) fn dispatch_value_changes() -> bool {
     let progressed = !changed.is_empty();
     for (id, value, mask) in changed {
         fire_with_snapshot(id, Some((value, mask)));
-        if STATE.with_borrow(|state| state.finish) {
+        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
         }
     }
@@ -179,16 +171,18 @@ pub(super) fn dispatch_value_changes() -> bool {
 }
 
 fn due_ids() -> Vec<u64> {
-    STATE.with_borrow(|state| {
-        state
-            .callbacks
-            .iter()
-            .filter_map(|(&id, registration)| {
-                (registration.data.reason == CB_AFTER_DELAY
-                    && registration.due.is_some_and(|due| due <= state.time))
-                .then_some(id)
-            })
-            .collect()
+    with_host(|host| {
+        borrow_cell(&host.callbacks, |state| {
+            state
+                .callbacks
+                .iter()
+                .filter_map(|(&id, registration)| {
+                    (registration.data.reason == CB_AFTER_DELAY
+                        && registration.due.is_some_and(|due| due <= state.time))
+                    .then_some(id)
+                })
+                .collect()
+        })
     })
 }
 
@@ -200,15 +194,17 @@ fn fire_with_snapshot(
     id: u64,
     delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
 ) -> bool {
-    let Some(mut registration) = STATE.with_borrow_mut(|state| {
-        let registration = state.callbacks.remove(&id)?;
-        state.firing.insert(id, false);
-        Some(registration)
+    let Some(mut registration) = with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            let registration = state.callbacks.remove(&id)?;
+            state.firing.insert(id, false);
+            Some(registration)
+        })
     }) else {
         return false;
     };
 
-    let now = STATE.with_borrow(|state| state.time);
+    let now = with_host(|host| borrow_cell(&host.callbacks, |state| state.time));
     let delivered_snapshot = delivered_snapshot.or_else(|| {
         callback_signal(&registration.data)
             .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)))
@@ -251,11 +247,17 @@ fn fire_with_snapshot(
         unsafe { callback(&mut registration.data) };
     }
 
-    let cancelled = STATE.with_borrow_mut(|state| state.firing.remove(&id).unwrap_or(true));
+    let cancelled = with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.firing.remove(&id).unwrap_or(true)
+        })
+    });
     if registration.data.reason == CB_VALUE_CHANGE && !cancelled {
         registration.snapshot = delivered_snapshot;
-        STATE.with_borrow_mut(|state| {
-            state.callbacks.insert(id, registration);
+        with_host(|host| {
+            borrow_cell_mut(&host.callbacks, |state| {
+                state.callbacks.insert(id, registration);
+            })
         });
     } else {
         // Safety: callback handles are private allocations and one-shot
@@ -270,7 +272,7 @@ fn fire_all(reason: i32) -> bool {
     let progressed = !ids.is_empty();
     for id in ids {
         fire(id);
-        if STATE.with_borrow(|state| state.finish) {
+        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
         }
     }
@@ -278,14 +280,14 @@ fn fire_all(reason: i32) -> bool {
 }
 
 pub(super) fn run() -> bool {
-    STATE.with_borrow_mut(|state| state.running = true);
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = true));
     fire_all(CB_START_OF_SIMULATION);
     if !finish_requested() {
         super::flush_pending_writes();
     }
     let mut iterations = 0usize;
     'scheduler: loop {
-        if STATE.with_borrow(|state| state.finish) {
+        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
         }
         iterations += 1;
@@ -297,26 +299,26 @@ pub(super) fn run() -> bool {
         let mut progressed = false;
         for id in due_ids() {
             progressed |= fire(id);
-            if STATE.with_borrow(|state| state.finish) {
+            if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
                 break 'scheduler;
             }
         }
         if !super::flush_pending_writes() {
             break;
         }
-        if STATE.with_borrow(|state| state.finish) {
+        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
         }
         loop {
             if dispatch_value_changes() {
                 progressed = true;
-                if STATE.with_borrow(|state| state.finish) {
+                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
                     break 'scheduler;
                 }
                 if !super::flush_pending_writes() {
                     break 'scheduler;
                 }
-                if STATE.with_borrow(|state| state.finish) {
+                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
                     break 'scheduler;
                 }
                 continue;
@@ -325,14 +327,14 @@ pub(super) fn run() -> bool {
             if !read_write.is_empty() {
                 for id in read_write {
                     progressed |= fire(id);
-                    if STATE.with_borrow(|state| state.finish) {
+                    if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
                         break 'scheduler;
                     }
                 }
                 if !super::flush_pending_writes() {
                     break 'scheduler;
                 }
-                if STATE.with_borrow(|state| state.finish) {
+                if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
                     break 'scheduler;
                 }
                 continue;
@@ -341,80 +343,90 @@ pub(super) fn run() -> bool {
         }
         progressed |= fire_all(CB_READ_ONLY_SYNCH);
 
-        if STATE.with_borrow(|state| state.finish) {
+        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
             break;
         }
         if progressed {
             continue;
         }
 
-        let next_time = STATE.with_borrow(|state| {
-            state
-                .callbacks
-                .values()
-                .filter_map(|registration| registration.due)
-                .min()
+        let next_time = with_host(|host| {
+            borrow_cell(&host.callbacks, |state| {
+                state
+                    .callbacks
+                    .values()
+                    .filter_map(|registration| registration.due)
+                    .min()
+            })
         });
         let Some(next_time) = next_time else {
             break;
         };
-        STATE.with_borrow_mut(|state| state.time = next_time);
+        with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.time = next_time));
         fire_all(CB_NEXT_SIM_TIME);
         if !finish_requested() {
             super::flush_pending_writes();
         }
     }
-    let finished = STATE.with_borrow(|state| state.finish);
+    let finished = with_host(|host| borrow_cell(&host.callbacks, |state| state.finish));
     // End-of-simulation callbacks are the one region intentionally dispatched
     // after finish has already been requested.
     for id in registration_ids(CB_END_OF_SIMULATION) {
         fire(id);
     }
-    STATE.with_borrow_mut(|state| state.running = false);
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.running = false));
     finished
 }
 
 pub(super) fn is_running() -> bool {
-    STATE.with_borrow(|state| state.running)
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.running))
 }
 
 pub(super) fn finish_requested() -> bool {
-    STATE.with_borrow(|state| state.finish)
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.finish))
 }
 
 pub(super) fn request_finish() {
-    STATE.with_borrow_mut(|state| state.finish = true);
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.finish = true));
 }
 
 pub(super) fn fail(message: String) {
-    STATE.with_borrow_mut(|state| {
-        state.error.get_or_insert(message);
-        state.finish = true;
+    with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.error.get_or_insert(message);
+            state.finish = true;
+        })
     });
 }
 
 pub(super) fn has_error() -> bool {
-    STATE.with_borrow(|state| state.error.is_some())
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.error.is_some()))
 }
 
 pub(super) fn take_error() -> Option<String> {
-    STATE.with_borrow_mut(|state| state.error.take())
+    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.error.take()))
 }
 
 pub(super) fn remove(id: u64, handle: VpiHandle) -> i32 {
-    let queued = STATE.with_borrow_mut(|state| state.callbacks.remove(&id).is_some());
+    let queued = with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            state.callbacks.remove(&id).is_some()
+        })
+    });
     if queued {
         // Safety: removing a queued callback returns ownership of its handle.
         drop(unsafe { Box::from_raw(handle) });
         return 1;
     }
-    let firing = STATE.with_borrow_mut(|state| {
-        if let Some(cancelled) = state.firing.get_mut(&id) {
-            *cancelled = true;
-            true
-        } else {
-            false
-        }
+    let firing = with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            if let Some(cancelled) = state.firing.get_mut(&id) {
+                *cancelled = true;
+                true
+            } else {
+                false
+            }
+        })
     });
     i32::from(firing)
 }
@@ -426,6 +438,9 @@ pub(super) fn remove(id: u64, handle: VpiHandle) -> i32 {
 ///
 /// `data` and its selected pointers must satisfy the VPI callback ABI.
 pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
+    if !host_is_active() {
+        return ptr::null_mut();
+    }
     if data.is_null() {
         return ptr::null_mut();
     }
@@ -474,26 +489,28 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
     data.value = value_storage
         .as_deref_mut()
         .map_or(ptr::null_mut(), std::ptr::from_mut);
-    STATE.with_borrow_mut(|state| {
-        let id = state.next_id;
-        state.next_id += 1;
-        let handle = new_callback_handle(id);
-        let due = (data.reason == CB_AFTER_DELAY)
-            .then(|| state.time.saturating_add(callback_delay(&data)));
-        let snapshot =
-            signal.and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
-        state.callbacks.insert(
-            id,
-            Registration {
-                data,
-                _time_storage: time_storage,
-                _value_storage: value_storage,
-                handle,
-                due,
-                snapshot,
-            },
-        );
-        handle
+    with_host(|host| {
+        borrow_cell_mut(&host.callbacks, |state| {
+            let id = state.next_id;
+            state.next_id += 1;
+            let handle = new_callback_handle(id);
+            let due = (data.reason == CB_AFTER_DELAY)
+                .then(|| state.time.saturating_add(callback_delay(&data)));
+            let snapshot =
+                signal.and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
+            state.callbacks.insert(
+                id,
+                Registration {
+                    data,
+                    _time_storage: time_storage,
+                    _value_storage: value_storage,
+                    handle,
+                    due,
+                    snapshot,
+                },
+            );
+            handle
+        })
     })
 }
 
@@ -524,7 +541,7 @@ pub unsafe extern "C" fn vpi_get_time(_object: VpiHandle, time: *mut VpiTime) {
     if time.is_null() {
         return;
     }
-    let now = STATE.with_borrow(|state| state.time);
+    let now = with_host(|host| borrow_cell(&host.callbacks, |state| state.time));
     // Safety: checked non-null above.
     let time = unsafe { &mut *time };
     if time.type_ == VPI_SCALED_REAL_TIME {
@@ -541,7 +558,7 @@ pub unsafe extern "C" fn vpi_get_time(_object: VpiHandle, time: *mut VpiTime) {
 #[unsafe(no_mangle)]
 pub extern "C" fn vpi_control(operation: i32) -> i32 {
     if matches!(operation, VPI_STOP | VPI_FINISH) {
-        STATE.with_borrow_mut(|state| state.finish = true);
+        with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.finish = true));
         1
     } else {
         0
@@ -556,27 +573,29 @@ pub extern "C" fn vpi_control(operation: i32) -> i32 {
 /// `info` must point to writable [`VpiVlogInfo`] storage.
 #[allow(clippy::disallowed_methods)] // VPI requires exposing the process argv.
 pub unsafe extern "C" fn vpi_get_vlog_info(info: *mut VpiVlogInfo) -> i32 {
-    if info.is_null() {
+    if info.is_null() || !host_is_active() {
         return 0;
     }
-    VLOG.with_borrow_mut(|storage| {
-        let storage = storage.get_or_insert_with(|| {
-            let args = std::env::args_os()
-                .map(|arg| CString::new(arg.to_string_lossy().replace('\0', "")).unwrap())
-                .collect::<Vec<_>>();
-            let arg_ptrs = args.iter().map(|arg| arg.as_ptr().cast_mut()).collect();
-            VlogStorage {
-                _args: args,
-                arg_ptrs,
-            }
-        });
-        // Safety: checked non-null above; storage lives in thread-local state.
-        let info = unsafe { &mut *info };
-        info.argc = i32::try_from(storage.arg_ptrs.len()).unwrap_or(i32::MAX);
-        info.argv = storage.arg_ptrs.as_mut_ptr();
-        info.product = c"Celox".as_ptr().cast_mut();
-        info.version = c"0.0.0".as_ptr().cast_mut();
-        1
+    with_host(|host| {
+        borrow_cell_mut(&host.vlog, |storage| {
+            let storage = storage.get_or_insert_with(|| {
+                let args = std::env::args_os()
+                    .map(|arg| CString::new(arg.to_string_lossy().replace('\0', "")).unwrap())
+                    .collect::<Vec<_>>();
+                let arg_ptrs = args.iter().map(|arg| arg.as_ptr().cast_mut()).collect();
+                VlogStorage {
+                    _args: args,
+                    arg_ptrs,
+                }
+            });
+            // Safety: checked non-null above; storage lives in the active session.
+            let info = unsafe { &mut *info };
+            info.argc = i32::try_from(storage.arg_ptrs.len()).unwrap_or(i32::MAX);
+            info.argv = storage.arg_ptrs.as_mut_ptr();
+            info.product = c"Celox".as_ptr().cast_mut();
+            info.version = c"0.0.0".as_ptr().cast_mut();
+            1
+        })
     })
 }
 
@@ -603,7 +622,7 @@ pub unsafe extern "C" fn vpi_handle_by_index(_reference: VpiHandle, _index: i32)
 
 #[unsafe(no_mangle)]
 pub extern "C" fn celox_vpi_current_time() -> u64 {
-    STATE.with_borrow(|state| state.time)
+    with_host(|host| borrow_cell(&host.callbacks, |state| state.time))
 }
 
 #[unsafe(no_mangle)]

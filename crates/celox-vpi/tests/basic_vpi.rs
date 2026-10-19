@@ -7,6 +7,14 @@ use std::{
 use celox::{NativeProgramInstance, Simulator};
 use celox_vpi::*;
 
+static VPI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_vpi() -> std::sync::MutexGuard<'static, ()> {
+    VPI_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 fn trusted_instance(image: celox::NativeProgramImage) -> NativeProgramInstance {
     // Safety: tests execute only images produced in-process by the Celox compiler.
     unsafe { NativeProgramInstance::from_image(image) }.unwrap()
@@ -229,6 +237,7 @@ const COMPILE_TIME_OBJECTS: &str = r#"
 
 #[test]
 fn value_layout_matches_vpi_user_header() {
+    let _serial = lock_vpi();
     assert_eq!(std::mem::size_of::<VpiVecVal>(), 8);
     assert_eq!(std::mem::align_of::<VpiVecVal>(), 4);
     assert_eq!(std::mem::offset_of!(VpiValue, format), 0);
@@ -347,12 +356,14 @@ unsafe extern "C" fn write_reflected_aliases(_data: *mut VpiCbData) -> i32 {
 
 #[test]
 fn compile_time_objects_are_not_exposed_as_writable_registers() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COMPILE_TIME_OBJECTS, "Top")
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         assert!(vpi_handle_by_name(c"Top.WIDTH".as_ptr(), ptr::null_mut()).is_null());
@@ -366,9 +377,10 @@ fn compile_time_objects_are_not_exposed_as_writable_registers() {
 
 #[test]
 fn callback_runtime_advances_time_and_finishes_regions() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
     let runtime = trusted_instance(simulator.shared_code().program_image().clone());
-    install_runtime(runtime);
+    let _session = install_runtime(runtime).unwrap();
     CALLBACKS_SEEN.store(0, Ordering::SeqCst);
 
     let mut start_time = VpiTime::default();
@@ -410,10 +422,12 @@ fn callback_runtime_advances_time_and_finishes_regions() {
 
 #[test]
 fn pre_time_callback_writes_settle_before_due_timers() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     STARTUP_TIMER_VALUE.store(-1, Ordering::SeqCst);
     NEXT_TIME_TIMER_VALUE.store(-1, Ordering::SeqCst);
 
@@ -466,10 +480,12 @@ fn pre_time_callback_writes_settle_before_due_timers() {
 
 #[test]
 fn scaled_real_zero_delay_inertial_write_is_immediate() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -502,10 +518,12 @@ fn scaled_real_zero_delay_inertial_write_is_immediate() {
 
 #[test]
 fn finish_stops_remaining_callback_regions_but_still_runs_end_callbacks() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     CALLBACKS_AFTER_FINISH.store(0, Ordering::SeqCst);
 
     let finish = VpiCbData {
@@ -548,10 +566,12 @@ fn finish_stops_remaining_callback_regions_but_still_runs_end_callbacks() {
 
 #[test]
 fn callback_deposits_preserve_order_across_reflected_aliases() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let parent = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -593,6 +613,7 @@ fn callback_deposits_preserve_order_across_reflected_aliases() {
 
 #[test]
 fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
     let container = simulator
         .shared_code()
@@ -602,7 +623,7 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
     // Safety: the container was created above from an in-process compiled image.
     let runtime = unsafe { NativeProgramInstance::from_attached_bytes(&container) }.unwrap();
     drop(simulator);
-    install_runtime(runtime);
+    let _session = install_runtime(runtime).unwrap();
 
     unsafe {
         let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
@@ -666,14 +687,16 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
 
 #[test]
 fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top")
         .opt_level(celox::OptLevel::O0)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -776,10 +799,12 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
 
 #[test]
 fn rejected_force_does_not_leave_vpi_overlay_or_pending_state() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -817,14 +842,16 @@ fn rejected_force_does_not_leave_vpi_overlay_or_pending_state() {
 
 #[test]
 fn two_state_deposits_and_forces_convert_unknown_bits_to_zero() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(TWO_STATE_VALUES, "Top")
         .four_state(true)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -868,13 +895,15 @@ fn two_state_deposits_and_forces_convert_unknown_bits_to_zero() {
 
 #[test]
 fn releasing_a_sequential_variable_keeps_its_forced_value_until_the_next_edge() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top")
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -912,14 +941,16 @@ fn releasing_a_sequential_variable_keeps_its_forced_value_until_the_next_edge() 
 
 #[test]
 fn force_is_reapplied_between_stores_in_branched_comb_logic() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(BRANCHED_COMB, "Top")
         .opt_level(celox::OptLevel::O0)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
@@ -954,14 +985,16 @@ fn force_is_reapplied_between_stores_in_branched_comb_logic() {
 
 #[test]
 fn force_split_preserves_procedural_order_across_branches() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(ORDERED_BRANCHED_COMB, "Top")
         .opt_level(celox::OptLevel::O0)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
@@ -990,14 +1023,16 @@ fn force_split_preserves_procedural_order_across_branches() {
 
 #[test]
 fn force_is_reapplied_between_unrolled_loop_iterations() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(LOOPED_COMB, "Top")
         .opt_level(celox::OptLevel::O0)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
@@ -1023,14 +1058,16 @@ fn force_is_reapplied_between_unrolled_loop_iterations() {
 
 #[test]
 fn force_state_is_shared_by_reflected_clock_aliases() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(ALIASED_CLOCK, "Top")
         .opt_level(celox::OptLevel::O0)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let top_clock = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -1292,10 +1329,12 @@ unsafe extern "C" fn trigger_fatal_and_register_phases(data: *mut VpiCbData) -> 
 
 #[test]
 fn value_change_callback_receives_the_requested_current_value() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     CALLBACK_VALUE.store(-1, Ordering::SeqCst);
 
     unsafe {
@@ -1334,10 +1373,12 @@ fn value_change_callback_receives_the_requested_current_value() {
 
 #[test]
 fn callback_registration_owns_copied_time_and_value_records() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     CALLBACK_VALUE.store(-1, Ordering::SeqCst);
     OWNED_CALLBACK_TIME.store(usize::MAX, Ordering::SeqCst);
 
@@ -1362,10 +1403,12 @@ fn callback_registration_owns_copied_time_and_value_records() {
 
 #[test]
 fn value_change_writes_settle_before_read_only_callbacks() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     VALUE_CHANGE_DRIVE.store(true, Ordering::SeqCst);
     READ_ONLY_VALUE.store(-1, Ordering::SeqCst);
 
@@ -1397,10 +1440,12 @@ fn value_change_writes_settle_before_read_only_callbacks() {
 
 #[test]
 fn value_change_callback_observes_a_change_it_makes_itself() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     SELF_CHANGE_COUNT.store(0, Ordering::SeqCst);
     SELF_CHANGE_VALUE.store(-1, Ordering::SeqCst);
 
@@ -1433,10 +1478,12 @@ fn value_change_callback_observes_a_change_it_makes_itself() {
 
 #[test]
 fn callback_batch_preserves_the_value_that_triggered_each_callback() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     BATCH_CALLBACK_RESET.store(true, Ordering::SeqCst);
     BATCH_CALLBACK_COUNT.store(0, Ordering::SeqCst);
     BATCH_CALLBACK_SEQUENCE.store(0, Ordering::SeqCst);
@@ -1481,10 +1528,12 @@ fn callback_batch_preserves_the_value_that_triggered_each_callback() {
 
 #[test]
 fn value_change_precedes_read_write_and_read_only_regions() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     REGION_ORDER.store(0, Ordering::SeqCst);
 
     unsafe {
@@ -1520,10 +1569,12 @@ fn value_change_precedes_read_write_and_read_only_regions() {
 
 #[test]
 fn fatal_settle_stops_remaining_callback_phases() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(FATAL_ASSERT, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     FATAL_PHASES.store(0, Ordering::SeqCst);
 
     unsafe {
@@ -1556,10 +1607,12 @@ fn fatal_settle_stops_remaining_callback_phases() {
 
 #[test]
 fn ff_fatal_error_uses_the_recorded_value_and_scheduler_time() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(FF_FATAL_ASSERT, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -1588,14 +1641,16 @@ fn ff_fatal_error_uses_the_recorded_value_and_scheduler_time() {
 
 #[test]
 fn signed_integer_deposits_and_z_values_round_trip() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(WIDE_FOUR_STATE, "Top")
         .four_state(true)
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let signed_in = vpi_handle_by_name(c"Top.signed_in".as_ptr(), ptr::null_mut());
@@ -1844,10 +1899,12 @@ unsafe fn put_int(handle: VpiHandle, integer: i32) {
 
 #[test]
 fn same_time_clock_callbacks_commit_domains_simultaneously() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(TWO_CLOCKS, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let clk_a = vpi_handle_by_name(c"Top.clk_a".as_ptr(), ptr::null_mut());
@@ -1911,13 +1968,15 @@ fn same_time_clock_callbacks_commit_domains_simultaneously() {
 
 #[test]
 fn repeated_four_state_clock_edges_in_one_callback_are_not_lost() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top")
         .four_state(true)
         .build()
         .unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -1956,10 +2015,12 @@ fn repeated_four_state_clock_edges_in_one_callback_are_not_lost() {
 
 #[test]
 fn repeated_clock_edges_preserve_the_data_at_each_edge() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -2009,10 +2070,12 @@ fn repeated_clock_edges_preserve_the_data_at_each_edge() {
 
 #[test]
 fn value_change_callbacks_observe_each_queued_clock_transition() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     EDGE_VALUE_CHANGE_COUNT.store(0, Ordering::SeqCst);
     EDGE_VALUE_CHANGE_SEQUENCE.store(0, Ordering::SeqCst);
 
@@ -2063,10 +2126,12 @@ fn value_change_callbacks_observe_each_queued_clock_transition() {
 
 #[test]
 fn inactive_clock_transition_is_replayed_between_two_active_edges() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     EDGE_VALUE_CHANGE_COUNT.store(0, Ordering::SeqCst);
     EDGE_VALUE_CHANGE_SEQUENCE.store(0, Ordering::SeqCst);
 
@@ -2117,10 +2182,12 @@ fn inactive_clock_transition_is_replayed_between_two_active_edges() {
 
 #[test]
 fn callback_writes_override_later_queued_edge_snapshots() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     EDGE_VALUE_CHANGE_DRIVE_DATA.store(true, Ordering::SeqCst);
 
     unsafe {
@@ -2183,10 +2250,12 @@ fn callback_writes_override_later_queued_edge_snapshots() {
 
 #[test]
 fn callback_clock_override_removes_a_later_queued_edge() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     EDGE_VALUE_CHANGE_OVERRIDE_CLOCK.store(true, Ordering::SeqCst);
 
     unsafe {
@@ -2242,10 +2311,12 @@ fn callback_clock_override_removes_a_later_queued_edge() {
 
 #[test]
 fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
+    let _serial = lock_vpi();
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(trusted_instance(
+    let _session = install_runtime(trusted_instance(
         simulator.shared_code().program_image().clone(),
-    ));
+    ))
+    .unwrap();
     FINISH_EDGE_CALLBACKS.store(0, Ordering::SeqCst);
     CALLBACKS_AFTER_EDGE_FINISH.store(0, Ordering::SeqCst);
 
@@ -2296,6 +2367,7 @@ fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
 #[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_time_properties_follow_the_attached_design_precision() {
+    let _serial = lock_vpi();
     for (declarations, unit, expected) in [
         ("", -9, -12),
         ("timeunit 1ns; timeprecision 1fs;", -9, -15),
@@ -2312,7 +2384,7 @@ fn vpi_time_properties_follow_the_attached_design_precision() {
             .to_container_bytes()
             .unwrap();
         let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
-        install_runtime(trusted_instance(image));
+        let _session = install_runtime(trusted_instance(image)).unwrap();
         unsafe {
             let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
             assert_eq!(vpi_get(VPI_TIME_UNIT, ptr::null_mut()), expected);
@@ -2328,6 +2400,7 @@ fn vpi_time_properties_follow_the_attached_design_precision() {
 #[cfg(feature = "systemverilog")]
 #[test]
 fn vpi_time_properties_preserve_module_scales_in_native_images() {
+    let _serial = lock_vpi();
     let source = r#"
         `timescale 10ns / 1ps
         module Top(output logic y);
@@ -2350,7 +2423,7 @@ fn vpi_time_properties_preserve_module_scales_in_native_images() {
         .to_container_bytes()
         .unwrap();
     let image = celox::NativeProgramImage::from_container_bytes(&bytes).unwrap();
-    install_runtime(trusted_instance(image));
+    let _session = install_runtime(trusted_instance(image)).unwrap();
     unsafe {
         assert_eq!(vpi_get(VPI_TIME_UNIT, ptr::null_mut()), -15);
         assert_eq!(vpi_get(VPI_TIME_PRECISION, ptr::null_mut()), -15);
@@ -2369,4 +2442,99 @@ fn vpi_time_properties_preserve_module_scales_in_native_images() {
         }
     }
     clear_runtime();
+}
+
+#[test]
+fn sessions_release_on_unwind_and_reject_nested_or_foreign_hosts() {
+    let _serial = lock_vpi();
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let session = install_runtime(trusted_instance(image.clone())).unwrap();
+    assert!(install_runtime(trusted_instance(image.clone())).is_err());
+    std::thread::spawn(|| {
+        // A foreign thread must not see or clear the owner's runtime.
+        clear_runtime();
+        unsafe {
+            assert!(vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()).is_null());
+        }
+    })
+    .join()
+    .unwrap();
+    unsafe {
+        let signal = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        assert!(!signal.is_null());
+        vpi_free_object(signal);
+    }
+    drop(session);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _session = install_runtime(trusted_instance(image.clone())).unwrap();
+        panic!("exercise session cleanup");
+    }));
+    assert!(unwind.is_err());
+    let _session = install_runtime(trusted_instance(image)).unwrap();
+    assert_eq!(celox_vpi_current_time(), 0);
+}
+
+struct ReentrantClear {
+    image: celox::NativeProgramImage,
+    replacement_rejected: bool,
+    nested_dispatch_rejected: bool,
+}
+
+unsafe extern "C" fn clear_during_callback(data: *mut VpiCbData) -> i32 {
+    // Safety: the test keeps its context alive throughout callback dispatch.
+    let context = unsafe { &mut *((*data).user_data.cast::<ReentrantClear>()) };
+    context.nested_dispatch_rejected = run_callbacks_result().is_err();
+    clear_runtime();
+    context.replacement_rejected =
+        install_runtime(trusted_instance(context.image.clone())).is_err();
+    0
+}
+
+#[test]
+fn callback_teardown_keeps_its_host_selected_until_dispatch_returns() {
+    let _serial = lock_vpi();
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    let image = simulator.shared_code().program_image().clone();
+    let session = install_runtime(trusted_instance(image.clone())).unwrap();
+    let mut context = ReentrantClear {
+        image: image.clone(),
+        replacement_rejected: false,
+        nested_dispatch_rejected: false,
+    };
+    let callback = VpiCbData {
+        reason: CB_START_OF_SIMULATION,
+        cb_rtn: Some(clear_during_callback),
+        obj: ptr::null_mut(),
+        time: ptr::null_mut(),
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: std::ptr::from_mut(&mut context).cast(),
+    };
+    unsafe {
+        assert!(!vpi_register_cb(&callback).is_null());
+    }
+    assert!(run_callbacks_result().unwrap());
+    assert!(context.replacement_rejected);
+    assert!(context.nested_dispatch_rejected);
+    // The old guard can outlive an explicitly cleared registration.
+    let replacement = install_runtime(trusted_instance(image)).unwrap();
+    drop(session);
+    unsafe {
+        let signal = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        assert!(!signal.is_null());
+        vpi_free_object(signal);
+    }
+    drop(replacement);
+    unsafe {
+        assert!(vpi_register_cb(&callback).is_null());
+        let mut info = VpiVlogInfo {
+            argc: 0,
+            argv: ptr::null_mut(),
+            product: ptr::null_mut(),
+            version: ptr::null_mut(),
+        };
+        assert_eq!(vpi_get_vlog_info(&mut info), 0);
+        assert!(info.argv.is_null());
+    }
 }
