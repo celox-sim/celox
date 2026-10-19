@@ -7,6 +7,34 @@ use sv_parser::{Define, Defines, SyntaxTree, parse_sv_str, preprocess_str};
 
 use crate::AnalyzerError;
 
+/// Expand macros and includes using the same preprocessor as [`parse_source`].
+/// Each call is one compilation unit; source-defined macros do not escape it.
+/// Command-line macros without a value expand to `1`. Compiler directives such
+/// as `timescale`, `line` and `default_nettype` remain in the returned source.
+pub fn preprocess_source(
+    code: &str,
+    path: &Path,
+    macros: &[(String, Option<String>)],
+    includes: &[&Path],
+) -> Result<String, AnalyzerError> {
+    let defines: Defines<FxBuildHasher> = macros
+        .iter()
+        .map(|(name, value)| {
+            let text = sv_parser::DefineText {
+                text: value.as_deref().unwrap_or("1").to_string(),
+                origin: None,
+            };
+            (
+                name.clone(),
+                Some(Define::new(name.clone(), Vec::new(), Some(text))),
+            )
+        })
+        .collect();
+    let (source, _) = preprocess_str(code, path, &defines, includes, false, false, 0, 0)
+        .map_err(|error| AnalyzerError::Parse(error.to_string()))?;
+    Ok(source.text().to_string())
+}
+
 /// Parse a SystemVerilog source string into an `sv-parser` syntax tree.
 pub fn parse_source(code: &str, path: &Path) -> Result<SyntaxTree, AnalyzerError> {
     let defines: Defines<FxBuildHasher> = HashMap::<String, Option<Define>>::default();

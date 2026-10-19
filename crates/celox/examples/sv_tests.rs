@@ -1,187 +1,170 @@
-//! Runs the elaboration and simulation tests of the sv-tests suite
-//! (<https://github.com/chipsalliance/sv-tests>) against the SystemVerilog
-//! frontend and compares the results with the retained expectations.
+//! Single-case compiler driver for the official sv-tests runner.
+//!
+//! Metadata, timeouts, expected failures and output assertions belong to
+//! sv-tests. This process reports only compiler/simulator success or failure.
 //!
 //! ```text
-//! cargo run --release -p celox --features systemverilog --example sv_tests -- \
-//!     <sv-tests>/tests --expected conformance/sv-tests/expected.tsv [--update] [--report report.tsv] [--state-mode 2state|4state|both]
+//! sv_tests --mode elaboration|simulation --state-mode 2state|4state \
+//!     [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE...
 //! ```
-//!
-//! As in sv-tests, a test passes when Celox succeeds, or fails if the test is
-//! marked `:should_fail_because:`. An elaboration test succeeds when its top
-//! module builds. A simulation test also runs until `$finish` or until no event
-//! is left; it succeeds when the run ends without a runtime error or `$fatal`,
-//! and passes only if every `:assert: <python expression>` line it prints
-//! evaluates true (with `python3`, as the sv-tests log parser does). Each test
-//! runs in a child process so that a crash or a hang only fails that test. The
-//! run fails when any result differs from `--expected`; `--update` rewrites that
-//! file instead. Both state modes run by default; a single-mode update preserves
-//! the other mode’s expectations.
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
-#![allow(clippy::disallowed_macros)] // Progress and differences intentionally use stderr.
+#![allow(clippy::disallowed_macros)] // Driver diagnostics intentionally use stderr.
 
-use std::{
-    collections::BTreeMap,
-    env,
-    fmt::Write as _,
-    path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
-const TIMEOUT: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Elaboration,
     Simulation,
 }
 
-impl Mode {
-    fn name(self) -> &'static str {
-        match self {
-            Mode::Elaboration => "elaboration",
-            Mode::Simulation => "simulation",
+#[derive(Debug)]
+struct Options {
+    mode: Mode,
+    four_state: bool,
+    top: Option<String>,
+    defines: Vec<(String, Option<String>)>,
+    includes: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+}
+
+fn parse_options(args: &[String]) -> Result<Options, String> {
+    let mut mode = None;
+    let mut four_state = None;
+    let mut top = None;
+    let mut defines = Vec::new();
+    let mut includes = Vec::new();
+    let mut files = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            files.extend(args.map(PathBuf::from));
+            break;
         }
-    }
-}
-
-struct Test {
-    path: PathBuf,
-    meta: BTreeMap<String, String>,
-}
-
-impl Test {
-    fn read(path: PathBuf) -> Option<Self> {
-        let text = std::fs::read_to_string(&path).ok()?;
-        let mut meta = BTreeMap::new();
-        for line in text.lines() {
-            if let Some(rest) = line.trim().strip_prefix(':')
-                && let Some((key, value)) = rest.split_once(':')
-                && !key.contains(char::is_whitespace)
-            {
-                meta.insert(key.to_string(), value.trim().to_string());
+        if !arg.starts_with('-') {
+            files.push(arg.into());
+            continue;
+        }
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {arg}"))?;
+        match arg.as_str() {
+            "--mode" if mode.is_none() => {
+                mode = Some(match value.as_str() {
+                    "elaboration" => Mode::Elaboration,
+                    "simulation" => Mode::Simulation,
+                    _ => return Err(format!("unsupported mode: {value}")),
+                })
             }
-        }
-        Some(Self { path, meta })
-    }
-
-    /// The mode sv-tests would choose for a simulator: simulation when the
-    /// test supports it, else elaboration. `None` for preprocessing and parsing
-    /// tests.
-    fn mode(&self) -> Option<Mode> {
-        let types: Vec<&str> = self
-            .meta
-            .get("type")
-            .map_or("parsing elaboration", String::as_str)
-            .split_whitespace()
-            .collect();
-        if types.contains(&"simulation") {
-            Some(Mode::Simulation)
-        } else if types.contains(&"elaboration") {
-            Some(Mode::Elaboration)
-        } else {
-            None
-        }
-    }
-
-    fn should_fail(&self) -> bool {
-        self.meta.contains_key("should_fail_because")
-            || self.meta.get("should_fail").is_some_and(|v| v == "1")
-    }
-
-    /// The source files; `:files:` paths are relative to the sv-tests root.
-    fn files(&self, tests: &Path) -> Vec<PathBuf> {
-        match self.meta.get("files") {
-            Some(files) => files
-                .split_whitespace()
-                .map(|file| tests.join("..").join(file))
-                .collect(),
-            None => vec![self.path.clone()],
+            "--state-mode" if four_state.is_none() => {
+                four_state = Some(match value.as_str() {
+                    "2state" => false,
+                    "4state" => true,
+                    _ => return Err(format!("unsupported state mode: {value}")),
+                })
+            }
+            "--top" if top.is_none() && !value.is_empty() => top = Some(value.clone()),
+            "--define" => {
+                let (name, replacement) = value
+                    .split_once('=')
+                    .map_or((value.as_str(), None), |(name, value)| {
+                        (name, Some(value.to_string()))
+                    });
+                if name.is_empty()
+                    || !name.bytes().enumerate().all(|(index, byte)| {
+                        byte.is_ascii_alphabetic()
+                            || byte == b'_'
+                            || index > 0 && (byte.is_ascii_digit() || byte == b'$')
+                    })
+                {
+                    return Err(format!("invalid macro name: {name}"));
+                }
+                defines.push((name.to_string(), replacement));
+            }
+            "--include" => includes.push(value.into()),
+            _ => return Err(format!("unknown, duplicate or invalid option: {arg}")),
         }
     }
+    if files.is_empty() {
+        return Err("no input files".to_string());
+    }
+    Ok(Options {
+        mode: mode.ok_or("--mode is required")?,
+        four_state: four_state.ok_or("--state-mode is required")?,
+        top,
+        defines,
+        includes,
+        files,
+    })
 }
 
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
-}
-
-/// The top module: the declared one, else `top`, else the one module whose
-/// name appears nowhere but in its declaration, else the last module. `None`
-/// when the sources declare no module.
-fn top_module(test: &Test, files: &[PathBuf], texts: &[String]) -> Option<String> {
-    if let Some(top) = test.meta.get("top_module").filter(|top| !top.is_empty()) {
-        return Some(top.clone());
+/// Select roots from parsed instantiations, including inactive generate
+/// branches (IEEE 1800-2023 23.3.1). Celox's simulator accepts one root.
+fn select_top(
+    parsed: &[celox_sv_analyzer::ParsedSource],
+    explicit: Option<&str>,
+) -> Result<String, String> {
+    if let Some(top) = explicit {
+        return Ok(top.to_string());
     }
-    let mut names = Vec::new();
-    for (text, path) in texts.iter().zip(files) {
-        match celox_sv_analyzer::source_module_names(text, path) {
-            Ok(found) => names.extend(found),
-            // The build reports the parse error.
-            Err(_) => return Some("top".to_string()),
-        }
-    }
-    if names.iter().any(|name| name == "top") {
-        return Some("top".to_string());
-    }
-    let mentions = |name: &str| {
-        texts
-            .iter()
-            .flat_map(|text| words(text))
-            .filter(|word| *word == name)
-            .count()
-    };
-    let roots: Vec<_> = names.iter().filter(|name| mentions(name) == 1).collect();
-    match roots.as_slice() {
-        [root] => Some((*root).clone()),
-        _ => names.last().cloned(),
-    }
-}
-
-/// Runs one test in this process. The exit status is 0 on success, 1 when the
-/// build fails and 3 when the simulation fails; a simulation prints its
-/// `$display` output to stdout.
-fn run_one(mode: &str, state_mode: &str, top: &str, files: &[PathBuf]) -> ExitCode {
-    let texts: Vec<String> = match files.iter().map(std::fs::read_to_string).collect() {
-        Ok(texts) => texts,
-        Err(error) => {
-            println!("io: {error}");
-            return ExitCode::from(2);
-        }
-    };
-    let sources = texts
+    let names: BTreeSet<_> = parsed
         .iter()
-        .zip(files)
+        .flat_map(|source| source.module_names())
+        .cloned()
+        .collect();
+    let referenced: BTreeSet<_> = parsed
+        .iter()
+        .flat_map(|source| source.component_references())
+        .collect();
+    let roots: Vec<_> = names.difference(&referenced).cloned().collect();
+    match roots.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => {
+            Err("elaboration requires a module root; none found in the parsed sources".to_string())
+        }
+        _ => Err(format!(
+            "multiple module roots ({}) are unsupported by Celox's single-root simulator; select one with --top",
+            roots.join(", ")
+        )),
+    }
+}
+
+fn run(options: &Options) -> Result<(), String> {
+    let includes: Vec<_> = options.includes.iter().map(PathBuf::as_path).collect();
+    let texts: Vec<_> = options
+        .files
+        .iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            celox_sv_analyzer::syntax::preprocess_source(&text, path, &options.defines, &includes)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let sources: Vec<_> = texts
+        .iter()
+        .zip(&options.files)
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
-    if mode == Mode::Elaboration.name() {
-        return match celox::Simulator::from_sv_sources(sources, top)
-            .four_state(state_mode == "4state")
+    let parsed = sources
+        .iter()
+        .map(|(text, path)| celox_sv_analyzer::ParsedSource::parse(text, path))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let top = select_top(&parsed, options.top.as_deref())?;
+    match options.mode {
+        Mode::Elaboration => celox::Simulator::from_sv_sources(sources, &top)
+            .four_state(options.four_state)
             .build()
-        {
-            Ok(_) => ExitCode::SUCCESS,
-            Err(error) => {
-                println!("{error}");
-                ExitCode::from(1)
-            }
-        };
-    }
-    let simulation = match celox::Simulation::from_sv_sources(sources, top)
-        .four_state(state_mode == "4state")
-        .build()
-    {
-        Ok(simulation) => simulation,
-        Err(error) => {
-            println!("{error}");
-            return ExitCode::from(1);
-        }
-    };
-    match simulate(simulation) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(3)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        Mode::Simulation => {
+            let sim = celox::Simulation::from_sv_sources(sources, &top)
+                .four_state(options.four_state)
+                .build()
+                .map_err(|error| error.to_string())?;
+            simulate(sim)
         }
     }
 }
@@ -217,8 +200,9 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
         }
         Ok(())
     };
-    sim.eval_comb().map_err(|error| error.to_string())?;
+    let initial = sim.eval_comb().map_err(|error| error.to_string());
     output(&mut sim)?;
+    initial?;
     while !sim.is_finished() {
         let step = sim.step().map_err(|error| error.to_string());
         output(&mut sim)?;
@@ -231,367 +215,247 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     Ok(())
 }
 
-enum Outcome {
-    /// The build, and a simulation, succeeded; the simulation output.
-    Succeeded(String),
-    Rejected(String),
-    /// The simulation failed: its output and the error.
-    SimulationFailed(String, String),
-    Crashed(String),
-    Timeout,
-}
-
-fn run_child(mode: Mode, state_mode: &str, files: &[PathBuf], top: &str) -> Outcome {
-    let mut child = Command::new(env::current_exe().expect("locate this executable"))
-        .arg("--one")
-        .arg(mode.name())
-        .arg(state_mode)
-        .arg(top)
-        .args(files)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the test child");
-    // Drain the pipes while waiting so that a chatty simulation cannot block.
-    let stdout = read_pipe(child.stdout.take());
-    let stderr = read_pipe(child.stderr.take());
-    let start = Instant::now();
-    while child.try_wait().expect("wait for the test child").is_none() {
-        if start.elapsed() > TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Outcome::Timeout;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let status = child.wait().expect("wait for the test child");
-    let stdout = stdout.join().expect("read the test output");
-    let stderr = stderr.join().expect("read the test output");
-    match status.code() {
-        Some(0) => Outcome::Succeeded(stdout),
-        Some(1) => Outcome::Rejected(stdout),
-        Some(3) => Outcome::SimulationFailed(stdout, stderr),
-        _ => Outcome::Crashed(format!("{status}: {stderr}")),
-    }
-}
-
-fn read_pipe(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
-}
-
-/// The expression of an `:assert:` line: as in the sv-tests log parser, the
-/// first `:name:` marker of the line decides.
-fn assertion(line: &str) -> Option<&str> {
-    let line = line.trim();
-    for (at, _) in line.match_indices(':') {
-        let rest = &line[at + 1..];
-        let name = rest.bytes().take_while(u8::is_ascii_lowercase).count();
-        if name > 0 && rest[name..].starts_with(':') {
-            return (&rest[..name] == "assert").then(|| &rest[name + 1..]);
-        }
-    }
-    None
-}
-
-/// Evaluates each expression in Python, as sv-tests does.
-const EVALUATE: &str = "\
-import sys
-for expression in sys.stdin.read().split('\\n'):
-    try:
-        print(int(bool(eval(expression))))
-    except Exception:
-        print(0)
-";
-
-/// The first `:assert:` expression in `output` that does not hold.
-fn failed_assertion(output: &str) -> Option<String> {
-    use std::io::Write as _;
-    let expressions: Vec<&str> = output.lines().filter_map(assertion).collect();
-    if expressions.is_empty() {
-        return None;
-    }
-    let mut python = Command::new("python3")
-        .args(["-I", "-c", EVALUATE])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("run python3 to evaluate the :assert: lines");
-    python
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(expressions.join("\n").as_bytes())
-        .expect("pass the :assert: lines to python3");
-    let output = python
-        .wait_with_output()
-        .expect("evaluate the :assert: lines");
-    let results = String::from_utf8_lossy(&output.stdout).into_owned();
-    let mut results = results.lines();
-    expressions
-        .iter()
-        .find(|_| results.next() != Some("1"))
-        .map(|expression| expression.trim().to_string())
-}
-
-/// The code and message of a rendered diagnostic, on one line.
-fn summary(text: &str) -> String {
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let first = lines.next().unwrap_or("");
-    let mut message = lines
-        .by_ref()
-        .find_map(|line| line.strip_prefix('×'))
-        .map_or(String::new(), |line| line.trim().to_string());
-    for line in lines.map_while(|line| line.strip_prefix('│')) {
-        message.push(' ');
-        message.push_str(line.trim());
-    }
-    format!("{first}: {message}").replace(['\t', '\n'], " ")
-}
-
-struct Options {
-    tests: PathBuf,
-    expected: Option<PathBuf>,
-    update: bool,
-    report: Option<PathBuf>,
-    state_modes: Vec<&'static str>,
-}
-
-fn parse_options(args: &[String]) -> Option<Options> {
-    let mut options = Options {
-        tests: PathBuf::new(),
-        expected: None,
-        update: false,
-        report: None,
-        state_modes: vec!["2state", "4state"],
-    };
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--expected" => options.expected = Some(args.next()?.into()),
-            "--report" => options.report = Some(args.next()?.into()),
-            "--update" => options.update = true,
-            "--state-mode" => {
-                options.state_modes = match args.next()?.as_str() {
-                    "2state" => vec!["2state"],
-                    "4state" => vec!["4state"],
-                    "both" => vec!["2state", "4state"],
-                    _ => return None,
-                }
-            }
-            _ if options.tests.as_os_str().is_empty() && !arg.starts_with("--") => {
-                options.tests = arg.into();
-            }
-            _ => return None,
-        }
-    }
-    (!options.tests.as_os_str().is_empty() && (!options.update || options.expected.is_some()))
-        .then_some(options)
-}
-
-fn test_paths(tests: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut stack = vec![tests.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read the test directory") {
-            let path = entry.expect("read the test directory").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|ext| ext == "sv" || ext == "v")
-            {
-                paths.push(path);
-            }
-        }
-    }
-    paths.sort();
-    paths
-}
-
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--one") && args.len() >= 5 {
-        let files: Vec<PathBuf> = args[4..].iter().map(PathBuf::from).collect();
-        return run_one(&args[1], &args[2], &args[3], &files);
-    }
-    let Some(options) = parse_options(&args) else {
-        eprintln!(
-            "usage: sv_tests <sv-tests>/tests [--expected FILE [--update]] [--report FILE] [--state-mode 2state|4state|both]"
-        );
-        return ExitCode::from(2);
-    };
-    let mut results = BTreeMap::new();
-    let mut report =
-        String::from("test\tstate_mode\ttags\tmode\ttop\tshould_fail\tresult\tdetail\n");
-    for path in test_paths(&options.tests) {
-        let Some(test) = Test::read(path) else {
-            continue;
-        };
-        let Some(mode) = test.mode() else {
-            continue;
-        };
-        let name = test
-            .path
-            .strip_prefix(&options.tests)
-            .unwrap_or(&test.path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let files = test.files(&options.tests);
-        let texts: Vec<String> = files
-            .iter()
-            .map(|file| std::fs::read_to_string(file).unwrap_or_default())
-            .collect();
-        let should_fail = test.should_fail();
-        let top = top_module(&test, &files, &texts);
-        for &state_mode in &options.state_modes {
-            let (result, detail) = match &top {
-                None => ("no_top", String::new()),
-                Some(top) => match run_child(mode, state_mode, &files, top) {
-                    Outcome::Succeeded(_) if should_fail => ("fail", "accepted".to_string()),
-                    Outcome::Succeeded(output) => match failed_assertion(&output) {
-                        Some(expression) => ("fail", format!("assert: {expression}")),
-                        None => ("pass", String::new()),
-                    },
-                    Outcome::Rejected(error) if should_fail => ("pass", summary(&error)),
-                    Outcome::Rejected(error) => ("fail", summary(&error)),
-                    Outcome::SimulationFailed(output, error) => {
-                        let error = format!("runtime: {}", error.trim()).replace(['\t', '\n'], " ");
-                        match failed_assertion(&output) {
-                            Some(expression) => ("fail", format!("assert: {expression}")),
-                            None if should_fail => ("pass", error),
-                            None => ("fail", error),
-                        }
-                    }
-                    Outcome::Crashed(error) => ("crash", summary(&error)),
-                    Outcome::Timeout => ("timeout", String::new()),
-                },
-            };
-            writeln!(
-                report,
-                "{name}\t{state_mode}\t{}\t{}\t{}\t{should_fail}\t{result}\t{detail}",
-                test.meta.get("tags").map_or("", String::as_str),
-                mode.name(),
-                top.as_deref().unwrap_or(""),
-            )
-            .unwrap();
-            results.insert((name.clone(), state_mode.to_string()), result);
-        }
-    }
-    if let Some(path) = &options.report {
-        std::fs::write(path, &report).expect("write the report");
-    }
-    for &state_mode in &options.state_modes {
-        let mut counts = BTreeMap::<&str, usize>::new();
-        for ((_, mode), result) in &results {
-            if mode == state_mode {
-                *counts.entry(result).or_default() += 1;
-            }
-        }
-        eprintln!("{state_mode}: {counts:?}");
-    }
-
-    let Some(expected_path) = &options.expected else {
+    if args.as_slice() == ["--version"] {
+        println!("Celox {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
-    };
-    let mut expected = BTreeMap::<(String, String), String>::new();
-    if !options.update || expected_path.exists() {
-        let text = std::fs::read_to_string(expected_path).expect("read the expectations");
-        let mut lines = text.lines();
-        if lines.next() != Some("test\tstate_mode\tresult") {
-            eprintln!("expected TSV header: test\tstate_mode\tresult");
+    }
+    let options = match parse_options(&args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!(
+                "{error}\nusage: sv_tests --mode elaboration|simulation --state-mode 2state|4state [--top NAME] [--define NAME[=VALUE]] [--include DIR] -- FILE..."
+            );
             return ExitCode::from(2);
         }
-        for line in lines {
-            let fields: Vec<_> = line.split('\t').collect();
-            if fields.len() != 3
-                || !["2state", "4state"].contains(&fields[1])
-                || !["pass", "fail", "no_top", "crash", "timeout"].contains(&fields[2])
-                || expected
-                    .insert(
-                        (fields[0].to_string(), fields[1].to_string()),
-                        fields[2].to_string(),
-                    )
-                    .is_some()
-            {
-                eprintln!("invalid or duplicate expectation: {line}");
-                return ExitCode::from(2);
-            }
+    };
+    match run(&options) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
-    if options.update {
-        expected.retain(|(_, state_mode), _| !options.state_modes.contains(&state_mode.as_str()));
-        expected.extend(
-            results
-                .iter()
-                .map(|(key, result)| (key.clone(), result.to_string())),
-        );
-        let mut text = String::from("test\tstate_mode\tresult\n");
-        for ((name, state_mode), result) in &expected {
-            writeln!(text, "{name}\t{state_mode}\t{result}").unwrap();
-        }
-        std::fs::write(expected_path, text).expect("write the expectations");
-        return ExitCode::SUCCESS;
-    }
-    expected.retain(|(_, state_mode), _| options.state_modes.contains(&state_mode.as_str()));
-    let mut changes = Vec::new();
-    for (key, result) in &results {
-        let (name, state_mode) = key;
-        match expected.get(key) {
-            Some(before) if before == result => {}
-            Some(before) => changes.push(format!("{name} [{state_mode}]: {before} -> {result}")),
-            None => changes.push(format!("{name} [{state_mode}]: new test, {result}")),
-        }
-    }
-    for (name, state_mode) in expected.keys().filter(|key| !results.contains_key(*key)) {
-        changes.push(format!("{name} [{state_mode}]: missing"));
-    }
-    if changes.is_empty() {
-        return ExitCode::SUCCESS;
-    }
-    eprintln!("results differ from {}:", expected_path.display());
-    for change in &changes {
-        eprintln!("  {change}");
-    }
-    eprintln!("rerun with --update to accept them after review");
-    ExitCode::FAILURE
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
-    fn options(args: &[&str]) -> Option<Options> {
+    fn options(args: &[&str]) -> Result<Options, String> {
         parse_options(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())
     }
 
     #[test]
-    fn state_mode_selection() {
+    fn accepts_compiler_inputs_and_rejects_unimplemented_modes() {
+        let o = options(&[
+            "--mode",
+            "simulation",
+            "--state-mode",
+            "4state",
+            "--top",
+            "Top",
+            "--define",
+            "W=8",
+            "--define",
+            "FLAG",
+            "--include",
+            "headers",
+            "--",
+            "a.sv",
+            "b.sv",
+        ])
+        .unwrap();
+        assert_eq!(o.mode, Mode::Simulation);
+        assert!(o.four_state);
+        assert_eq!(o.top.as_deref(), Some("Top"));
         assert_eq!(
-            options(&["tests"]).unwrap().state_modes,
-            ["2state", "4state"]
+            o.defines,
+            [("W".into(), Some("8".into())), ("FLAG".into(), None)]
         );
-        for mode in ["2state", "4state"] {
-            assert_eq!(
-                options(&["tests", "--state-mode", mode])
-                    .unwrap()
-                    .state_modes,
-                [mode]
-            );
+        assert_eq!(o.includes, [PathBuf::from("headers")]);
+        assert_eq!(o.files, [PathBuf::from("a.sv"), PathBuf::from("b.sv")]);
+        for args in [
+            vec!["--mode", "parsing", "--state-mode", "2state", "a.sv"],
+            vec!["--mode", "elaboration", "--state-mode", "both", "a.sv"],
+            vec![
+                "--mode",
+                "elaboration",
+                "--state-mode",
+                "2state",
+                "--define",
+                "2bad",
+                "a.sv",
+            ],
+            vec!["--mode", "elaboration", "--state-mode", "2state"],
+            vec!["a.sv"],
+        ] {
+            assert!(options(&args).is_err(), "{args:?}");
         }
-        assert_eq!(
-            options(&["tests", "--state-mode", "both"])
-                .unwrap()
-                .state_modes,
-            ["2state", "4state"]
+    }
+
+    #[test]
+    fn detects_roots_from_syntax_instead_of_identifier_mentions() {
+        let parse =
+            |code| celox_sv_analyzer::ParsedSource::parse(code, Path::new("root.sv")).unwrap();
+        let parsed = [parse(
+            "module Leaf; endmodule module Parent; Leaf u(); string name = \"Parent\"; endmodule",
+        )];
+        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        let parsed = [parse("module A; endmodule module top; endmodule")];
+        assert!(
+            select_top(&parsed, None)
+                .unwrap_err()
+                .contains("multiple module roots")
         );
-        assert!(options(&["tests", "--state-mode", "unknown"]).is_none());
-        assert!(options(&["tests", "--state-mode"]).is_none());
-        assert!(options(&["tests", "--update"]).is_none());
+        assert_eq!(select_top(&parsed, Some("A")).unwrap(), "A");
+        let parsed = [parse(
+            "module Leaf; endmodule module Parent; if (0) begin Leaf u(); end endmodule",
+        )];
+        assert_eq!(select_top(&parsed, None).unwrap(), "Parent");
+        let parsed = [parse("typedef logic T;")];
+        assert!(
+            select_top(&parsed, None)
+                .unwrap_err()
+                .contains("none found")
+        );
+    }
+    fn fixture(dir: &Path, name: &str, code: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, code).unwrap();
+        path
+    }
+
+    fn fixture_options(files: Vec<PathBuf>, mode: Mode) -> Options {
+        Options {
+            mode,
+            four_state: false,
+            top: None,
+            defines: Vec::new(),
+            includes: Vec::new(),
+            files,
+        }
+    }
+
+    #[test]
+    fn rejects_sources_without_a_module_root() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, code) in [
+            (
+                "unit.sv",
+                "typedef logic [7:0] Byte; function automatic int twice(int x); return x * 2; endfunction",
+            ),
+            (
+                "package.sv",
+                "package P; parameter int W=8; typedef logic [W-1:0] Byte; endpackage",
+            ),
+        ] {
+            let path = fixture(dir.path(), name, code);
+            let mut options = fixture_options(vec![path], Mode::Elaboration);
+            assert!(run(&options).unwrap_err().contains("module root"));
+            options.mode = Mode::Simulation;
+            assert!(run(&options).unwrap_err().contains("module root"));
+            options.mode = Mode::Elaboration;
+            options.top = Some("Missing".into());
+            assert!(run(&options).is_err());
+        }
+        for (name, code, diagnostic) in [
+            ("class.sv", "class C; int x; endclass", "module root"),
+            (
+                "interface.sv",
+                "interface Bus; logic x; endinterface",
+                "module root",
+            ),
+            (
+                "unresolved_unit.sv",
+                "function automatic int f(); return missing; endfunction",
+                "module root",
+            ),
+            ("parse.sv", "typedef logic [7:0]", "parse error"),
+            (
+                "bad_unit.sv",
+                "function automatic int f(); #1; return 0; endfunction",
+                "module root",
+            ),
+            (
+                "bad_interface.sv",
+                "interface Bus; logic x; assign x = missing; endinterface",
+                "module root",
+            ),
+        ] {
+            let path = fixture(dir.path(), name, code);
+            let options = fixture_options(vec![path], Mode::Elaboration);
+            let error = run(&options)
+                .err()
+                .unwrap_or_else(|| panic!("{name} was accepted"));
+            assert!(error.to_lowercase().contains(diagnostic), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn preprocesses_real_includes_defines_and_preserves_compiler_directives() {
+        let dir = tempfile::tempdir().unwrap();
+        let headers = dir.path().join("headers");
+        std::fs::create_dir(&headers).unwrap();
+        fixture(&headers, "width.svh", "`define WIDTH `COMMAND_WIDTH\n");
+        let child = fixture(
+            dir.path(),
+            "child.sv",
+            "`timescale 1ns/1ps\nmodule Child(output logic [7:0] y); assign y=8'd42; endmodule",
+        );
+        let top = fixture(
+            dir.path(),
+            "top.sv",
+            r#"`include "width.svh"
+`timescale 1ns/1ps
+`default_nettype none
+`line 30 "authored.sv" 0
+module Top;
+    logic [`WIDTH-1:0] y;
+    Child c(.y);
+    initial begin
+        #1;
+        if ($bits(y) != 8 || y != 42 || $time != 1 || `FLAG != 1)
+            $fatal(1, "preprocessor inputs or time scope changed");
+        $finish;
+    end
+endmodule
+"#,
+        );
+        let mut options = fixture_options(vec![child, top], Mode::Simulation);
+        options.defines = vec![
+            ("COMMAND_WIDTH".into(), Some("8".into())),
+            ("FLAG".into(), None),
+        ];
+        options.includes = vec![headers];
+        run(&options).unwrap();
+        let code = std::fs::read_to_string(&options.files[1]).unwrap();
+        let includes: Vec<_> = options.includes.iter().map(PathBuf::as_path).collect();
+        let expanded = celox_sv_analyzer::syntax::preprocess_source(
+            &code,
+            &options.files[1],
+            &options.defines,
+            &includes,
+        )
+        .unwrap();
+        for directive in [
+            "`timescale 1ns/1ps",
+            "`default_nettype none",
+            "`line 30 \"authored.sv\" 0",
+        ] {
+            assert!(expanded.contains(directive), "{expanded}");
+        }
+        options.includes.clear();
+        assert!(run(&options).unwrap_err().contains("parse error"));
+        let missing_net = fixture(
+            dir.path(),
+            "nettype.sv",
+            "`default_nettype none\nmodule Top; assign undeclared = 1'b1; endmodule",
+        );
+        options.files = vec![missing_net];
+        options.mode = Mode::Elaboration;
+        assert!(run(&options).is_err());
     }
 }
