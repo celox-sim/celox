@@ -1,1 +1,6 @@
-Publish the existing local rebase onto master after the preceding SV stack merged; this commit retains its guide/reference reorganization.
+Revision history for #1522:
+
+rev 2 (rebase) 2026-10-19 05:36 UTC — Publish the existing local rebase onto master after the preceding SV stack merged; this commit retains its guide/reference reorganization.
+rev 1 (initial) 2026-10-19 05:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1522,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"11c47bc9a3aa8835e47b32b8f285e2c976502337","timestamp_iso":"2026-10-19T05:36:54Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"11c47bc9a3aa8835e47b32b8f285e2c976502337","new_sha":"5f3c2e46b8e6f942db9ce8b11a824047a6c0e82c","timestamp_iso":"2026-10-19T05:36:54Z","reason":"Publish the existing local rebase onto master after the preceding SV stack merged; this commit retains its guide/reference reorganization.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/11c47bc9a3aa8835e47b32b8f285e2c976502337...5f3c2e46b8e6f942db9ce8b11a824047a6c0e82c"}]} -->
