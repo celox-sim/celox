@@ -1,8 +1,8 @@
 # cocotb and the Celox CLI
 
-Celox can compile a Veryl design into a native executable that runs ordinary
+Celox can compile a Veryl or SystemVerilog design into a native executable that runs ordinary
 [cocotb](https://www.cocotb.org/) tests through VPI. The generated executable
-contains the compiled design and the Celox runtime; it does not need the Veryl
+contains the compiled design and the Celox runtime; it does not need the HDL
 sources when it runs.
 
 ## Build the CLI
@@ -69,6 +69,16 @@ Celox finds `Veryl.toml` from the source path and includes the project's source
 files and dependencies. For a standalone source outside a Veryl project, it
 compiles that file alone. The output defaults to `celox.out` when `-o` is
 omitted.
+
+For standalone SystemVerilog, pass a `.sv` file:
+
+```sh
+target/release/celox vpi build src/Top.sv --top Top -o build/top-sim
+```
+
+This compiles only the specified file, including any child modules defined in
+it, using Celox's supported SystemVerilog subset. It does not discover a
+`Veryl.toml` project or additional SystemVerilog source files.
 
 ## Run cocotb
 

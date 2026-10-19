@@ -35,7 +35,7 @@ fn arguments() -> Result<Arguments, String> {
         }
     }
     Ok(Arguments {
-        source: source.ok_or_else(|| "missing Veryl source path".to_string())?,
+        source: source.ok_or_else(|| "missing Veryl or SystemVerilog source path".to_string())?,
         top: top.ok_or_else(|| "missing --top".to_string())?,
         runtime: runtime.ok_or_else(|| "missing --runtime".to_string())?,
         output: output.ok_or_else(|| "missing --output".to_string())?,

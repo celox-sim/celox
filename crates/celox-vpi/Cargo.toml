@@ -29,10 +29,10 @@ name = "celox"
 path = "src/bin/celox.rs"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-celox = { path = "../celox" }
+celox = { path = "../celox", features = ["systemverilog"] }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
-celox = { path = "../celox" }
+celox = { path = "../celox", features = ["systemverilog"] }
 
 [dependencies]
 celox-design.workspace = true
