@@ -945,6 +945,8 @@ sv_backends! {
         assert_eq!(sim.get(initial_words), 0xaabbcc00u32.into());
         sim.tick(clk).unwrap();
         assert_eq!(sim.get(registered), 0x0a0b0c00u32.into());
+        // Address directives, or a word for each address, warn nothing.
+        assert!(sim.warnings().is_empty(), "{:?}", sim.warnings());
     }
 
     fn readmem_count_mismatch_preserves_unwritten_words(sim) {
@@ -976,6 +978,50 @@ sv_backends! {
         let short_y = sim.signal("short_y");
         assert_eq!(sim.get(y), 0xbbcc3344u32.into());
         assert_eq!(sim.get(short_y), 0x112233aau32.into());
+        // IEEE 1800-2023 21.4: a count mismatch without address directives
+        // issues a warning, at each call.
+        let warned = readmem_warnings(sim.warnings());
+        assert_eq!(warned, vec![
+            ("readmem.sv".to_string(), source_line(&source, "short_mem, 3, 2"), short.display().to_string()),
+            ("readmem.sv".to_string(), source_line(&source, "mem, -1, 0"), long.display().to_string()),
+        ]);
+    }
+
+    fn readmem_count_mismatch_warns_once_per_call(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"
+                module Child #(parameter int P = 0) (output logic [7:0] y);
+                    logic [7:0] mem [0:1];
+                    initial $readmemh("{file}", mem);
+                    assign y = mem[0] + P;
+                endmodule
+                module Top(output logic [31:0] y);
+                    logic [7:0] a [0:1];
+                    logic [7:0] b [0:1];
+                    initial $readmemh("{file}", a);
+                    initial $readmemh("{file}", b);
+                    Child #(.P(0)) c0(y[23:16]);
+                    Child #(.P(1)) c1(y[31:24]);
+                    assign y[15:0] = {{a[0], b[0]}};
+                endmodule
+            "#, file = file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("calls.sv"))], "Top");
+        assert_eq!(sim.get(sim.signal("y")), 0xabaaaaaau32.into());
+        // Calls that read the same file into equal ranges warn separately;
+        // a call in a module specialized twice warns once.
+        let file = file.display().to_string();
+        assert_eq!(readmem_warnings(sim.warnings()), vec![
+            ("calls.sv".to_string(), source_line(&source, "\", mem);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", a);"), file.clone()),
+            ("calls.sv".to_string(), source_line(&source, "\", b);"), file),
+        ]);
+        let rendered = celox::render_diagnostic(&sim.warnings()[1]);
+        let line = source_line(&source, "\", a);");
+        assert!(rendered.contains(&format!("[calls.sv:{line}:29]")), "{rendered}");
     }
     fn signed_casts_in_parameters(sim) { @case "system_functions::signed_casts_in_parameters"; }
     fn array_queries_preserve_bounds_and_dimensions(sim) { @case "system_functions::array_queries_preserve_bounds_and_dimensions"; }
@@ -1087,6 +1133,32 @@ fn rejects_bit_vector_functions_with_missing_or_extra_arguments() {
             assert!(result.is_err(), "invalid call should be rejected: {call}");
         }
     }
+}
+
+/// The file, line and memory file of each `$readmem` word-count warning.
+fn readmem_warnings(warnings: &[celox::CompilationWarning]) -> Vec<(String, usize, String)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::MemoryFileWordCount { task, file, .. },
+                location: Some(location),
+            }) => {
+                assert_eq!(task, "$readmemh");
+                (location.path.clone(), location.line, file.clone())
+            }
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line of the first line of `source` containing `needle`.
+fn source_line(source: &str, needle: &str) -> usize {
+    source
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap()
+        + 1
 }
 
 fn build_error(source: &str) -> String {
@@ -1459,11 +1531,174 @@ fn exit_outside_a_program_block_is_ignored() {
     assert!(!sim.is_stopped());
     assert_eq!(sim.get(sim.signal("a")), 3u8.into());
     assert_eq!(sim.drain_runtime_events(), Vec::new());
+    // Each call warns once, at its line.
+    let warned: Vec<_> = sim
+        .warnings()
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => location.line,
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect();
+    assert_eq!(
+        warned,
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("$exit"))
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>()
+    );
     let error =
         build_error("module Top(output logic y); initial $exit(1); assign y = 0; endmodule");
     assert!(
         error.contains("$exit") && error.contains("expected 0 arguments"),
         "{error}"
+    );
+}
+
+/// The location of each `$exit` warning, which must be all of them.
+fn exit_warning_locations(warnings: &[celox::CompilationWarning]) -> Vec<(usize, usize)> {
+    warnings
+        .iter()
+        .map(|warning| match warning {
+            celox::CompilationWarning::SystemVerilog(celox::SvFrontendWarning {
+                kind: celox::SvFrontendWarningKind::ExitOutsideProgram,
+                location: Some(location),
+            }) => (location.line, location.column),
+            warning => panic!("unexpected warning: {warning}"),
+        })
+        .collect()
+}
+
+/// The 1-based line and column of the first `needle` in `source`.
+fn source_position(source: &str, needle: &str) -> (usize, usize) {
+    let line = source_line(source, needle);
+    let column = source.lines().nth(line - 1).unwrap().find(needle).unwrap() + 1;
+    (line, column)
+}
+
+#[test]
+fn exit_in_a_timed_process_warns_at_the_call() {
+    let source = r#"
+        module Top(input logic clk, output int a);
+          timeunit 1ps;
+          timeprecision 1ps;
+          initial begin
+            #1 $exit;
+            a = 1;
+          end
+          always @(posedge clk) begin
+            #1;
+            $exit();
+          end
+        endmodule
+    "#;
+    let mut sim = initial_simulation(source);
+    sim.run_until(2).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+#[test]
+fn exit_in_a_constant_function_warns_at_the_call() {
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          function automatic int f();
+            $exit();
+            return 4;
+          endfunction
+          localparam int N = f();
+          assign y = N + P::Q;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("constant.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 6u8.into());
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![
+            source_position(source, "$exit;"),
+            source_position(source, "$exit();")
+        ]
+    );
+}
+
+#[test]
+fn package_warnings_survive_a_failing_module() {
+    // Analyzing the top fails the build before the package states lower.
+    let source = r#"
+        package P;
+          function automatic int g();
+            $exit;
+            return 2;
+          endfunction
+          localparam int Q = g();
+        endpackage
+        module Top(output int y);
+          always_comb y <= P::Q;
+        endmodule
+    "#;
+    let Err(error) = Simulator::from_sv_sources(vec![(source, Path::new("package.sv"))], "Top")
+        .build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        exit_warning_locations(error.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+}
+
+/// Type and assignment-pattern parameters are bound by rewriting the module
+/// source; the warnings still point at the call in the file.
+#[test]
+fn warnings_of_rewritten_specializations_point_at_their_call() {
+    let source = r#"
+        module Child #(parameter type T = logic, parameter int P [2] = '{1, 2})
+            (output int y);
+          T v;
+          initial begin
+            $exit;
+          end
+          assign y = P[0];
+        endmodule
+        module Top(output int a, b, c);
+          Child #(.T(logic [63:0])) c0(.y(a));
+          Child #(.P('{100000, 200000})) c1(.y(b));
+          Child c2(.y(c));
+        endmodule
+    "#;
+    let sim = Simulator::from_sv_sources(vec![(source, Path::new("rewritten.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    // The three specializations share the call.
+    assert_eq!(
+        exit_warning_locations(sim.warnings()),
+        vec![source_position(source, "$exit;")]
+    );
+    let rendered = celox::render_diagnostic(&sim.warnings()[0]);
+    assert!(
+        rendered.contains("$exit;") && !rendered.contains("logic [63:0]"),
+        "{rendered}"
     );
 }
 
@@ -2663,4 +2898,140 @@ fn time_is_zero_in_a_simulator_without_time() {
     let clk = sim.event("clk");
     sim.tick(clk).unwrap();
     assert_eq!(sim.drain_runtime_events(), displays(&["0 0"]));
+}
+
+#[test]
+fn readmem_warnings_survive_a_later_lowering_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("short.hex");
+    std::fs::write(&file, "aa").unwrap();
+    // The top's inout port fails the build after its processes lowered.
+    let source = format!(
+        r#"
+        module Top(inout wire x, output logic [7:0] y);
+            logic [7:0] mem [0:1];
+            initial $readmemh("{}", mem);
+            assign y = mem[0];
+        endmodule
+    "#,
+        file.display()
+    );
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(&source, Path::new("inout.sv"))], "Top").build_cranelift()
+    else {
+        panic!("design unexpectedly compiled");
+    };
+    assert_eq!(
+        readmem_warnings(error.warnings()),
+        vec![(
+            "inout.sv".to_string(),
+            source_line(&source, "$readmemh"),
+            file.display().to_string()
+        )]
+    );
+}
+
+#[test]
+fn exit_warnings_survive_analyzer_errors() {
+    for source in [
+        r#"module Top(output int y);
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            always_comb y <= N;
+        endmodule"#,
+        r#"package P;
+            function automatic int f(); $exit; return 2; endfunction
+            localparam int N = f();
+            localparam int BAD = missing();
+        endpackage
+        module Top(output int y); assign y = P::N; endmodule"#,
+    ] {
+        let error = Simulator::from_sv_sources(vec![(source, Path::new("error.sv"))], "Top")
+            .build_cranelift()
+            .unwrap_err();
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")],
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn exit_warnings_survive_simulator_initialization_errors() {
+    let source = "module Top(output int y); initial $exit; assign y = 1; endmodule";
+    let dir = tempfile::tempdir().unwrap();
+    // A directory cannot be opened as a VCD file, after compilation succeeded.
+    let builder =
+        || Simulator::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top").vcd(dir.path());
+    let mut errors = vec![
+        builder().build_cranelift().unwrap_err(),
+        builder().build_interpreter().unwrap_err(),
+        builder().build_tiered().unwrap_err(),
+        builder().build_wasm().unwrap_err(),
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("init.sv"))], "Top")
+            .vcd(dir.path())
+            .build_cranelift()
+            .unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().build_native().unwrap_err());
+    for error in errors {
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+#[test]
+fn review_warnings_survive_test_runner_errors() {
+    let source = r#"module Top(output int y);
+        function automatic int value(); $exit; return 1; endfunction
+        localparam int N = value();
+        assign y = N;
+    endmodule"#;
+    let builder = || Simulator::from_sv_sources(vec![(source, Path::new("testbench.sv"))], "Top");
+    let mut errors = vec![
+        builder().run_test().unwrap_err(),
+        builder().run_test_cranelift().unwrap_err(),
+        builder().run_test_detailed().unwrap_err(),
+    ];
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    errors.push(builder().run_test_native().unwrap_err());
+    for error in errors {
+        assert!(
+            error.to_string().contains("no initial block found"),
+            "{error}"
+        );
+        assert_eq!(
+            exit_warning_locations(error.warnings()),
+            vec![source_position(source, "$exit;")]
+        );
+    }
+}
+
+sv_backends! {
+    fn review_warnings_deduplicate_parameterized_readmem_calls(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("short.hex");
+            std::fs::write(&file, "aa").unwrap();
+            let source = format!(r#"module Child #(parameter N = 2)(output logic [7:0] y);
+                logic [7:0] mem [0:N-1];
+                initial $readmemh("{}", mem);
+                assign y = mem[0];
+            endmodule
+            module Top(output logic [7:0] a, b, c);
+                Child #(.N(2)) one(a);
+                Child #(.N(3)) two(b);
+                Child #(.N(4)) three(c);
+            endmodule"#, file.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("specialized.sv"))], "Top");
+        let warnings = readmem_warnings(sim.warnings());
+        assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
+        assert_eq!(warnings[0].0, "specialized.sv");
+        assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
+    }
 }

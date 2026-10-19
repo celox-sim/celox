@@ -25,6 +25,7 @@ pub mod typecheck;
 pub use ast::interfaces::{InterfacePrototype, interface_prototypes, interface_prototypes_for};
 pub use ast::interfaces::{NativeInterfacePlan, plan_interfaces};
 pub use ast::packages::Packages;
+pub use ast::warnings::analyzing as collect_warnings;
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 pub use parsed::ParsedSource;
@@ -180,7 +181,7 @@ pub fn generated_time_declarations(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
+    collecting_warnings(|| {
         let syntax_tree = syntax::parse_source(code, path)?;
         if syntax_tree
             .into_iter()
@@ -201,7 +202,7 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
+    collecting_warnings(|| {
         let syntax_tree = syntax::parse_source(code, path)?;
         if syntax_tree
             .into_iter()
@@ -246,6 +247,7 @@ fn analyze_interface_source(
             .cloned(),
     );
     let mut modules = Vec::new();
+    let mut warnings = packages.warnings().to_vec();
     for name in names {
         let values = if name == override_module
             || plan
@@ -283,8 +285,18 @@ fn analyze_interface_source(
             &packages,
         )?;
         modules.extend(ir.modules().iter().cloned());
+        warnings.extend(ir.warnings().iter().cloned());
     }
-    Ok(Ir::new(modules))
+    Ok(Ir::new(modules).with_warnings(warnings))
+}
+
+/// Run one analysis with call sites numbered from zero, and add the warnings
+/// it found to its IR.
+fn collecting_warnings(
+    analysis: impl FnOnce() -> Result<Ir, AnalyzerError>,
+) -> Result<Ir, AnalyzerError> {
+    let (ir, warnings) = ast::warnings::analyzing(|| ast::with_call_sites(analysis));
+    ir.map(|ir| ir.with_warnings(warnings))
 }
 
 /// Return the module names declared in a SystemVerilog source without
@@ -311,7 +323,7 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    ast::with_call_sites(|| {
+    collecting_warnings(|| {
         let syntax_tree = syntax::parse_source(code, path)?;
         let source = ast::Source::from_syntax_module_with_parameter_overrides(
             &syntax_tree,

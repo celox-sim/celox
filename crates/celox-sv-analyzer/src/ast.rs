@@ -64,6 +64,7 @@ mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
+pub(crate) mod warnings;
 
 use array_compatibility::{
     check_unpacked_array_assignment, net_lvalue_unpacked_shape, selected_unpacked_shape,

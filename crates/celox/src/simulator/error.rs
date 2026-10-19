@@ -42,6 +42,8 @@ fn render_analyzer_error(error: &veryl_analyzer::AnalyzerError) -> String {
 pub enum CompilationWarning {
     Analyzer(veryl_analyzer::AnalyzerError),
     Frontend(celox_frontend_veryl::FrontendDiagnostic),
+    #[cfg(feature = "systemverilog")]
+    SystemVerilog(celox_frontend_sv::FrontendWarning),
 }
 
 impl fmt::Display for CompilationWarning {
@@ -49,6 +51,8 @@ impl fmt::Display for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => diagnostic.fmt(f),
             Self::Frontend(diagnostic) => diagnostic.fmt(f),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => diagnostic.fmt(f),
         }
     }
 }
@@ -60,6 +64,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::code(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::code(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::code(diagnostic),
         }
     }
 
@@ -67,6 +73,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::severity(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::severity(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::severity(diagnostic),
         }
     }
 
@@ -74,6 +82,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::help(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::help(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::help(diagnostic),
         }
     }
 
@@ -81,6 +91,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::url(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::url(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::url(diagnostic),
         }
     }
 
@@ -88,6 +100,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::source_code(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::source_code(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::source_code(diagnostic),
         }
     }
 
@@ -95,6 +109,8 @@ impl miette::Diagnostic for CompilationWarning {
         match self {
             Self::Analyzer(diagnostic) => miette::Diagnostic::labels(diagnostic),
             Self::Frontend(diagnostic) => miette::Diagnostic::labels(diagnostic),
+            #[cfg(feature = "systemverilog")]
+            Self::SystemVerilog(diagnostic) => miette::Diagnostic::labels(diagnostic),
         }
     }
 }
