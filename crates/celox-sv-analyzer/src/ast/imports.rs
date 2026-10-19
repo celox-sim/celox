@@ -11,6 +11,7 @@
 //! shadow them, since nested declarations are renamed apart before names are
 //! looked up.
 
+use super::instances::normalize_identifier;
 use super::scope::ScopeSymbols;
 use super::*;
 
@@ -43,159 +44,108 @@ pub(super) enum Export {
 }
 
 impl ScopeImports {
-    pub fn from_node(node: RefNode<'_>, tree: &SyntaxTree) -> Self {
+    pub(crate) fn from_scope(tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
+        use celox_sv_syntax::{PackageBindingItemKind, PackageBindingKind};
         let mut imports = Self::default();
-        let note = |packages: &mut Vec<String>, name: String| {
-            if !packages.contains(&name) {
-                packages.push(name);
+        let blocks = generate_scopes(tree)?;
+        let nested = nested_declarations(tree);
+        for view in package_owners::scope(tree)? {
+            let binding = tree.declarations().package_binding(view.id);
+            for native in &binding.items {
+                let in_block = blocks
+                    .iter()
+                    .any(|scope| scope.contains(native.tokens.start));
+                match (&binding.kind, &native.kind) {
+                    (PackageBindingKind::Export, PackageBindingItemKind::All) => {
+                        imports.exports.push(Export::All)
+                    }
+                    (
+                        PackageBindingKind::Export,
+                        PackageBindingItemKind::Named { package, name },
+                    ) => {
+                        let package = normalize_identifier(&package.spelling);
+                        let name = normalize_identifier(&name.spelling);
+                        imports.packages.push(package.clone());
+                        imports
+                            .export_offsets
+                            .entry((package.clone(), name.clone()))
+                            .or_insert(native.tokens.start);
+                        imports.exports.push(Export::Item(package, name));
+                    }
+                    (PackageBindingKind::Export, PackageBindingItemKind::Wildcard(package)) => {
+                        let package = normalize_identifier(&package.spelling);
+                        imports.packages.push(package.clone());
+                        imports.exports.push(Export::Wildcard(package));
+                    }
+                    (
+                        PackageBindingKind::Import,
+                        PackageBindingItemKind::Named { package, name },
+                    ) => {
+                        let package = normalize_identifier(&package.spelling);
+                        imports.packages.push(package.clone());
+                        if !in_block {
+                            imports
+                                .explicit
+                                .push((package, normalize_identifier(&name.spelling)));
+                        }
+                    }
+                    (PackageBindingKind::Import, PackageBindingItemKind::Wildcard(package)) => {
+                        let package = normalize_identifier(&package.spelling);
+                        imports.packages.push(package.clone());
+                        if !in_block {
+                            imports.wildcard.push(package);
+                        }
+                    }
+                    _ => {}
+                }
             }
-        };
-        // The identifier a package scope qualifies follows the scope and its
-        // package identifier.
-        let mut scope: Option<String> = None;
-        let mut skip = 0;
-        // An import in a generate block belongs to that block (see
-        // `generate_scopes`); its package is still one the module uses.
-        let blocks = generate_blocks(node.clone());
-        let in_block = |item: RefNode<'_>| {
-            let offset = node_range(item).0;
-            blocks
-                .iter()
-                .any(|(start, end)| (*start..*end).contains(&offset))
-        };
-        // The items of an export name what it exports, not imports.
-        let mut exported = HashSet::default();
-        for child in node.clone() {
-            let RefNode::PackageExportDeclaration(export) = child else {
+        }
+        // Qualified expression and type names carry their package segment natively.
+        let native = tree.declarations();
+        let ranges = active_ranges(tree)?;
+        for expression in &native.expressions {
+            if !in_ranges(expression.tokens.start, &ranges) {
                 continue;
-            };
-            match export {
-                sv_parser::PackageExportDeclaration::Asterisk(_) => {
-                    imports.exports.push(Export::All);
-                }
-                sv_parser::PackageExportDeclaration::Item(_) => {
-                    for item in RefNode::PackageExportDeclaration(export) {
-                        let RefNode::PackageImportItem(item) = item else {
-                            continue;
-                        };
-                        exported.insert(item as *const sv_parser::PackageImportItem);
-                        let export = match item {
-                            sv_parser::PackageImportItem::Identifier(item) => {
-                                identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
-                                    .zip(identifier_text(RefNode::Identifier(&item.nodes.2), tree))
-                                    .map(|(package, name)| Export::Item(package, name))
-                            }
-                            sv_parser::PackageImportItem::Asterisk(item) => {
-                                identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
-                                    .map(Export::Wildcard)
-                            }
-                        };
-                        if let Some(export) = export {
-                            if let Export::Item(package, _) | Export::Wildcard(package) = &export {
-                                note(&mut imports.packages, package.clone());
-                            }
-                            if let Export::Item(package, name) = &export
-                                && let Some(offset) = RefNode::PackageImportItem(item)
-                                    .into_iter()
-                                    .find_map(|node| match node {
-                                        RefNode::Locate(locate) => Some(locate.offset),
-                                        _ => None,
-                                    })
-                            {
-                                // The first export of a name is the one a
-                                // later reference sees.
-                                imports
-                                    .export_offsets
-                                    .entry((package.clone(), name.clone()))
-                                    .or_insert(offset);
-                            }
-                            imports.exports.push(export);
-                        }
-                    }
+            }
+            if let celox_sv_syntax::ExprKind::Member {
+                expression: base,
+                separator,
+                name,
+            } = &expression.kind
+                && separator == "::"
+                && let celox_sv_syntax::ExprKind::Name(package) = &native.expression(*base).kind
+            {
+                let package = normalize_identifier(&package.spelling);
+                if !nested.iter().any(|(start, end, names)| {
+                    (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
+                }) {
+                    imports
+                        .qualified
+                        .push((package, normalize_identifier(&name.spelling)));
                 }
             }
         }
-        for child in node {
-            match child {
-                RefNode::PackageImportItem(item)
-                    if exported.contains(&(item as *const sv_parser::PackageImportItem)) => {}
-                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
-                    if skip > 0 {
-                        skip -= 1;
-                    } else if let Some(package) = scope.take()
-                        && let Some(name) = identifier_text(child, tree)
-                    {
-                        imports.qualified.push((package, name));
-                    }
-                }
-                RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
-                    let (Some(package), Some(name)) = (
-                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
-                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
-                    ) else {
-                        continue;
-                    };
-                    note(&mut imports.packages, package.clone());
-                    if !in_block(RefNode::PackageImportItemIdentifier(item)) {
-                        imports.explicit.push((package, name));
-                    }
-                }
-                RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => {
-                    let Some(package) =
-                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
-                    else {
-                        continue;
-                    };
-                    note(&mut imports.packages, package.clone());
-                    if !in_block(RefNode::PackageImportItemAsterisk(item))
-                        && !imports.wildcard.contains(&package)
-                    {
-                        imports.wildcard.push(package);
-                    }
-                }
-                // `$unit::x` names an item of the compilation unit.
-                RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => {
-                    scope = Some(packages::UNIT.to_string());
-                    skip = 0;
-                }
-                RefNode::PackageScopePackage(package_scope) => {
-                    if let Some(package) =
-                        identifier_text(RefNode::PackageIdentifier(&package_scope.nodes.0), tree)
-                    {
-                        note(&mut imports.packages, package.clone());
-                        scope = Some(package);
-                        skip = 1;
-                    }
-                }
-                RefNode::ClassScope(class_scope) => {
-                    if let Some(package) = identifier_text(
-                        RefNode::ClassIdentifier(&class_scope.nodes.0.nodes.0.nodes.1),
-                        tree,
-                    ) {
-                        note(&mut imports.packages, package.clone());
-                        scope = Some(package);
-                        skip = 1;
-                    }
-                }
-                // `p::t` as a data type parses as a class type.
-                RefNode::ClassType(class_type) if !class_type.nodes.2.is_empty() => {
-                    if let Some(package) =
-                        identifier_text(RefNode::PsClassIdentifier(&class_type.nodes.0), tree)
-                    {
-                        note(&mut imports.packages, package.clone());
-                        if let [(_, member, None)] = class_type.nodes.2.as_slice()
-                            && class_type.nodes.1.is_none()
-                            && let Some(name) =
-                                identifier_text(RefNode::ClassIdentifier(member), tree)
-                        {
-                            imports.qualified.push((package, name));
-                        }
-                    }
-                }
-                _ => {}
+        for ty in &native.types {
+            if in_ranges(ty.tokens.start, &ranges)
+                && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
+                && let [package, name] = path.as_slice()
+            {
+                imports.qualified.push((
+                    normalize_identifier(&package.name.spelling),
+                    normalize_identifier(&name.name.spelling),
+                ));
             }
         }
-        imports
+        for (package, _) in &imports.qualified {
+            if package != packages::UNIT {
+                imports.packages.push(package.clone());
+            }
+        }
+        let mut seen = HashSet::default();
+        imports.packages.retain(|name| seen.insert(name.clone()));
+        seen.clear();
+        imports.wildcard.retain(|name| seen.insert(name.clone()));
+        Ok(imports)
     }
 }
 
@@ -203,440 +153,407 @@ impl ScopeImports {
 /// parameters, and the declarations and instances of its items. Names
 /// declared in nested scopes, such as structure members, function locals
 /// and generate blocks, are left out.
-pub(super) fn scope_names(node: RefNode<'_>, tree: &SyntaxTree) -> HashSet<String> {
+pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> HashSet<String> {
+    use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind};
+    let native = tree.declarations();
     let mut names = HashSet::default();
-    let mut add = |node: RefNode<'_>| {
-        if let Some(name) = identifier_text(node, tree) {
-            names.insert(name);
-        }
+    let mut add = |name: &celox_sv_syntax::Name| {
+        names.insert(normalize_identifier(&name.spelling));
     };
-    if let Some(list) = module_parameter_port_list(node.clone()) {
-        for child in list {
-            match child {
-                RefNode::ParamAssignment(assignment) => {
-                    add(RefNode::ParameterIdentifier(&assignment.nodes.0))
-                }
-                RefNode::TypeAssignment(assignment) => {
-                    add(RefNode::TypeIdentifier(&assignment.nodes.0))
-                }
-                _ => {}
-            }
-        }
-    }
-    if let RefNode::ModuleDeclarationAnsi(module) = &node
-        && let Some(ports) = &module.nodes.0.nodes.6
-    {
-        for child in RefNode::ListOfPortDeclarations(ports) {
-            if let RefNode::PortIdentifier(_) = child {
-                add(child);
-            }
-        }
-    }
-    for item in scope_items(node) {
-        if let ScopeItem::Module(module_item) = item
-            && let Some(RefNode::HierarchicalInstance(_)) = unwrap_node!(
-                RefNode::ModuleOrGenerateItem(module_item),
-                HierarchicalInstance
-            )
-        {
-            for child in RefNode::ModuleOrGenerateItem(module_item) {
-                if let RefNode::InstanceIdentifier(_) = child {
-                    add(child);
-                }
-            }
-        }
-        let Some(declaration) = item.declaration() else {
-            continue;
-        };
-        let node = RefNode::PackageOrGenerateItemDeclaration(declaration);
-        match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::FunctionDeclaration(_) => {
-                if let Some(name) = unwrap_node!(node, FunctionIdentifier) {
-                    add(name);
-                }
-                continue;
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::TaskDeclaration(_) => {
-                if let Some(name) = unwrap_node!(node, TaskIdentifier) {
-                    add(name);
-                }
-                continue;
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::DpiImportExport(_) => {
-                if let Some(name) = unwrap_node!(node, FunctionIdentifier, TaskIdentifier) {
-                    add(name);
-                }
-                continue;
-            }
-            _ => {}
-        }
-        // Structure and union members are declared in the member name space
-        // of their type.
-        let mut members = HashSet::default();
-        for child in node.clone() {
-            if let RefNode::StructUnionMember(_) = child {
-                for member in child {
-                    if let RefNode::Locate(locate) = member {
-                        members.insert(locate.offset);
-                    }
-                }
-            }
-        }
-        let mut add_declared = |name: Option<RefNode<'_>>| {
-            if let Some(name) = name
-                && identifier_locate(name.clone())
-                    .is_none_or(|locate| !members.contains(&locate.offset))
+    let mut types = Vec::new();
+    match &native.body_item(id).kind {
+        BodyItemKind::Data(id) => {
+            if let DataDeclaration::Variables(decl) | DataDeclaration::Constructed(decl) =
+                native.data_declaration(*id)
             {
-                add(name);
+                for variable in &decl.variables {
+                    add(&variable.name);
+                }
+                types.push(decl.data_type);
             }
-        };
-        for child in node {
-            match child {
-                RefNode::VariableDeclAssignment(_) => {
-                    add_declared(unwrap_node!(child, VariableIdentifier))
+        }
+        BodyItemKind::Net(id) => {
+            let decl = native.net_declaration(*id);
+            for variable in &decl.variables {
+                add(&variable.name);
+            }
+            types.push(decl.data_type);
+        }
+        BodyItemKind::Parameter(id) => {
+            for parameter in &native.parameter_declaration(*id).parameters {
+                add(&parameter.name);
+                if let celox_sv_syntax::ParameterKind::Value { data_type, .. } = &parameter.kind {
+                    types.push(*data_type);
                 }
-                RefNode::NetDeclAssignment(_) => add_declared(unwrap_node!(child, NetIdentifier)),
-                RefNode::ParamAssignment(assignment) => {
-                    add_declared(Some(RefNode::ParameterIdentifier(&assignment.nodes.0)))
+            }
+        }
+        BodyItemKind::TypeAlias(id) => {
+            let alias = native.type_alias(*id);
+            add(&alias.name);
+            if let celox_sv_syntax::TypeAliasTarget::DataType(id) = alias.target {
+                types.push(id);
+            }
+        }
+        BodyItemKind::Subroutine(id) => add(&native.subroutine(*id).name),
+        BodyItemKind::Dpi(id) => add(&native.dpi_declaration(*id).name),
+        BodyItemKind::Instance(id) => {
+            for instance in &native.instantiation(*id).instances {
+                add(&instance.name);
+            }
+        }
+        _ => {}
+    }
+    for id in types {
+        if let DataTypeKind::Enum { items, .. } = &native.data_type(id).kind {
+            for item in items {
+                add(&item.name);
+            }
+        }
+    }
+    names
+}
+pub(super) fn scope_names(tree: &SyntaxTree) -> Converted<HashSet<String>> {
+    use celox_sv_syntax::{BodyItemKind, PortKind};
+    let mut names = HashSet::default();
+    if let Ok(unit) = tree.root_unit() {
+        for parameter in unit.parameters.iter().flatten() {
+            names.insert(normalize_identifier(&parameter.name.spelling));
+        }
+        for id in tree.header_port_ids()? {
+            match &unit.ports[id].kind {
+                PortKind::Named(name) | PortKind::Explicit { name, .. } => {
+                    names.insert(normalize_identifier(&name.spelling));
                 }
-                RefNode::TypeAssignment(assignment) => {
-                    add_declared(Some(RefNode::TypeIdentifier(&assignment.nodes.0)))
-                }
-                RefNode::TypeDeclarationDataType(declaration) => {
-                    add_declared(Some(RefNode::TypeIdentifier(&declaration.nodes.2)))
-                }
-                RefNode::EnumNameDeclaration(member) => {
-                    add_declared(Some(RefNode::EnumIdentifier(&member.nodes.0)))
-                }
-                RefNode::GenvarIdentifier(_) => add_declared(Some(child)),
                 _ => {}
             }
         }
     }
-    names
+    let mut pending = tree.native_body_membership()?;
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native scope declaration".into(),
+            ));
+        }
+        if let BodyItemKind::Region(items) = &tree.declarations().body_item(id).kind {
+            pending.extend(items);
+        } else {
+            names.extend(item_names(id, tree));
+        }
+    }
+    Ok(names)
 }
 
-/// The names a scope looks up without a package scope: the first identifier
-/// of each name reference in an expression, a constant, a data type or a
-/// call. Declarations, formal names of connections, members and identifiers
-/// qualified by a package scope are not looked up, nor are names a nested
-/// subroutine or block declares, within it. Each name maps to the source
-/// offsets of its references, in order.
-pub(super) fn unqualified_names(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
-) -> HashMap<String, Vec<usize>> {
-    let nested = nested_declarations(node.clone(), tree);
-    let identifiers = |node: RefNode<'_>| {
-        node.into_iter()
-            .filter_map(|node| match node {
-                RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) => {
-                    identifier_locate(node)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
+fn validate_children(
+    item: &celox_sv_syntax::BodyItem,
+    native: &celox_sv_syntax::Declarations,
+) -> Converted<()> {
+    use celox_sv_syntax::BodyItemKind;
+    let children = match &item.kind {
+        BodyItemKind::Region(items)
+        | BodyItemKind::Block { items, .. }
+        | BodyItemKind::Unconverted { items, .. } => items.clone(),
+        BodyItemKind::Conditional {
+            then_body,
+            otherwise,
+            ..
+        } => std::iter::once(*then_body).chain(*otherwise).collect(),
+        BodyItemKind::Case { arms, .. } => arms.iter().map(|arm| arm.body).collect(),
+        BodyItemKind::Loop { body, .. } => vec![*body],
+        _ => Vec::new(),
     };
-    // A package scope is followed by its package identifier and then by the
-    // identifier it qualifies; `p::t` as a data type parses as the class type
-    // `p` with the member `t`.
-    let mut qualified = HashSet::default();
-    let mut skip = 0;
-    for child in node.clone() {
-        match child {
-            RefNode::PackageScopePackage(_) | RefNode::ClassScope(_) => skip = 2,
-            RefNode::PackageScope(sv_parser::PackageScope::Unit(_)) => skip = 1,
-            RefNode::ClassType(class_type) if !class_type.nodes.2.is_empty() => {
-                qualified.extend(identifiers(child).iter().map(|locate| locate.offset));
+    if children.iter().any(|id| {
+        let range = native.body_item(*id).tokens;
+        range.start < item.tokens.start || range.end > item.tokens.end
+    }) {
+        return Err(AnalyzerError::Parse(
+            "native import scope child is outside its body owner".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn body_items(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::BodyItemId>> {
+    use celox_sv_syntax::BodyItemKind;
+    let mut pending = tree.native_body_membership()?;
+    let mut result = Vec::new();
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native import scope item".into(),
+            ));
+        }
+        result.push(id);
+        validate_children(tree.declarations().body_item(id), tree.declarations())?;
+        match &tree.declarations().body_item(id).kind {
+            BodyItemKind::Region(items)
+            | BodyItemKind::Block { items, .. }
+            | BodyItemKind::Unconverted { items, .. } => pending.extend(items),
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                pending.push(*then_body);
+                pending.extend(otherwise);
             }
-            RefNode::SimpleIdentifier(_) | RefNode::EscapedIdentifier(_) if skip > 0 => {
-                skip -= 1;
-                if let Some(locate) = identifier_locate(child) {
-                    qualified.insert(locate.offset);
-                }
-            }
+            BodyItemKind::Case { arms, .. } => pending.extend(arms.iter().map(|arm| arm.body)),
+            BodyItemKind::Loop { body, .. } => pending.push(*body),
             _ => {}
         }
     }
-    let mut names = HashMap::default();
-    for child in node {
-        if !matches!(
-            child,
-            RefNode::HierarchicalIdentifier(_)
-                | RefNode::PsParameterIdentifier(_)
-                | RefNode::PsTypeIdentifier(_)
-                | RefNode::PsOrHierarchicalTfIdentifier(_)
-                // The target of a continuous assignment, and the array of a
-                // `foreach` loop.
-                | RefNode::PsOrHierarchicalNetIdentifier(_)
-                | RefNode::PsOrHierarchicalArrayIdentifier(_)
-                | RefNode::PsClassIdentifier(_)
-                | RefNode::DataTypeType(_)
-                // `t v;` with a type `t` declares a net of a user-defined
-                // net type as far as the syntax tells.
-                | RefNode::NetTypeIdentifier(_)
-        ) {
-            continue;
-        }
-        if let Some(first) = identifiers(child).first()
-            && !qualified.contains(&first.offset)
-            && let Some(name) = tree
-                .get_str(first)
-                .map(super::instances::normalize_identifier)
-            && !nested.iter().any(|(start, end, declared)| {
-                (*start..*end).contains(&first.offset) && declared.contains(&name)
-            })
-        {
-            names
-                .entry(name)
-                .or_insert_with(Vec::new)
-                .push(first.offset);
-        }
-    }
-    names
+    Ok(result)
 }
-
-/// The source range of `node`: from its first token to the end of its last.
-pub(super) fn node_range(node: RefNode<'_>) -> (usize, usize) {
-    let mut start = usize::MAX;
-    let mut end = 0;
-    for child in node {
-        if let RefNode::Locate(locate) = child {
-            start = start.min(locate.offset);
-            end = end.max(locate.offset + locate.len);
-        }
-    }
-    (start, end)
-}
-
-/// The source ranges of the generate blocks under a module `node`: each is a
-/// scope of its own (IEEE 1800-2023 27.5).
-fn generate_blocks(node: RefNode<'_>) -> Vec<(usize, usize)> {
-    if !matches!(
-        node,
-        RefNode::ModuleDeclarationAnsi(_) | RefNode::ModuleDeclarationNonansi(_)
-    ) {
-        return Vec::new();
-    }
-    // A loop body is always a scope of its own.
-    let loop_bodies: HashSet<(usize, usize)> = node
-        .clone()
+fn active_ranges(tree: &SyntaxTree) -> Converted<Vec<celox_sv_syntax::TokenRange>> {
+    let mut ranges: Vec<_> = body_items(tree)?
         .into_iter()
-        .filter_map(|child| match child {
-            RefNode::LoopGenerateConstruct(construct) => {
-                Some(node_range(RefNode::GenerateBlock(&construct.nodes.2)))
-            }
+        .map(|id| tree.declarations().body_item(id).tokens)
+        .collect();
+    if let Ok(unit) = tree.root_unit() {
+        let end = unit
+            .items
+            .iter()
+            .map(|id| tree.declarations().body_item(*id).tokens.start)
+            .min()
+            .unwrap_or(unit.tokens.end);
+        ranges.push(celox_sv_syntax::TokenRange {
+            start: unit.tokens.start,
+            end,
+        });
+    }
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<celox_sv_syntax::TokenRange> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    Ok(merged)
+}
+fn in_ranges(offset: usize, ranges: &[celox_sv_syntax::TokenRange]) -> bool {
+    let next = ranges.partition_point(|range| range.start <= offset);
+    next > 0 && offset < ranges[next - 1].end
+}
+/// Unqualified expression and type references in the selected native scope.
+pub(super) fn unqualified_names(tree: &SyntaxTree) -> HashMap<String, Vec<usize>> {
+    use celox_sv_syntax::{DataTypeKind, ExprKind};
+    let native = tree.declarations();
+    let Ok(ranges) = active_ranges(tree) else {
+        return HashMap::default();
+    };
+    let nested = nested_declarations(tree);
+    let qualified: HashSet<_> = native
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "::" => Some(*expression),
             _ => None,
         })
         .collect();
-    node.into_iter()
-        .filter_map(|child| match child {
-            RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(_)) => {
-                Some(node_range(child))
+    // Bare pattern keys name members; they do not bind wildcard imports.
+    let pattern_keys: HashSet<_> = native
+        .expressions
+        .iter()
+        .flat_map(|expression| match &expression.kind {
+            ExprKind::Pattern { items, .. } => {
+                items.iter().filter_map(|item| item.key).collect::<Vec<_>>()
             }
-            RefNode::GenerateBlock(_) if loop_bodies.contains(&node_range(child.clone())) => {
-                Some(node_range(child))
-            }
-            // A single item is a scope too, except a conditional generate
-            // directly in a conditional one, which continues its scope.
-            RefNode::GenerateBlock(sv_parser::GenerateBlock::GenerateItem(item))
-                if !matches!(
-                    &**item,
-                    sv_parser::GenerateItem::ModuleOrGenerateItem(common)
-                        if matches!(
-                            &**common,
-                            sv_parser::ModuleOrGenerateItem::ModuleItem(common)
-                                if matches!(
-                                    common.nodes.1,
-                                    sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(_)
-                                )
-                        )
-                ) =>
-            {
-                Some(node_range(child))
-            }
-            _ => None,
+            _ => Vec::new(),
         })
-        .collect()
+        .filter_map(|id| {
+            matches!(native.expression(id).kind, ExprKind::Name(_))
+                .then_some(native.expression(id).tokens.start)
+        })
+        .collect();
+    let mut names: HashMap<String, Vec<usize>> = HashMap::default();
+    let mut add = |name: &str, offset| {
+        let name = normalize_identifier(name);
+        if in_ranges(offset, &ranges)
+            && !nested.iter().any(|(start, end, declared)| {
+                (*start..*end).contains(&offset) && declared.contains(&name)
+            })
+        {
+            names.entry(name).or_default().push(offset);
+        }
+    };
+    for expression in &native.expressions {
+        if let ExprKind::Name(name) = &expression.kind
+            && !pattern_keys.contains(&expression.tokens.start)
+            && !qualified.iter().any(|base| {
+                native.expression(*base).tokens == expression.tokens
+                    && matches!(&native.expression(*base).kind, ExprKind::Name(_))
+            })
+        {
+            add(&name.spelling, expression.tokens.start);
+        }
+    }
+    for ty in &native.types {
+        if let DataTypeKind::Named(path) = &ty.kind
+            && let [name] = path.as_slice()
+        {
+            add(&name.name.spelling, ty.tokens.start);
+        }
+    }
+    for offsets in names.values_mut() {
+        offsets.sort_unstable();
+        offsets.dedup();
+    }
+    names
 }
 
-/// A generate block: its imports, and the names it declares itself.
+/// Native generate scopes, keyed by their authored body owner.
 struct GenerateScope {
+    parent: Option<usize>,
+    id: celox_sv_syntax::BodyItemId,
     start: usize,
     end: usize,
-    /// `import p::x;`, as `(p, x)`.
     explicit: Vec<(String, String)>,
-    /// `import p::*;`
     wildcard: Vec<String>,
     declared: HashSet<String>,
 }
-
 impl GenerateScope {
     fn contains(&self, offset: usize) -> bool {
         (self.start..self.end).contains(&offset)
     }
 }
-
-/// The generate blocks of a module `node`, each with the imports and
-/// declarations that are its own rather than those of a block, function or
-/// task nested in it.
-fn generate_scopes(node: RefNode<'_>, tree: &SyntaxTree) -> Vec<GenerateScope> {
-    let mut blocks = generate_blocks(node.clone());
-    if blocks.is_empty() {
-        return Vec::new();
-    }
-    let real_blocks = blocks.len();
-    // A loop's genvar is also visible in the loop's own header.
-    blocks.extend(node.clone().into_iter().filter_map(|child| match child {
-        RefNode::LoopGenerateConstruct(_) => Some(node_range(child)),
-        _ => None,
-    }));
-    // Subroutines and blocks declare names of their own, and the members of
-    // a structure live in the member name space of its type.
-    let subroutines: Vec<(usize, usize)> = node
-        .clone()
+fn generate_scopes(tree: &SyntaxTree) -> Converted<Vec<GenerateScope>> {
+    use celox_sv_syntax::{BodyItemKind, PackageBindingItemKind, PackageBindingKind};
+    let native = tree.declarations();
+    let mut scopes: Vec<GenerateScope> = Vec::new();
+    let mut seen = HashSet::default();
+    let mut loop_variables = HashMap::default();
+    let mut pending: Vec<(celox_sv_syntax::BodyItemId, Option<usize>, bool)> = tree
+        .native_body_membership()?
         .into_iter()
-        .filter(|child| {
-            matches!(
-                child,
-                RefNode::FunctionDeclaration(_)
-                    | RefNode::TaskDeclaration(_)
-                    | RefNode::SeqBlock(_)
-                    | RefNode::StructUnionMember(_)
-            )
-        })
-        .map(node_range)
+        .map(|id| (id, None, false))
         .collect();
-    let mut scopes: Vec<GenerateScope> = blocks
-        .iter()
-        .map(|&(start, end)| GenerateScope {
-            start,
-            end,
-            explicit: Vec::new(),
-            wildcard: Vec::new(),
-            declared: HashSet::default(),
-        })
-        .collect();
-    // The innermost block that contains `offset`, outside any subroutine.
-    let owner = |offset: usize, nested: &[(usize, usize)]| -> Option<usize> {
-        if nested
-            .iter()
-            .any(|(start, end)| (*start..*end).contains(&offset))
-        {
-            return None;
+    while let Some((id, parent, force_scope)) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native generate scope".into(),
+            ));
         }
-        blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, (start, end))| (*start..*end).contains(&offset))
-            .min_by_key(|(_, (start, end))| end - start)
-            .map(|(index, _)| index)
-    };
-    for child in node {
-        let (offset, nested) = match &child {
-            // A subroutine's name is declared in the enclosing scope.
-            RefNode::FunctionIdentifier(_) | RefNode::TaskIdentifier(_) => {
-                (node_range(child.clone()).0, &[][..])
-            }
-            _ => (node_range(child.clone()).0, &subroutines[..]),
-        };
-        let name = match child {
-            RefNode::PackageImportItem(sv_parser::PackageImportItem::Identifier(item)) => {
-                if let Some(index) = owner(offset, nested)
-                    && let (Some(package), Some(name)) = (
-                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree),
-                        identifier_text(RefNode::Identifier(&item.nodes.2), tree),
-                    )
-                {
-                    scopes[index].explicit.push((package, name));
-                }
-                continue;
-            }
-            RefNode::PackageImportItem(sv_parser::PackageImportItem::Asterisk(item)) => {
-                if let Some(index) = owner(offset, nested)
-                    && let Some(package) =
-                        identifier_text(RefNode::PackageIdentifier(&item.nodes.0), tree)
-                    && !scopes[index].wildcard.contains(&package)
-                {
-                    scopes[index].wildcard.push(package);
-                }
-                continue;
-            }
-            RefNode::VariableDeclAssignment(_) => unwrap_node!(child, VariableIdentifier),
-            RefNode::NetDeclAssignment(_) => unwrap_node!(child, NetIdentifier),
-            RefNode::ParamAssignment(assignment) => {
-                Some(RefNode::ParameterIdentifier(&assignment.nodes.0))
-            }
-            // A loop's genvar is declared in each block the loop generates
-            // (IEEE 1800-2023 27.4).
-            RefNode::LoopGenerateConstruct(construct) => {
-                let body = node_range(RefNode::GenerateBlock(&construct.nodes.2));
-                let header = node_range(child.clone());
-                if let Some(name) = identifier_text(
-                    RefNode::GenvarIdentifier(&construct.nodes.1.nodes.1.0.nodes.1),
-                    tree,
-                ) {
-                    for (index, range) in blocks.iter().enumerate() {
-                        if *range == body || *range == header {
-                            scopes[index].declared.insert(name.clone());
-                        }
-                    }
-                }
-                continue;
-            }
-            // A named generate block is a declaration of the scope around
-            // it, not of itself.
-            RefNode::GenerateBlock(sv_parser::GenerateBlock::Multiple(block)) => {
-                let label = block
-                    .nodes
-                    .2
-                    .as_ref()
-                    .map(|(_, name)| name)
-                    .or_else(|| block.nodes.0.as_ref().map(|(name, _)| name));
-                let range = node_range(child.clone());
-                // Not a loop header: a loop body's name is declared beside the
-                // loop.
-                let parent = blocks[..real_blocks]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (start, end))| {
-                        (*start, *end) != range && *start <= range.0 && range.1 <= *end
-                    })
-                    .min_by_key(|(_, (start, end))| end - start)
-                    .map(|(index, _)| index);
-                if let (Some(label), Some(parent)) = (label, parent)
-                    && let Some(name) =
-                        identifier_text(RefNode::GenerateBlockIdentifier(label), tree)
-                {
-                    scopes[parent].declared.insert(name);
-                }
-                continue;
-            }
-            // `genvar i;`; a loop's own `genvar i` is the loop's.
-            RefNode::GenvarDeclaration(declaration) => {
-                if let Some(index) = owner(offset, nested) {
-                    for genvar in RefNode::GenvarDeclaration(declaration) {
-                        if let RefNode::GenvarIdentifier(_) = genvar
-                            && let Some(name) = identifier_text(genvar, tree)
-                        {
-                            scopes[index].declared.insert(name);
-                        }
-                    }
-                }
-                continue;
-            }
-            RefNode::InstanceIdentifier(_)
-            | RefNode::FunctionIdentifier(_)
-            | RefNode::TaskIdentifier(_) => Some(child),
-            _ => continue,
-        };
-        if let Some(index) = owner(offset, nested)
-            && let Some(name) = name.and_then(|name| identifier_text(name, tree))
+        let item = native.body_item(id);
+        validate_children(item, native)?;
+        if let BodyItemKind::Block {
+            label,
+            leading_label,
+            ..
+        } = &item.kind
+            && let Some(parent) = parent
+            && let Some(label) = label.as_ref().or(leading_label.as_ref())
         {
-            scopes[index].declared.insert(name);
+            // A loop body label is declared beside the loop, not in its
+            // implicit genvar scope.
+            let parent = if matches!(
+                native.body_item(scopes[parent].id).kind,
+                BodyItemKind::Loop { .. }
+            ) {
+                scopes[parent].parent
+            } else {
+                Some(parent)
+            };
+            if let Some(parent) = parent {
+                scopes[parent]
+                    .declared
+                    .insert(normalize_identifier(&label.spelling));
+            }
+        }
+        let owner = if force_scope
+            || matches!(
+                item.kind,
+                BodyItemKind::Block { .. } | BodyItemKind::Loop { .. }
+            ) {
+            scopes.push(GenerateScope {
+                parent,
+                id,
+                start: item.tokens.start,
+                end: item.tokens.end,
+                explicit: Vec::new(),
+                wildcard: Vec::new(),
+                declared: HashSet::default(),
+            });
+            Some(scopes.len() - 1)
+        } else {
+            parent
+        };
+        if let Some(owner) = owner {
+            scopes[owner].declared.extend(item_names(id, tree));
+            if let Some(variable) = loop_variables.remove(&id) {
+                scopes[owner].declared.insert(variable);
+            }
+        }
+        match &item.kind {
+            BodyItemKind::Region(items)
+            | BodyItemKind::Block { items, .. }
+            | BodyItemKind::Unconverted { items, .. } => {
+                pending.extend(items.iter().map(|id| (*id, owner, false)))
+            }
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => pending.extend(std::iter::once(then_body).chain(otherwise).map(|id| {
+                (
+                    *id,
+                    owner,
+                    !matches!(native.body_item(*id).kind, BodyItemKind::Conditional { .. }),
+                )
+            })),
+            BodyItemKind::Case { arms, .. } => pending.extend(arms.iter().map(|arm| {
+                (
+                    arm.body,
+                    owner,
+                    !matches!(
+                        native.body_item(arm.body).kind,
+                        BodyItemKind::Conditional { .. }
+                    ),
+                )
+            })),
+            BodyItemKind::Loop { variable, body, .. } => {
+                scopes[owner.expect("loop owns a scope")]
+                    .declared
+                    .insert(normalize_identifier(&variable.spelling));
+                // Each generated body owns its genvar localparam, ahead of
+                // wildcard imports authored in that same body.
+                loop_variables.insert(*body, normalize_identifier(&variable.spelling));
+                pending.push((*body, owner, true));
+            }
+            BodyItemKind::PackageBinding(id) => {
+                let binding = native.package_binding(*id);
+                if binding.kind == PackageBindingKind::Import
+                    && let Some(owner) = owner
+                {
+                    for item in &binding.items {
+                        match &item.kind {
+                            PackageBindingItemKind::Named { package, name } => {
+                                scopes[owner].explicit.push((
+                                    normalize_identifier(&package.spelling),
+                                    normalize_identifier(&name.spelling),
+                                ))
+                            }
+                            PackageBindingItemKind::Wildcard(package) => scopes[owner]
+                                .wildcard
+                                .push(normalize_identifier(&package.spelling)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    scopes
+    Ok(scopes)
 }
 
 /// What a reference in a generate block names.
@@ -645,7 +562,7 @@ enum ScopeLookup {
     Declared,
     /// The declaration an import of a block around it binds: that block's
     /// source offset, and the declaration.
-    Imported(usize, String),
+    Imported(celox_sv_syntax::BodyItemId, String),
     /// Nothing in the blocks around it: the module's scope decides.
     Outside,
 }
@@ -683,7 +600,7 @@ fn scope_lookup(
             }
         }
         if let Some(target) = explicit {
-            return Ok(ScopeLookup::Imported(scope.start, target));
+            return Ok(ScopeLookup::Imported(scope.id, target));
         }
         let mut found: Option<(String, &String)> = None;
         for package_name in &scope.wildcard {
@@ -711,95 +628,134 @@ fn scope_lookup(
             }
         }
         if let Some((target, _)) = found {
-            return Ok(ScopeLookup::Imported(scope.start, target));
+            return Ok(ScopeLookup::Imported(scope.id, target));
         }
     }
     Ok(ScopeLookup::Outside)
 }
 
-/// The functions, tasks and blocks under `node` that declare names of their
-/// own: their source ranges, and the names each declares itself, not in a
-/// block nested in it.
-fn nested_declarations(
-    node: RefNode<'_>,
-    tree: &SyntaxTree,
-) -> Vec<(usize, usize, HashSet<String>)> {
-    let range = |node: RefNode<'_>| {
-        let mut start = usize::MAX;
-        let mut end = 0;
-        for child in node {
-            if let RefNode::Locate(locate) = child {
-                start = start.min(locate.offset);
-                end = end.max(locate.offset + locate.len);
-            }
-        }
-        (start, end)
+fn nested_declarations(tree: &SyntaxTree) -> Vec<(usize, usize, HashSet<String>)> {
+    use celox_sv_syntax::{
+        BodyItemKind, DataTypeKind, ForInitialization, LocalDeclaration, LoopSyntax, StatementKind,
+        TypeAliasTarget,
     };
-    let scopes: Vec<_> = node
-        .into_iter()
-        .filter(|child| {
-            matches!(
-                child,
-                RefNode::FunctionDeclaration(_)
-                    | RefNode::TaskDeclaration(_)
-                    | RefNode::SeqBlock(_)
-                    // A `for` loop variable is declared for the loop only.
-                    | RefNode::LoopStatementFor(_)
-            )
-        })
-        .map(|child| (range(child.clone()), child))
-        .collect();
-    let mut declarations = Vec::new();
-    for ((start, end), scope) in &scopes {
-        let inner: Vec<_> = scopes
-            .iter()
-            .map(|(range, _)| *range)
-            .filter(|range| *range != (*start, *end) && *start <= range.0 && range.1 <= *end)
-            .collect();
-        let mut declared = HashSet::default();
-        for child in scope.clone() {
-            let name = match child {
-                // A function's name denotes its result inside it.
-                RefNode::FunctionIdentifier(_)
-                | RefNode::VariableIdentifier(_)
-                | RefNode::PortIdentifier(_)
-                | RefNode::ParameterIdentifier(_) => child,
-                RefNode::TypeDeclarationDataType(declaration) => {
-                    RefNode::TypeIdentifier(&declaration.nodes.2)
+    let native = tree.declarations();
+    let mut result = Vec::new();
+    let mut pending = Vec::new();
+    let Ok(items) = body_items(tree) else {
+        return result;
+    };
+    for id in items {
+        match native.body_item(id).kind {
+            BodyItemKind::Subroutine(id) => {
+                let sub = native.subroutine(id);
+                let mut names = HashSet::default();
+                names.insert(normalize_identifier(&sub.name.spelling));
+                for port in sub
+                    .ports
+                    .iter()
+                    .flatten()
+                    .chain(sub.port_declarations.iter().flat_map(|decl| &decl.ports))
+                {
+                    if let Some(name) = &port.name {
+                        names.insert(normalize_identifier(&name.spelling));
+                    }
                 }
-                RefNode::EnumNameDeclaration(member) => RefNode::EnumIdentifier(&member.nodes.0),
-                _ => continue,
-            };
-            let Some(locate) = identifier_locate(name.clone()) else {
-                continue;
-            };
-            if inner
-                .iter()
-                .any(|(inner_start, inner_end)| (*inner_start..*inner_end).contains(&locate.offset))
-            {
-                continue;
+                result.push((sub.tokens.start, sub.tokens.end, names));
+                // Walk lexical roots so a nested block keeps its declarations.
+                pending.extend(
+                    sub.items
+                        .iter()
+                        .copied()
+                        .map(|id| (id, Some(result.len() - 1))),
+                );
             }
-            if let Some(name) = identifier_text(name, tree) {
-                declared.insert(name);
-            }
-        }
-        if !declared.is_empty() {
-            declarations.push((*start, *end, declared));
+            BodyItemKind::Procedure(id) => pending.push((native.procedure(id).body, None)),
+            _ => {}
         }
     }
-    declarations
+    let mut seen = HashSet::default();
+    while let Some((id, mut owner)) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let statement = native.statement(id);
+        if matches!(
+            statement.kind,
+            StatementKind::Block { .. }
+                | StatementKind::Parallel { .. }
+                | StatementKind::Loop {
+                    kind: LoopSyntax::For(_),
+                    ..
+                }
+        ) {
+            result.push((
+                statement.tokens.start,
+                statement.tokens.end,
+                HashSet::default(),
+            ));
+            owner = Some(result.len() - 1);
+        }
+        if let Some(owner) = owner {
+            let names = &mut result[owner].2;
+            let mut types = Vec::new();
+            match &statement.kind {
+                StatementKind::Declaration(
+                    LocalDeclaration::Variables(decl) | LocalDeclaration::Constructed(decl),
+                ) => {
+                    for var in &decl.variables {
+                        names.insert(normalize_identifier(&var.name.spelling));
+                    }
+                    types.push(decl.data_type);
+                }
+                StatementKind::Declaration(LocalDeclaration::Parameters(id)) => {
+                    for parameter in &native.parameter_declaration(*id).parameters {
+                        names.insert(normalize_identifier(&parameter.name.spelling));
+                    }
+                }
+                StatementKind::Declaration(LocalDeclaration::TypeAlias(id)) => {
+                    let alias = native.type_alias(*id);
+                    names.insert(normalize_identifier(&alias.name.spelling));
+                    if let TypeAliasTarget::DataType(id) = alias.target {
+                        types.push(id);
+                    }
+                }
+                StatementKind::Loop {
+                    kind: LoopSyntax::For(header),
+                    ..
+                } => {
+                    if let Some(ForInitialization::Declarations(decls)) = &header.initialization {
+                        for decl in decls {
+                            for var in &decl.variables {
+                                names.insert(normalize_identifier(&var.name.spelling));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for ty in types {
+                if let DataTypeKind::Enum { items, .. } = &native.data_type(ty).kind {
+                    for item in items {
+                        names.insert(normalize_identifier(&item.name.spelling));
+                    }
+                }
+            }
+        }
+        pending.extend(statement.kind.children().map(|id| (id, owner)));
+    }
+    result
 }
 
 /// The symbols a scope starts from: those of every package it uses, directly
 /// or through another package, and an alias for each name its imports bind.
 /// `unit` is the compilation unit of the module's source file.
 pub(super) fn imported_symbols(
-    node: RefNode<'_>,
     tree: &SyntaxTree,
     packages: &packages::Packages,
     unit: Option<&packages::Unit>,
 ) -> Result<ScopeSymbols, AnalyzerError> {
-    Ok(resolve_imports(node, tree, packages, unit)?.symbols)
+    Ok(resolve_imports(tree, packages, unit)?.symbols)
 }
 
 /// The imports of a scope, resolved.
@@ -820,22 +776,14 @@ struct Binding {
 }
 
 pub(super) fn resolve_imports(
-    node: RefNode<'_>,
     tree: &SyntaxTree,
     packages: &packages::Packages,
     unit: Option<&packages::Unit>,
 ) -> Result<ResolvedImports, AnalyzerError> {
-    let imports = ScopeImports::from_node(node.clone(), tree);
+    let imports = ScopeImports::from_scope(tree)?;
     // A module sees the compilation-unit items declared before it, which are
     // also those declared before any reference in it.
-    let start = node
-        .clone()
-        .into_iter()
-        .find_map(|child| match child {
-            RefNode::Locate(locate) => Some(locate.offset),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let start = tree.native_scope_start()?;
     let package = |name: &String| {
         packages
             .get(name)
@@ -857,7 +805,7 @@ pub(super) fn resolve_imports(
     }
     // So does an import of a generate block, whether or not a reference uses
     // it.
-    let all_scopes = generate_scopes(node.clone(), tree);
+    let all_scopes = generate_scopes(tree)?;
     for scope in &all_scopes {
         for name in scope
             .explicit
@@ -869,10 +817,15 @@ pub(super) fn resolve_imports(
         }
     }
     // A package may name its own items through its scope.
-    let own = match &node {
-        RefNode::PackageDeclaration(_) => scope_name_from_node(node.clone(), tree).ok(),
-        _ => None,
-    };
+    let own = tree
+        .root_unit()
+        .ok()
+        .filter(|unit| unit.kind == celox_sv_syntax::UnitKind::Package)
+        .map(|unit| normalize_identifier(&unit.name.spelling))
+        .or_else(|| {
+            (tree.scope_handle() == crate::migration::ScopeHandle::Compilation)
+                .then(|| "$unit".into())
+        });
     let mut own_names = None;
     let mut exported_references = Vec::new();
     let mut own_exported: Vec<String> = Vec::new();
@@ -881,7 +834,10 @@ pub(super) fn resolve_imports(
     for (package_name, name) in &imports.qualified {
         if own.as_ref() == Some(package_name) {
             // The package names one of its own items.
-            let own_names = own_names.get_or_insert_with(|| scope_names(node.clone(), tree));
+            if own_names.is_none() {
+                own_names = Some(scope_names(tree)?);
+            }
+            let own_names = own_names.as_ref().expect("populated scope names");
             // A name the package exports is known once its imports are.
             if !own_names.contains(name) && !own_exported.contains(name) {
                 own_exported.push(name.clone());
@@ -944,7 +900,7 @@ pub(super) fn resolve_imports(
     for (reference, target) in &exported_references {
         symbols.alias(reference, target);
     }
-    let local = scope_names(node.clone(), tree);
+    let local = scope_names(tree)?;
     // The declaration `package_name::name` denotes, for an import.
     let provided = |package_name: &String, name: &String| -> Result<String, AnalyzerError> {
         package(package_name)?
@@ -1027,12 +983,13 @@ pub(super) fn resolve_imports(
     let mut referenced = if imports.wildcard.is_empty() && unit.is_none() && !scoped_imports {
         HashMap::default()
     } else {
-        unqualified_names(node.clone(), tree)
+        unqualified_names(tree)
     };
     // A reference in a generate block is looked up in that block and the
     // blocks around it first (IEEE 1800-2023 26.3): the references the
     // imports of a block bind, by name, with the block and the declaration.
-    let mut scoped: HashMap<String, Vec<(usize, String)>> = HashMap::default();
+    let mut scoped: HashMap<String, Vec<(celox_sv_syntax::BodyItemId, String)>> =
+        HashMap::default();
     if scoped_imports {
         for scope in &all_scopes {
             let mut explicit: HashMap<&String, String> = HashMap::default();
@@ -1272,7 +1229,8 @@ pub(super) fn resolve_imports(
     // A name the generate blocks import is a name of the whole module when
     // nothing else gives it a meaning; otherwise each block that imports
     // another declaration than the one visible around it names it there.
-    let mut generate_imports: HashMap<usize, HashMap<String, String>> = HashMap::default();
+    let mut generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>> =
+        HashMap::default();
     for (name, mut uses) in scoped {
         let outside = bindings
             .iter()
@@ -1296,18 +1254,30 @@ pub(super) fn resolve_imports(
             });
             continue;
         }
-        uses.sort_unstable();
+        uses.sort_by_key(|(id, target)| {
+            (
+                all_scopes
+                    .iter()
+                    .find(|scope| scope.id == *id)
+                    .map(|scope| scope.start),
+                target.clone(),
+            )
+        });
         uses.dedup();
         // A block around `block` that imports another declaration, or
         // declares the name, hides the module's binding there.
-        let encloses =
-            |scope: &GenerateScope, block: usize| scope.start < block && scope.contains(block);
-        let hidden = |block: usize, target: &String| {
+        let encloses = |scope: &GenerateScope, block: celox_sv_syntax::BodyItemId| {
+            all_scopes
+                .iter()
+                .find(|inner| inner.id == block)
+                .is_some_and(|inner| scope.start < inner.start && scope.contains(inner.start))
+        };
+        let hidden = |block: celox_sv_syntax::BodyItemId, target: &String| {
             uses.iter().any(|(outer, other)| {
                 other != target
                     && all_scopes
                         .iter()
-                        .any(|scope| scope.start == *outer && encloses(scope, block))
+                        .any(|scope| scope.id == *outer && encloses(scope, block))
             }) || all_scopes
                 .iter()
                 .any(|scope| scope.declared.contains(&name) && encloses(scope, block))

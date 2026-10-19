@@ -1,79 +1,110 @@
-//! Locations of module nodes, without borrowing from the owned syntax tree.
+//! Native module scopes cached for repeated hierarchy specialization.
 
 use super::*;
-
-#[derive(Clone, Copy)]
-enum Location {
-    Description(usize),
-    // Preserve support for nested declarations and unusual source forms.
-    Nested(usize),
-}
 
 #[derive(Default)]
 pub(crate) struct ModuleIndex {
     names: Vec<String>,
-    locations: HashMap<String, Vec<Location>>,
+    locations: HashMap<String, Vec<SyntaxTree>>,
     pub interfaces: ModuleInterfaces,
 }
 
-fn source_text(tree: &SyntaxTree) -> Option<&sv_parser::SourceText> {
-    tree.into_iter().find_map(|node| match node {
-        RefNode::SourceText(source) => Some(source),
-        _ => None,
-    })
-}
-
-fn module_node(declaration: &sv_parser::ModuleDeclaration) -> Option<RefNode<'_>> {
-    match declaration {
-        sv_parser::ModuleDeclaration::Ansi(module) => Some(RefNode::ModuleDeclarationAnsi(module)),
-        sv_parser::ModuleDeclaration::Nonansi(module) => {
-            Some(RefNode::ModuleDeclarationNonansi(module))
-        }
-        _ => None,
-    }
-}
-
-fn identifier_offset(node: &RefNode<'_>) -> Option<usize> {
-    let identifier = match node {
-        RefNode::ModuleDeclarationAnsi(module) => &module.nodes.0.nodes.3,
-        RefNode::ModuleDeclarationNonansi(module) => &module.nodes.0.nodes.3,
-        _ => return None,
-    };
-    identifier_locate(RefNode::ModuleIdentifier(identifier)).map(|locate| locate.offset)
-}
-
 impl ModuleIndex {
-    pub fn new(tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
+    pub(crate) fn new(tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
+        Self::build(tree, None)
+    }
+
+    pub(crate) fn from_declarations(
+        tree: &SyntaxTree,
+        declarations: &celox_sv_syntax::Declarations,
+    ) -> Result<Self, AnalyzerError> {
+        Self::build(tree, Some(declarations))
+    }
+
+    fn build(
+        tree: &SyntaxTree,
+        declarations: Option<&celox_sv_syntax::Declarations>,
+    ) -> Result<Self, AnalyzerError> {
         let mut index = Self::default();
-        let mut descriptions = HashMap::default();
-        if let Some(source) = source_text(tree) {
-            for (i, description) in source.nodes.2.iter().enumerate() {
-                if let sv_parser::Description::ModuleDeclaration(declaration) = description
-                    && let Some(node) = module_node(declaration)
-                    && let Some(offset) = identifier_offset(&node)
-                {
-                    descriptions.insert(offset, i);
-                }
-            }
-        }
-        for node in tree {
-            let Some(offset) = identifier_offset(&node) else {
+        let mut ansi = Vec::new();
+        for handle in tree.root_scopes()? {
+            let scoped = tree.scoped(handle)?;
+            let unit = scoped.root_unit()?;
+            if unit.kind != celox_sv_syntax::UnitKind::Module
+                || unit.port_style == celox_sv_syntax::PortStyle::Wildcard
+            {
                 continue;
-            };
-            let name = module_name_from_node(node.clone(), tree)?;
+            }
+            let name = scoped.root_name()?;
             index.names.push(name.clone());
-            let location = descriptions
-                .get(&offset)
-                .map_or(Location::Nested(offset), |&i| Location::Description(i));
+            ansi.push(unit.port_style == celox_sv_syntax::PortStyle::Ansi);
             index
                 .locations
                 .entry(name.clone())
                 .or_default()
-                .push(location);
-            if matches!(node, RefNode::ModuleDeclarationAnsi(_)) {
-                index
-                    .interfaces
-                    .insert(name, module_interface_from_node(node, tree)?);
+                .push(scoped.clone());
+            if declarations.is_none() && unit.port_style == celox_sv_syntax::PortStyle::Ansi {
+                index.interfaces.insert(
+                    name,
+                    module_interface_from_scope(&AnalysisContext::unspecialized(&scoped))?,
+                );
+            }
+        }
+        if let Some(declarations) = declarations {
+            use celox_sv_syntax::{PortKind, PortStyle, UnitKind};
+            let units = declarations
+                .all_units()
+                .filter(|unit| {
+                    unit.kind == UnitKind::Module
+                        && !unit.external
+                        && unit.port_style != PortStyle::Wildcard
+                })
+                .collect::<Vec<_>>();
+            if units.len() != index.names.len()
+                || units
+                    .iter()
+                    .zip(index.names.iter().zip(&ansi))
+                    .any(|(unit, (name, ansi))| {
+                        unit.name.spelling != *name || (unit.port_style == PortStyle::Ansi) != *ansi
+                    })
+            {
+                return Err(AnalyzerError::Parse(
+                    "native declaration index disagrees with the validated module bodies".into(),
+                ));
+            }
+            index.names = units
+                .iter()
+                .map(|unit| unit.name.spelling.clone())
+                .collect();
+            for unit in units {
+                if unit.port_style != PortStyle::Ansi {
+                    continue;
+                }
+                let ports = unit
+                    .ports
+                    .iter()
+                    .filter_map(|port| match &port.kind {
+                        PortKind::Named(name) => Some(name.spelling.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let parameters = unit
+                    .overridable_parameters()
+                    // Preserve the legacy positional binding contract for body
+                    // type parameters during this syntax-only migration.
+                    .filter(|parameter| {
+                        unit.parameters.is_some()
+                            || matches!(
+                                parameter.kind,
+                                celox_sv_syntax::ParameterKind::Value { .. }
+                            )
+                    })
+                    .map(|parameter| parameter.name.spelling.clone())
+                    .collect();
+                index.interfaces.insert(
+                    unit.name.spelling.clone(),
+                    ModuleInterface { ports, parameters },
+                );
             }
         }
         Ok(index)
@@ -83,25 +114,10 @@ impl ModuleIndex {
         &self.names
     }
 
-    pub fn nodes<'a>(&self, tree: &'a SyntaxTree, name: &str) -> Vec<RefNode<'a>> {
-        let Some(locations) = self.locations.get(name) else {
-            return Vec::new();
-        };
-        locations
-            .iter()
-            .filter_map(|location| match location {
-                Location::Description(i) => {
-                    let sv_parser::Description::ModuleDeclaration(declaration) =
-                        &source_text(tree)?.nodes.2[*i]
-                    else {
-                        return None;
-                    };
-                    module_node(declaration)
-                }
-                Location::Nested(offset) => tree
-                    .into_iter()
-                    .find(|node| identifier_offset(node) == Some(*offset)),
-            })
-            .collect()
+    pub(crate) fn scopes(&self, name: &str) -> &[SyntaxTree] {
+        self.locations
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 }

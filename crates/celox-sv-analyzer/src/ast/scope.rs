@@ -24,9 +24,9 @@ pub(super) struct ScopeSymbols {
     pub parameter_values: HashMap<String, Expr>,
     pub parameters: Vec<Parameter>,
     pub type_aliases: HashMap<String, Type>,
-    /// Bound type parameters, keyed by their declaration offset in this tree.
-    pub type_parameter_bindings: HashMap<usize, Type>,
-    pub pattern_parameter_bindings: HashMap<usize, BoundPattern>,
+    /// Bound type parameters, keyed by native declaration ownership.
+    pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
+    pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
     pub enum_constants: EnumMemberConstants,
     pub functions: HashMap<String, Function>,
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
@@ -52,11 +52,12 @@ pub(super) struct ScopeSymbols {
     pub interface_types: HashMap<String, String>,
     pub interface_arrays: HashMap<String, native_interfaces::ArrayBinding>,
     pub interface_scopes: HashMap<String, native_interfaces::ScopeBinding>,
-    pub interface_declarations: HashSet<usize>,
-    pub interface_instances: HashMap<usize, native_interfaces::InstanceBinding>,
+    pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
+    pub interface_instances:
+        HashMap<native_interfaces::InstanceKey, native_interfaces::InstanceBinding>,
     /// The names the imports of a generate block bind there to another
-    /// declaration than outside it, by the source offset of the block.
-    pub generate_imports: HashMap<usize, HashMap<String, String>>,
+    /// declaration than outside it, by the native body identity of the block.
+    pub generate_imports: HashMap<celox_sv_syntax::BodyItemId, HashMap<String, String>>,
 }
 
 #[derive(Default)]

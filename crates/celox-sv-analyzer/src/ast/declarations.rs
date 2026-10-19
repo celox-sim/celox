@@ -2,257 +2,106 @@
 
 use super::*;
 
-pub(super) fn module_name_from_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Result<String, AnalyzerError> {
-    let id = unwrap_node!(node, ModuleIdentifier)
-        .ok_or_else(|| AnalyzerError::Unsupported("module without identifier".to_string()))?;
-    let locate = identifier_locate(id)
-        .ok_or_else(|| AnalyzerError::Unsupported("unsupported module identifier".to_string()))?;
-    syntax_tree
-        .get_str(&locate)
-        .map(str::to_string)
-        .ok_or_else(|| AnalyzerError::Unsupported("invalid module identifier span".to_string()))
-}
-
-/// The name of a module or package declaration.
-pub(super) fn scope_name_from_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Result<String, AnalyzerError> {
-    if let RefNode::PackageDeclaration(package) = node {
-        if packages::is_unit(package) {
-            return Ok(packages::UNIT.to_string());
-        }
-        return identifier_text(RefNode::PackageIdentifier(&package.nodes.3), syntax_tree)
-            .ok_or_else(|| AnalyzerError::Unsupported("package identifier".to_string()));
-    }
-    module_name_from_node(node, syntax_tree)
-}
-
-pub(super) fn identifier_locate(node: RefNode<'_>) -> Option<Locate> {
-    match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
-        Some(RefNode::SimpleIdentifier(identifier)) => Some(identifier.nodes.0),
-        Some(RefNode::EscapedIdentifier(identifier)) => Some(identifier.nodes.0),
-        _ => None,
-    }
-}
-
-pub(super) fn ports_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn ports_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
+    selected: Option<&port_owners::Selection<'_>>,
 ) -> Result<Vec<Port>, AnalyzerError> {
-    let scope_span = dimensions::ref_node_source_span(node.clone());
     let mut ports = Vec::new();
     let mut inherited_direction = PortDirection::Unspecified;
     let mut inherited_type = Type::implicit();
-    for child in node {
-        match child {
-            RefNode::AnsiPortDeclarationNet(port) => {
-                let header = port.nodes.0.as_ref();
-                let direction = header
-                    .and_then(|header| direction_from_ref_node(header.into()))
-                    .unwrap_or(inherited_direction);
-                let r#type = match header {
-                    Some(header) => {
-                        type_from_net_port_header(header, syntax_tree, const_env, type_aliases)
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported("unsupported port data type".to_string())
-                            })?
-                    }
-                    None => inherited_type.clone(),
-                };
-                let r#type = type_with_fallback_ranges_with_env(
-                    r#type,
-                    RefNode::AnsiPortDeclarationNet(port),
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                );
-                let inherited_type_base = r#type.clone();
-                let r#type = type_with_unpacked_ranges(
-                    r#type,
-                    unpacked_ranges_from_dimensions_with_env(
-                        &port.nodes.2,
-                        syntax_tree,
-                        const_env,
-                        type_aliases,
-                    )?,
-                );
-                let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
-                inherited_direction = direction;
-                inherited_type = inherited_type_base;
-                ports.push(Port::new(name, direction, r#type, true));
-            }
-            RefNode::AnsiPortDeclarationVariable(port) => {
-                let header = port.nodes.0.as_ref();
-                let direction = header
-                    .and_then(|header| direction_from_ref_node(header.into()))
-                    .unwrap_or(inherited_direction);
-                let r#type = match header {
-                    Some(header) => {
-                        type_from_variable_port_header(header, syntax_tree, const_env, type_aliases)
-                            .ok_or_else(|| {
-                                AnalyzerError::Unsupported("unsupported port data type".to_string())
-                            })?
-                    }
-                    None => inherited_type.clone(),
-                };
-                let r#type = type_with_fallback_ranges_with_env(
-                    r#type,
-                    RefNode::AnsiPortDeclarationVariable(port),
-                    syntax_tree,
-                    const_env,
-                    type_aliases,
-                );
-                let inherited_type_base = r#type.clone();
-                let r#type = type_with_unpacked_ranges(
-                    r#type,
-                    unpacked_ranges_from_variable_dimensions_with_env(
-                        &port.nodes.2,
-                        syntax_tree,
-                        const_env,
-                        type_aliases,
-                    )?,
-                );
-                let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
-                inherited_direction = direction;
-                inherited_type = inherited_type_base;
-                ports.push(Port::new(name, direction, r#type, false));
-            }
-            RefNode::AnsiPortDeclarationParen(port) => {
-                let explicit_direction = port.nodes.0.as_ref().map(direction_from_port_direction);
-                let direction = explicit_direction.unwrap_or(inherited_direction);
-                let r#type = if explicit_direction.is_some() {
-                    Type::implicit()
-                } else {
-                    inherited_type.clone()
-                };
-                let name = port_name(RefNode::PortIdentifier(&port.nodes.2), syntax_tree)?;
-                inherited_direction = direction;
-                inherited_type = r#type.clone();
-                ports.push(Port::new(name, direction, r#type, false));
-            }
-            _ => continue,
-        }
-        if let Some(span) = scope_span {
-            dimensions::publish_declaration_dimensions(
-                &syntax_tree.state,
-                span,
-                &ports[ports.len() - 1..],
-                &[],
-            );
-        }
+    for native in port_owners::scope(selected, syntax_tree)? {
+        let direction = native
+            .direction
+            .map(native_types::port_direction)
+            .unwrap_or(inherited_direction);
+        let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
+        let base = match native_types::port_type(native, syntax_tree, const_env, type_aliases)? {
+            Some(ty) => ty,
+            None if native.data_type.is_none() => inherited_type.clone(),
+            None => return Err(unsupported("unsupported port data type")),
+        };
+        inherited_direction = direction;
+        inherited_type = base.clone();
+        let ty = type_with_unpacked_ranges(
+            base,
+            native_constants::unpacked_ranges(
+                &native.dimensions,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?,
+        );
+        ports.push(Port::new(
+            native_port_name(native)?,
+            direction,
+            ty,
+            !explicit && !native.variable,
+        ));
     }
     Ok(ports)
 }
 
+fn native_port_name(port: &celox_sv_syntax::Port) -> Converted<String> {
+    match &port.kind {
+        celox_sv_syntax::PortKind::Named(name)
+        | celox_sv_syntax::PortKind::Explicit { name, .. } => Ok(name.spelling.clone()),
+        _ => Err(AnalyzerError::Parse(
+            "native ANSI port has a non-ANSI name".into(),
+        )),
+    }
+}
+
 /// The positional interface of a module: its ports in declaration order and
 /// its overridable value parameters: in the header when present, otherwise body.
-pub(super) fn module_interface_from_node(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+pub(super) fn module_interface_from_scope(
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Result<ModuleInterface, AnalyzerError> {
-    let mut ports = Vec::new();
-    for child in node.clone() {
-        match child {
-            RefNode::AnsiPortDeclarationNet(port) => {
-                ports.push(port_name(
-                    RefNode::PortIdentifier(&port.nodes.1),
-                    syntax_tree,
-                )?);
-            }
-            RefNode::AnsiPortDeclarationVariable(port) => {
-                ports.push(port_name(
-                    RefNode::PortIdentifier(&port.nodes.1),
-                    syntax_tree,
-                )?);
-            }
-            _ => {}
-        }
-    }
+    let ports = port_owners::scope(None, syntax_tree)?
+        .into_iter()
+        .filter(|port| matches!(port.kind, celox_sv_syntax::PortKind::Named(_)))
+        .map(native_port_name)
+        .collect::<Converted<Vec<_>>>()?;
     let mut parameters = Vec::new();
-    if let Some(RefNode::ParameterPortList(list)) = module_parameter_port_list(node.clone()) {
-        let mut local = false;
-        let mut push_declaration =
-            |declaration: &sv_parser::ParameterPortDeclaration, parameters: &mut Vec<String>| {
-                // IEEE 1800-2023 6.20.4: localparam applies until the next
-                // explicit parameter keyword, including shorthand type declarations.
-                match declaration {
-                    sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_) => {
-                        local = true
-                    }
-                    sv_parser::ParameterPortDeclaration::ParameterDeclaration(_) => local = false,
-                    _ => {}
-                }
-                if local {
-                    return;
-                }
-                for child in RefNode::ParameterPortDeclaration(declaration) {
-                    match child {
-                        RefNode::ParamAssignment(assignment) => parameters.extend(identifier_text(
-                            RefNode::ParameterIdentifier(&assignment.nodes.0),
-                            syntax_tree,
-                        )),
-                        RefNode::TypeAssignment(assignment) => parameters.extend(identifier_text(
-                            RefNode::TypeIdentifier(&assignment.nodes.0),
-                            syntax_tree,
-                        )),
-                        _ => {}
-                    }
-                }
-            };
-        match list {
-            sv_parser::ParameterPortList::Assignment(list) => {
-                for child in RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0) {
-                    if let RefNode::ParamAssignment(assignment) = child
-                        && let Some(name) = identifier_text(
-                            RefNode::ParameterIdentifier(&assignment.nodes.0),
-                            syntax_tree,
-                        )
-                    {
-                        parameters.push(name);
-                    }
-                }
-                for (_, declaration) in &list.nodes.1.nodes.1.1 {
-                    push_declaration(declaration, &mut parameters);
-                }
-            }
-            sv_parser::ParameterPortList::Declaration(list) => {
-                for declaration in list.nodes.1.nodes.1.contents() {
-                    push_declaration(declaration, &mut parameters);
-                }
-            }
-            sv_parser::ParameterPortList::Empty(_) => {}
-        }
-    }
-    if module_parameter_port_list(node.clone()).is_none() {
-        for declaration in scope_declarations(node) {
-            let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) =
-                declaration
-            else {
-                continue;
-            };
-            for child in RefNode::ParameterDeclaration(&declaration.0) {
-                if let RefNode::ParamAssignment(parameter) = child
-                    && let Some(name) = identifier_text(
-                        RefNode::ParameterIdentifier(&parameter.nodes.0),
-                        syntax_tree,
-                    )
-                {
-                    parameters.push(name);
-                }
+    if let Some(header) = syntax_tree
+        .scope_handle()
+        .unit(syntax_tree.declarations())
+        .and_then(|unit| unit.parameters.as_ref())
+    {
+        parameters.extend(
+            header
+                .iter()
+                .filter(|parameter| !parameter.local)
+                .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
+        );
+    } else {
+        for id in syntax_tree.native_body_membership()? {
+            if let celox_sv_syntax::BodyItemKind::Parameter(id) =
+                syntax_tree.declarations().body_item(id).kind
+            {
+                parameters.extend(
+                    syntax_tree
+                        .declarations()
+                        .parameter_declaration(id)
+                        .parameters
+                        .iter()
+                        .filter(|parameter| {
+                            !parameter.local
+                                && matches!(
+                                    parameter.kind,
+                                    celox_sv_syntax::ParameterKind::Value { .. }
+                                )
+                        })
+                        .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
+                );
             }
         }
     }
     Ok(ModuleInterface { ports, parameters })
 }
 
-pub(super) fn parameters_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn parameters_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     base_const_env: &HashMap<String, i128>,
@@ -261,18 +110,67 @@ pub(super) fn parameters_from_module_node(
     let mut parameters = Vec::new();
     let mut environment =
         parameters::ParameterEnvironment::new(&syntax_tree.state, &parameters, base_const_env);
-    let parameter_port_list = module_parameter_port_list(node.clone());
-    // IEEE 1800-2023 6.20.1: with a parameter port list, even an empty one,
-    // a `parameter` declared in the module body is a localparam.
-    let body_parameters_are_local = parameter_port_list.is_some();
-    if let Some(parameter_port_list) = parameter_port_list {
-        let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list else {
-            unreachable!();
+    let header = syntax_tree
+        .scope_handle()
+        .unit(syntax_tree.declarations())
+        .and_then(|unit| unit.parameters.as_ref());
+    let body_parameters_are_local = header.is_some();
+    if let Some(header) = header {
+        let values = header
+            .iter()
+            .filter(|parameter| {
+                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+            })
+            .collect::<Vec<_>>();
+        for values in values.chunk_by(|a, b| {
+            let celox_sv_syntax::ParameterKind::Value {
+                data_type: left, ..
+            } = a.kind
+            else {
+                unreachable!()
+            };
+            let celox_sv_syntax::ParameterKind::Value {
+                data_type: right, ..
+            } = b.kind
+            else {
+                unreachable!()
+            };
+            left == right && a.local == b.local
+        }) {
+            parameters::parameters_from_native_with_environment(
+                values,
+                syntax_tree,
+                &mut parameters,
+                values[0].local,
+                base_const_env,
+                type_aliases,
+                parameter_overrides,
+                &mut environment,
+            )?;
+        }
+    }
+    for id in syntax_tree.native_body_membership()? {
+        let celox_sv_syntax::BodyItemKind::Parameter(id) =
+            syntax_tree.declarations().body_item(id).kind
+        else {
+            continue;
         };
-        parameters_from_parameter_port_list(
-            parameter_port_list,
+        let values = syntax_tree
+            .declarations()
+            .parameter_declaration(id)
+            .parameters
+            .iter()
+            .filter(|parameter| {
+                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+            })
+            .collect::<Vec<_>>();
+        let local =
+            body_parameters_are_local || values.first().is_some_and(|parameter| parameter.local);
+        parameters::parameters_from_native_with_environment(
+            &values,
             syntax_tree,
             &mut parameters,
+            local,
             base_const_env,
             type_aliases,
             parameter_overrides,
@@ -280,145 +178,25 @@ pub(super) fn parameters_from_module_node(
         )?;
     }
 
-    for declaration in scope_declarations(node.clone()) {
-        match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
-                parameters::parameters_from_ref_node_with_environment(
-                    RefNode::LocalParameterDeclaration(&localparam.0),
-                    syntax_tree,
-                    &mut parameters,
-                    true,
-                    base_const_env,
-                    type_aliases,
-                    parameter_overrides,
-                    &mut environment,
-                )?
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
-                parameters::parameters_from_ref_node_with_environment(
-                    RefNode::ParameterDeclaration(&parameter.0),
-                    syntax_tree,
-                    &mut parameters,
-                    body_parameters_are_local,
-                    base_const_env,
-                    type_aliases,
-                    parameter_overrides,
-                    &mut environment,
-                )?
-            }
-            _ => {}
-        }
-    }
-
     Ok(parameters)
 }
 
-fn parameters_from_parameter_port_list(
-    list: &sv_parser::ParameterPortList,
-    syntax_tree: &AnalysisContext<'_>,
-    parameters: &mut Vec<Parameter>,
-    base_const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-    parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment<'_>,
-) -> Result<(), AnalyzerError> {
-    match list {
-        sv_parser::ParameterPortList::Assignment(list) => {
-            parameters::parameters_from_ref_node_with_environment(
-                RefNode::ListOfParamAssignments(&list.nodes.1.nodes.1.0),
-                syntax_tree,
-                parameters,
-                false,
-                base_const_env,
-                type_aliases,
-                parameter_overrides,
-                environment,
-            )?;
-            for (_, declaration) in &list.nodes.1.nodes.1.1 {
-                parameters_from_parameter_port_declaration(
-                    declaration,
-                    syntax_tree,
-                    parameters,
-                    base_const_env,
-                    type_aliases,
-                    parameter_overrides,
-                    environment,
-                )?;
-            }
-        }
-        sv_parser::ParameterPortList::Declaration(list) => {
-            for declaration in list.nodes.1.nodes.1.contents() {
-                parameters_from_parameter_port_declaration(
-                    declaration,
-                    syntax_tree,
-                    parameters,
-                    base_const_env,
-                    type_aliases,
-                    parameter_overrides,
-                    environment,
-                )?;
-            }
-        }
-        sv_parser::ParameterPortList::Empty(_) => {}
-    }
-    Ok(())
-}
-
-fn parameters_from_parameter_port_declaration(
-    declaration: &sv_parser::ParameterPortDeclaration,
-    syntax_tree: &AnalysisContext<'_>,
-    parameters: &mut Vec<Parameter>,
-    base_const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-    parameter_overrides: &HashMap<String, ConstExpr>,
-    environment: &mut parameters::ParameterEnvironment<'_>,
-) -> Result<(), AnalyzerError> {
-    let is_local = matches!(
-        declaration,
-        sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_)
-    );
-    if matches!(
-        declaration,
-        sv_parser::ParameterPortDeclaration::TypeList(_)
-    ) {
-        return Ok(());
-    }
-    parameters::parameters_from_ref_node_with_environment(
-        RefNode::ParameterPortDeclaration(declaration),
-        syntax_tree,
-        parameters,
-        is_local,
-        base_const_env,
-        type_aliases,
-        parameter_overrides,
-        environment,
-    )
-}
-
-pub(super) fn signals_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn signals_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
-    signals_from_module_node_with_declaration_ranges(
-        node,
-        syntax_tree,
-        const_env,
-        type_aliases,
-        false,
-    )
+    signals_from_scope_with_declaration_ranges(syntax_tree, const_env, type_aliases, false)
 }
 
-pub(super) fn signals_from_module_node_with_declaration_ranges(
-    node: RefNode<'_>,
+pub(super) fn signals_from_scope_with_declaration_ranges(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    for mut item in generate::items(node, syntax_tree, const_env, type_aliases)? {
+    for mut item in generate::items(syntax_tree, const_env, type_aliases)? {
         let _interface_scope = item.interface_scope();
         if preserve_parameters {
             let names = item.env.keys().cloned().collect::<Vec<_>>();
@@ -426,43 +204,10 @@ pub(super) fn signals_from_module_node_with_declaration_ranges(
                 item.env.remove(&local_parameter_marker(&name));
             }
         }
-        let node = match item.node {
-            ScopeItem::Module(node) => node,
-            // The variables of a package are its constant variables; the
-            // others are rejected with the package.
-            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(
-                data,
-            )) => {
-                signals.extend(signals_from_data_declaration(
-                    data,
-                    syntax_tree,
-                    type_aliases,
-                    &item.env,
-                    None,
-                )?);
-                continue;
-            }
-            // sv-parser represents `word_t v;` as a net declaration even
-            // when `word_t` is a typedef and `v` is a variable. Real package
-            // nets are rejected with the package.
-            ScopeItem::Package(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(
-                net,
-            )) => {
-                signals.extend(signals_from_net_declaration(
-                    net,
-                    syntax_tree,
-                    type_aliases,
-                    &item.env,
-                    None,
-                )?);
-                continue;
-            }
-            ScopeItem::Package(_) => continue,
-        };
         let _constant_functions = item.enter();
         let start = signals.len();
-        signals_from_module_or_generate_item(
-            node,
+        signals_from_body_item(
+            item.id,
             syntax_tree,
             &item.type_aliases(type_aliases),
             &item.env,
@@ -486,206 +231,91 @@ pub(super) fn signals_from_module_node_with_declaration_ranges(
     Ok(signals)
 }
 
-/// Direct value declarations for preliminary type queries. This avoids
-/// re-evaluating parameter initializers and generate conditions during discovery.
-pub(super) fn signals_from_scope_node(
-    node: RefNode<'_>,
-    syntax_tree: &AnalysisContext<'_>,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Result<(), AnalyzerError> {
-    let scope_span = dimensions::ref_node_source_span(node.clone());
-    for item in scope_items(node) {
-        let parameter = match item.declaration() {
-            Some(sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter)) => {
-                Some(RefNode::ParameterDeclaration(&parameter.0))
+pub(super) fn signals_from_body_item(
+    id: celox_sv_syntax::BodyItemId,
+    tree: &AnalysisContext<'_>,
+    aliases: &HashMap<String, Type>,
+    env: &HashMap<String, i128>,
+    selected_name: Option<&str>,
+    signals: &mut Vec<Signal>,
+) -> Converted<()> {
+    use celox_sv_syntax::{BodyItemKind, DataDeclaration};
+    let native = tree.declarations();
+    let owner = native.body_item(id);
+    let payload = match owner.kind {
+        BodyItemKind::Data(id) => match native.data_declaration(id) {
+            DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => {
+                Some(value.tokens)
             }
-            Some(sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
-                parameter,
-            )) => Some(RefNode::LocalParameterDeclaration(&parameter.0)),
-            _ => None,
-        };
-        if let Some(parameter) = parameter {
-            array_parameters::array_parameters_from_declaration(
-                parameter,
-                syntax_tree,
-                const_env,
-                type_aliases,
-                &mut |parameter| {
-                    if let Some(span) = scope_span {
-                        dimensions::publish_declaration_dimensions(
-                            &syntax_tree.state,
-                            span,
-                            &[],
-                            std::slice::from_ref(&parameter.signal),
-                        );
+            DataDeclaration::Unconverted(tokens) => Some(*tokens),
+        },
+        BodyItemKind::Net(id) => Some(native.net_declaration(id).tokens),
+        BodyItemKind::Instance(id) => Some(native.instantiation(id).tokens),
+        _ => None,
+    };
+    if payload
+        .is_some_and(|tokens| tokens.start < owner.tokens.start || tokens.end > owner.tokens.end)
+    {
+        return Err(AnalyzerError::Parse(
+            "native declaration payload is outside its body owner".into(),
+        ));
+    }
+    let mut declared = match owner.kind {
+        BodyItemKind::Data(id) => match tree.declarations().data_declaration(id) {
+            DataDeclaration::Variables(value) | DataDeclaration::Constructed(value) => {
+                if !value.var
+                    && !value.constant
+                    && matches!(
+                        tree.declarations().data_type(value.data_type).kind,
+                        celox_sv_syntax::DataTypeKind::Named(_)
+                    )
+                {
+                    native_types::alias_signals(value, tree, env, aliases, selected_name)?
+                } else {
+                    native_types::local_signals(value, tree, env, aliases, selected_name)?
+                }
+            }
+            DataDeclaration::Unconverted(_) => {
+                return Err(AnalyzerError::Parse(
+                    "ordinary native data declaration is unexpectedly unconverted".into(),
+                ));
+            }
+        },
+        BodyItemKind::Net(id) => native_types::net_signals(
+            tree.declarations().net_declaration(id),
+            tree,
+            env,
+            aliases,
+            selected_name,
+        )?,
+        BodyItemKind::Instance(id) => {
+            let declaration = tree.declarations().instantiation(id);
+            let name = instances::normalize_identifier(&declaration.name.spelling);
+            let mut values = Vec::new();
+            if let Some(base) = aliases.get(&name) {
+                let context = PackedDimensions::new(HashMap::default(), env, aliases);
+                for variable in &declaration.instances {
+                    let name = instances::normalize_identifier(&variable.name.spelling);
+                    if selected_name.is_some_and(|selected| selected != name) {
+                        continue;
                     }
-                },
-            )?;
-            continue;
+                    let ty = type_with_unpacked_ranges(
+                        base.clone(),
+                        native_constants::bind_unpacked_ranges(
+                            &variable.dimensions,
+                            tree,
+                            &context,
+                        )?,
+                    );
+                    values.push(Signal::new(name, ty));
+                }
+            }
+            values
         }
-        let declaration = match item {
-            ScopeItem::Module(item) if item_is_value_declaration(item) => {
-                RefNode::ModuleOrGenerateItem(item)
-            }
-            ScopeItem::Package(declaration) => {
-                RefNode::PackageOrGenerateItemDeclaration(declaration)
-            }
-            _ => continue,
-        };
-        let names = declaration.into_iter().filter_map(|node| {
-            let identifier = match node {
-                RefNode::VariableDeclAssignment(sv_parser::VariableDeclAssignment::Variable(
-                    assignment,
-                )) => RefNode::VariableIdentifier(&assignment.nodes.0),
-                RefNode::NetDeclAssignment(assignment) => {
-                    RefNode::NetIdentifier(&assignment.nodes.0)
-                }
-                RefNode::HierarchicalInstance(instance) => {
-                    RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0)
-                }
-                _ => return None,
-            };
-            identifier_text(identifier, syntax_tree)
-        });
-        // Lower only the current declarator's unpacked ranges, then publish
-        // it before a sibling can query its shape. The shared packed type is
-        // resolved with the same environment for every declarator.
-        for name in names {
-            let mut declared = Vec::new();
-            match item {
-                ScopeItem::Module(item) => {
-                    signals_from_module_or_generate_item(
-                        item,
-                        syntax_tree,
-                        type_aliases,
-                        const_env,
-                        Some(&name),
-                        &mut declared,
-                    )?;
-                }
-                ScopeItem::Package(
-                    sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data),
-                ) => {
-                    declared = signals_from_data_declaration(
-                        data,
-                        syntax_tree,
-                        type_aliases,
-                        const_env,
-                        Some(&name),
-                    )?;
-                }
-                ScopeItem::Package(
-                    sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net),
-                ) => {
-                    declared = signals_from_net_declaration(
-                        net,
-                        syntax_tree,
-                        type_aliases,
-                        const_env,
-                        Some(&name),
-                    )?;
-                }
-                _ => continue,
-            }
-            if let Some(span) = scope_span {
-                dimensions::publish_declaration_dimensions(
-                    &syntax_tree.state,
-                    span,
-                    &[],
-                    &declared,
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn item_is_value_declaration(item: &sv_parser::ModuleOrGenerateItem) -> bool {
-    matches!(item, sv_parser::ModuleOrGenerateItem::Module(_))
-        || matches!(
-            package_or_generate_declaration_from_module_item(item),
-            Some(
-                sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(_)
-                    | sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_)
-            )
-        )
-}
-
-pub(super) fn signals_from_module_or_generate_item(
-    item: &sv_parser::ModuleOrGenerateItem,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-    const_env: &HashMap<String, i128>,
-    selected_name: Option<&str>,
-    signals: &mut Vec<Signal>,
-) -> Result<(), AnalyzerError> {
-    match item {
-        sv_parser::ModuleOrGenerateItem::Module(module) => {
-            let mut alias_signals = signals_from_type_alias_instantiation(
-                &module.nodes.1,
-                syntax_tree,
-                type_aliases,
-                const_env,
-                selected_name,
-            )?;
-            substitute_signal_local_constants(&mut alias_signals, const_env);
-            signals.extend(alias_signals);
-        }
-        sv_parser::ModuleOrGenerateItem::ModuleItem(item) => {
-            signals_from_module_common_item(
-                &item.nodes.1,
-                syntax_tree,
-                type_aliases,
-                const_env,
-                selected_name,
-                signals,
-            )?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn signals_from_module_common_item(
-    item: &sv_parser::ModuleCommonItem,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-    const_env: &HashMap<String, i128>,
-    selected_name: Option<&str>,
-    signals: &mut Vec<Signal>,
-) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = item {
-        let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-            declaration,
-        ) = &**declaration
-        else {
-            return Ok(());
-        };
-        let mut declared = match &**declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
-                signals_from_data_declaration(
-                    data,
-                    syntax_tree,
-                    type_aliases,
-                    const_env,
-                    selected_name,
-                )?
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
-                signals_from_net_declaration(
-                    net,
-                    syntax_tree,
-                    type_aliases,
-                    const_env,
-                    selected_name,
-                )?
-            }
-            _ => Vec::new(),
-        };
-        substitute_signal_local_constants(&mut declared, const_env);
-        signals.extend(declared);
-    }
+        _ => Vec::new(),
+    };
+    substitute_signal_local_constants(&mut declared, env);
+    signals.extend(declared);
     Ok(())
 }
 
@@ -704,389 +334,4 @@ fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap
                 .map(|size| substitute_dimension_constants(size, const_env));
         }
     }
-}
-
-fn signals_from_net_declaration(
-    net: &sv_parser::NetDeclaration,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-    const_env: &HashMap<String, i128>,
-    selected_name: Option<&str>,
-) -> Result<Vec<Signal>, AnalyzerError> {
-    let (r#type, assignments, is_net) = match net {
-        sv_parser::NetDeclaration::NetType(net) => {
-            let r#type = type_from_ref_node_with_env(
-                RefNode::DataTypeOrImplicit(&net.nodes.3),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )
-            .or_else(|| {
-                type_alias_from_ref_node(
-                    RefNode::DataTypeOrImplicit(&net.nodes.3),
-                    syntax_tree,
-                    type_aliases,
-                )
-            });
-            let r#type = match (&net.nodes.3, r#type) {
-                (_, Some(r#type)) => r#type,
-                (sv_parser::DataTypeOrImplicit::ImplicitDataType(_), None) => Type::implicit(),
-                (sv_parser::DataTypeOrImplicit::DataType(_), None) => {
-                    return Err(AnalyzerError::Unsupported(
-                        "unsupported net data type".to_string(),
-                    ));
-                }
-            };
-            let r#type = type_with_fallback_ranges_with_env(
-                r#type,
-                RefNode::DataTypeOrImplicit(&net.nodes.3),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            );
-            (r#type, net.nodes.5.nodes.0.contents(), true)
-        }
-        sv_parser::NetDeclaration::NetTypeIdentifier(net) => {
-            let Some(name) = identifier_text(RefNode::NetTypeIdentifier(&net.nodes.0), syntax_tree)
-            else {
-                return Ok(Vec::new());
-            };
-            let Some(r#type) = type_aliases.get(&name).cloned() else {
-                return Ok(Vec::new());
-            };
-            (r#type, net.nodes.2.nodes.0.contents(), false)
-        }
-        sv_parser::NetDeclaration::Interconnect(_) => {
-            return Err(AnalyzerError::Unsupported(
-                "interconnect net declaration".to_string(),
-            ));
-        }
-    };
-    let mut signals = Vec::new();
-    for assignment in assignments {
-        let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("unsupported signal identifier".to_string())
-            })?;
-        if selected_name.is_some_and(|selected| selected != name) {
-            continue;
-        }
-        let signal_type = type_with_unpacked_ranges(
-            r#type.clone(),
-            unpacked_ranges_from_dimensions_with_env(
-                &assignment.nodes.1,
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?,
-        );
-        signals.push(if is_net {
-            Signal::new_net(name, signal_type)
-        } else {
-            Signal::new(name, signal_type)
-        });
-    }
-    Ok(signals)
-}
-
-fn signals_from_type_alias_instantiation(
-    instantiation: &sv_parser::ModuleInstantiation,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-    const_env: &HashMap<String, i128>,
-    selected_name: Option<&str>,
-) -> Result<Vec<Signal>, AnalyzerError> {
-    let mut signals = Vec::new();
-    let module_name = identifier_text(
-        RefNode::ModuleIdentifier(&instantiation.nodes.0),
-        syntax_tree,
-    )
-    .ok_or_else(|| {
-        AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
-    })?;
-    let Some(r#type) = type_aliases.get(&module_name) else {
-        return Ok(signals);
-    };
-    for instance in instantiation.nodes.2.contents() {
-        let name = identifier_text(
-            RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-            syntax_tree,
-        )
-        .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
-        if selected_name.is_some_and(|selected| selected != name) {
-            continue;
-        }
-        let signal_type = type_with_unpacked_ranges(
-            r#type.clone(),
-            unpacked_ranges_from_dimensions_with_env(
-                &instance.nodes.0.nodes.1,
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?,
-        );
-        signals.push(Signal::new(name, signal_type));
-    }
-    Ok(signals)
-}
-
-pub(super) fn signals_from_data_declaration(
-    data: &sv_parser::DataDeclaration,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-    const_env: &HashMap<String, i128>,
-    selected_name: Option<&str>,
-) -> Result<Vec<Signal>, AnalyzerError> {
-    let sv_parser::DataDeclaration::Variable(variable) = data else {
-        return Ok(Vec::new());
-    };
-    let r#type = type_from_ref_node_with_env(
-        RefNode::DataTypeOrImplicit(&variable.nodes.3),
-        syntax_tree,
-        const_env,
-        type_aliases,
-    )
-    .or_else(|| {
-        type_alias_from_ref_node(
-            RefNode::DataTypeOrImplicit(&variable.nodes.3),
-            syntax_tree,
-            type_aliases,
-        )
-    });
-    let r#type = match (&variable.nodes.3, r#type) {
-        (_, Some(r#type)) => r#type,
-        (sv_parser::DataTypeOrImplicit::ImplicitDataType(_), None) => Type::implicit(),
-        (sv_parser::DataTypeOrImplicit::DataType(_), None) => {
-            return Err(AnalyzerError::Unsupported(
-                "unsupported internal data type".to_string(),
-            ));
-        }
-    };
-    let r#type = type_with_fallback_ranges_with_env(
-        r#type,
-        RefNode::DataTypeOrImplicit(&variable.nodes.3),
-        syntax_tree,
-        const_env,
-        type_aliases,
-    );
-    let mut signals = Vec::new();
-    for assignment in variable.nodes.4.nodes.0.contents() {
-        let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
-            continue;
-        };
-        let name = identifier_text(
-            RefNode::VariableIdentifier(&assignment.nodes.0),
-            syntax_tree,
-        )
-        .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
-        if selected_name.is_some_and(|selected| selected != name) {
-            continue;
-        }
-        let signal_type = type_with_unpacked_ranges(
-            r#type.clone(),
-            unpacked_ranges_from_variable_dimensions_with_env(
-                &assignment.nodes.1,
-                syntax_tree,
-                const_env,
-                type_aliases,
-            )?,
-        );
-        signals.push(Signal::new(name, signal_type));
-    }
-    Ok(signals)
-}
-
-pub(super) fn type_alias_from_ref_node(
-    node: RefNode<'_>,
-    syntax_tree: &AnalysisContext<'_>,
-    type_aliases: &HashMap<String, Type>,
-) -> Option<Type> {
-    // A cast within a built-in type's range does not make the declared type
-    // an alias. Inspect the outer type before searching wrapper nodes.
-    match &node {
-        RefNode::DataType(data_type) => {
-            return type_alias_from_data_type(data_type, syntax_tree, type_aliases);
-        }
-        RefNode::DataTypeOrImplicit(data_type) => {
-            return type_alias_from_data_type_or_implicit(data_type, syntax_tree, type_aliases);
-        }
-        _ => {}
-    }
-    if let Some(RefNode::DataType(data_type)) = unwrap_node!(node.clone(), DataType)
-        && let Some(r#type) = type_alias_from_data_type(data_type, syntax_tree, type_aliases)
-    {
-        return Some(r#type);
-    }
-    if let Some(RefNode::DataTypeOrImplicit(data_type)) =
-        unwrap_node!(node.clone(), DataTypeOrImplicit)
-        && let Some(r#type) =
-            type_alias_from_data_type_or_implicit(data_type, syntax_tree, type_aliases)
-    {
-        return Some(r#type);
-    }
-    let name =
-        if let Some(RefNode::DataTypeType(data_type)) = unwrap_node!(node.clone(), DataTypeType) {
-            reference_name(RefNode::DataTypeType(data_type), syntax_tree)?
-        } else {
-            let RefNode::TypeIdentifier(identifier) = unwrap_node!(node, TypeIdentifier)? else {
-                return None;
-            };
-            identifier_text(RefNode::TypeIdentifier(identifier), syntax_tree)?
-        };
-    type_aliases.get(&name).cloned()
-}
-
-pub(super) fn module_parameter_port_list(node: RefNode<'_>) -> Option<RefNode<'_>> {
-    match node {
-        RefNode::ModuleDeclarationAnsi(module) => module
-            .nodes
-            .0
-            .nodes
-            .5
-            .as_ref()
-            .map(RefNode::ParameterPortList),
-        RefNode::ModuleDeclarationNonansi(module) => module
-            .nodes
-            .0
-            .nodes
-            .5
-            .as_ref()
-            .map(RefNode::ParameterPortList),
-        _ => None,
-    }
-}
-
-pub(super) fn module_non_port_items(node: RefNode<'_>) -> Vec<&sv_parser::NonPortModuleItem> {
-    match node {
-        RefNode::ModuleDeclarationAnsi(module) => module.nodes.2.iter().collect(),
-        RefNode::ModuleDeclarationNonansi(_) => Vec::new(),
-        _ => Vec::new(),
-    }
-}
-
-/// An item of a module or package scope.
-#[derive(Clone, Copy)]
-pub(super) enum ScopeItem<'a> {
-    Module(&'a sv_parser::ModuleOrGenerateItem),
-    Package(&'a sv_parser::PackageOrGenerateItemDeclaration),
-}
-
-impl<'a> ScopeItem<'a> {
-    pub(super) fn node(self) -> RefNode<'a> {
-        match self {
-            Self::Module(item) => RefNode::ModuleOrGenerateItem(item),
-            Self::Package(declaration) => RefNode::PackageOrGenerateItemDeclaration(declaration),
-        }
-    }
-
-    /// The declaration the item makes, if it is one.
-    pub(super) fn declaration(self) -> Option<&'a sv_parser::PackageOrGenerateItemDeclaration> {
-        match self {
-            Self::Module(item) => package_or_generate_declaration_from_module_item(item),
-            Self::Package(declaration) => Some(declaration),
-        }
-    }
-}
-
-/// The items of a package (IEEE 1800-2023 26.2) other than exports, anonymous
-/// programs and timeunits.
-pub(super) fn package_declarations(
-    package: &sv_parser::PackageDeclaration,
-) -> impl Iterator<Item = &sv_parser::PackageOrGenerateItemDeclaration> {
-    package.nodes.6.iter().filter_map(|(_, item)| match item {
-        sv_parser::PackageItem::PackageOrGenerateItemDeclaration(declaration) => {
-            Some(&**declaration)
-        }
-        _ => None,
-    })
-}
-
-/// The declarations made directly in a module or package, in source order.
-/// The items of a module's generate constructs and regions are not included.
-pub(super) fn scope_declarations(
-    node: RefNode<'_>,
-) -> Vec<&sv_parser::PackageOrGenerateItemDeclaration> {
-    match node {
-        RefNode::PackageDeclaration(package) => package_declarations(package).collect(),
-        node => module_non_port_items(node)
-            .into_iter()
-            .filter_map(package_or_generate_declaration_from_non_port_item)
-            .collect(),
-    }
-}
-
-// Explicit generate regions do not introduce a scope. Conditional/loop
-// constructs and function bodies do, and must not leak declarations here.
-pub(super) fn scope_items(node: RefNode<'_>) -> Vec<ScopeItem<'_>> {
-    if let RefNode::PackageDeclaration(package) = node {
-        return package_declarations(package)
-            .map(ScopeItem::Package)
-            .collect();
-    }
-    let mut direct = Vec::new();
-    for item in module_non_port_items(node) {
-        match item {
-            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
-                direct.push(ScopeItem::Module(item))
-            }
-            sv_parser::NonPortModuleItem::GenerateRegion(region) => {
-                for item in &region.nodes.1 {
-                    if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-                        direct.push(ScopeItem::Module(item));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    direct
-}
-
-pub(super) fn package_or_generate_declaration_from_non_port_item(
-    item: &sv_parser::NonPortModuleItem,
-) -> Option<&sv_parser::PackageOrGenerateItemDeclaration> {
-    let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) = item else {
-        return None;
-    };
-    package_or_generate_declaration_from_module_item(item)
-}
-
-pub(super) fn package_or_generate_declaration_from_module_item(
-    item: &sv_parser::ModuleOrGenerateItem,
-) -> Option<&sv_parser::PackageOrGenerateItemDeclaration> {
-    let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
-        return None;
-    };
-    let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = &item.nodes.1
-    else {
-        return None;
-    };
-    let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
-        &**declaration
-    else {
-        return None;
-    };
-    Some(declaration)
-}
-
-pub(super) fn parameter_name(
-    node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Result<String, AnalyzerError> {
-    let locate = identifier_locate(node).ok_or_else(|| {
-        AnalyzerError::Unsupported("unsupported parameter identifier".to_string())
-    })?;
-    syntax_tree
-        .get_str(&locate)
-        .map(str::to_string)
-        .ok_or_else(|| AnalyzerError::Unsupported("invalid parameter identifier span".to_string()))
-}
-
-fn port_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Result<String, AnalyzerError> {
-    let locate = identifier_locate(node)
-        .ok_or_else(|| AnalyzerError::Unsupported("unsupported port identifier".to_string()))?;
-    syntax_tree
-        .get_str(&locate)
-        .map(str::to_string)
-        .ok_or_else(|| AnalyzerError::Unsupported("invalid port identifier span".to_string()))
 }

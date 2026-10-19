@@ -59,88 +59,47 @@ pub(super) fn selected_unpacked_shape(
 /// The shape of the unpacked array an expression names: a variable, or one
 /// of its subarrays selected by indices. Other expressions (slices, member
 /// selects, calls, concatenations) are not resolved.
-fn expression_unpacked_shape(
-    expr: &sv_parser::Expression,
-    tree: &AnalysisContext<'_>,
+pub(super) fn native_unpacked_shape(
+    mut id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
     dims: &PackedDimensions,
 ) -> Option<VariableDimensions> {
-    let sv_parser::Expression::Primary(primary) = expr else {
-        return None;
-    };
-    match &**primary {
-        sv_parser::Primary::MintypmaxExpression(grouped) => {
-            let sv_parser::MintypmaxExpression::Expression(inner) = &grouped.nodes.0.nodes.1 else {
-                return None;
-            };
-            expression_unpacked_shape(inner, tree, dims)
-        }
-        sv_parser::Primary::Hierarchical(hierarchical) => {
-            let select = &hierarchical.nodes.2;
-            if select.nodes.0.is_some() || select.nodes.2.is_some() {
-                return None;
+    use celox_sv_syntax::{DimensionKind, ExprKind};
+    let mut indices = 0;
+    loop {
+        match &native.expression(id).kind {
+            ExprKind::Group(inner) => id = *inner,
+            ExprKind::Select {
+                expression,
+                dimension,
+            } if matches!(dimension.kind, DimensionKind::Index(_)) => {
+                indices += 1;
+                id = *expression;
             }
-            let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), tree)?;
-            selected_unpacked_shape(&name, select.nodes.1.nodes.0.len(), dims)
+            ExprKind::Name(name) => {
+                return selected_unpacked_shape(
+                    &instances::normalize_identifier(&name.spelling),
+                    indices,
+                    dims,
+                );
+            }
+            _ => return None,
         }
-        _ => None,
     }
 }
-
-/// The shape of an assignment target when it is an unpacked array.
-pub(super) fn variable_lvalue_unpacked_shape(
-    lvalue: &sv_parser::VariableLvalue,
-    tree: &SyntaxTree,
-    dims: &PackedDimensions,
-) -> Option<VariableDimensions> {
-    let sv_parser::VariableLvalue::Identifier(identifier) = lvalue else {
-        return None;
-    };
-    let select = &identifier.nodes.2;
-    if identifier.nodes.0.is_some() || select.nodes.0.is_some() || select.nodes.2.is_some() {
-        return None;
-    }
-    let name = identifier_text(
-        RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
-        tree,
-    )?;
-    selected_unpacked_shape(&name, select.nodes.1.nodes.0.len(), dims)
-}
-
-/// The shape of a net assignment target when it is an unpacked array.
-pub(super) fn net_lvalue_unpacked_shape(
-    lvalue: &sv_parser::NetLvalue,
-    tree: &SyntaxTree,
-    dims: &PackedDimensions,
-) -> Option<VariableDimensions> {
-    let sv_parser::NetLvalue::Identifier(identifier) = lvalue else {
-        return None;
-    };
-    let select = &identifier.nodes.1;
-    if select.nodes.0.is_some() || select.nodes.2.is_some() {
-        return None;
-    }
-    let name = identifier_text(
-        RefNode::PsOrHierarchicalNetIdentifier(&identifier.nodes.0),
-        tree,
-    )?;
-    selected_unpacked_shape(&name, select.nodes.1.nodes.0.len(), dims)
-}
-
-/// Rejects `value` in an assignment-like context with an unpacked array of
-/// `target` shape when `value` is an unpacked array of an incompatible type.
-/// `context` names the assignment-like context for the diagnostic.
-pub(super) fn check_unpacked_array_assignment(
-    value: &sv_parser::Expression,
+pub(super) fn check_native_unpacked_assignment(
+    state: &AnalysisState,
+    id: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
     target: &VariableDimensions,
     context: impl FnOnce() -> String,
-    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let Some(target) = unpacked_array_type(&tree.state, target, dims) else {
+    let Some(target) = unpacked_array_type(state, target, dims) else {
         return Ok(());
     };
-    let Some(actual) = expression_unpacked_shape(value, tree, dims)
-        .and_then(|shape| unpacked_array_type(&tree.state, &shape, dims))
+    let Some(actual) = native_unpacked_shape(id, native, dims)
+        .and_then(|shape| unpacked_array_type(state, &shape, dims))
     else {
         return Ok(());
     };

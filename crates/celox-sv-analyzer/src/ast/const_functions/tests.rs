@@ -459,7 +459,8 @@ fn check_function_parameter_chains() {
             writeln!(code, "localparam int P{i} = next_value({arg});").unwrap();
         }
         code.push_str("endmodule\n");
-        let tree = crate::syntax::parse_source(&code, Path::new("function_parameters.sv")).unwrap();
+        let tree =
+            crate::migration::parse_source(&code, Path::new("function_parameters.sv")).unwrap();
         let source = Source::from_syntax(&tree).unwrap();
         let ir = crate::analyze::analyze_source(source).unwrap();
         let parameters = ir.modules()[0].parameters();

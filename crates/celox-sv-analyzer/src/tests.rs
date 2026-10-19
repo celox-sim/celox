@@ -46,7 +46,7 @@ fn caps_aggregate_nested_generate_expansion() {
             endmodule
         "#
         );
-        let syntax = syntax::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
+        let syntax = migration::parse_source(&source, Path::new("nested_generate.sv")).unwrap();
         let result = ast::Source::from_syntax(&syntax);
         if accepted {
             result.expect("small nested loops should expand");
@@ -5157,7 +5157,8 @@ fn constant_branch_pruning_retains_runtime_subroutine_conditions() {
 fn named_constant_calls_retain_parameter_dependencies() {
     let source = "module Top #(parameter W=8, parameter N=f(.value(W)))(); function automatic integer f(input integer value); return value+1; endfunction endmodule";
     let syntax =
-        crate::syntax::parse_source(source, std::path::Path::new("named_dependency.sv")).unwrap();
+        crate::migration::parse_source(source, std::path::Path::new("named_dependency.sv"))
+            .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
     let state = module.constant_function_state();
@@ -5330,195 +5331,680 @@ fn native_interface_bindings_reject_enum_constant_collisions() {
 }
 
 #[test]
-fn public_analyses_report_constant_function_exit_warnings() {
-    let exit_sites = |ir: &Ir| {
-        ir.warnings()
-            .iter()
-            .map(|warning| match warning {
-                ir::AnalyzerWarning::ExitOutsideProgram { site } => {
-                    let site = site.as_ref().unwrap();
-                    (site.path.clone(), site.start)
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let module = "module Top(output int y);
-        function automatic int f(); $exit; return 1; endfunction
-        localparam int N = f();
-        assign y = N;
-    endmodule";
-    let path = Path::new("exit.sv");
-    let expected = vec![(path.to_path_buf(), module.find("$exit").unwrap())];
-    let overrides = HashMap::default();
-    assert_eq!(exit_sites(&analyze_source(module, path).unwrap()), expected);
-    assert_eq!(
-        exit_sites(
-            &analyze_source_with_module_parameter_overrides(module, path, "Top", &overrides)
-                .unwrap()
-        ),
-        expected
-    );
-    assert_eq!(
-        exit_sites(
-            &analyze_source_module_with_parameter_overrides(module, path, "Top", &overrides)
-                .unwrap()
-        ),
-        expected
-    );
-    // A source with an interface is analyzed module by module.
-    let with_interface = format!("interface Bus; logic x; endinterface\n{module}");
-    assert_eq!(
-        exit_sites(&analyze_source(&with_interface, path).unwrap()),
-        vec![(path.to_path_buf(), with_interface.find("$exit").unwrap())]
-    );
+fn native_package_bindings_feed_reexports_header_imports_and_unit_visibility() {
+    for declaration in ["import p::*;", "import \"DPI-C\" function int f();"] {
+        let code = format!(
+            "package p; endpackage module M; if(1) {declaration} parameter int N=1; \
+             function int local_function(); localparam HIDDEN=2; endfunction endmodule"
+        );
+        let source = ParsedSource::parse(&code, Path::new("atomic-branch.sv")).unwrap();
+        assert_eq!(source.module_interfaces()["M"].parameters, ["N"]);
+    }
+
+    let code = r#"
+        `define USE(package_name) import package_name::*;
+        package p;
+            parameter int VALUE = 7;
+            typedef logic [VALUE:0] word;
+        endpackage
+        package q;
+            import p::*;
+            export p::VALUE, p::word;
+        endpackage
+        `USE(q)
+        module Top import q::VALUE; #(parameter N = VALUE)(output p::word y);
+            assign y = N;
+            if (1) begin : g
+                import q::*;
+                word z;
+                assign z = VALUE;
+            end
+        endmodule
+    "#;
+    let ir = analyze_source(code, Path::new("native-package-bindings.sv")).unwrap();
+    let module = &ir.modules()[0];
+    assert_eq!(module.parameters()[0].resolved_value(), Some(7));
+    assert_eq!(module.ports()[0].r#type().resolved_width(), Some(8));
+    assert_eq!(module.signals()[0].r#type().resolved_width(), Some(8));
+
+    let code = r"package \p.q ; parameter int \v.w = 9; endpackage
+                 import \p.q ::\v.w ;
+                 module Top #(parameter N=\v.w )(); endmodule";
+    let ir = analyze_source(code, Path::new("escaped-package-bindings.sv")).unwrap();
+    assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(9));
 }
 
 #[test]
-fn interface_prototypes_include_package_warnings() {
-    let source = r#"package P;
-        function automatic int width(); $exit; return 8; endfunction
-        localparam int W = width();
-    endpackage
-    interface Bus;
-        logic [P::W-1:0] req;
-    endinterface"#;
-    let prototypes = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
-    assert_eq!(prototypes.len(), 1);
-    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] =
-        prototypes[0].warnings.as_slice()
-    else {
-        panic!("unexpected warnings: {:?}", prototypes[0].warnings);
-    };
-    assert_eq!(site.path, Path::new("bus.sv"));
-    assert_eq!(site.start, source.find("$exit").unwrap());
-}
-
-#[test]
-fn declaration_warnings_are_owned_by_failed_analyses() {
-    let source = r#"module Top(output int y);
-        function automatic int f(); $exit; return 2; endfunction
-        localparam int N = f();
-        always_comb y <= N;
-    endmodule"#;
-    let error = analyze_source(source, Path::new("failed.sv")).unwrap_err();
-    assert_eq!(error.warnings().len(), 1);
-    let clean = analyze_source("module Clean; endmodule", Path::new("clean.sv")).unwrap();
-    assert!(clean.warnings().is_empty());
-    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] = error.warnings() else {
-        panic!("{error:?}");
-    };
-    assert_eq!(site.path, Path::new("failed.sv"));
-    assert_eq!(site.start, source.find("$exit").unwrap());
-    assert_eq!(error.tracking_issue(), 453);
-    assert!(matches!(error.into_error(), AnalyzerError::Unsupported(_)));
-}
-
-#[test]
-fn declaration_warnings_are_scoped_to_the_analyzed_module() {
-    let source = r#"module Warn;
-        function automatic int unused(); $exit; return 1; endfunction
-    endmodule
-    module Clean; endmodule"#;
-    let parsed = ParsedSource::parse(source, Path::new("modules.sv")).unwrap();
-    let packages = ParsedSource::analyze_packages(&[&parsed]).unwrap();
-    let analyze = |name| {
-        parsed
-            .analyze_module(
-                name,
-                &HashMap::default(),
-                &[],
-                &[],
-                &ModuleInterfaces::default(),
-                &packages,
-            )
-            .unwrap()
-    };
-    assert_eq!(analyze("Warn").warnings().len(), 1);
-    assert!(analyze("Clean").warnings().is_empty());
-    assert_eq!(analyze("Warn").warnings().len(), 1);
-}
-
-#[test]
-fn program_functions_do_not_report_outside_program_warnings() {
-    let source = "program P; function automatic int f(); $exit; return 1; endfunction endprogram";
-    let result = analyze_source(source, Path::new("program.sv"));
-    match result {
-        Ok(ir) => assert!(ir.warnings().is_empty()),
-        Err(error) => assert!(error.warnings().is_empty()),
+fn native_package_wildcard_and_all_exports_preserve_transitive_bindings() {
+    for export in ["export p::*;", "export *::*;"] {
+        let code = format!(
+            "package p; parameter int V=11; endpackage \
+             package q; import p::*; localparam int used=V; {export} endpackage \
+             module Top import q::*; #(parameter N=V)(); endmodule"
+        );
+        let ir = analyze_source(&code, Path::new("native-reexport.sv")).unwrap();
+        assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
     }
 }
 
 #[test]
-fn package_errors_own_their_declaration_warnings() {
-    let source = r#"package P;
-        function automatic int f(); $exit; return 1; endfunction
-        localparam int N = f();
-        localparam int BAD = missing();
-    endpackage"#;
-    let path = Path::new("failed-package.sv");
-    let tree = crate::syntax::parse_source(source, path).unwrap();
-    let error = Packages::analyze(&[(&tree, path)]).unwrap_err();
-    let [ir::AnalyzerWarning::ExitOutsideProgram { site: Some(site) }] = error.warnings() else {
-        panic!("{error:?}");
-    };
-    assert_eq!(site.path, path);
-    assert_eq!(site.start, source.find("$exit").unwrap());
-    assert!(std::error::Error::source(&error).is_some());
-    assert!(matches!(error.into_error(), AnalyzerError::Unsupported(_)));
-}
-
-#[test]
-fn interface_shape_errors_keep_owned_function_warnings() {
-    let source = r#"interface Bus;
-        function automatic int unused(); $exit; return 1; endfunction
-        logic req;
-        logic req;
-    endinterface"#;
-    let error = interface_prototypes(&[(source, Path::new("duplicate.sv"))]).unwrap_err();
-    assert_eq!(error.warnings().len(), 1);
-    assert!(matches!(
-        error.into_error(),
-        AnalyzerError::DuplicateInterfaceItem { .. }
-    ));
-}
-
-#[test]
-fn native_interface_recursive_instances_report_an_error() {
-    let error = analyze_source(
-        "interface I; I child(); endinterface module Top; I h(); endmodule",
-        Path::new("recursive_interface.sv"),
+fn native_typedef_names_and_base_types_bind_into_existing_layouts() {
+    let declarations = ParsedSource::parse(
+        "typedef class C; typedef interface class I; typedef enum E; typedef F; \
+         interface Bus; typedef logic[7:0] word; endinterface \
+         module M; Bus bus(); typedef bus.word View; endmodule",
+        Path::new("forward-and-interface-typedefs.sv"),
     )
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(declarations.declarations().type_aliases.len(), 6);
+
+    let code = r#"
+        `define WORD(name) typedef logic[7:0] name;
+        package p; typedef shortint unsigned half; endpackage
+        module Top;
+            `WORD(Word)
+            typedef p::half Half;
+            typedef Word Pair[2];
+            typedef enum logic[1:0] { A, B } Choice;
+            typedef struct packed { Word high; Half low; } Record;
+            Half h; Word w; Pair array; Choice choice; Record record;
+        endmodule
+    "#;
+    let ir = analyze_source(code, Path::new("native-typedefs.sv")).unwrap();
+    let signals = ir.modules()[0].signals();
+    for (name, width) in [
+        ("h", 16),
+        ("w", 8),
+        ("array", 16),
+        ("choice", 2),
+        ("record", 24),
+    ] {
+        let signal = signals.iter().find(|signal| signal.name() == name).unwrap();
+        assert_eq!(signal.r#type().resolved_width(), Some(width), "{name}");
+    }
     assert!(
-        error
-            .to_string()
-            .contains("recursive interface instantiation `I`"),
-        "{error}"
+        !signals
+            .iter()
+            .find(|signal| signal.name() == "h")
+            .unwrap()
+            .r#type()
+            .is_signed()
     );
 }
 
 #[test]
-fn native_interface_type_parameters_keep_order_and_reject_duplicates() {
-    let module = native_interface_module(
-        "interface I #(parameter N = 2, parameter type T = logic [7:0]); T data; endinterface
-         module Top; I #(3, logic [11:0]) h(); endmodule",
-        "Top",
+fn native_time_values_bind_all_statement_groupings_and_macro_literals() {
+    for declaration in [
+        "timeunit `VALUE; timeprecision 1ps;",
+        "timeprecision 1ps; timeunit `VALUE;",
+        "timeunit `VALUE/1ps;",
+        "timeunit `VALUE; timeprecision 1ps; timeunit `VALUE;",
+    ] {
+        let code = format!(
+            "`define VALUE 10.00ns\n`timescale 100ns/1ns\nmodule Top; {declaration} localparam U=$timeunit(), P=$timeprecision(); endmodule\n`resetall\n"
+        );
+        let ir = analyze_source(&code, Path::new("native-time-values.sv")).unwrap();
+        assert_eq!(
+            ir.modules()[0].parameters()[0].resolved_value(),
+            Some(-8),
+            "{declaration}"
+        );
+        assert_eq!(
+            ir.modules()[0].parameters()[1].resolved_value(),
+            Some(-12),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn native_typedef_bound_operators_preserve_precedence_and_typed_primaries() {
+    for (declaration, width) in [
+        ("typedef logic [20-3*4-1:0] T;", 8),
+        ("typedef logic [Sizes::N-1:0] T;", 3),
+        ("typedef logic [grow(3)-1:0] T;", 5),
+        ("typedef logic [int'(7):0] T;", 8),
+        ("typedef logic [MASK[0]:0] T;", 2),
+        ("typedef logic [$bits(Eight)-1:0] T;", 8),
+        (
+            "typedef Eight [(Sizes::N==3 ? grow(Sizes::N)+7 : 0)-1:0] T;",
+            96,
+        ),
+        ("typedef logic [2**3-1:0] T;", 8),
+        ("typedef logic [(20-3)-4-1:0] T;", 13),
+        ("typedef logic [20-(3-4)-1:0] T;", 21),
+        ("typedef logic [((1 ? 0 : 1) ? 9 : 4)-1:0] T;", 4),
+        ("typedef Eight T[grow(1)+1];", 32),
+        ("typedef Eight T[Sizes::N-1:0][1+1];", 48),
+    ] {
+        let code = format!(
+            r#"
+            package Sizes; parameter N=3; endpackage
+            module Top;
+              function automatic int grow(input int n); return n+2; endfunction
+              localparam logic [7:0] MASK=8'haf;
+              typedef logic [7:0] Eight;
+              {declaration}
+              T value;
+            endmodule
+        "#
+        );
+        let ir = analyze_source(&code, Path::new("native-bound-operators.sv"))
+            .unwrap_or_else(|error| panic!("{declaration}: {error}"));
+        let signal = ir.modules()[0]
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "value")
+            .unwrap();
+        assert_eq!(
+            signal.r#type().resolved_width(),
+            Some(width),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn native_parameter_statements_bind_header_body_generate_and_subroutine_values() {
+    let source = r#"
+        `define CALC(x) ((x)*3+1)
+        localparam ROOT=2;
+        module Top #(
+          parameter N=`CALC(ROOT),
+          parameter bit [3:0] FILL='0
+        )(output logic [31:0] value);
+          localparam BASE=N+2;
+          function automatic int f(input int x);
+            localparam K=2*3;
+            return x+K;
+          endfunction
+          if(BASE>0) begin:g
+            localparam G=(BASE ? BASE : 0)+1;
+            assign value=f(G);
+          end
+        endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-parameter-values.sv")).unwrap();
+    let declarations = parsed.declarations();
+    assert_eq!(declarations.parameter_declarations.len(), 4);
+    let ir = analyze_source(source, Path::new("native-parameter-values.sv")).unwrap();
+    for (name, value) in [("N", 7), ("FILL", 0), ("BASE", 9)] {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.name() == name)
+            .unwrap();
+        assert_eq!(parameter.resolved_value(), Some(value), "{name}");
+    }
+    assert_eq!(
+        ir.modules()[0].ports()[0].r#type().resolved_width(),
+        Some(32)
     );
+
+    // Class headers remain explicitly outside the parameter-default bridge.
+    // Body statements still have native syntax and must not corrupt the next
+    // unit's header identity or positional metadata.
+    let source = "class Unused #(parameter N=3, type T=logic[2:0]); localparam K=N+1; endclass module M #(parameter P=7); endmodule";
+    let parsed = ParsedSource::parse(source, Path::new("unused-class-header.sv")).unwrap();
+    assert_eq!(parsed.declarations().parameter_declarations.len(), 2);
+    assert_eq!(parsed.module_interfaces()["M"].parameters, ["P"]);
+}
+
+#[test]
+fn native_continuous_operators_preserve_runtime_groups_concat_and_typed_leaves() {
+    let source = r#"
+        `define PAIR(x,y) {x,y}
+        module Top(input logic [7:0] a,b,c,input logic choose,output logic[7:0] y,z,w);
+          assign y=choose ? a-(b-c) : a-b-c,
+                 z=(a ~^ b) ^ (~&c),
+                 w=`PAIR(a[3:0],4'(b+1));
+        endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-runtime-operators.sv")).unwrap();
+    let statements = &parsed.declarations().assign_statements;
+    assert_eq!(statements.len(), 1);
+    assert_eq!(statements[0].assignments.len(), 3);
+    let ir = analyze_source(source, Path::new("native-runtime-operators.sv")).unwrap();
+    let assignments = ir.modules()[0].assignments();
+    let ir::Expr::Mux {
+        then_expr,
+        else_expr,
+        ..
+    } = assignments[0].rhs()
+    else {
+        panic!("native conditional")
+    };
+    let ir::Expr::Binary {
+        op: ir::BinaryOp::Sub,
+        right,
+        ..
+    } = &**then_expr
+    else {
+        panic!("grouped subtraction")
+    };
+    assert!(matches!(
+        &**right,
+        ir::Expr::Binary {
+            op: ir::BinaryOp::Sub,
+            ..
+        }
+    ));
+    let ir::Expr::Binary {
+        op: ir::BinaryOp::Sub,
+        left,
+        ..
+    } = &**else_expr
+    else {
+        panic!("left-associated subtraction")
+    };
+    assert!(matches!(
+        &**left,
+        ir::Expr::Binary {
+            op: ir::BinaryOp::Sub,
+            ..
+        }
+    ));
+    assert!(matches!(
+        assignments[1].rhs(),
+        ir::Expr::Binary {
+            op: ir::BinaryOp::BitXor,
+            ..
+        }
+    ));
+    let ir::Expr::Concat(parts) = assignments[2].rhs() else {
+        panic!("native concat")
+    };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(&parts[0], ir::Expr::Select { .. }));
+    assert!(matches!(&parts[1], ir::Expr::Resize { width: 4, .. }));
+
+    let syntax=ParsedSource::parse("module M; wire a,b; assign (strong1,pull0) #(1:2:3,4,5) a=b; initial begin assign b=a; end endmodule",Path::new("native-assign-syntax.sv")).unwrap();
+    assert_eq!(syntax.declarations().assign_statements.len(), 2);
+}
+
+#[test]
+fn native_assign_grammar_retains_existing_unsupported_runtime_diagnostics() {
+    for (expression, diagnostic) in [
+        ("(x+=1)", "assignment used as an expression"),
+        ("tagged Value x", "tagged union expression"),
+        ("++x", "increment or decrement expression"),
+        ("x++", "increment or decrement expression"),
+    ] {
+        let source =
+            format!("module M(input int x,output int y); assign y={expression}; endmodule");
+        ParsedSource::parse(&source, Path::new("unsupported-runtime-expression.sv")).unwrap();
+        let error =
+            analyze_source(&source, Path::new("unsupported-runtime-expression.sv")).unwrap_err();
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)),
+            "{expression}: {error}"
+        );
+        assert!(
+            error.to_string().contains(diagnostic),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn native_control_values_preserve_case_ranges_loops_waits_and_packed_alias_types() {
+    let source = r#"
+      module M(input logic[7:0] a,b,c,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        initial begin
+          case(a+b) b+c:y=a; default:y=b; endcase
+          case(a+b) inside [b:c+1]:y=a; default:y=b; endcase
+          while(a+b) y=a;
+          repeat(a+b) y=b;
+          do y=c; while(a+b);
+          for(T[1:0] i=0;i<a;i+=1) y=a;
+          for(var int j=0,k=1,logic[3:0] p=0;j<a;j+=2,k--,++p) y=b;
+          for(y=0;y<a;y+=2) y=b;
+          wait(a+b);
+        end
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-control-values.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let local = module
+        .locals()
+        .iter()
+        .find(|local| local.source_name == "i")
+        .unwrap();
+    assert_eq!(local.r#type.resolved_width(), Some(8));
+    assert!(!local.r#type.is_signed());
+    let mut cases = 0;
+    let mut loops = 0;
+    let mut waits = 0;
+    for process in module.initial_processes() {
+        for statement in process.body() {
+            statement.walk(&mut |statement| match statement {
+                ir::Stmt::Case {
+                    selector, items, ..
+                } => {
+                    assert!(matches!(
+                        selector,
+                        ir::Expr::Binary {
+                            op: ir::BinaryOp::Add,
+                            ..
+                        }
+                    ));
+                    match &items[0].labels[0] {
+                        ir::CaseLabel::Value(value) => assert!(matches!(
+                            value,
+                            ir::Expr::Binary {
+                                op: ir::BinaryOp::Add,
+                                ..
+                            }
+                        )),
+                        ir::CaseLabel::Range { high, .. } => assert!(matches!(
+                            high,
+                            ir::Expr::Binary {
+                                op: ir::BinaryOp::Add,
+                                ..
+                            }
+                        )),
+                    }
+                    cases += 1;
+                }
+                ir::Stmt::Loop { .. } => loops += 1,
+                ir::Stmt::Wait(condition) => {
+                    assert!(matches!(
+                        condition,
+                        ir::Expr::Binary {
+                            op: ir::BinaryOp::Add,
+                            ..
+                        }
+                    ));
+                    waits += 1;
+                }
+                _ => {}
+            });
+        }
+    }
+    assert_eq!((cases, loops, waits), (2, 6, 1));
+}
+
+#[test]
+fn native_local_types_dimensions_and_initializers_reach_procedural_ir() {
+    let source = r#"
+      module M(input logic[3:0] a,b,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        always_comb begin
+          automatic T[1:0] pair={a,b};
+          automatic logic[3:0] words[2]='{a,b};
+          var automatic signed[3:0] value=a-b;
+          y=pair[0]+words[1]+value;
+        end
+      endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-local-values.sv")).unwrap();
+    assert_eq!(
+        parsed
+            .declarations()
+            .statements
+            .iter()
+            .filter(|statement| matches!(
+                statement.kind,
+                celox_sv_syntax::StatementKind::Declaration(
+                    celox_sv_syntax::LocalDeclaration::Variables(_)
+                )
+            ))
+            .count(),
+        3
+    );
+    let ir = analyze_source(source, Path::new("native-local-values.sv")).unwrap();
+    let locals = ir.modules()[0].locals();
+    let pair = locals
+        .iter()
+        .find(|local| local.source_name == "pair")
+        .unwrap();
+    assert_eq!(pair.r#type.resolved_width(), Some(8));
+    assert!(!pair.r#type.is_signed());
+    let words = locals
+        .iter()
+        .find(|local| local.source_name == "words")
+        .unwrap();
+    assert_eq!(words.r#type.unpacked_ranges().len(), 1);
+    let value = locals
+        .iter()
+        .find(|local| local.source_name == "value")
+        .unwrap();
+    assert!(value.r#type.is_signed());
+    assert_eq!(value.r#type.resolved_width(), Some(4));
+    let mut initialized = 0;
+    for statement in ir.modules()[0].comb_processes()[0].body() {
+        statement.walk(&mut |statement| {
+            if matches!(statement, ir::Stmt::Local { init: Some(_), .. }) {
+                initialized += 1;
+            }
+        });
+    }
+    assert_eq!(initialized, 3);
+}
+
+#[test]
+fn native_subroutine_headers_formals_defaults_and_bodies_reach_ir() {
+    let source = r#"
+      module M(input logic[3:0] a,output logic[7:0] y);
+        typedef bit signed[3:0] T;
+        function automatic T[1:0] sum(input T[1:0] x,input int bias=1+2);
+          automatic T[1:0] value=x+bias;
+          if(x>0) return value+1; else return value-1;
+        endfunction
+        task drive;input logic[3:0] x;output logic[7:0] result;result=sum(x);endtask
+        function automatic int count(input int n);
+          automatic int total=0;
+          for(int i=0;i<n;i++) total+=i;
+          return total;
+        endfunction
+        localparam int N=count(4);
+        logic[N-1:0] width_probe;
+        always_comb begin drive(a,y);width_probe='0;end
+      endmodule
+    "#;
+    let parsed = ParsedSource::parse(source, Path::new("native-subroutines.sv")).unwrap();
+    assert_eq!(parsed.declarations().subroutines.len(), 3);
+    let ir = analyze_source(source, Path::new("native-subroutines.sv")).unwrap();
+    let module = &ir.modules()[0];
+    let sum = module
+        .subroutines()
+        .iter()
+        .find(|routine| routine.name == "sum")
+        .unwrap();
+    let ty = sum.return_type.as_ref().unwrap();
+    assert_eq!(ty.resolved_width(), Some(8));
+    assert!(!ty.is_signed());
+    assert_eq!(sum.params[0].r#type.resolved_width(), Some(8));
+    assert_eq!(sum.params[1].source_name, "bias");
+    assert!(sum.params[1].default.is_some());
+    let mut locals = 0;
+    let mut returns = 0;
+    for statement in &sum.body {
+        statement.walk(&mut |statement| match statement {
+            ir::Stmt::Local { init: Some(_), .. } => locals += 1,
+            ir::Stmt::Return(Some(_)) => returns += 1,
+            _ => {}
+        });
+    }
+    assert_eq!((locals, returns), (1, 2));
+    let drive = module
+        .subroutines()
+        .iter()
+        .find(|routine| routine.name == "drive")
+        .unwrap();
+    assert!(drive.is_task);
+    assert_eq!(drive.params[1].direction, ir::ParamDirection::Output);
     assert_eq!(
         module
             .signals()
             .iter()
-            .find(|signal| signal.name() == "h$data")
+            .find(|signal| signal.name() == "width_probe")
             .unwrap()
             .r#type()
             .resolved_width(),
-        Some(12)
+        Some(6)
     );
-    let error = elaborate(
-        "interface I #(parameter type T = logic, parameter T = 1); endinterface module Top; I h(); endmodule",
-    ).unwrap_err();
+}
+
+#[test]
+fn native_named_call_arguments_reach_production_ir_with_source_order() {
+    let source = r#"
+      module M(input int a,output int y);
+        function automatic int g(input int x);return x;endfunction
+        function automatic int f(input int left=1,right=2);return left+right;endfunction
+        assign y=f(.right(a+1),.left(g(a*2)));
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-named-call-ir.sv")).unwrap();
+    let assignment = &ir.modules()[0].assignments()[0];
+    let ir::Expr::Call {
+        callee,
+        args,
+        arg_order,
+    } = assignment.rhs()
+    else {
+        panic!("{assignment:?}")
+    };
+    assert_eq!(callee, &ir::Callee::Subroutine("f".into()));
+    assert_eq!(arg_order, &[1, 0]);
+    let Some(ir::Expr::Call { callee, args, .. }) = &args[0] else {
+        panic!()
+    };
+    assert_eq!(callee, &ir::Callee::Subroutine("g".into()));
+    assert!(matches!(
+        &args[0],
+        Some(ir::Expr::Binary {
+            op: ir::BinaryOp::Mul,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn native_index_selection_preserves_multidimensional_offsets_and_signed_elements() {
+    let source = r#"
+      module M(output logic[3:0] y,z);
+        typedef bit signed[3:0] T;
+        logic [1:0][3:0] x[2];
+        T[1:0] a;
+        assign y=x[1][0], z=a[1];
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-selected-elements.sv")).unwrap();
+    for (assignment, high, low, expected_signed) in [
+        (&ir.modules()[0].assignments()[0], 11, 8, false),
+        (&ir.modules()[0].assignments()[1], 7, 4, true),
+    ] {
+        let ir::Expr::Select {
+            msb, lsb, signed, ..
+        } = assignment.rhs()
+        else {
+            panic!("{assignment:?}")
+        };
+        assert_eq!(eval_test_const_expr(msb), Some(high));
+        assert_eq!(eval_test_const_expr(lsb), Some(low));
+        assert_eq!(*signed, expected_signed);
+    }
+}
+
+#[test]
+fn native_cast_targets_preserve_numeric_signing_alias_and_zero_contracts() {
+    let source = r#"
+      module M(input logic signed[7:0] a,input logic[7:0] b,
+        output logic[31:0] x0,x1,x2,x3,x4,x5,x6);
+        typedef bit signed[3:0] T;
+        localparam WIDTH=5;
+        assign x0=4'(a),x1=unsigned'(a),x2=signed'(b),
+          x3=T'(b),x4=WIDTH'(b),x5=8'('0),x6=T'(0);
+      endmodule
+    "#;
+    let ir = analyze_source(source, Path::new("native-cast-contracts.sv")).unwrap();
+    let assignments = ir.modules()[0].assignments();
+    for (index, expected_width, expected_signed) in [
+        (0, 4, true),
+        (1, 8, false),
+        (2, 8, true),
+        (3, 4, true),
+        (4, 5, false),
+        (5, 8, false),
+        (6, 4, true),
+    ] {
+        let ir::Expr::Resize { width, signed, .. } = assignments[index].rhs() else {
+            panic!("{:?}", assignments[index].rhs())
+        };
+        assert_eq!(*width, expected_width, "x{index}");
+        assert_eq!(*signed, expected_signed, "x{index}");
+    }
+    let ir::Expr::Resize { expr, .. } = assignments[3].rhs() else {
+        panic!()
+    };
+    let ir::Expr::Resize { expr, signed, .. } = &**expr else {
+        panic!("{expr:?}")
+    };
+    assert!(!signed);
+    assert!(matches!(
+        &**expr,
+        ir::Expr::Unary {
+            op: ir::UnaryOp::ToTwoState,
+            ..
+        }
+    ));
+    let ir::Expr::Resize { expr, .. } = assignments[6].rhs() else {
+        panic!()
+    };
+    assert!(matches!(&**expr, ir::Expr::Literal(value) if value == "0"));
+}
+
+#[test]
+fn native_indexed_ranges_preserve_declared_direction_for_dynamic_bases() {
+    let source = "module M(input logic[7:0] d,input logic[0:7] u,input logic[2:0] i,output logic[1:0] y0,y1,y2,y3);assign y0=d[i+:2],y1=d[i-:2],y2=u[i+:2],y3=u[i-:2];endmodule";
+    let ir = analyze_source(source, Path::new("native-indexed-direction.sv")).unwrap();
+    for (assignment, (high, low)) in
+        ir.modules()[0]
+            .assignments()
+            .iter()
+            .zip([(4, 3), (3, 2), (3, 4), (2, 3)])
+    {
+        let ir::Expr::Select {
+            msb, lsb, signed, ..
+        } = assignment.rhs()
+        else {
+            panic!()
+        };
+        let env = HashMap::from_iter([("i".into(), 3)]);
+        assert_eq!(typecheck::eval_const_expr(msb, &env), Some(high));
+        assert_eq!(typecheck::eval_const_expr(lsb, &env), Some(low));
+        assert!(!signed);
+    }
+}
+
+#[test]
+fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() {
+    let source = r#"module Top(input int value);
+        initial begin
+            $display;
+            $display();
+            $display("value=%0d\n\"quoted\"",, $bits(value) + value);
+            $write("tail\\");
+        end
+    endmodule"#;
+    let ir = analyze_source(source, Path::new("native_system_task_arguments.sv")).unwrap();
+    let body = ir.modules()[0].initial_processes()[0].body();
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[2] else {
+        panic!("expected display");
+    };
     assert!(
-        matches!(error, AnalyzerError::DuplicateInterfaceItem { .. }),
-        "{error}"
+        matches!(&args[0], crate::ir::SystemTaskArg::Str(text) if text == r#"value=%0d\n\"quoted\""#)
     );
+    assert!(matches!(args[1], crate::ir::SystemTaskArg::Empty));
+    assert!(matches!(args[2], crate::ir::SystemTaskArg::Expr(_)));
+    let crate::ir::Stmt::SystemTask { args, .. } = &body[3] else {
+        panic!("expected write");
+    };
+    assert!(matches!(&args[0], crate::ir::SystemTaskArg::Str(text) if text == r#"tail\\"#));
+    for call in ["$display(.value(1));", "$display(1,,.value(2));"] {
+        let source = format!("module Top; initial begin {call} end endmodule");
+        assert!(analyze_source(&source, Path::new("named_system_task.sv")).is_err());
+    }
 }

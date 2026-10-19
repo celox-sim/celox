@@ -10,10 +10,10 @@ edition.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
+celox-sv-syntax = { workspace = true }
 fxhash    = { workspace = true }
 miette    = { workspace = true }
 num-bigint = { workspace = true }
-sv-parser = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

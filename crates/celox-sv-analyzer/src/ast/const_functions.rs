@@ -106,6 +106,7 @@ pub(super) fn replace(state: &State, functions: ConstantFunctions) {
     *state.functions.borrow_mut() = functions;
 }
 
+/// Why an installed function could not be converted for constant evaluation.
 pub(super) fn installed(state: &State) -> ConstantFunctions {
     state.functions.borrow().clone()
 }
@@ -330,15 +331,54 @@ impl ConstantFunctions {
     }
 }
 
+fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
+    use celox_sv_syntax::{BodyItemKind, SubroutineKind};
+    let native = tree.declarations();
+    let mut pending = tree.native_body_membership().unwrap_or_default();
+    let mut seen = HashSet::default();
+    let (mut functions, mut controls) = (false, false);
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match &native.body_item(id).kind {
+            BodyItemKind::Subroutine(id) => {
+                functions |= native.subroutine(*id).kind == SubroutineKind::Function
+            }
+            BodyItemKind::Region(items)
+            | BodyItemKind::Block { items, .. }
+            | BodyItemKind::Unconverted { items, .. } => pending.extend(items),
+            BodyItemKind::Unit(id) => pending.extend(&native.unit(*id).items),
+            BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                controls = true;
+                pending.push(*then_body);
+                pending.extend(otherwise);
+            }
+            BodyItemKind::Case { arms, .. } => {
+                controls = true;
+                pending.extend(arms.iter().map(|arm| arm.body));
+            }
+            BodyItemKind::Loop { body, .. } => {
+                controls = true;
+                pending.push(*body);
+            }
+            _ => {}
+        }
+    }
+    (functions, controls)
+}
+
 pub(super) fn module_constant_functions(
-    node: RefNode<'_>,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
-        node,
         tree,
         const_env,
         type_aliases,
@@ -348,30 +388,19 @@ pub(super) fn module_constant_functions(
 }
 
 pub(super) fn symbolic_module_constant_functions(
-    node: RefNode<'_>,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
-    if !node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::FunctionDeclaration(_)))
-    {
+    let (has_functions, has_controls) = scope_flags(tree);
+    if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !generate::root_subroutines_only(&tree.state)
-        && node.clone().into_iter().any(|child| {
-            matches!(
-                child,
-                RefNode::ConditionalGenerateConstruct(_) | RefNode::LoopGenerateConstruct(_)
-            )
-        });
+    let needs_bootstrap = !generate::root_subroutines_only(&tree.state) && has_controls;
     if !needs_bootstrap {
         return collect_module_constant_functions(
-            node,
             tree,
             const_env,
             type_aliases,
@@ -381,7 +410,6 @@ pub(super) fn symbolic_module_constant_functions(
     }
     let mut roots = generate::with_root_subroutines(&tree.state, || {
         collect_module_constant_functions(
-            node.clone(),
             tree,
             const_env,
             type_aliases,
@@ -392,7 +420,6 @@ pub(super) fn symbolic_module_constant_functions(
     roots.extend_missing(&scope::imported(&tree.state).constant_functions);
     let _installed = install(&tree.state, roots);
     collect_module_constant_functions(
-        node,
         tree,
         const_env,
         type_aliases,
@@ -402,17 +429,13 @@ pub(super) fn symbolic_module_constant_functions(
 }
 
 fn collect_module_constant_functions(
-    node: RefNode<'_>,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
     symbolic_parameters: &HashSet<String>,
 ) -> ConstantFunctions {
-    let has_functions = node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::FunctionDeclaration(_)));
+    let (has_functions, _) = scope_flags(tree);
     if !has_functions {
         return ConstantFunctions::default();
     }
@@ -427,15 +450,14 @@ fn collect_module_constant_functions(
             .filter(|(name, _)| !symbolic_parameters.contains(*name))
             .map(|(name, value)| (name.clone(), *value))
             .collect();
-        symbolic_aliases =
-            match type_aliases_from_module_node_with_env(node.clone(), tree, &constants) {
-                Ok(aliases) => aliases,
-                Err(error) => return ConstantFunctions::unconverted(error),
-            };
+        symbolic_aliases = match type_aliases_from_scope_with_env(tree, &constants) {
+            Ok(aliases) => aliases,
+            Err(error) => return ConstantFunctions::unconverted(error),
+        };
         &symbolic_aliases
     };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
-        match procedural::subroutine_argument_names(node.clone(), tree, const_env, type_aliases) {
+        match procedural::subroutine_argument_names(tree, const_env, type_aliases) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
@@ -449,12 +471,11 @@ fn collect_module_constant_functions(
         counter: &mut counter,
         subroutine_params: &subroutine_params,
         subroutine_directions: &subroutine_directions,
-        automatic: lifetimes::automatic_by_default(&node),
+        automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
     };
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
-        node,
         tree,
         const_env,
         &dimensions,

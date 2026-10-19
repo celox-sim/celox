@@ -4,19 +4,19 @@ use std::path::{Path, PathBuf};
 
 use fxhash::FxHashMap as HashMap;
 
-use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, syntax};
+use crate::{AnalyzerError, Ir, ModuleInterfaces, Packages, analyze, ast, ir, migration};
 
 /// A parsed source that can analyze many modules or parameter specializations.
 ///
 /// The syntax tree and module interfaces are built once. Module lookup follows
 /// cached top-level declaration indices, without scanning unrelated bodies.
 /// No elaborated AST is cached: overrides and constant-function environments
-/// remain local to each analysis. Like `sv-parser`'s tree, this value is confined
-/// to the parsing thread; consumers can share it there with [`std::rc::Rc`].
+/// remain local to each analysis. The private parsing context is confined to
+/// its parsing thread; consumers can share it there with [`std::rc::Rc`].
 pub struct ParsedSource {
     code: std::rc::Rc<str>,
     path: PathBuf,
-    tree: std::rc::Rc<sv_parser::SyntaxTree>,
+    tree: std::rc::Rc<migration::ValidatedSyntax>,
     index: ast::module_index::ModuleIndex,
     /// Immutable declaration diagnostics, indexed once alongside module syntax.
     warnings: HashMap<String, Vec<ir::AnalyzerWarning>>,
@@ -24,10 +24,9 @@ pub struct ParsedSource {
 
 impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
-        let tree = syntax::parse_source(code, path)?;
+        let tree = migration::parse_source(code, path)?;
+        let index = ast::module_index::ModuleIndex::from_declarations(&tree, tree.declarations())?;
         let warnings = ast::warnings::components(&tree);
-        let index = ast::module_index::ModuleIndex::new(&tree)
-            .map_err(|error| error.with_warnings(ast::warnings::functions(&tree, &tree)))?;
         Ok(Self {
             code: code.into(),
             path: path.to_path_buf(),
@@ -41,28 +40,25 @@ impl ParsedSource {
         self.index.names()
     }
 
+    /// Native declaration arenas with original token origins. Opaque body forms
+    /// retain token ranges and are checked by semantic support boundaries.
+    pub fn declarations(&self) -> &celox_sv_syntax::Declarations {
+        self.tree.declarations()
+    }
+
     /// Module and interface declarations share the SV design-element namespace.
     pub fn component_names(&self) -> fxhash::FxHashSet<String> {
-        let mut names = self
-            .module_names()
-            .iter()
-            .cloned()
-            .collect::<fxhash::FxHashSet<_>>();
-        for node in self.tree.as_ref() {
-            let identifier = match node {
-                sv_parser::RefNode::InterfaceDeclarationAnsi(interface) => {
-                    &interface.nodes.0.nodes.3
-                }
-                sv_parser::RefNode::InterfaceDeclarationNonansi(interface) => {
-                    &interface.nodes.0.nodes.3
-                }
-                _ => continue,
-            };
-            if let Some(name) = ast::component_identifier(identifier, &self.tree) {
-                names.insert(name);
-            }
-        }
-        names
+        self.declarations()
+            .all_units()
+            .filter(|unit| {
+                matches!(
+                    unit.kind,
+                    celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                ) && !unit.external
+                    && unit.port_style != celox_sv_syntax::PortStyle::Wildcard
+            })
+            .map(|unit| unit.name.spelling.clone())
+            .collect()
     }
 
     pub fn module_interfaces(&self) -> &ModuleInterfaces {
@@ -71,7 +67,14 @@ impl ParsedSource {
 
     /// Module and interface names referenced by instantiations and ports.
     pub fn component_references(&self) -> fxhash::FxHashSet<String> {
-        ast::interfaces::component_references(&self.tree)
+        let mut references = ast::interfaces::body_component_references(&self.tree);
+        for unit in self.declarations().all_units() {
+            references.extend(
+                unit.interface_references(self.declarations())
+                    .map(|name| name.spelling.clone()),
+            );
+        }
+        references
     }
 
     /// Analyze the packages declared in `sources`, each once, after the
@@ -102,14 +105,20 @@ impl ParsedSource {
             let mut packages = Packages::analyze_with_roots(&trees, roots)?;
             ast::warnings::append(&mut warnings, packages.warnings().iter().cloned());
             for source in sources {
-                for node in source.tree.as_ref() {
-                    if let sv_parser::RefNode::InterfaceDeclarationAnsi(declaration) = node
-                        && let Some(name) =
-                            ast::component_identifier(&declaration.nodes.0.nodes.3, &source.tree)
-                        && packages
-                            .interface_sources
-                            .insert(name.clone(), (source.tree.clone(), source.path.clone()))
-                            .is_some()
+                for handle in source.tree.root_scopes()? {
+                    let Some(unit) = handle.unit(source.tree.declarations()) else {
+                        continue;
+                    };
+                    if unit.kind != celox_sv_syntax::UnitKind::Interface
+                        || unit.port_style != celox_sv_syntax::PortStyle::Ansi
+                    {
+                        continue;
+                    }
+                    let name = ast::normalize_identifier(&unit.name.spelling);
+                    if packages
+                        .interface_sources
+                        .insert(name.clone(), (source.tree.clone(), source.path.clone()))
+                        .is_some()
                     {
                         return Err(AnalyzerError::DuplicateModule { name });
                     }
@@ -117,8 +126,16 @@ impl ParsedSource {
             }
             if !packages.interface_sources.is_empty()
                 && trees.iter().any(|(tree, _)| {
-                    tree.into_iter()
-                        .any(|node| matches!(node, sv_parser::RefNode::InterfacePortHeader(_)))
+                    tree.declarations().all_units().any(|unit| {
+                        unit.ports.iter().any(|port| {
+                            port.data_type.is_some_and(|id| {
+                                matches!(
+                                    tree.declarations().data_type(id).kind,
+                                    celox_sv_syntax::DataTypeKind::Interface { .. }
+                                ) || (port.direction.is_none() && port.net_type.is_none() && !port.variable && matches!(&tree.declarations().data_type(id).kind,celox_sv_syntax::DataTypeKind::Named(path) if path.len()==1))
+                            })
+                        })
+                    })
                 })
             {
                 let sources = sources
@@ -674,6 +691,39 @@ mod native_interface_tests {
     use super::*;
 
     #[test]
+    fn escaped_interface_handles_do_not_match_type_keywords() {
+        let source = ParsedSource::parse(
+            "interface I;logic d;endinterface module Child(I p);endmodule module Top;logic ordinary;if(1)begin:g I \\logic ();Child u(.p(\\logic ));end endmodule",
+            Path::new("native-keyword-interface-handle.sv"),
+        ).unwrap();
+        source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn escaped_interface_names_keep_native_binding_identity() {
+        let source = ParsedSource::parse(
+            "interface \\Bus.Name ;logic d;endinterface module Top;\\Bus.Name h();endmodule",
+            Path::new("native-escaped-interface.sv"),
+        )
+        .unwrap();
+        let ir = source
+            .analyze_module_with_parameter_expr_overrides(
+                "Top",
+                &HashMap::default(),
+                &ModuleInterfaces::default(),
+            )
+            .unwrap();
+        assert!(ir.modules()[0].instances().is_empty());
+        assert_eq!(ir.modules()[0].signals()[0].name(), "h$d");
+    }
+
+    #[test]
     fn binds_generated_interface_instances_in_their_own_scopes() {
         let source = ParsedSource::parse(
             r#"
@@ -1003,6 +1053,67 @@ mod native_interface_tests {
 #[cfg(test)]
 mod declaration_tests {
     use super::*;
+
+    #[test]
+    fn native_headers_supply_metadata_and_original_type_syntax() {
+        let code = "`define WIDTH 7\ninterface Bus; endinterface module M #(parameter type T=logic[`WIDTH:0],localparam type L=int,type K=int,parameter N=2)(input T a,b,Bus.master bus); parameter BODY=3; endmodule";
+        let source = ParsedSource::parse(code, Path::new("native_headers.sv")).unwrap();
+        let interface = &source.module_interfaces()["M"];
+        assert_eq!(interface.ports, ["a", "b", "bus"]);
+        assert_eq!(interface.parameters, ["T", "N"]);
+        assert_eq!(
+            source.component_names(),
+            fxhash::FxHashSet::from_iter(["M".into(), "Bus".into()])
+        );
+        assert!(source.component_references().contains("Bus"));
+        let unit = source
+            .declarations()
+            .all_units()
+            .find(|unit| unit.name.value() == "M")
+            .unwrap();
+        let celox_sv_syntax::ParameterKind::Type {
+            default: Some(data_type),
+        } = &unit.parameters.as_ref().unwrap()[0].kind
+        else {
+            panic!()
+        };
+        let tokens = &source.declarations().tokens
+            [source.declarations().data_type(*data_type).tokens.range()];
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text == "7" && token.origin.expansion.is_some())
+        );
+        assert!(unit.body_parameters[0].local);
+    }
+
+    #[test]
+    fn native_header_success_does_not_accept_a_malformed_body() {
+        let code = "module M #(parameter int N=1)(input logic a); and g(a,,a); endmodule";
+        assert!(celox_sv_syntax::Declarations::parse(code, Path::new("invalid_body.sv")).is_err());
+        assert!(matches!(
+            ParsedSource::parse(code, Path::new("invalid_body.sv")),
+            Err(AnalyzerError::Parse(_))
+        ));
+        assert!(migration::parse_source(code, Path::new("invalid_body.sv")).is_err());
+    }
+
+    #[test]
+    fn body_type_parameter_metadata_preserves_the_existing_binding_contract() {
+        let source = ParsedSource::parse(
+            "module M; parameter type T=logic; parameter int N=3; endmodule",
+            Path::new("body_types.sv"),
+        )
+        .unwrap();
+        assert_eq!(source.module_interfaces()["M"].parameters, ["N"]);
+        assert_eq!(
+            source.declarations().units[0]
+                .overridable_parameters()
+                .map(|parameter| parameter.name.value())
+                .collect::<Vec<_>>(),
+            ["T", "N"]
+        );
+    }
 
     #[test]
     fn inspects_timed_module_shapes_without_editing_procedure_tokens() {

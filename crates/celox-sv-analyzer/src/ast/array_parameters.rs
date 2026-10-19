@@ -8,190 +8,153 @@
 use super::*;
 
 /// A parameter of unpacked array type, as the variable that holds it.
-pub(super) struct ArrayParameter<'a> {
+pub(super) struct ArrayParameter {
     pub signal: Signal,
-    pattern: Option<&'a sv_parser::AssignmentPatternExpression>,
+    native_pattern: Option<celox_sv_syntax::ExprId>,
     bound: Option<BoundPattern>,
 }
 
-/// Whether a parameter assignment declares an unpacked array, or a value
-/// given by an assignment pattern (a packed structure or array).
+/// An authored unpacked parameter or an assignment-pattern value.
 pub(super) fn is_array_parameter(
-    state: &AnalysisState,
-    param: &sv_parser::ParamAssignment,
+    parameter: &celox_sv_syntax::Parameter,
+    native: &celox_sv_syntax::Declarations,
 ) -> bool {
-    !param.nodes.1.is_empty()
-        || value_pattern(param).is_some()
-        || identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).is_some_and(|loc| {
-            scope::imported(state)
-                .pattern_parameter_bindings
-                .contains_key(&loc.offset)
+    let celox_sv_syntax::ParameterKind::Value {
+        dimensions,
+        default,
+        ..
+    } = &parameter.kind
+    else {
+        return false;
+    };
+    !dimensions.is_empty()
+        || default.is_some_and(|id| {
+            matches!(
+                native
+                    .expression(native_expressions::ungroup(id, native))
+                    .kind,
+                celox_sv_syntax::ExprKind::Pattern { .. }
+            )
         })
 }
 
 fn declared_type(
-    node: RefNode<'_>,
+    native: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> Option<Type> {
-    let type_node = match node {
-        RefNode::ParameterDeclaration(sv_parser::ParameterDeclaration::Param(declaration)) => {
-            RefNode::DataTypeOrImplicit(&declaration.nodes.1)
-        }
-        RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(
-            declaration,
-        )) => RefNode::DataTypeOrImplicit(&declaration.nodes.1),
-        RefNode::ParameterPortDeclaration(sv_parser::ParameterPortDeclaration::ParamList(
-            declaration,
-        )) => RefNode::DataType(&declaration.nodes.0),
-        _ => return None,
+) -> Converted<Option<Type>> {
+    let celox_sv_syntax::ParameterKind::Value { data_type, .. } = native.kind else {
+        return Err(unsupported(
+            "type parameter used as an array value parameter",
+        ));
     };
-    let r#type = type_from_ref_node_with_env(type_node.clone(), tree, const_env, type_aliases)
-        .or_else(|| type_alias_from_ref_node(type_node.clone(), tree, type_aliases))?;
-    Some(type_with_fallback_ranges_with_env(
-        r#type,
-        type_node,
+    native_types::bind(
+        data_type,
         tree,
-        const_env,
-        type_aliases,
-    ))
+        &PackedDimensions::new(HashMap::default(), const_env, type_aliases),
+    )
 }
 
-/// The value pattern of an array parameter.
-fn value_pattern(
-    param: &sv_parser::ParamAssignment,
-) -> Option<&sv_parser::AssignmentPatternExpression> {
-    let (_, value) = param.nodes.2.as_ref()?;
-    let sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(value) = value else {
-        return None;
-    };
-    let sv_parser::ConstantMintypmaxExpression::Unary(value) = &**value else {
-        return None;
-    };
-    let sv_parser::ConstantExpression::ConstantPrimary(primary) = &**value else {
-        return None;
-    };
-    let sv_parser::ConstantPrimary::ConstantAssignmentPatternExpression(pattern) = &**primary
-    else {
-        return None;
-    };
-    Some(&pattern.nodes.0)
-}
-
-/// The array parameters declared in the module scope.
-pub(super) fn array_parameters_from_module_node<'a>(
-    node: RefNode<'a>,
+/// Array parameters declared directly in the selected native unit/scope.
+pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
-    let mut parameters = array_parameters_from_parameter_ports(
-        node.clone(),
-        tree,
-        const_env,
-        type_aliases,
-        &mut |_| {},
-    )?;
-    for declaration in scope_declarations(node.clone()) {
-        let declaration = match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
-                RefNode::LocalParameterDeclaration(&declaration.0)
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
-                RefNode::ParameterDeclaration(&declaration.0)
-            }
-            _ => continue,
-        };
+) -> Converted<Vec<ArrayParameter>> {
+    let mut parameters = Vec::new();
+    if let Ok(unit) = tree.root_unit() {
+        let authored = unit
+            .parameters
+            .iter()
+            .flatten()
+            .filter(|parameter| {
+                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+            })
+            .collect::<Vec<_>>();
         parameters.extend(array_parameters_from_declaration(
-            declaration,
+            &authored,
             tree,
             const_env,
             type_aliases,
             &mut |_| {},
         )?);
     }
-    Ok(parameters)
-}
-
-/// Header parameters must be visible before dependent port ranges are lowered.
-pub(super) fn array_parameters_from_parameter_ports<'a>(
-    node: RefNode<'a>,
-    tree: &AnalysisContext<'_>,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-    publish: &mut impl FnMut(&ArrayParameter<'a>),
-) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
-    let mut declarations = Vec::new();
-    if let Some(list) = module_parameter_port_list(node.clone()) {
-        for child in list {
-            match child {
-                RefNode::ParameterPortDeclaration(
-                    declaration @ sv_parser::ParameterPortDeclaration::ParamList(_),
-                ) => declarations.push(RefNode::ParameterPortDeclaration(declaration)),
-                RefNode::ParameterDeclaration(_) | RefNode::LocalParameterDeclaration(_) => {
-                    declarations.push(child)
-                }
-                _ => {}
-            }
+    for id in tree.native_body_membership()? {
+        if let celox_sv_syntax::BodyItemKind::Parameter(id) = tree.declarations().body_item(id).kind
+        {
+            let authored = tree
+                .declarations()
+                .parameter_declaration(id)
+                .parameters
+                .iter()
+                .filter(|parameter| {
+                    matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. })
+                })
+                .collect::<Vec<_>>();
+            parameters.extend(array_parameters_from_declaration(
+                &authored,
+                tree,
+                const_env,
+                type_aliases,
+                &mut |_| {},
+            )?);
         }
-    }
-    let mut parameters = Vec::new();
-    for declaration in declarations {
-        parameters.extend(array_parameters_from_declaration(
-            declaration,
-            tree,
-            const_env,
-            type_aliases,
-            publish,
-        )?);
     }
     Ok(parameters)
 }
 
 /// A scope scan installs each array parameter declaration in source order.
-pub(super) fn array_parameters_from_declaration<'a>(
-    declaration: RefNode<'a>,
+fn array_parameters_from_declaration(
+    authored: &[&celox_sv_syntax::Parameter],
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    publish: &mut impl FnMut(&ArrayParameter<'a>),
-) -> Result<Vec<ArrayParameter<'a>>, AnalyzerError> {
+    publish: &mut impl FnMut(&ArrayParameter),
+) -> Result<Vec<ArrayParameter>, AnalyzerError> {
     let mut parameters = Vec::new();
-    for child in declaration.clone() {
-        let RefNode::ParamAssignment(param) = child else {
-            continue;
-        };
-        let bound =
-            identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0)).and_then(|loc| {
-                scope::imported(&tree.state)
-                    .pattern_parameter_bindings
-                    .get(&loc.offset)
-                    .cloned()
-            });
-        if !is_array_parameter(&tree.state, param) && bound.is_none() {
+    for &native in authored {
+        let bound = scope::imported(&tree.state)
+            .pattern_parameter_bindings
+            .get(&native.id)
+            .cloned();
+        if !is_array_parameter(native, tree.declarations()) && bound.is_none() {
             continue;
         }
-        let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)?;
-        let element = declared_type(declaration.clone(), tree, const_env, type_aliases)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
-            })?;
-        let ranges = unpacked_ranges_from_dimensions_with_env(
-            &param.nodes.1,
-            tree,
-            const_env,
-            type_aliases,
-        )?;
-        let pattern = value_pattern(param);
+        let name = instances::normalize_identifier(&native.name.spelling);
+        let element = declared_type(native, tree, const_env, type_aliases)?.ok_or_else(|| {
+            AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
+        })?;
+        let celox_sv_syntax::ParameterKind::Value { dimensions, .. } = &native.kind else {
+            return Err(AnalyzerError::Parse(
+                "native array parameter kind disagrees".into(),
+            ));
+        };
+        let ranges = dimensions
+            .iter()
+            .map(|dimension| {
+                native_constants::unpacked_dimension(dimension, tree, const_env, type_aliases)
+            })
+            .collect::<Converted<Vec<_>>>()?;
+        let pattern = parameters::ownership::default(native).filter(|id| {
+            matches!(
+                tree.declarations()
+                    .expression(native_expressions::ungroup(*id, tree.declarations()))
+                    .kind,
+                celox_sv_syntax::ExprKind::Pattern { .. }
+            )
+        });
         if pattern.is_none() && bound.is_none() {
             return Err(AnalyzerError::Unsupported(format!(
                 "value of array parameter `{name}`"
             )));
         }
+        // A supplied caller-bound pattern takes precedence over the authored
+        // default. Only defaults actually consumed here require their native ID.
+        let native_pattern = if bound.is_none() { pattern } else { None };
         let parameter = ArrayParameter {
             signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
-            pattern,
+            native_pattern,
             bound,
         };
         // Publish before the next declarator can query this array's shape.
@@ -201,7 +164,7 @@ pub(super) fn array_parameters_from_declaration<'a>(
     Ok(parameters)
 }
 
-impl ArrayParameter<'_> {
+impl ArrayParameter {
     /// The `initial` block that gives the variable its value.
     pub(super) fn initial_process(
         &self,
@@ -213,13 +176,16 @@ impl ArrayParameter<'_> {
         let value = if let Some(bound) = &self.bound {
             bound.lower(&tree.state, &shape, dims)?
         } else {
-            let pattern = self
-                .pattern
-                .ok_or_else(|| unsupported("array parameter value"))?;
-            if pattern.nodes.0.is_some() {
-                patterns::typed_pattern(pattern, tree, dims)?
-            } else {
-                patterns::expr_from_pattern(&pattern.nodes.1, &shape, tree, dims)?
+            match self.native_pattern {
+                Some(root) => match patterns::native_expression(root, &shape, tree, dims)? {
+                    Some(value) => value,
+                    None => return Err(unsupported("array parameter pattern target")),
+                },
+                None => {
+                    return Err(AnalyzerError::Parse(
+                        "native array parameter default is missing".into(),
+                    ));
+                }
             }
         };
         Ok(InitialProcess {

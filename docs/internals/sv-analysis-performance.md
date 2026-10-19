@@ -1,7 +1,13 @@
 # SystemVerilog analyzer scaling
 
-The scaling probe separates `sv-parser`, analyzer AST construction, and AST-to-IR
-conversion. It also compares parsing a multi-module file for each selected
+Current probes use the public `ParsedSource` API and report `parse_index_ms`
+(native syntax, full validation and module indexing) and `analysis_ms` (semantic
+AST binding plus IR lowering). Historical tables below retain their original
+separate parse/AST/IR phase measurements and are not directly phase-comparable.
+
+The original scaling probe separated `sv-parser`, analyzer AST construction,
+and AST-to-IR conversion. The current probe combines AST and IR work in its
+analysis phase. It also compares parsing a multi-module file for each selected
 module with reusing one `ParsedSource`. This measures frontend work, without
 backend compilation or simulation.
 
@@ -49,10 +55,9 @@ are queried through borrowed tables, with the existing local precedence.
 Numeric specializations lower fresh ASTs from the shared syntax tree.
 
 The syntax cache lives for one frontend build, rather than globally. It retains
-the original CST until that build finishes, trading that linear storage for
-repeated parsing and per-module source copies. `sv-parser`'s tree is confined
-to its parsing thread. Generated simulator execution remains independent of
-this syntax cache.
+native declaration, expression and type arenas with original token origins,
+trading that linear storage for repeated parsing and per-module source copies.
+Generated simulator execution remains independent of this syntax cache.
 
 ## Measurements
 

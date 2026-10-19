@@ -1,8 +1,5 @@
 # SystemVerilog source layer
 
-This commit introduces the standalone syntax layer. The analyzer integration
-described below is supplied by the dependent parser-cutover change.
-
 `celox-sv-syntax` owns original source files, UTF-8 byte spans, lossless tokens,
 preprocessing, and native syntax arenas. It has no external parser or simulator
 dependency. `celox-sv-analyzer` consumes these arenas directly for semantic

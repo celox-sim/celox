@@ -7,6 +7,10 @@
 //! module signal or share its name with a local of another process.
 
 use super::*;
+mod native_assertions;
+mod native_control;
+mod native_foreach;
+mod native_timing;
 use crate::procedural::{
     CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
     SystemTaskArg,
@@ -376,68 +380,94 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    fn expr(&self, expr: &sv_parser::Expression) -> Result<Expr, AnalyzerError> {
-        let mut lowered = expr_from_expression_with_types(expr, self.tree, &self.dims)?;
-        self.rename_expr(&mut lowered);
-        Ok(lowered)
+    fn native_value(&self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
+        let mut value =
+            native_expressions::value(id, self.tree.declarations(), self.tree, &self.dims)?;
+        self.rename_expr(&mut value);
+        Ok(value)
     }
 
-    /// The lvalue as written (before local renaming) and as stored.
-    fn lvalue(&self, node: &sv_parser::VariableLvalue) -> Result<(LValue, LValue), AnalyzerError> {
-        let lowered = variable_lvalue_from_node(node, self.tree, &self.dims)?;
+    fn native_lvalue(
+        &self,
+        id: celox_sv_syntax::ExprId,
+    ) -> Result<(LValue, LValue), AnalyzerError> {
+        let lowered = native_expressions::variable_lvalue(
+            id,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        )?;
         let mut renamed = lowered.clone();
         self.rename_lvalue(&mut renamed);
         Ok((lowered, renamed))
     }
 
     /// The parts of a concatenated assignment target, most significant first.
-    fn concat_lvalue(&self, node: &sv_parser::VariableLvalue) -> Option<Vec<LValue>> {
-        let sv_parser::VariableLvalue::Lvalue(concat) = node else {
-            return None;
+    fn concat_lvalue(&self, root: celox_sv_syntax::ExprId) -> Converted<Option<Vec<LValue>>> {
+        let native = self.tree.declarations();
+        let celox_sv_syntax::ExprKind::Concatenation(parts) = &native.expression(root).kind else {
+            return Ok(None);
         };
+        let mut pending = parts.iter().rev().copied().collect::<Vec<_>>();
         let mut parts = Vec::new();
-        for part in concat.nodes.0.nodes.1.contents() {
-            match part {
-                sv_parser::VariableLvalue::Lvalue(_) => parts.extend(self.concat_lvalue(part)?),
-                _ => parts.push(self.lvalue(part).ok()?.1),
+        while let Some(id) = pending.pop() {
+            if let celox_sv_syntax::ExprKind::Concatenation(items) = &native.expression(id).kind {
+                pending.extend(items.iter().rev().copied());
+            } else {
+                let mut target =
+                    native_expressions::variable_lvalue(id, native, self.tree, &self.dims)?;
+                self.rename_lvalue(&mut target);
+                parts.push(target);
             }
         }
-        Some(parts)
+        Ok(Some(parts))
     }
 
-    fn assignment(
+    fn assignment_value(
         &self,
-        lvalue: &sv_parser::VariableLvalue,
         op: &str,
-        rhs: &sv_parser::Expression,
         nonblocking: bool,
+        native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
-        if let Some(parts) = self.concat_lvalue(lvalue) {
+        let (left, right) = native;
+        if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
                 return Err(unsupported("compound assignment to a concatenation"));
             }
             return Ok(Stmt::AssignConcat {
                 parts,
-                rhs: self.expr(rhs)?,
+                rhs: self.native_value(right)?,
                 nonblocking,
             });
         }
         if op == "="
-            && let Some(target) = variable_lvalue_unpacked_shape(lvalue, self.tree, &self.dims)
+            && let Some(target) = array_compatibility::native_unpacked_shape(
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
         {
-            check_unpacked_array_assignment(
-                rhs,
+            array_compatibility::check_native_unpacked_assignment(
+                &self.tree.state,
+                right,
+                self.tree.declarations(),
                 &target,
-                || "assignment".to_string(),
-                self.tree,
+                || "assignment".into(),
                 &self.dims,
             )?;
         }
-        let (written, lhs) = self.lvalue(lvalue)?;
+        let (written, lhs) = self.native_lvalue(left)?;
         let mut rhs = if op == "=" {
-            expr_from_expression_for_lvalue(rhs, &written, self.tree, &self.dims)?
+            native_expressions::expression(
+                right,
+                self.tree.declarations(),
+                &written,
+                self.tree,
+                &self.dims,
+            )?
         } else {
-            let value = expr_from_expression_with_types(rhs, self.tree, &self.dims)?;
+            let value =
+                native_expressions::value(right, self.tree.declarations(), self.tree, &self.dims)?;
             assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
         };
         // A two-state member of a four-state packed struct drops unknown bits.
@@ -458,22 +488,26 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
-    fn inc_or_dec(&self, expr: &sv_parser::IncOrDecExpression) -> Result<Stmt, AnalyzerError> {
-        let (op, lvalue) = match expr {
-            sv_parser::IncOrDecExpression::Prefix(expr) => (&expr.nodes.0, &expr.nodes.2),
-            sv_parser::IncOrDecExpression::Suffix(expr) => (&expr.nodes.2, &expr.nodes.0),
+    fn inc_or_dec(&self, root: celox_sv_syntax::ExprId) -> Result<Stmt, AnalyzerError> {
+        let celox_sv_syntax::ExprKind::Unary {
+            operator,
+            expression,
+            ..
+        } = &self.tree.declarations().expression(root).kind
+        else {
+            return Err(unsupported("increment or decrement expression"));
         };
-        let op = match self.tree.get_str(&op.nodes.0) {
-            Some("++") => "+=",
-            Some("--") => "-=",
+        let op = match operator.as_str() {
+            "++" => "+=",
+            "--" => "-=",
             _ => return Err(unsupported("increment or decrement operator")),
         };
-        let (written, lhs) = self.lvalue(lvalue)?;
+        let (written, lhs) = self.native_lvalue(*expression)?;
         let mut rhs = assignment_op_expr(
             &self.tree.state,
             &written,
             op,
-            Expr::Literal("1".to_string()),
+            Expr::Literal("1".into()),
             &self.dims,
         )?;
         self.rename_expr(&mut rhs);
@@ -484,125 +518,49 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
-    pub(super) fn statements(
+    fn native_statement_leaf(
         &mut self,
-        stmts: &[sv_parser::StatementOrNull],
+        statement: &celox_sv_syntax::StatementKind,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let mut lowered = Vec::new();
-        for stmt in stmts {
-            lowered.extend(self.statement_or_null(stmt)?);
-        }
-        Ok(lowered)
-    }
-
-    pub(super) fn statement_or_null(
-        &mut self,
-        stmt: &sv_parser::StatementOrNull,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        match stmt {
-            sv_parser::StatementOrNull::Statement(stmt) => self.statement(stmt),
-            sv_parser::StatementOrNull::Attribute(_) => Ok(Vec::new()),
-        }
-    }
-
-    pub(super) fn statement(
-        &mut self,
-        stmt: &sv_parser::Statement,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        match &stmt.nodes.2 {
-            sv_parser::StatementItem::BlockingAssignment(assignment) => match &assignment.0 {
-                sv_parser::BlockingAssignment::Variable(assignment) => {
-                    if !matches!(assignment.nodes.2, sv_parser::DelayOrEventControl::Delay(_))
-                        && delay_or_event_control_is_empty(&assignment.nodes.2)
-                    {
-                        Ok(vec![self.assignment(
-                            &assignment.nodes.0,
-                            "=",
-                            &assignment.nodes.3,
-                            false,
-                        )?])
-                    } else {
-                        Err(unsupported("intra-assignment timing control"))
-                    }
-                }
-                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
-                    let op = self
-                        .tree
-                        .get_str(&assignment.nodes.1.nodes.0.nodes.0)
-                        .unwrap_or("=");
-                    Ok(vec![self.assignment(
-                        &assignment.nodes.0,
-                        op,
-                        &assignment.nodes.2,
-                        false,
-                    )?])
-                }
-                _ => Err(unsupported("dynamic array or class assignment")),
-            },
-            sv_parser::StatementItem::NonblockingAssignment(assignment) => {
-                if assignment.0.nodes.2.is_some() {
+        use celox_sv_syntax::{ExprKind, StatementKind};
+        match statement {
+            StatementKind::Assignment {
+                left,
+                operator,
+                right,
+                nonblocking,
+                timing,
+                ..
+            } => {
+                if timing.is_some() {
                     return Err(unsupported("intra-assignment timing control"));
                 }
-                Ok(vec![self.assignment(
-                    &assignment.0.nodes.0,
-                    "=",
-                    &assignment.0.nodes.3,
-                    true,
+                if (operator == "<=") != *nonblocking {
+                    return Err(AnalyzerError::Parse(
+                        "native assignment operator mode disagrees".into(),
+                    ));
+                }
+                Ok(vec![self.assignment_value(
+                    if *nonblocking { "=" } else { operator },
+                    *nonblocking,
+                    (*left, *right),
                 )?])
             }
-            sv_parser::StatementItem::IncOrDecExpression(expr) => {
-                Ok(vec![self.inc_or_dec(&expr.0)?])
-            }
-            sv_parser::StatementItem::SubroutineCallStatement(call) => {
-                self.subroutine_call_statement(call)
-            }
-            sv_parser::StatementItem::ConditionalStatement(stmt) => {
-                self.conditional(&self.tree.state, stmt)
-            }
-            sv_parser::StatementItem::CaseStatement(stmt) => self.case(stmt),
-            sv_parser::StatementItem::LoopStatement(stmt) => self.loop_statement(stmt),
-            sv_parser::StatementItem::JumpStatement(jump) => match &**jump {
-                sv_parser::JumpStatement::Break(_) => Ok(vec![Stmt::Break]),
-                sv_parser::JumpStatement::Continue(_) => Ok(vec![Stmt::Continue]),
-                sv_parser::JumpStatement::Return(stmt) => Ok(vec![Stmt::Return(
-                    stmt.nodes
-                        .1
-                        .as_ref()
-                        .map(|expr| self.expr(expr))
-                        .transpose()?,
-                )]),
-            },
-            sv_parser::StatementItem::SeqBlock(block) => {
-                self.push_scope();
-                let result = self.seq_block(block);
-                self.pop_scope();
-                result
-            }
-            sv_parser::StatementItem::ProceduralAssertionStatement(assertion) => {
-                self.assertion(assertion)
-            }
-            sv_parser::StatementItem::ProceduralTimingControlStatement(timing) => {
-                let mut stmts = vec![self.timing_control(&timing.nodes.0)?];
-                stmts.extend(self.statement_or_null(&timing.nodes.1)?);
-                Ok(stmts)
-            }
-            sv_parser::StatementItem::WaitStatement(wait) => match &**wait {
-                sv_parser::WaitStatement::Wait(wait) => {
-                    self.allow_timing("wait statement")?;
-                    let condition = self.expr(&wait.nodes.1.nodes.1)?;
-                    let mut stmts = vec![Stmt::Wait(condition)];
-                    stmts.extend(self.statement_or_null(&wait.nodes.2)?);
-                    Ok(stmts)
+            StatementKind::Expression(id) => match &self.tree.declarations().expression(*id).kind {
+                ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--") => {
+                    Ok(vec![self.inc_or_dec(*id)?])
                 }
-                sv_parser::WaitStatement::Fork(_) => Err(unsupported("wait fork statement")),
-                sv_parser::WaitStatement::Order(_) => Err(unsupported("wait order statement")),
+                _ => self.subroutine_call_statement(*id),
             },
-            sv_parser::StatementItem::EventTrigger(_) => Err(unsupported("event trigger")),
-            sv_parser::StatementItem::ProceduralContinuousAssignment(_) => {
+            StatementKind::Assertion { .. } => Err(unsupported("concurrent assertion")),
+            StatementKind::WaitFork => Err(unsupported("wait fork statement")),
+            StatementKind::WaitOrder { .. } => Err(unsupported("wait order statement")),
+            StatementKind::EventTrigger(_) => Err(unsupported("event trigger")),
+            StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
-            sv_parser::StatementItem::DisableStatement(_) => Err(unsupported("disable statement")),
-            sv_parser::StatementItem::ParBlock(_) => Err(unsupported("fork-join block")),
+            StatementKind::Disable(_) => Err(unsupported("disable statement")),
+            StatementKind::Parallel { .. } => Err(unsupported("fork-join block")),
             _ => Err(unsupported("procedural statement")),
         }
     }
@@ -624,171 +582,38 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    /// The suspension a procedural timing control stands for: a delay or an
-    /// event control.
-    fn timing_control(
-        &self,
-        control: &sv_parser::ProceduralTimingControl,
-    ) -> Result<Stmt, AnalyzerError> {
-        match control {
-            sv_parser::ProceduralTimingControl::DelayControl(delay) => {
-                self.allow_timing("delay control")?;
-                self.delay_control(delay)
-            }
-            sv_parser::ProceduralTimingControl::EventControl(control) => {
-                self.allow_timing("event control")?;
-                self.event_control(control).map(Stmt::WaitEvent)
-            }
-            sv_parser::ProceduralTimingControl::CycleDelay(_) => Err(unsupported("cycle delay")),
-        }
-    }
-
-    /// The amount of a `#` delay control in simulation time, which counts
-    /// the global time precision: the delay is given in time units of its
-    /// scope (IEEE 1800-2023 3.14.1). Of a `min:typ:max` delay the typical
-    /// value is used, as simulators do by default.
-    fn delay_control(&self, delay: &sv_parser::DelayControl) -> Result<Stmt, AnalyzerError> {
-        Ok(Stmt::Delay {
-            amount: self.delay_amount(delay)?,
-            ticks_per_unit: super::timescales::time_divisor(
-                RefNode::DelayControl(delay),
-                self.tree,
-            )?,
-        })
-    }
-
-    /// The amount of a `#` delay control, in time units.
-    fn delay_amount(&self, delay: &sv_parser::DelayControl) -> Result<Expr, AnalyzerError> {
-        match delay {
-            sv_parser::DelayControl::Delay(delay) => match &delay.nodes.1 {
-                sv_parser::DelayValue::UnsignedNumber(number) => Ok(Expr::Literal(
-                    self.tree
-                        .get_str(&number.nodes.0)
-                        .ok_or_else(|| unsupported("delay value"))?
-                        .replace('_', ""),
-                )),
-                sv_parser::DelayValue::PsIdentifier(identifier) => {
-                    if identifier.nodes.0.is_some() {
-                        return Err(unsupported("package-scoped delay value"));
-                    }
-                    let name = identifier_text(RefNode::Identifier(&identifier.nodes.1), self.tree)
-                        .ok_or_else(|| unsupported("delay value"))?;
-                    let mut expr = Expr::Ident(name);
-                    self.rename_expr(&mut expr);
-                    Ok(expr)
-                }
-                sv_parser::DelayValue::HierarchicalIdentifier(identifier) => {
-                    let name =
-                        identifier_text(RefNode::HierarchicalIdentifier(identifier), self.tree)
-                            .ok_or_else(|| unsupported("delay value"))?;
-                    let mut expr = Expr::Ident(name);
-                    self.rename_expr(&mut expr);
-                    Ok(expr)
-                }
-                sv_parser::DelayValue::RealNumber(_)
-                | sv_parser::DelayValue::TimeLiteral(_)
-                | sv_parser::DelayValue::Step1(_) => Err(unsupported("delay value")),
-            },
-            sv_parser::DelayControl::Mintypmax(delay) => match &delay.nodes.1.nodes.1 {
-                sv_parser::MintypmaxExpression::Expression(expr) => self.expr(expr),
-                sv_parser::MintypmaxExpression::Ternary(ternary) => self.expr(&ternary.nodes.2),
-            },
-        }
-    }
-
-    /// The items of an `@` event control.
-    fn event_control(
-        &self,
-        control: &sv_parser::EventControl,
-    ) -> Result<Vec<EventItemBase<Expr>>, AnalyzerError> {
-        match control {
-            sv_parser::EventControl::EventExpression(control) => {
-                let mut items = Vec::new();
-                self.event_items(&control.nodes.1.nodes.1, &mut items)?;
-                Ok(items)
-            }
-            sv_parser::EventControl::EventIdentifier(_) => Err(unsupported("named event")),
-            sv_parser::EventControl::Asterisk(_) | sv_parser::EventControl::ParenAsterisk(_) => {
-                Err(unsupported("`@*` event control in a process"))
-            }
-            sv_parser::EventControl::SequenceIdentifier(_) => {
-                Err(unsupported("sequence event control"))
-            }
-        }
-    }
-
-    fn event_items(
-        &self,
-        expr: &sv_parser::EventExpression,
-        items: &mut Vec<EventItemBase<Expr>>,
-    ) -> Result<(), AnalyzerError> {
-        match expr {
-            sv_parser::EventExpression::Expression(expr) => {
-                if expr.nodes.2.is_some() {
-                    return Err(unsupported("iff-qualified event"));
-                }
-                let edge = match &expr.nodes.0 {
-                    None => EventEdge::Any,
-                    Some(sv_parser::EdgeIdentifier::Posedge(_)) => EventEdge::Pos,
-                    Some(sv_parser::EdgeIdentifier::Negedge(_)) => EventEdge::Neg,
-                    Some(sv_parser::EdgeIdentifier::Edge(_)) => EventEdge::Both,
-                };
-                let expr = self.expr(&expr.nodes.1)?;
-                items.push(EventItemBase { edge, expr });
-                Ok(())
-            }
-            sv_parser::EventExpression::Or(expr) => {
-                self.event_items(&expr.nodes.0, items)?;
-                self.event_items(&expr.nodes.2, items)
-            }
-            sv_parser::EventExpression::Comma(expr) => {
-                self.event_items(&expr.nodes.0, items)?;
-                self.event_items(&expr.nodes.2, items)
-            }
-            sv_parser::EventExpression::Paren(expr) => {
-                self.event_items(&expr.nodes.0.nodes.1, items)
-            }
-            sv_parser::EventExpression::Sequence(_) => Err(unsupported("sequence event")),
-        }
-    }
-
-    fn seq_block(&mut self, block: &sv_parser::SeqBlock) -> Result<Vec<Stmt>, AnalyzerError> {
-        let mut stmts = Vec::new();
-        for item in &block.nodes.2 {
-            stmts.extend(self.block_item_declaration(item)?);
-        }
-        stmts.extend(self.statements(&block.nodes.3)?);
-        Ok(stmts)
-    }
-
-    /// Declare the variables of a block item and return their initializations.
+    /// Declare native local variables and return their initializations.
     pub(super) fn block_item_declaration(
         &mut self,
-        item: &sv_parser::BlockItemDeclaration,
+        native: &celox_sv_syntax::LocalDeclaration,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let item = match item {
-            sv_parser::BlockItemDeclaration::Data(item) => item,
-            sv_parser::BlockItemDeclaration::LocalParameter(item) => {
-                return self.local_parameters(RefNode::LocalParameterDeclaration(&item.nodes.1));
+        let native = match native {
+            celox_sv_syntax::LocalDeclaration::Parameters(id) => return self.local_parameters(*id),
+            celox_sv_syntax::LocalDeclaration::Variables(value)
+            | celox_sv_syntax::LocalDeclaration::Constructed(value) => value,
+            celox_sv_syntax::LocalDeclaration::TypeAlias(_) => {
+                return Err(unsupported("local type declaration"));
             }
-            sv_parser::BlockItemDeclaration::Parameter(item) => {
-                return self.local_parameters(RefNode::ParameterDeclaration(&item.nodes.1));
+            celox_sv_syntax::LocalDeclaration::Unconverted(_) => {
+                return Err(unsupported("let declaration inside a procedural block"));
             }
-            _ => return Err(unsupported("let declaration inside a procedural block")),
+            _ => return Err(unsupported("local declaration")),
         };
-        let data = &item.nodes.1;
-        let sv_parser::DataDeclaration::Variable(variable) = data else {
-            return Err(unsupported("type declaration inside a procedural block"));
-        };
-        let signals = signals_from_data_declaration(
-            data,
+        let signals = native_types::local_signals(
+            native,
             self.tree,
-            &self.type_aliases,
             &self.dims.const_env,
+            &self.type_aliases,
             None,
         )?;
         let mut stmts = Vec::new();
-        for (signal, assignment) in signals.into_iter().zip(variable.nodes.4.nodes.0.contents()) {
+        for (signal, assignment) in
+            signals
+                .into_iter()
+                .zip(native.variables.iter().filter(|variable| {
+                    native_types::ordinary_variable(variable, self.tree.declarations())
+                }))
+        {
             // A declaration may not repeat a name of its own scope, such as
             // a subroutine argument (IEEE 1800-2023 6.21).
             let scope = self.scopes.last().expect("a body always has a scope");
@@ -802,32 +627,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     signal.name()
                 )));
             }
-            let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment else {
-                return Err(unsupported("dynamic array or class declaration"));
-            };
-            let init = match &assignment.nodes.2 {
-                Some((_, expr)) => {
-                    // The initializer is evaluated before the new name is in
-                    // scope (IEEE 1800-2023 6.21).
+            let init = match assignment.value {
+                Some(root) => {
                     let target = LValue::Ident(signal.name().to_string());
-                    let dims = self.dims.clone();
-                    let mut scoped = dims;
+                    let mut scoped = self.dims.clone();
                     scoped.insert(
                         signal.name().to_string(),
                         dimensions_from_type(signal.r#type()),
                     );
-                    let mut init =
-                        expr_from_expression_for_lvalue(expr, &target, self.tree, &scoped)?;
+                    let mut init = native_expressions::expression(
+                        root,
+                        self.tree.declarations(),
+                        &target,
+                        self.tree,
+                        &scoped,
+                    )?;
                     self.rename_expr(&mut init);
                     Some(init)
                 }
                 None => None,
             };
             let name = self.declare(signal.name(), signal.r#type().clone());
-            let automatic = match &variable.nodes.2 {
-                Some(sv_parser::Lifetime::Automatic(_)) => true,
-                Some(sv_parser::Lifetime::Static(_)) => false,
-                None => self.automatic,
+            let automatic = match native.lifetime.as_deref() {
+                Some("automatic") => true,
+                Some("static") => false,
+                _ => self.automatic,
             };
             if !automatic {
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
@@ -839,10 +663,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     /// Make the parameters of a declaration in the body known as constants.
-    fn local_parameters(&mut self, node: RefNode<'_>) -> Result<Vec<Stmt>, AnalyzerError> {
+    fn local_parameters(
+        &mut self,
+        id: celox_sv_syntax::ParameterDeclarationId,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
         let mut parameters = Vec::new();
-        parameters_from_ref_node(
-            node,
+        let authored = self
+            .tree
+            .declarations()
+            .parameter_declaration(id)
+            .parameters
+            .iter()
+            .collect::<Vec<_>>();
+        parameters::parameters_from_native(
+            &authored,
             self.tree,
             &mut parameters,
             true,
@@ -900,222 +734,143 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     fn subroutine_call_statement(
         &mut self,
-        call: &sv_parser::SubroutineCallStatement,
+        root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let call = match call {
-            sv_parser::SubroutineCallStatement::SubroutineCall(call) => &call.0,
-            sv_parser::SubroutineCallStatement::Function(call) => &call.nodes.2.nodes.1.nodes.0,
-        };
-        match call {
-            sv_parser::SubroutineCall::TfCall(call) => {
-                let name = reference_name(
-                    RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
-                    self.tree,
-                )
-                .ok_or_else(|| unsupported("subroutine call"))?;
-                let (args, arg_order) =
-                    self.call_arguments(&name, call.nodes.2.as_ref().map(|paren| &paren.nodes.1))?;
-                Ok(vec![Stmt::Call {
-                    name,
-                    args,
-                    arg_order,
-                }])
-            }
-            sv_parser::SubroutineCall::MethodCall(call) => {
-                let (name, arguments) =
-                    native_interfaces::method_call(call, self.tree, &self.dims)?;
-                let (args, arg_order) = self.call_arguments(&name, arguments)?;
-                Ok(vec![Stmt::Call {
-                    name,
-                    args,
-                    arg_order,
-                }])
-            }
-            sv_parser::SubroutineCall::SystemTfCall(system_call) => {
-                let (name, args) = system_tf_call_parts(system_call, self.tree)
-                    .ok_or_else(|| unsupported("system task or function name"))?;
-                let task = match system_functions::check_call(
-                    name,
-                    args.as_deref(),
-                    system_functions::CallSite::Statement(self.body),
-                )? {
-                    system_functions::SystemCall::Function(_) => {
-                        // A system function called as a statement is
-                        // converted and checked like the same call in an
-                        // expression, then its value is discarded. `$bits`
-                        // and `$size` become constants and do not evaluate
-                        // their operands (IEEE 1800-2023 20.6.2).
-                        let mut value = expr_from_subroutine_call(call, self.tree, &self.dims)?;
-                        self.rename_expr(&mut value);
-                        return Ok(vec![Stmt::Eval(value)]);
-                    }
-                    system_functions::SystemCall::Task(SystemTask::Printtimescale) => {
-                        return Ok(vec![Stmt::SystemTask {
-                            task: SystemTask::Display(system_functions::Radix::Decimal),
-                            args: vec![SystemTaskArg::Str(timescales::print_message(
-                                system_call,
-                                self.tree,
-                                system_functions::CallSite::Statement(self.body),
-                            )?)],
-                            site: source_span(RefNode::SystemTfCall(system_call), self.tree),
-                        }]);
-                    }
-                    system_functions::SystemCall::Task(task) => task,
-                };
-                let args = match &**system_call {
-                    sv_parser::SystemTfCall::ArgOptionl(call) => call
-                        .nodes
-                        .1
-                        .as_ref()
-                        .map(|paren| self.system_task_arguments(&paren.nodes.1))
-                        .transpose()?
-                        .unwrap_or_default(),
-                    sv_parser::SystemTfCall::ArgExpression(call) => {
-                        let mut args = Vec::new();
-                        for arg in call.nodes.1.nodes.1.0.contents() {
-                            args.push(self.system_task_argument(arg.as_ref())?);
-                        }
-                        if args.len() == 1 && args[0] == SystemTaskArg::Empty {
-                            args.clear();
-                        }
-                        args
-                    }
-                    sv_parser::SystemTfCall::ArgDataType(_) => {
-                        return Err(unsupported("system task with a data type argument"));
-                    }
-                };
-                // Keep Veryl's assertion calls as calls: their message arguments
-                // execute even on success, unlike an SV assertion's fail action.
-                Ok(vec![Stmt::SystemTask {
-                    task,
-                    args,
-                    site: source_span(RefNode::SystemTfCall(system_call), self.tree),
-                }])
-            }
-            _ => Err(unsupported("method or randomize call")),
-        }
-    }
-
-    fn system_task_arguments(
-        &self,
-        args: &sv_parser::ListOfArguments,
-    ) -> Result<Vec<SystemTaskArg<Expr>>, AnalyzerError> {
-        let sv_parser::ListOfArguments::Ordered(args) = args else {
-            return Err(unsupported("named system task arguments"));
-        };
-        if !args.nodes.1.is_empty() {
-            return Err(unsupported("named system task arguments"));
-        }
-        let contents = args.nodes.0.contents();
-        if contents.len() == 1 && contents[0].is_none() {
-            return Ok(Vec::new());
-        }
-        contents
-            .into_iter()
-            .map(|arg| self.system_task_argument(arg.as_ref()))
-            .collect()
-    }
-
-    fn system_task_argument(
-        &self,
-        arg: Option<&sv_parser::Expression>,
-    ) -> Result<SystemTaskArg<Expr>, AnalyzerError> {
-        let Some(arg) = arg else {
-            return Ok(SystemTaskArg::Empty);
-        };
-        if let sv_parser::Expression::Primary(primary) = arg
-            && let sv_parser::Primary::PrimaryLiteral(literal) = &**primary
-            && let sv_parser::PrimaryLiteral::StringLiteral(text) = &**literal
+        let discarded = matches!(
+            self.tree.declarations().expression(root).kind,
+            celox_sv_syntax::ExprKind::Cast { .. }
+        );
         {
-            let text = self
-                .tree
-                .get_str(&text.nodes.0)
-                .ok_or_else(|| unsupported("string literal"))?;
-            let text = text
-                .strip_prefix('"')
-                .and_then(|text| text.strip_suffix('"'))
-                .unwrap_or(text);
-            return Ok(SystemTaskArg::Str(text.to_string()));
-        }
-        Ok(SystemTaskArg::Expr(self.expr(arg)?))
-    }
-
-    /// Positional arguments of a subroutine call, binding named arguments by
-    /// the declared argument order.
-    fn call_arguments(
-        &self,
-        name: &str,
-        args: Option<&sv_parser::ListOfArguments>,
-    ) -> Result<(Vec<Option<Expr>>, Vec<usize>), AnalyzerError> {
-        let signatures = if self.dims.subroutine_param_names.is_empty() {
-            self.state.subroutine_params
-        } else {
-            &self.dims.subroutine_param_names
-        };
-        let (bindings, order) =
-            expressions::bind_call_arguments(name, args, self.tree, signatures)?;
-        let args = bindings
-            .into_iter()
-            .enumerate()
-            .map(|(position, arg)| {
-                arg.map(|arg| self.call_argument(name, position, arg))
-                    .transpose()
-            })
-            .collect::<Result<_, _>>()?;
-        Ok((args, order))
-    }
-
-    /// One subroutine argument; an assignment pattern takes the formal's shape.
-    fn call_argument(
-        &self,
-        name: &str,
-        position: usize,
-        arg: &sv_parser::Expression,
-    ) -> Result<Expr, AnalyzerError> {
-        let shape = self
-            .dims
-            .subroutine_param_shapes
-            .get(name)
-            .and_then(|shapes| shapes.get(position));
-        if let Some(shape) = shape {
-            // Passing an argument in any direction is an assignment-like
-            // context (IEEE 1800-2023 10.8).
-            check_unpacked_array_assignment(
-                arg,
-                shape,
-                || format!("argument {} of `{name}`", position + 1),
+            let query_root =
+                native_expressions::call_statement_root(root, discarded, self.tree.declarations())?;
+            if timescales::is_query(query_root, self.tree.declarations()) {
+                let value = timescales::query(query_root, self.tree)?;
+                return Ok(vec![Stmt::Eval(Expr::Literal(
+                    parameters::format_typed_parameter_literal(i128::from(value), 32, true),
+                ))]);
+            }
+            let signatures = if self.dims.subroutine_param_names.is_empty() {
+                self.state.subroutine_params
+            } else {
+                &self.dims.subroutine_param_names
+            };
+            if let Some(mut call) = native_expressions::call_statement(
+                root,
+                discarded,
+                self.tree.declarations(),
                 self.tree,
                 &self.dims,
-            )?;
+                signatures,
+            )? {
+                self.rename_expr(&mut call);
+                let Expr::Call {
+                    callee: Callee::Subroutine(name),
+                    args,
+                    arg_order,
+                } = call
+                else {
+                    unreachable!("ordinary native statement call")
+                };
+                return Ok(vec![Stmt::Call {
+                    name,
+                    args,
+                    arg_order,
+                }]);
+            }
         }
-        if let Some(pattern) =
-            patterns::pattern_expression(arg).filter(|pattern| pattern.nodes.0.is_none())
-            && let Some(shape) = shape
-        {
-            let mut lowered =
-                patterns::expr_from_pattern(&pattern.nodes.1, shape, self.tree, &self.dims)?;
-            self.rename_expr(&mut lowered);
-            return Ok(lowered);
-        }
-        self.expr(arg)
+        let root =
+            native_expressions::call_statement_root(root, discarded, self.tree.declarations())?;
+        let declarations = self.tree.declarations();
+        let (callee, arguments) = match &declarations.expression(root).kind {
+            celox_sv_syntax::ExprKind::Call {
+                expression,
+                arguments,
+            } => (*expression, arguments.as_slice()),
+            celox_sv_syntax::ExprKind::Name(_) => (root, &[][..]),
+            _ => return Err(unsupported("system task or function name")),
+        };
+        let celox_sv_syntax::ExprKind::Name(name) = &declarations.expression(callee).kind else {
+            return Err(unsupported("system task or function name"));
+        };
+        let presence = arguments
+            .iter()
+            .map(|arg| {
+                if arg.value.is_some() {
+                    system_functions::Arg::Given
+                } else {
+                    system_functions::Arg::Omitted
+                }
+            })
+            .collect::<Vec<_>>();
+        let args = (!arguments.iter().any(|arg| arg.name.is_some())).then_some(presence);
+        let name = name.spelling.as_str();
+        let task = match system_functions::check_call(
+            name,
+            args.as_deref(),
+            system_functions::CallSite::Statement(self.body),
+        )? {
+            system_functions::SystemCall::Function(_) => {
+                // A system function called as a statement is
+                // converted and checked like the same call in an
+                // expression, then its value is discarded. `$bits`
+                // and `$size` become constants and do not evaluate
+                // their operands (IEEE 1800-2023 20.6.2).
+                let mut value = native_expressions::bind_value(
+                    root,
+                    declarations,
+                    self.tree,
+                    &self.dims,
+                    None,
+                )?;
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
+            system_functions::SystemCall::Task(SystemTask::Printtimescale) => {
+                return Ok(vec![Stmt::SystemTask {
+                    task: SystemTask::Display(system_functions::Radix::Decimal),
+                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    args: vec![SystemTaskArg::Str(timescales::print_message(
+                        root,
+                        self.tree,
+                        system_functions::CallSite::Statement(self.body),
+                    )?)],
+                }]);
+            }
+            system_functions::SystemCall::Task(task) => task,
+        };
+        let args = arguments
+            .iter()
+            .map(|arg| {
+                let Some(id) = arg.value else {
+                    return Ok(SystemTaskArg::Empty);
+                };
+                if let celox_sv_syntax::ExprKind::Literal(text) = &declarations.expression(id).kind
+                    && let Some(text) = text
+                        .strip_prefix('"')
+                        .and_then(|text| text.strip_suffix('"'))
+                {
+                    return Ok(SystemTaskArg::Str(text.to_string()));
+                }
+                let mut value =
+                    native_expressions::bind_value(id, declarations, self.tree, &self.dims, None)?;
+                self.rename_expr(&mut value);
+                Ok(SystemTaskArg::Expr(value))
+            })
+            .collect::<Result<Vec<_>, AnalyzerError>>()?;
+        // Keep Veryl's assertion calls as calls: their message arguments
+        // execute even on success, unlike an SV assertion's fail action.
+        Ok(vec![Stmt::SystemTask {
+            task,
+            args,
+            site: source_span(declarations.expression(root).tokens, self.tree),
+        }])
     }
 
-    fn conditional(
+    fn fold_conditional(
         &mut self,
-        state: &AnalysisState,
-        stmt: &sv_parser::ConditionalStatement,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let condition = self.cond_predicate(&stmt.nodes.2.nodes.1)?;
-        let then_body = self.statement_or_null(&stmt.nodes.3)?;
-        let mut branches = vec![(condition, then_body)];
-        for (_, _, predicate, branch) in &stmt.nodes.4 {
-            let condition = self.cond_predicate(&predicate.nodes.1)?;
-            branches.push((condition, self.statement_or_null(branch)?));
-        }
-        let mut else_body = match &stmt.nodes.5 {
-            Some((_, branch)) => self.statement_or_null(branch)?,
-            None => Vec::new(),
-        };
+        branches: Vec<(Expr, Vec<Stmt>)>,
+        mut else_body: Vec<Stmt>,
+    ) -> Vec<Stmt> {
         for (condition, then_body) in branches.into_iter().rev() {
             // A generate index or parameter can make a procedural branch
             // unreachable. Remove its writes before checking process drivers.
@@ -1124,8 +879,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 // call's display, output or module-variable effects optional.
                 None
             } else {
-                expr_to_const(state, condition.clone()).and_then(|condition| {
-                    eval_ast_const_expr(state, &condition, &self.dims.const_env)
+                expr_to_const(&self.tree.state, condition.clone()).and_then(|condition| {
+                    eval_ast_const_expr(&self.tree.state, &condition, &self.dims.const_env)
                 })
             };
             if let Some(value) = constant {
@@ -1146,244 +901,100 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 else_body,
             }];
         }
-        Ok(else_body)
+        else_body
     }
 
-    fn cond_predicate(&self, predicate: &sv_parser::CondPredicate) -> Result<Expr, AnalyzerError> {
-        let mut condition = expr_from_cond_predicate(predicate, self.tree, &self.dims)?;
+    fn cond_predicate(
+        &self,
+        predicate: &celox_sv_syntax::Predicate,
+    ) -> Result<Expr, AnalyzerError> {
+        let [item] = predicate.items.as_slice() else {
+            return Err(unsupported("`&&&` in a condition"));
+        };
+        if item.pattern.is_some() {
+            return Err(unsupported("pattern matching in a condition"));
+        }
+        let condition = native_expressions::value(
+            item.expression,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        )?;
+        let mut condition = statements::simplify_condition(&self.tree.state, condition, &self.dims);
         self.rename_expr(&mut condition);
         Ok(condition)
     }
 
-    fn case(&mut self, stmt: &sv_parser::CaseStatement) -> Result<Vec<Stmt>, AnalyzerError> {
-        let mut items = Vec::new();
-        let mut default = None;
-        let (kind, selector) = match stmt {
-            sv_parser::CaseStatement::Normal(stmt) => {
-                let kind = match &stmt.nodes.1 {
-                    sv_parser::CaseKeyword::Case(_) => CaseKind::Exact,
-                    sv_parser::CaseKeyword::Casez(_) => CaseKind::Z,
-                    sv_parser::CaseKeyword::Casex(_) => CaseKind::X,
-                };
-                let selector = self.expr(&stmt.nodes.2.nodes.1.nodes.0)?;
-                for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
-                    match item {
-                        sv_parser::CaseItem::NonDefault(item) => {
-                            let labels = item
-                                .nodes
-                                .0
-                                .contents()
-                                .into_iter()
-                                .map(|label| self.expr(&label.nodes.0).map(CaseLabel::Value))
-                                .collect::<Result<_, _>>()?;
-                            let body = self.statement_or_null(&item.nodes.2)?;
-                            items.push(CaseItemBase { labels, body });
-                        }
-                        sv_parser::CaseItem::Default(item) => {
-                            default = Some(self.statement_or_null(&item.nodes.2)?);
-                        }
-                    }
-                }
-                (kind, selector)
-            }
-            sv_parser::CaseStatement::Inside(stmt) => {
-                let selector = self.expr(&stmt.nodes.2.nodes.1.nodes.0)?;
-                for item in std::iter::once(&stmt.nodes.4).chain(stmt.nodes.5.iter()) {
-                    match item {
-                        sv_parser::CaseInsideItem::NonDefault(item) => {
-                            let labels = item
-                                .nodes
-                                .0
-                                .nodes
-                                .0
-                                .contents()
-                                .into_iter()
-                                .map(|range| self.value_range(&range.nodes.0))
-                                .collect::<Result<_, _>>()?;
-                            let body = self.statement_or_null(&item.nodes.2)?;
-                            items.push(CaseItemBase { labels, body });
-                        }
-                        sv_parser::CaseInsideItem::Default(item) => {
-                            default = Some(self.statement_or_null(&item.nodes.2)?);
-                        }
-                    }
-                }
-                (CaseKind::Inside, selector)
-            }
-            sv_parser::CaseStatement::Matches(_) => {
-                return Err(unsupported("pattern-matching case statement"));
-            }
-        };
-        Ok(vec![Stmt::Case {
-            kind,
-            selector,
-            items,
-            default,
-        }])
-    }
-
-    fn value_range(&self, range: &sv_parser::ValueRange) -> Result<CaseLabel<Expr>, AnalyzerError> {
-        match range {
-            sv_parser::ValueRange::Expression(expr) => Ok(CaseLabel::Value(self.expr(expr)?)),
-            sv_parser::ValueRange::Binary(range) => {
-                let (low, _, high) = &range.nodes.0.nodes.1;
-                Ok(CaseLabel::Range {
-                    low: self.expr(low)?,
-                    high: self.expr(high)?,
-                })
-            }
-        }
-    }
-
-    fn loop_statement(
+    fn for_header(
         &mut self,
-        stmt: &sv_parser::LoopStatement,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        match stmt {
-            sv_parser::LoopStatement::For(stmt) => {
-                self.push_scope();
-                let result = self.for_loop(stmt);
-                self.pop_scope();
-                result
-            }
-            sv_parser::LoopStatement::While(stmt) => {
-                let condition = self.expr(&stmt.nodes.1.nodes.1)?;
-                let body = self.statement_or_null(&stmt.nodes.2)?;
-                Ok(vec![Stmt::Loop {
-                    kind: LoopKind::While,
-                    init: Vec::new(),
-                    condition: Some(condition),
-                    step: Vec::new(),
-                    body,
-                }])
-            }
-            sv_parser::LoopStatement::DoWhile(stmt) => {
-                let body = self.statement_or_null(&stmt.nodes.1)?;
-                let condition = self.expr(&stmt.nodes.3.nodes.1)?;
-                Ok(vec![Stmt::Loop {
-                    kind: LoopKind::DoWhile,
-                    init: Vec::new(),
-                    condition: Some(condition),
-                    step: Vec::new(),
-                    body,
-                }])
-            }
-            sv_parser::LoopStatement::Repeat(stmt) => {
-                let count = self.expr(&stmt.nodes.1.nodes.1)?;
-                let body = self.statement_or_null(&stmt.nodes.2)?;
-                Ok(vec![Stmt::Loop {
-                    kind: LoopKind::Repeat(count),
-                    init: Vec::new(),
-                    condition: None,
-                    step: Vec::new(),
-                    body,
-                }])
-            }
-            sv_parser::LoopStatement::Forever(stmt) => {
-                let body = self.statement_or_null(&stmt.nodes.1)?;
-                Ok(vec![Stmt::Loop {
-                    kind: LoopKind::Forever,
-                    init: Vec::new(),
-                    condition: None,
-                    step: Vec::new(),
-                    body,
-                }])
-            }
-            sv_parser::LoopStatement::Foreach(stmt) => {
-                self.push_scope();
-                let result = self.foreach_loop(stmt);
-                self.pop_scope();
-                result
-            }
-        }
-    }
-
-    fn for_loop(&mut self, stmt: &sv_parser::LoopStatementFor) -> Result<Vec<Stmt>, AnalyzerError> {
-        let (initialization, _, condition, _, step) = &stmt.nodes.1.nodes.1;
+        header: &celox_sv_syntax::ForHeader,
+    ) -> Result<(Vec<Stmt>, Option<Expr>, Vec<Stmt>), AnalyzerError> {
+        use celox_sv_syntax::{ForInitialization, ForStep};
         let mut init = Vec::new();
-        match initialization {
+        match &header.initialization {
             None => {}
-            Some(sv_parser::ForInitialization::Declaration(declaration)) => {
-                for variable in declaration.nodes.0.contents() {
-                    let r#type = function_type_from_ref_node(
-                        RefNode::DataType(&variable.nodes.1),
+            Some(ForInitialization::Declarations(groups)) => {
+                for group in groups {
+                    let ty = native_types::procedural_type(
+                        group.data_type,
+                        self.tree.declarations(),
                         self.tree,
                         &self.dims.const_env,
                         &self.type_aliases,
-                    )
+                    )?
                     .ok_or_else(|| unsupported("for-loop variable type"))?;
-                    for (identifier, _, value) in variable.nodes.2.contents() {
-                        let source =
-                            identifier_text(RefNode::VariableIdentifier(identifier), self.tree)
-                                .ok_or_else(|| unsupported("for-loop variable"))?;
-                        // The initializer is evaluated outside the new scope.
-                        let mut value_expr = {
-                            let target = LValue::Ident(source.clone());
-                            let mut scoped = self.dims.clone();
-                            scoped.insert(source.clone(), dimensions_from_type(&r#type));
-                            expr_from_expression_for_lvalue(value, &target, self.tree, &scoped)?
-                        };
-                        self.rename_expr(&mut value_expr);
-                        let name = self.declare(&source, r#type.clone());
+                    for variable in &group.variables {
+                        let source = instances::normalize_identifier(&variable.name.spelling);
+                        let target = LValue::Ident(source.clone());
+                        let mut scoped = self.dims.clone();
+                        scoped.insert(source.clone(), dimensions_from_type(&ty));
+                        let mut value = native_expressions::expression(
+                            variable.value,
+                            self.tree.declarations(),
+                            &target,
+                            self.tree,
+                            &scoped,
+                        )?;
+                        self.rename_expr(&mut value);
+                        let name = self.declare(&source, ty.clone());
                         init.push(Stmt::Local {
                             name,
-                            init: Some(value_expr),
+                            init: Some(value),
                         });
                     }
                 }
             }
-            Some(sv_parser::ForInitialization::ListOfVariableAssignments(assignments)) => {
-                for assignment in assignments.nodes.0.contents() {
-                    init.push(self.assignment(
-                        &assignment.nodes.0,
-                        "=",
-                        &assignment.nodes.2,
-                        false,
-                    )?);
+            Some(ForInitialization::Assignments(values)) => {
+                for value in values {
+                    init.push(self.assignment_value("=", false, (value.left, value.right))?);
                 }
             }
         }
-        let condition = condition.as_ref().map(|expr| self.expr(expr)).transpose()?;
+        let condition = header
+            .condition
+            .map(|id| self.native_value(id))
+            .transpose()?;
         let mut steps = Vec::new();
-        if let Some(step) = step {
-            for step in step.nodes.0.contents() {
-                steps.push(match step {
-                    sv_parser::ForStepAssignment::OperatorAssignment(assignment) => {
-                        let op = self
-                            .tree
-                            .get_str(&assignment.nodes.1.nodes.0.nodes.0)
-                            .unwrap_or("=");
-                        self.assignment(&assignment.nodes.0, op, &assignment.nodes.2, false)?
-                    }
-                    sv_parser::ForStepAssignment::IncOrDecExpression(expr) => {
-                        self.inc_or_dec(expr)?
-                    }
-                    sv_parser::ForStepAssignment::FunctionSubroutineCall(_) => {
+        for step in &header.steps {
+            steps.push(match step {
+                ForStep::Assignment { left, operator, right, .. } => self.assignment_value(operator, false, (*left, *right))?,
+                ForStep::Expression(id) => {
+                    if !matches!(&self.tree.declarations().expression(*id).kind,
+                        celox_sv_syntax::ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--")) {
                         return Err(unsupported("subroutine call as a for-loop step"));
                     }
-                });
-            }
+                    self.inc_or_dec(*id)?
+                }
+            });
         }
-        let body = self.statement_or_null(&stmt.nodes.2)?;
-        Ok(vec![Stmt::Loop {
-            kind: LoopKind::For,
-            init,
-            condition,
-            step: steps,
-            body,
-        }])
+        Ok((init, condition, steps))
     }
 
-    /// `foreach (a[i, j])` as nested `for` loops that step each named index
-    /// from the left bound of its dimension to the right bound (IEEE
-    /// 1800-2023 12.7.3).
-    fn foreach_loop(
+    fn foreach_bound_indices(
         &mut self,
-        stmt: &sv_parser::LoopStatementForeach,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let (array, variables) = &stmt.nodes.1.nodes.1;
-        let array = identifier_text(RefNode::PsOrHierarchicalArrayIdentifier(array), self.tree)
-            .ok_or_else(|| unsupported("foreach array"))?;
+        array: String,
+        variables: Vec<Option<String>>,
+    ) -> Result<Vec<(String, i128, i128)>, AnalyzerError> {
         let dimensions = self
             .dims
             .get(&array)
@@ -1401,7 +1012,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             )
             .collect();
         let mut loops = Vec::new();
-        for (position, variable) in variables.nodes.1.nodes.0.contents().into_iter().enumerate() {
+        for (position, variable) in variables.into_iter().enumerate() {
             let Some(variable) = variable else {
                 continue;
             };
@@ -1412,12 +1023,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
-            let source = identifier_text(RefNode::IndexVariableIdentifier(variable), self.tree)
-                .ok_or_else(|| unsupported("foreach index variable"))?;
-            let name = self.declare(&source, int_type());
+            let name = self.declare(&variable, int_type());
             loops.push((name, left, right));
         }
-        let mut body = self.statement(&stmt.nodes.2)?;
+        Ok(loops)
+    }
+    fn fold_foreach(loops: Vec<(String, i128, i128)>, mut body: Vec<Stmt>) -> Vec<Stmt> {
         for (name, left, right) in loops.into_iter().rev() {
             let index = Expr::Ident(name.clone());
             let (compare, step) = if left <= right {
@@ -1448,395 +1059,45 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 body,
             }];
         }
-        Ok(body)
-    }
-
-    /// An immediate assertion: the pass action runs when the condition is
-    /// true; otherwise the fail action, or `$error` without one (IEEE
-    /// 1800-2023 16.3).
-    fn assertion(
-        &mut self,
-        assertion: &sv_parser::ProceduralAssertionStatement,
-    ) -> Result<Vec<Stmt>, AnalyzerError> {
-        let sv_parser::ProceduralAssertionStatement::Immediate(assertion) = assertion else {
-            return Err(unsupported("concurrent assertion"));
-        };
-        let (keyword, expr, action) = match &**assertion {
-            sv_parser::ImmediateAssertionStatement::Simple(assertion) => match &**assertion {
-                sv_parser::SimpleImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
-                }
-                sv_parser::SimpleImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.1.nodes.1, Some(&stmt.nodes.2))
-                }
-                sv_parser::SimpleImmediateAssertionStatement::Cover(stmt) => {
-                    return Ok(vec![Stmt::If {
-                        condition: procedural_truth_condition(self.expr(&stmt.nodes.1.nodes.1)?),
-                        then_body: self.statement_or_null(&stmt.nodes.2)?,
-                        else_body: Vec::new(),
-                    }]);
-                }
-            },
-            sv_parser::ImmediateAssertionStatement::Deferred(assertion) => match &**assertion {
-                sv_parser::DeferredImmediateAssertionStatement::Assert(stmt) => {
-                    ("assert", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
-                }
-                sv_parser::DeferredImmediateAssertionStatement::Assume(stmt) => {
-                    ("assume", &stmt.nodes.2.nodes.1, Some(&stmt.nodes.3))
-                }
-                sv_parser::DeferredImmediateAssertionStatement::Cover(_) => {
-                    return Err(unsupported("deferred immediate cover"));
-                }
-            },
-        };
-        let condition = procedural_truth_condition(self.expr(expr)?);
-        let (pass, fail) = match action {
-            Some(sv_parser::ActionBlock::StatementOrNull(stmt)) => {
-                (self.statement_or_null(stmt)?, None)
-            }
-            Some(sv_parser::ActionBlock::Else(action)) => (
-                match &action.nodes.0 {
-                    Some(stmt) => self.statement(stmt)?,
-                    None => Vec::new(),
-                },
-                Some(self.statement_or_null(&action.nodes.2)?),
-            ),
-            None => (Vec::new(), None),
-        };
-        let fail = fail.unwrap_or_else(|| {
-            vec![Stmt::SystemTask {
-                task: SystemTask::Severity(system_functions::Severity::Error),
-                args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
-                site: None,
-            }]
-        });
-        Ok(vec![Stmt::If {
-            condition,
-            then_body: pass,
-            else_body: fail,
-        }])
+        body
     }
 }
 
-/// Whether a delay or event control is absent (sv-parser models the omitted
-/// control of `a = b` as an empty one).
-fn delay_or_event_control_is_empty(control: &sv_parser::DelayOrEventControl) -> bool {
-    RefNode::DelayOrEventControl(control)
-        .into_iter()
-        .all(|node| {
-            !matches!(
-                node,
-                RefNode::Delay3(_) | RefNode::DelayControl(_) | RefNode::EventControl(_)
-            )
-        })
+/// The default failure action of a native immediate assertion.
+fn assertion_failure(keyword: &str) -> Vec<Stmt> {
+    vec![Stmt::SystemTask {
+        task: SystemTask::Severity(system_functions::Severity::Error),
+        args: vec![SystemTaskArg::Str(format!("{keyword} failed"))],
+        site: None,
+    }]
 }
+
 /// The declared arguments of a task or function: `(name, direction, type,
 /// default)`. An argument without a direction takes the previous one's, and
 /// one without a type the previous one's type (IEEE 1800-2023 13.3).
-pub(super) fn subroutine_param_declarations<'t>(
-    list: Option<&'t sv_parser::TfPortList>,
-    items: &'t [sv_parser::TfItemDeclaration],
+pub(super) fn subroutine_param_declarations(
+    native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
-    const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
-) -> Result<
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<
     Vec<(
         String,
         ParamDirection,
         Type,
-        Option<&'t sv_parser::Expression>,
+        Option<celox_sv_syntax::ExprId>,
     )>,
-    AnalyzerError,
 > {
-    let direction_of = |direction: &sv_parser::TfPortDirection| match direction {
-        sv_parser::TfPortDirection::PortDirection(direction) => match &**direction {
-            sv_parser::PortDirection::Input(_) => Ok(ParamDirection::Input),
-            sv_parser::PortDirection::Output(_) => Ok(ParamDirection::Output),
-            sv_parser::PortDirection::Inout(_) => Ok(ParamDirection::Inout),
-            sv_parser::PortDirection::Ref(_) => Err(unsupported("ref subroutine argument")),
-        },
-        sv_parser::TfPortDirection::ConstRef(_) => Err(unsupported("ref subroutine argument")),
-    };
-    let unpacked = |dimensions: &[sv_parser::VariableDimension]| {
-        unpacked_ranges_from_variable_dimensions_with_env(dimensions, tree, const_env, type_aliases)
-    };
-    let mut params = Vec::new();
-    if let Some(list) = list {
-        let mut direction = ParamDirection::Input;
-        let mut previous_type: Option<Type> = None;
-        for port in list.nodes.0.contents() {
-            if let Some(declared) = &port.nodes.1 {
-                direction = direction_of(declared)?;
-            }
-            let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
-            let omitted_type = matches!(
-                port.nodes.3,
-                sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
-            ) && is_signed_from_ref_node(type_node.clone()).is_none()
-                && function_type_from_ref_node(type_node.clone(), tree, const_env, type_aliases)
-                    .is_none_or(|r#type| r#type.packed_ranges().is_empty());
-            let declared_type =
-                || function_type_from_ref_node(type_node.clone(), tree, const_env, type_aliases);
-            let (name, r#type, dimensions, default) = match port.nodes.4.as_ref() {
-                Some((identifier, dimensions, default)) => {
-                    let name = identifier_text(RefNode::PortIdentifier(identifier), tree)
-                        .ok_or_else(|| unsupported("subroutine argument"))?;
-                    let r#type = if port.nodes.1.is_none() && omitted_type {
-                        previous_type.clone().or_else(declared_type)
-                    } else {
-                        declared_type()
-                    };
-                    (
-                        name,
-                        r#type,
-                        dimensions.as_slice(),
-                        default.as_ref().map(|(_, expr)| expr),
-                    )
-                }
-                None => {
-                    // sv-parser reads the `b` of `input a, b` as a type name.
-                    if type_alias_from_data_type_or_implicit(&port.nodes.3, tree, type_aliases)
-                        .is_some()
-                    {
-                        return Err(unsupported("subroutine argument without a name"));
-                    }
-                    // An empty `()` list parses as one item without a name.
-                    let Some(name) = identifier_text(type_node, tree) else {
-                        continue;
-                    };
-                    (name, previous_type.clone(), &[][..], None)
-                }
-            };
-            let r#type = match r#type {
-                Some(r#type) => r#type,
-                // A data type that is not integral, such as `real`.
-                None if port.nodes.4.is_some()
-                    && matches!(port.nodes.3, sv_parser::DataTypeOrImplicit::DataType(_)) =>
-                {
-                    return Err(unsupported("unsupported function formal data type"));
-                }
-                None => Type::new(TypeKind::Logic),
-            };
-            previous_type = Some(r#type.clone());
-            let r#type = type_with_unpacked_ranges(r#type, unpacked(dimensions)?);
-            params.push((name, direction, r#type, default));
-        }
-    }
-    for item in items {
-        let sv_parser::TfItemDeclaration::TfPortDeclaration(declaration) = item else {
-            continue;
-        };
-        let direction = direction_of(&declaration.nodes.1)?;
-        let r#type = match function_type_from_ref_node(
-            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
-            tree,
-            const_env,
-            type_aliases,
-        ) {
-            Some(r#type) => r#type,
-            None if matches!(
-                declaration.nodes.3,
-                sv_parser::DataTypeOrImplicit::DataType(_)
-            ) =>
-            {
-                return Err(unsupported("unsupported function formal data type"));
-            }
-            None => Type::new(TypeKind::Logic),
-        };
-        for (identifier, dimensions, default) in declaration.nodes.4.nodes.0.contents() {
-            let name = identifier_text(RefNode::PortIdentifier(identifier), tree)
-                .ok_or_else(|| unsupported("subroutine argument"))?;
-            params.push((
-                name,
-                direction,
-                type_with_unpacked_ranges(r#type.clone(), unpacked(dimensions)?),
-                default.as_ref().map(|(_, expr)| expr),
-            ));
-        }
-    }
-    Ok(params)
-}
-
-/// The syntax of one function or task body.
-struct SubroutineSyntax<'t> {
-    name: String,
-    lifetime: Option<&'t sv_parser::Lifetime>,
-    is_task: bool,
-    return_type: Option<&'t sv_parser::FunctionDataTypeOrImplicit>,
-    ports: Option<&'t sv_parser::TfPortList>,
-    items: &'t [sv_parser::TfItemDeclaration],
-    block_items: Vec<&'t sv_parser::BlockItemDeclaration>,
-    statements: Vec<&'t sv_parser::Statement>,
-}
-
-fn function_syntax<'t>(
-    declaration: &'t sv_parser::FunctionDeclaration,
-    tree: &SyntaxTree,
-) -> Option<SubroutineSyntax<'t>> {
-    let statements = |list: &'t [sv_parser::FunctionStatementOrNull]| {
-        list.iter()
-            .filter_map(|stmt| match stmt {
-                sv_parser::FunctionStatementOrNull::Statement(stmt) => Some(&stmt.nodes.0),
-                sv_parser::FunctionStatementOrNull::Attribute(_) => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    Some(match &declaration.nodes.2 {
-        sv_parser::FunctionBodyDeclaration::WithPort(body) => SubroutineSyntax {
-            name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
-            is_task: false,
-            return_type: Some(&body.nodes.0),
-            ports: body.nodes.3.nodes.1.as_ref(),
-            items: &[],
-            block_items: body.nodes.5.iter().collect(),
-            statements: statements(&body.nodes.6),
-        },
-        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
-            name: identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
-            is_task: false,
-            return_type: Some(&body.nodes.0),
-            ports: None,
-            items: &body.nodes.4,
-            block_items: body
-                .nodes
-                .4
-                .iter()
-                .filter_map(|item| match item {
-                    sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
-                    sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
-                })
-                .collect(),
-            statements: statements(&body.nodes.5),
-        },
-    })
-}
-
-fn task_syntax<'t>(
-    declaration: &'t sv_parser::TaskDeclaration,
-    tree: &SyntaxTree,
-) -> Option<SubroutineSyntax<'t>> {
-    let statements = |list: &'t [sv_parser::StatementOrNull]| {
-        list.iter()
-            .filter_map(|stmt| match stmt {
-                sv_parser::StatementOrNull::Statement(stmt) => Some(&**stmt),
-                sv_parser::StatementOrNull::Attribute(_) => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    Some(match &declaration.nodes.2 {
-        sv_parser::TaskBodyDeclaration::WithPort(body) => SubroutineSyntax {
-            name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
-            is_task: true,
-            return_type: None,
-            ports: body.nodes.2.nodes.1.as_ref(),
-            items: &[],
-            block_items: body.nodes.4.iter().collect(),
-            statements: statements(&body.nodes.5),
-        },
-        sv_parser::TaskBodyDeclaration::WithoutPort(body) => SubroutineSyntax {
-            name: identifier_text(RefNode::TaskIdentifier(&body.nodes.1), tree)?,
-            lifetime: declaration.nodes.1.as_ref(),
-            is_task: true,
-            return_type: None,
-            ports: None,
-            items: &body.nodes.3,
-            block_items: body
-                .nodes
-                .3
-                .iter()
-                .filter_map(|item| match item {
-                    sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
-                    sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
-                })
-                .collect(),
-            statements: statements(&body.nodes.4),
-        },
-    })
-}
-
-/// Declared shape of formals and body locals, before statement lowering.
-pub(super) fn subroutine_declared_dimensions(
-    node: RefNode<'_>,
-    tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
-    target_span: (usize, usize),
-) -> Option<VariablePackedDimensions> {
-    let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
-        _ => None,
-    }?;
-    let params =
-        subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
-    // The implicit result is a body variable. Discovering it while a query
-    // is still resolving the return declaration would rebuild that same type.
-    let in_body = syntax
-        .block_items
-        .iter()
-        .map(|item| RefNode::BlockItemDeclaration(item))
-        .chain(
-            syntax
-                .statements
-                .iter()
-                .map(|stmt| RefNode::Statement(stmt)),
-        )
-        .any(|node| {
-            dimensions::ref_node_source_span(node)
-                .is_some_and(|(start, end)| start <= target_span.0 && target_span.1 <= end)
-        });
-    let mut dimensions: VariablePackedDimensions = params
-        .into_iter()
-        .map(|(name, _, ty, _)| (name, dimensions_from_type(&ty)))
-        .collect();
-    dimensions.extend(function_local_packed_dimensions_from_block_item_iter(
-        syntax.block_items,
+    native_types::subroutine_formals(
+        native,
         tree,
-        env,
-        aliases,
-    )?);
-    if in_body && let RefNode::FunctionDeclaration(declaration) = node {
-        dimensions.extend(functions::function_result_dimensions(
-            declaration,
-            tree,
-            env,
-            aliases,
-        ));
-    }
-    Some(dimensions)
-}
-
-/// Formal shapes are needed to type assignment-pattern call arguments,
-/// even when a type query deliberately leaves the subroutine body unexpanded.
-pub(super) fn subroutine_declared_parameter_shapes(
-    node: RefNode<'_>,
-    tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
-) -> Option<(String, Vec<VariableDimensions>)> {
-    let syntax = match node {
-        RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-        RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
-        _ => None,
-    }?;
-    let params =
-        subroutine_param_declarations(syntax.ports, syntax.items, tree, env, aliases).ok()?;
-    Some((
-        syntax.name,
-        params
-            .into_iter()
-            .map(|(_, _, ty, _)| dimensions_from_type(&ty))
-            .collect(),
-    ))
+        &PackedDimensions::new(HashMap::default(), env, aliases),
+    )
 }
 
 /// The argument names of every function and task in the active generate
 /// items, in declaration order, keyed by their (qualified) names.
 pub(super) fn subroutine_argument_names(
-    node: RefNode<'_>,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
@@ -1851,26 +1112,18 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
-    for item in generate::subroutine_items(node, tree, const_env, type_aliases)? {
+    for item in generate::subroutine_items(tree, const_env, type_aliases)? {
         let _interface_scope = item.interface_scope();
-        for child in item.node.node() {
-            let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
-                _ => continue,
-            };
-            let Some(syntax) = syntax else {
-                continue;
-            };
+        for native_id in subroutine_owners::item(item.id, tree)? {
+            let native = tree.declarations().subroutine(native_id);
             let _constant_functions = item.enter();
             let params = subroutine_param_declarations(
-                syntax.ports,
-                syntax.items,
+                native,
                 tree,
                 &item.env,
                 &item.type_aliases(type_aliases),
             )?;
-            let qualified = item.name(&syntax.name);
+            let qualified = item.name(&instances::normalize_identifier(&native.name.spelling));
             let param_shapes: Vec<VariableDimensions> = params
                 .iter()
                 .map(|(_, _, r#type, _)| {
@@ -1890,16 +1143,14 @@ pub(super) fn subroutine_argument_names(
 
 /// Every function and task of the active generate items, with statement
 /// bodies.
-pub(super) fn subroutines_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn subroutines_from_scope(
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
-    subroutines_from_module_node_with(
-        node,
+    subroutines_from_scope_with(
         tree,
         const_env,
         packed_dimensions,
@@ -1912,8 +1163,7 @@ pub(super) fn subroutines_from_module_node(
 /// The subroutines of a module. With `rejected`, a subroutine that cannot be
 /// lowered is left out and the reason recorded under its name, instead of
 /// failing.
-pub(super) fn subroutines_from_module_node_with(
-    node: RefNode<'_>,
+pub(super) fn subroutines_from_scope_with(
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -1922,7 +1172,6 @@ pub(super) fn subroutines_from_module_node_with(
     rejected: Option<&mut HashMap<String, AnalyzerError>>,
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     subroutines_with_symbolic_parameters(
-        node,
         tree,
         const_env,
         packed_dimensions,
@@ -1935,7 +1184,6 @@ pub(super) fn subroutines_from_module_node_with(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subroutines_with_symbolic_parameters(
-    node: RefNode<'_>,
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -1946,22 +1194,14 @@ pub(super) fn subroutines_with_symbolic_parameters(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let module_type_aliases = &packed_dimensions.type_aliases;
     let mut subroutines = Vec::new();
-    let active = generate::subroutine_items(node, tree, const_env, module_type_aliases)?;
+    let active = generate::subroutine_items(tree, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
         let _interface_scope = item.interface_scope();
-        if item.is_parameter_declaration() {
+        if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
-        for child in item.node.node() {
-            let syntax = match child {
-                RefNode::FunctionDeclaration(declaration) => function_syntax(declaration, tree),
-                RefNode::TaskDeclaration(declaration) => task_syntax(declaration, tree),
-                _ => continue,
-            };
-            let Some(syntax) = syntax else {
-                continue;
-            };
+        for native_id in subroutine_owners::item(item.id, tree)? {
             let (item_dimensions, literals) = views.get(item);
             let item_dimensions = if symbolic_parameters.is_empty() {
                 std::borrow::Cow::Borrowed(item_dimensions)
@@ -1989,144 +1229,19 @@ pub(super) fn subroutines_with_symbolic_parameters(
 
             let _constant_functions = item.enter();
             let type_aliases = item.type_aliases(module_type_aliases);
-            let name = syntax.name.clone();
-            let lowered = (|| -> Result<Subroutine, AnalyzerError> {
-                let params = subroutine_param_declarations(
-                    syntax.ports,
-                    syntax.items,
-                    tree,
-                    &declaration_env,
-                    &type_aliases,
-                )?;
-                let return_type = match syntax.return_type {
-                    Some(node) => function_type_from_ref_node(
-                        RefNode::FunctionDataTypeOrImplicit(node),
-                        tree,
-                        &declaration_env,
-                        &type_aliases,
-                    )
-                    .or_else(|| match node {
-                        // `function f` without a type returns one bit.
-                        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(_) => {
-                            Some(Type::new(TypeKind::Logic))
-                        }
-                        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(_) => None,
-                    }),
-                    None => None,
-                };
-                let mut builder = BodyBuilder::new(
-                    tree,
-                    item_dimensions,
-                    state,
-                    system_functions::Body::Subroutine,
-                );
-                builder.automatic = match syntax.lifetime {
-                    Some(sv_parser::Lifetime::Automatic(_)) => true,
-                    Some(sv_parser::Lifetime::Static(_)) => false,
-                    None => builder.automatic,
-                };
-                let first_static = builder.state.statics.len();
-                builder.push_scope();
-                // Defaults bind in the enclosing declaration scope, before
-                // any formal can shadow those names (IEEE 1800-2023 13.5.3).
-                let defaults = params
-                    .iter()
-                    .map(|(_, _, _, default)| default.map(|expr| builder.expr(expr)).transpose())
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut lowered_params = Vec::new();
-                for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
-                    let name = builder.declare(&source, r#type.clone());
-                    lowered_params.push(SubroutineParam {
-                        name,
-                        source_name: source,
-                        direction,
-                        r#type: crate::ir::Type::from_ast(
-                            scoped_type(r#type, &declaration_env),
-                            &const_functions::Environment {
-                                constants: &*item.env,
-                                functions: &tree.state.const_functions,
-                            },
-                        ),
-                        default,
-                    });
-                }
-                let return_var = return_type
-                    .as_ref()
-                    .map(|r#type| builder.declare(&syntax.name, r#type.clone()));
-                let mut body = Vec::new();
-                for block_item in &syntax.block_items {
-                    body.extend(builder.block_item_declaration(block_item)?);
-                }
-                for stmt in &syntax.statements {
-                    body.extend(builder.statement(stmt)?);
-                }
-                builder.pop_scope();
-                let statics: HashSet<String> = builder
-                    .state
-                    .statics
-                    .split_off(first_static)
-                    .into_iter()
-                    .map(|(name, _)| name)
-                    .collect();
-                if return_var.is_some() {
-                    let mut expressionless = false;
-                    for stmt in &body {
-                        stmt.walk(&mut |stmt| expressionless |= matches!(stmt, Stmt::Return(None)));
-                    }
-                    if expressionless {
-                        return Err(unsupported("expressionless function return"));
-                    }
-                }
-                let mut subroutine = Subroutine {
-                    name: item.name(&syntax.name),
-                    is_task: syntax.is_task,
-                    return_type: return_type.map(|r#type| {
-                        crate::ir::Type::from_ast(
-                            scoped_type(r#type, &declaration_env),
-                            &const_functions::Environment {
-                                constants: &*item.env,
-                                functions: &tree.state.const_functions,
-                            },
-                        )
-                    }),
-                    params: lowered_params,
-                    return_var,
-                    body,
-                    sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
-                };
-                for stmt in subroutine
-                    .body
-                    .iter_mut()
-                    .chain(&mut subroutine.sensitivity_body)
-                {
-                    qualify_stmt(item, stmt);
-                    substitute_stmt_constants(&tree.state, stmt, &declaration_env, literals);
-                }
-                for param in &mut subroutine.params {
-                    if let Some(default) = &mut param.default {
-                        item.expr(default);
-                        *default = substitute_expr_constants_with_parameter_literals(
-                            &tree.state,
-                            default.clone(),
-                            &item.env,
-                            literals,
-                        );
-                    }
-                }
-                lifetimes::check_subroutine_statics(
-                    &tree.state,
-                    &subroutine,
-                    &statics,
-                    builder.state.subroutine_directions,
-                )?;
-                if !builder.automatic {
-                    lifetimes::check_static_result(
-                        &subroutine,
-                        builder.state.subroutine_directions,
-                    )?;
-                }
-                Ok(subroutine)
-            })();
+            let name = instances::normalize_identifier(
+                &tree.declarations().subroutine(native_id).name.spelling,
+            );
+            let lowered = lower_subroutine(
+                native_id,
+                tree,
+                &declaration_env,
+                &type_aliases,
+                item_dimensions,
+                literals,
+                state,
+                item,
+            );
             let subroutine = match (lowered, rejected.as_deref_mut()) {
                 (Ok(subroutine), _) => subroutine,
                 (Err(error), Some(rejected)) => {
@@ -2150,8 +1265,173 @@ pub(super) fn subroutines_with_symbolic_parameters(
     Ok(subroutines)
 }
 
+/// Shared native subroutine lowering for execution and expression-form plans.
+/// Native ownership/control is identical in both consumers; typed headers remain
+/// borrowed operands until their independent type kernels are migrated.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lower_subroutine(
+    native_id: celox_sv_syntax::SubroutineId,
+    tree: &AnalysisContext<'_>,
+    declaration_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    item_dimensions: &PackedDimensions,
+    literals: &HashMap<String, Expr>,
+    state: &mut BodyState<'_>,
+    item: &generate::Item,
+) -> Converted<Subroutine> {
+    let native = tree.declarations().subroutine(native_id);
+    let name = instances::normalize_identifier(&native.name.spelling);
+    let params = subroutine_param_declarations(native, tree, declaration_env, type_aliases)?;
+    let mut formal_names = HashSet::default();
+    if let Some((name, ..)) = params
+        .iter()
+        .find(|(name, ..)| !formal_names.insert(name.as_str()))
+    {
+        return Err(unsupported(format!("duplicate function argument `{name}`")));
+    }
+    let return_type = match native.return_type {
+        Some(id)
+            if matches!(
+                tree.declarations().data_type(id).kind,
+                celox_sv_syntax::DataTypeKind::Implicit
+            ) =>
+        {
+            Some(native_types::implicit_subroutine_type(
+                id,
+                tree,
+                declaration_env,
+                type_aliases,
+            )?)
+        }
+        Some(id) => native_types::procedural_type(
+            id,
+            tree.declarations(),
+            tree,
+            declaration_env,
+            type_aliases,
+        )?,
+        None => None,
+    };
+    let mut builder = BodyBuilder::new(
+        tree,
+        item_dimensions,
+        state,
+        system_functions::Body::Subroutine,
+    );
+    builder.automatic = match native.lifetime.as_deref() {
+        Some("automatic") => true,
+        Some("static") => false,
+        Some(_) => {
+            return Err(AnalyzerError::Parse(
+                "unknown native subroutine lifetime".into(),
+            ));
+        }
+        None => builder.automatic,
+    };
+    let first_static = builder.state.statics.len();
+    builder.push_scope();
+    // Defaults bind in the enclosing declaration scope, before
+    // any formal can shadow those names (IEEE 1800-2023 13.5.3).
+    let defaults = params
+        .iter()
+        .map(|(_, _, _, default)| {
+            default
+                .map(|root| {
+                    let mut value = native_expressions::bind(root, tree, &builder.dims)?;
+                    builder.rename_expr(&mut value);
+                    Ok(value)
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut lowered_params = Vec::new();
+    for ((source, direction, r#type, _), default) in params.into_iter().zip(defaults) {
+        let name = builder.declare(&source, r#type.clone());
+        lowered_params.push(SubroutineParam {
+            name,
+            source_name: source,
+            direction,
+            r#type: crate::ir::Type::from_ast(
+                scoped_type(r#type, declaration_env),
+                &const_functions::Environment {
+                    constants: &*item.env,
+                    functions: &tree.state.const_functions,
+                },
+            ),
+            default,
+        });
+    }
+    let return_var = return_type
+        .as_ref()
+        .map(|r#type| builder.declare(&name, r#type.clone()));
+    let body = builder.native_body(&native.items, &native.authored_statements)?;
+    builder.pop_scope();
+    let statics: HashSet<String> = builder
+        .state
+        .statics
+        .split_off(first_static)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    if return_var.is_some() {
+        let mut expressionless = false;
+        for stmt in &body {
+            stmt.walk(&mut |stmt| expressionless |= matches!(stmt, Stmt::Return(None)));
+        }
+        if expressionless {
+            return Err(unsupported("expressionless function return"));
+        }
+    }
+    let mut subroutine = Subroutine {
+        name: item.name(&name),
+        is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
+        return_type: return_type.map(|r#type| {
+            crate::ir::Type::from_ast(
+                scoped_type(r#type, declaration_env),
+                &const_functions::Environment {
+                    constants: &*item.env,
+                    functions: &tree.state.const_functions,
+                },
+            )
+        }),
+        params: lowered_params,
+        return_var,
+        body,
+        sensitivity_body: std::mem::take(&mut builder.sensitivity_body),
+    };
+    for stmt in subroutine
+        .body
+        .iter_mut()
+        .chain(&mut subroutine.sensitivity_body)
+    {
+        qualify_stmt(item, stmt);
+        substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+    }
+    for param in &mut subroutine.params {
+        if let Some(default) = &mut param.default {
+            item.expr(default);
+            *default = substitute_expr_constants_with_parameter_literals(
+                &tree.state,
+                default.clone(),
+                &item.env,
+                literals,
+            );
+        }
+    }
+    lifetimes::check_subroutine_statics(
+        &tree.state,
+        &subroutine,
+        &statics,
+        builder.state.subroutine_directions,
+    )?;
+    if !builder.automatic {
+        lifetimes::check_static_result(&subroutine, builder.state.subroutine_directions)?;
+    }
+    Ok(subroutine)
+}
+
 /// Qualify the module-scope names of a statement for its generate scope.
-pub(super) fn qualify_stmt(item: &generate::Item<'_>, stmt: &mut Stmt) {
+pub(super) fn qualify_stmt(item: &generate::Item, stmt: &mut Stmt) {
     stmt.visit_mut(
         &mut |expr| item.expr(expr),
         &mut |lvalue| item.lvalue(lvalue),
@@ -2187,8 +1467,7 @@ pub(super) fn substitute_stmt_constants(
 }
 
 /// Every `initial` process of the active generate items.
-pub(super) fn initial_processes_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn initial_processes_from_scope(
     tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -2200,62 +1479,60 @@ pub(super) fn initial_processes_from_module_node(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
-    let active = generate::items(node, tree, const_env, &type_aliases)?;
+    let active = generate::items(tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
         let _interface_scope = item.interface_scope();
-        if item.is_parameter_declaration() {
+        if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
         let _constant_functions = item.enter();
         let mut assignments = Vec::new();
-        match item.node.declaration() {
-            Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) => {
-                if let sv_parser::DataDeclaration::Variable(variable) = &**data {
-                    for assignment in variable.nodes.4.nodes.0.contents() {
-                        if let sv_parser::VariableDeclAssignment::Variable(assignment) = assignment
-                            && let Some((_, expr)) = &assignment.nodes.2
-                        {
-                            assignments
-                                .push((RefNode::VariableIdentifier(&assignment.nodes.0), expr));
-                        }
-                    }
+        if let celox_sv_syntax::BodyItemKind::Data(id) = tree.declarations().body_item(item.id).kind
+        {
+            let declaration = match tree.declarations().data_declaration(id) {
+                celox_sv_syntax::DataDeclaration::Variables(value)
+                | celox_sv_syntax::DataDeclaration::Constructed(value) => value,
+                celox_sv_syntax::DataDeclaration::Unconverted(_) => {
+                    return Err(unsupported("opaque declaration initializer"));
+                }
+            };
+            for variable in declaration
+                .variables
+                .iter()
+                .filter(|variable| native_types::ordinary_variable(variable, tree.declarations()))
+            {
+                if let Some(value) = variable.value {
+                    assignments.push((
+                        instances::normalize_identifier(&variable.name.spelling),
+                        value,
+                    ));
                 }
             }
-            Some(sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net)) => {
-                // sv-parser also parses `t n = expr` this way when `t` is
-                // a typedef. It declares a variable (6.8), so its assignment
-                // is an initialization (10.5), rather than a net driver.
-                if let sv_parser::NetDeclaration::NetTypeIdentifier(net) = &**net
-                    && identifier_text(RefNode::NetTypeIdentifier(&net.nodes.0), tree)
-                        .is_some_and(|name| views.dimensions(item).type_aliases.contains_key(&name))
-                {
-                    for assignment in net.nodes.2.nodes.0.contents() {
-                        if let Some((_, expr)) = &assignment.nodes.2 {
-                            assignments.push((RefNode::NetIdentifier(&assignment.nodes.0), expr));
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
-            for (identifier, expr) in assignments {
-                let name = identifier_text(identifier, tree)
-                    .ok_or_else(|| unsupported("variable declaration initializer"))?;
+            for (name, native) in assignments {
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
-                    check_unpacked_array_assignment(
-                        expr,
+                    let id = native;
+                    array_compatibility::check_native_unpacked_assignment(
+                        &tree.state,
+                        id,
+                        tree.declarations(),
                         &target,
                         || format!("initializer of `{name}`"),
-                        tree,
                         item_dimensions,
                     )?;
                 }
                 let lhs = LValue::Ident(name);
-                let rhs = expr_from_expression_for_lvalue(expr, &lhs, tree, item_dimensions)?;
+                let rhs = native_expressions::expression(
+                    native,
+                    tree.declarations(),
+                    &lhs,
+                    tree,
+                    item_dimensions,
+                )?;
                 body.push(Stmt::Assign {
                     lhs,
                     rhs,
@@ -2279,18 +1556,16 @@ pub(super) fn initial_processes_from_module_node(
             }
             continue;
         }
-        let ScopeItem::Module(sv_parser::ModuleOrGenerateItem::ModuleItem(module_item)) = item.node
-        else {
+        let Some(procedure) = item.procedure(tree.declarations())? else {
             continue;
         };
-        let (statement, repeats) = match &module_item.nodes.1 {
-            sv_parser::ModuleCommonItem::InitialConstruct(initial) => {
-                (Some(&initial.nodes.1), false)
-            }
-            sv_parser::ModuleCommonItem::AlwaysConstruct(always)
-                if validation::always_kind(always) == validation::AlwaysKind::Process =>
+        let repeats = match procedure.kind {
+            celox_sv_syntax::ProcedureKind::Initial => false,
+            celox_sv_syntax::ProcedureKind::Always
+                if validation::always_kind(procedure, tree.declarations())?
+                    == validation::AlwaysKind::Process =>
             {
-                (None, true)
+                true
             }
             _ => continue,
         };
@@ -2303,19 +1578,17 @@ pub(super) fn initial_processes_from_module_node(
             state,
             system_functions::Body::Initial,
         );
-        let mut body = match (statement, &module_item.nodes.1) {
-            (Some(statement), _) => builder.statement_or_null(statement)?,
-            (None, sv_parser::ModuleCommonItem::AlwaysConstruct(always)) => {
-                // `always statement` repeats the statement forever.
-                vec![Stmt::Loop {
-                    kind: LoopKind::Forever,
-                    init: Vec::new(),
-                    condition: None,
-                    step: Vec::new(),
-                    body: builder.statement(&always.nodes.1)?,
-                }]
-            }
-            _ => unreachable!("only initial and always constructs are collected"),
+        let body = builder.native_body(&[procedure.body], &procedure.authored_statements)?;
+        let mut body = if repeats {
+            vec![Stmt::Loop {
+                kind: LoopKind::Forever,
+                init: Vec::new(),
+                condition: None,
+                step: Vec::new(),
+                body,
+            }]
+        } else {
+            body
         };
         for stmt in &mut body {
             substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
@@ -2352,45 +1625,34 @@ pub(super) fn written_names<'s>(stmts: impl IntoIterator<Item = &'s Stmt>) -> Ha
     names
 }
 
-/// The span of `node` in the source text before preprocessing, if all of it
-/// comes from one file.
+/// Original invocation span of a native token range, when it belongs to one file.
 pub(super) fn source_span(
-    node: RefNode<'_>,
+    tokens: celox_sv_syntax::TokenRange,
     tree: &SyntaxTree,
 ) -> Option<crate::procedural::SourceSpan> {
-    let origin = |offset| {
-        tree.get_origin(&Locate {
-            offset,
-            line: 0,
-            len: 1,
-        })
-    };
-    let mut span: Option<crate::procedural::SourceSpan> = None;
-    for child in node {
-        let RefNode::Locate(locate) = child else {
-            continue;
-        };
-        if locate.len == 0 {
-            continue;
+    let native = tree.declarations();
+    let mut result: Option<crate::procedural::SourceSpan> = None;
+    for token in native
+        .tokens
+        .get(tokens.start..tokens.end)?
+        .iter()
+        .filter(|token| !token.is_trivia())
+    {
+        let span = native.sources.invocation(token.origin);
+        let path = native.sources.file(span.file).path.clone();
+        if let Some(current) = &mut result {
+            if current.path != path {
+                return None;
+            }
+            current.start = current.start.min(span.start);
+            current.end = current.end.max(span.end);
+        } else {
+            result = Some(crate::procedural::SourceSpan {
+                path,
+                start: span.start,
+                end: span.end,
+            });
         }
-        let (path, start) = origin(locate.offset)?;
-        let (last_path, last) = origin(locate.offset + locate.len - 1)?;
-        if last_path != path || span.as_ref().is_some_and(|span| span.path != *path) {
-            return None;
-        }
-        let end = last + 1;
-        span = Some(match span {
-            None => crate::procedural::SourceSpan {
-                path: path.clone(),
-                start,
-                end,
-            },
-            Some(span) => crate::procedural::SourceSpan {
-                start: span.start.min(start),
-                end: span.end.max(end),
-                ..span
-            },
-        });
     }
-    span
+    result
 }
