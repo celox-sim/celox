@@ -70,15 +70,17 @@ files and dependencies. For a standalone source outside a Veryl project, it
 compiles that file alone. The output defaults to `celox.out` when `-o` is
 omitted.
 
-For standalone SystemVerilog, pass a `.sv` file:
+For SystemVerilog, pass one or more `.sv` files in compilation order:
 
 ```sh
-target/release/celox vpi build src/Top.sv --top Top -o build/top-sim
+target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
 ```
 
-This compiles only the specified file, including any child modules defined in
-it, using Celox's supported SystemVerilog subset. It does not discover a
-`Veryl.toml` project or additional SystemVerilog source files.
+This compiles the specified files using Celox's supported SystemVerilog subset.
+List package definitions before their consumers. It does not discover a
+`Veryl.toml` project or additional SystemVerilog source files. Multiple inputs
+must all be `.sv` files; for Veryl, pass one project entry file. The
+`celox-vpi-compile` binary accepts the same source list.
 
 ## Run cocotb
 

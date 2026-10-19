@@ -3,14 +3,14 @@
 use std::{env, io::Write, path::PathBuf, process::ExitCode};
 
 struct Arguments {
-    source: PathBuf,
+    sources: Vec<PathBuf>,
     top: String,
     runtime: PathBuf,
     output: PathBuf,
 }
 
 fn arguments() -> Result<Arguments, String> {
-    let mut source = None;
+    let mut sources = Vec::new();
     let mut top = None;
     let mut runtime = None;
     let mut output = None;
@@ -21,11 +21,10 @@ fn arguments() -> Result<Arguments, String> {
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))?,
             _ if argument.starts_with('-') => return Err(format!("unknown option `{argument}`")),
-            _ if source.is_none() => {
-                source = Some(PathBuf::from(argument));
+            _ => {
+                sources.push(PathBuf::from(argument));
                 continue;
             }
-            _ => return Err(format!("unexpected argument `{argument}`")),
         };
         match argument.as_str() {
             "--top" => top = Some(value),
@@ -34,8 +33,11 @@ fn arguments() -> Result<Arguments, String> {
             _ => unreachable!(),
         }
     }
+    if sources.is_empty() {
+        return Err("missing Veryl or SystemVerilog source path".to_string());
+    }
     Ok(Arguments {
-        source: source.ok_or_else(|| "missing Veryl or SystemVerilog source path".to_string())?,
+        sources,
         top: top.ok_or_else(|| "missing --top".to_string())?,
         runtime: runtime.ok_or_else(|| "missing --runtime".to_string())?,
         output: output.ok_or_else(|| "missing --output".to_string())?,
@@ -44,7 +46,12 @@ fn arguments() -> Result<Arguments, String> {
 
 fn run() -> Result<(), String> {
     let arguments = arguments()?;
-    celox_vpi::driver::compile_native_image(&arguments.source, &arguments.top)?
+    let sources = arguments
+        .sources
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    celox_vpi::driver::compile_native_sources(&sources, &arguments.top)?
         .write_attached_runtime(&arguments.runtime, &arguments.output)
         .map_err(|error| format!("failed to write {}: {error}", arguments.output.display()))
 }
@@ -55,7 +62,7 @@ fn main() -> ExitCode {
         Err(error) => {
             let _ = writeln!(
                 std::io::stderr(),
-                "celox-vpi-compile: {error}\nusage: celox-vpi-compile SOURCE --top TOP --runtime RUNTIME --output OUTPUT"
+                "celox-vpi-compile: {error}\nusage: celox-vpi-compile SOURCE... --top TOP --runtime RUNTIME --output OUTPUT"
             );
             ExitCode::FAILURE
         }
