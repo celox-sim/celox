@@ -6,7 +6,7 @@ use super::*;
 /// the operand. Preserve array shape before expression lowering flattens it.
 pub(super) fn dimensions_system_function_call_value(
     call: &sv_parser::SystemTfCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -63,8 +63,8 @@ pub(super) fn dimensions_system_function_call_value(
     }
 }
 
-fn extend_interface_dimensions(dimensions: &mut PackedDimensions) {
-    let imported = scope::imported();
+fn extend_interface_dimensions(state: &AnalysisState, dimensions: &mut PackedDimensions) {
+    let imported = scope::imported(state);
     if imported.interface_members.is_empty() {
         return;
     }
@@ -87,7 +87,7 @@ fn extend_interface_dimensions(dimensions: &mut PackedDimensions) {
 
 fn query_operand_dimensions(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -104,7 +104,7 @@ fn query_operand_dimensions(
             type_aliases,
         )
         .unwrap_or_else(|| PackedDimensions::new(HashMap::default(), const_env, type_aliases));
-        extend_interface_dimensions(&mut context);
+        extend_interface_dimensions(&syntax_tree.state, &mut context);
         context.function_return_types = containing_function_return_types(
             RefNode::Expression(argument),
             syntax_tree,
@@ -164,7 +164,7 @@ fn query_operand_dimensions(
 
 fn expression_dimensions(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: &PackedDimensions,
@@ -314,7 +314,7 @@ fn expression_dimensions(
         return metadata.dimensions;
     }
     // Ordinary integral expression results are scalar or simple bit vectors.
-    expr_static_width(&expression, dimensions).map(|width| {
+    expr_static_width(&syntax_tree.state, &expression, dimensions).map(|width| {
         usize::from(
             width > 1
                 || matches!(
@@ -332,7 +332,7 @@ fn expression_dimensions(
 /// flattened. Packed arrays and other nonarray operands have count zero.
 pub(super) fn unpacked_dimensions_call_value(
     call: &sv_parser::SystemTfCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -383,7 +383,7 @@ pub(super) fn unpacked_dimensions_call_value(
 fn validate_query_selection(
     argument: &sv_parser::Expression,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -400,7 +400,7 @@ fn validate_query_selection(
             if let RefNode::Expression(expression) = node {
                 let expression =
                     expr_from_expression_with_types(expression, syntax_tree, &context).ok()?;
-                expr_static_width(&expression, &context)?;
+                expr_static_width(&syntax_tree.state, &expression, &context)?;
             }
         }
         Some(())
@@ -420,7 +420,7 @@ fn validate_query_selection(
                     &context,
                 )
                 .ok()?;
-                eval_ast_const_expr(&bound, &context.const_env)?;
+                eval_ast_const_expr(&syntax_tree.state, &bound, &context.const_env)?;
             }
         }
         sv_parser::PartSelectRange::IndexedRange(range) => {
@@ -434,7 +434,7 @@ fn validate_query_selection(
                 &context,
             )
             .ok()?;
-            if eval_ast_const_expr(&width, &context.const_env)? <= 0 {
+            if eval_ast_const_expr(&syntax_tree.state, &width, &context.const_env)? <= 0 {
                 return None;
             }
         }
@@ -444,7 +444,7 @@ fn validate_query_selection(
 
 pub(super) fn unpacked_expression_dimensions(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -585,7 +585,7 @@ pub(super) use queries::array_query_call;
 
 pub(super) fn size_system_function_expr_type(
     primary: &sv_parser::ConstantPrimary,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
@@ -616,7 +616,7 @@ pub(super) fn size_system_function_expr_type(
 
 pub(super) fn size_system_function_call_type(
     call: &sv_parser::SystemTfCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     dimensions: Option<&PackedDimensions>,
@@ -626,7 +626,7 @@ pub(super) fn size_system_function_call_type(
         const_expr_from_expr(dimension, syntax_tree)
             .ok()
             .flatten()
-            .and_then(|dimension| eval_ast_const_expr(&dimension, const_env))
+            .and_then(|dimension| eval_ast_const_expr(&syntax_tree.state, &dimension, const_env))
     };
     let function = called_system_function(call, syntax_tree)?;
     let size = match function {
@@ -672,7 +672,12 @@ pub(super) fn size_system_function_call_type(
                 else {
                     // A type name that sv-parser parsed as an expression.
                     let r#type = type_aliases.get(&identifier)?.clone();
-                    return type_dimension_size(&r#type, Some(dimension), const_env);
+                    return type_dimension_size(
+                        &syntax_tree.state,
+                        &r#type,
+                        Some(dimension),
+                        const_env,
+                    );
                 };
                 let widths: Vec<&ConstExpr> = variable
                     .unpacked
@@ -682,7 +687,12 @@ pub(super) fn size_system_function_call_type(
                     .collect();
                 let width = widths.get(usize::try_from(dimension).ok()?.checked_sub(1)?)?;
                 return Some(ExprType {
-                    width: usize::try_from(eval_ast_const_expr(width, const_env)?).ok()?,
+                    width: usize::try_from(eval_ast_const_expr(
+                        &syntax_tree.state,
+                        width,
+                        const_env,
+                    )?)
+                    .ok()?,
                     signed: false,
                 });
             }
@@ -704,7 +714,7 @@ pub(super) fn size_system_function_call_type(
                 && !dimensions.parameter_values.contains_key(&identifier)
                 && let Some(r#type) = type_aliases.get(&identifier)
             {
-                return size_query_for_type(r#type, const_env, size);
+                return size_query_for_type(&syntax_tree.state, r#type, const_env, size);
             }
             if let Some(dimensions) = dimensions
                 && let Some(ty) = size_function_expression_type(
@@ -733,7 +743,7 @@ pub(super) fn size_system_function_call_type(
                 let width = if size {
                     selected_expression_first_dimension_width(argument, syntax_tree, &dimensions)
                 } else {
-                    expr_static_width(&expression, &dimensions)
+                    expr_static_width(&syntax_tree.state, &expression, &dimensions)
                 }?;
                 return Some(ExprType {
                     width,
@@ -792,36 +802,37 @@ pub(super) fn size_system_function_call_type(
     // $bits covers every unpacked and packed dimension; $size covers one
     // dimension, by default the outermost one.
     if size {
-        return type_dimension_size(&r#type, dimension, const_env);
+        return type_dimension_size(&syntax_tree.state, &r#type, dimension, const_env);
     }
     if dimension.is_some() {
         return None;
     }
-    size_query_for_type(&r#type, const_env, false)
+    size_query_for_type(&syntax_tree.state, &r#type, const_env, false)
 }
 
 fn size_query_for_type(
+    state: &AnalysisState,
     r#type: &Type,
     const_env: &HashMap<String, i128>,
     first_dimension_only: bool,
 ) -> Option<ExprType> {
     if first_dimension_only {
-        return type_dimension_size(r#type, None, const_env);
+        return type_dimension_size(state, r#type, None, const_env);
     }
     let unpacked_width = r#type
         .unpacked_ranges()
         .iter()
         .try_fold(1usize, |width, range| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
+            let left = eval_ast_const_expr(state, range.left(), const_env)?;
+            let right = eval_ast_const_expr(state, range.right(), const_env)?;
             width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
         })?;
     let packed_width = r#type
         .packed_ranges()
         .iter()
         .try_fold(1usize, |width, range| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
+            let left = eval_ast_const_expr(state, range.left(), const_env)?;
+            let right = eval_ast_const_expr(state, range.right(), const_env)?;
             width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
         })?;
     Some(ExprType {
@@ -834,6 +845,7 @@ fn size_query_for_type(
 /// (default 1), numbered from the slowest varying dimension, unpacked
 /// dimensions first (IEEE 1800-2023 20.7).
 fn type_dimension_size(
+    state: &AnalysisState,
     r#type: &Type,
     dimension: Option<i128>,
     const_env: &HashMap<String, i128>,
@@ -859,8 +871,8 @@ fn type_dimension_size(
         });
     }
     let (left, right) = ranges.nth(dimension)?;
-    let left = eval_ast_const_expr(left, const_env)?;
-    let right = eval_ast_const_expr(right, const_env)?;
+    let left = eval_ast_const_expr(state, left, const_env)?;
+    let right = eval_ast_const_expr(state, right, const_env)?;
     let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
     Some(ExprType {
         width: width.max(1),
@@ -870,7 +882,7 @@ fn type_dimension_size(
 
 fn size_function_expression_type(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     first_dimension_only: bool,
@@ -906,7 +918,7 @@ fn size_function_expression_type(
         type_aliases: type_aliases.clone(),
         ..PackedDimensions::default()
     });
-    extend_interface_dimensions(&mut packed_dimensions);
+    extend_interface_dimensions(&syntax_tree.state, &mut packed_dimensions);
     packed_dimensions.function_return_types = containing_function_return_types(
         RefNode::Expression(argument),
         syntax_tree,
@@ -963,7 +975,7 @@ fn size_function_expression_type(
 
 fn size_function_expression_type_from_dimensions(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     first_dimension_only: bool,
     packed_dimensions: &PackedDimensions,
@@ -988,11 +1000,11 @@ fn size_function_expression_type_from_dimensions(
                     .function_return_types
                     .get(name)
                     .and_then(|metadata| metadata.first_packed_dimension_width),
-                _ => expr_static_width(&expression, packed_dimensions),
+                _ => expr_static_width(&syntax_tree.state, &expression, packed_dimensions),
             },
         )
     } else {
-        expr_static_width(&expression, packed_dimensions)
+        expr_static_width(&syntax_tree.state, &expression, packed_dimensions)
     }?;
     let signed = expr_signedness_with_return_types(
         &expression,
@@ -1030,7 +1042,7 @@ impl Signedness for SizeQuerySignedness<'_> {
 
 fn selected_expression_first_dimension_width(
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Option<usize> {
     let sv_parser::Expression::Primary(primary) = argument else {
@@ -1068,8 +1080,9 @@ fn selected_expression_first_dimension_width(
         )
         .ok()?;
         return usize::try_from(
-            eval_ast_const_expr(&msb, &packed_dimensions.const_env)?
-                .abs_diff(eval_ast_const_expr(&lsb, &packed_dimensions.const_env)?),
+            eval_ast_const_expr(&syntax_tree.state, &msb, &packed_dimensions.const_env)?.abs_diff(
+                eval_ast_const_expr(&syntax_tree.state, &lsb, &packed_dimensions.const_env)?,
+            ),
         )
         .ok()?
         .checked_add(1);
@@ -1084,9 +1097,12 @@ fn selected_expression_first_dimension_width(
         .chain(dimensions.packed.iter().map(|dimension| &dimension.width))
         .nth(index_count);
     match width {
-        Some(width) => {
-            usize::try_from(eval_ast_const_expr(width, &packed_dimensions.const_env)?).ok()
-        }
+        Some(width) => usize::try_from(eval_ast_const_expr(
+            &syntax_tree.state,
+            width,
+            &packed_dimensions.const_env,
+        )?)
+        .ok(),
         None if index_count == dimensions.unpacked.len() + dimensions.packed.len() => Some(1),
         None => None,
     }
@@ -1094,7 +1110,7 @@ fn selected_expression_first_dimension_width(
 
 pub(super) fn containing_packed_dimensions(
     target: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<PackedDimensions> {
@@ -1115,23 +1131,42 @@ pub(super) fn containing_packed_dimensions(
             continue;
         }
         let module_span = (module_start, module_end);
-        if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
+        if !syntax_tree
+            .state
+            .dimensions
+            .active_packed_dimensions
+            .borrow_mut()
+            .insert(module_span)
+        {
             // A range in the current declaration can refer to an earlier
             // declaration. Use shapes already collected by the outer scan.
-            return DISCOVERED_PACKED_DIMENSIONS
-                .with(|contexts| contexts.borrow().get(&module_span).cloned());
+            return syntax_tree
+                .state
+                .dimensions
+                .discovered_packed_dimensions
+                .borrow()
+                .get(&module_span)
+                .cloned();
         }
-        let _guard = ActivePackedDimensionsGuard { module_span };
-        let imported = scope::imported();
+        let _guard = ActivePackedDimensionsGuard {
+            module_span,
+            state: syntax_tree.state.clone(),
+        };
+        let imported = scope::imported(&syntax_tree.state);
         let dimensions = packed_dimensions_from_ports_and_signals(
             &[],
             &imported.signals,
             const_env,
             type_aliases,
         );
-        DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
-            contexts.borrow_mut().insert(module_span, dimensions);
-        });
+        {
+            syntax_tree
+                .state
+                .dimensions
+                .discovered_packed_dimensions
+                .borrow_mut()
+                .insert(module_span, dimensions);
+        };
         // Header array parameters can determine port ranges. Scope parameters
         // are installed with direct declarations in source order below.
         array_parameters::array_parameters_from_parameter_ports(
@@ -1141,6 +1176,7 @@ pub(super) fn containing_packed_dimensions(
             type_aliases,
             &mut |parameter| {
                 publish_declaration_dimensions(
+                    &syntax_tree.state,
                     module_span,
                     &[],
                     std::slice::from_ref(&parameter.signal),
@@ -1157,9 +1193,14 @@ pub(super) fn containing_packed_dimensions(
         // of elaborated generate signals and hoisted procedural variables.
         let signals =
             signals_from_module_node(module.clone(), syntax_tree, const_env, type_aliases).ok()?;
-        publish_declaration_dimensions(module_span, &[], &signals);
-        let mut dimensions = DISCOVERED_PACKED_DIMENSIONS
-            .with(|contexts| contexts.borrow().get(&module_span).cloned())?;
+        publish_declaration_dimensions(&syntax_tree.state, module_span, &[], &signals);
+        let mut dimensions = syntax_tree
+            .state
+            .dimensions
+            .discovered_packed_dimensions
+            .borrow()
+            .get(&module_span)
+            .cloned()?;
         if let Some(locals) =
             containing_function_dimensions(target.clone(), syntax_tree, const_env, type_aliases)
         {
@@ -1196,12 +1237,13 @@ pub(super) fn extend_query_local_dimensions(
 /// Publish each completed declaration before resolving the next range.
 /// Only a live preliminary scope scan owns this temporary metadata.
 pub(super) fn publish_declaration_dimensions(
+    state: &AnalysisState,
     scope_span: (usize, usize),
     ports: &[Port],
     signals: &[Signal],
 ) {
-    DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
-        let mut contexts = contexts.borrow_mut();
+    {
+        let mut contexts = state.dimensions.discovered_packed_dimensions.borrow_mut();
         if let Some(context) = contexts.get_mut(&scope_span) {
             // Reuse the scan's environment instead of cloning all parameters
             // and aliases for every preceding declaration.
@@ -1213,12 +1255,12 @@ pub(super) fn publish_declaration_dimensions(
                 context.insert(name.to_string(), procedural::dimensions_from_type(ty));
             }
         }
-    });
+    };
 }
 
 fn containing_function_dimensions(
     target: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, VariableDimensions>> {
@@ -1241,10 +1283,19 @@ fn containing_function_dimensions(
     // Only ancestors contribute names; inner declarations shadow outer ones.
     scopes.sort_by_key(|((start, end), _)| std::cmp::Reverse(end - start));
     let function_span = scopes.first()?.0;
-    if !ACTIVE_FUNCTION_DIMENSIONS.with(|active| active.borrow_mut().insert(function_span)) {
+    if !syntax_tree
+        .state
+        .dimensions
+        .active_function_dimensions
+        .borrow_mut()
+        .insert(function_span)
+    {
         return None;
     }
-    let _guard = ActiveFunctionDimensionsGuard { function_span };
+    let _guard = ActiveFunctionDimensionsGuard {
+        function_span,
+        state: syntax_tree.state.clone(),
+    };
     let mut dimensions = HashMap::default();
     for (_, scope) in scopes {
         let locals = match scope {
@@ -1269,7 +1320,7 @@ fn containing_function_dimensions(
 
 fn containing_function_return_types(
     target: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> HashMap<String, FunctionReturnMetadata> {
@@ -1314,15 +1365,28 @@ fn containing_function_return_types(
             .filter(|span| contains(*span, target_span))
             .min_by_key(|(start, end)| end - start)
             .unwrap_or((module_start, module_end));
-        if let Some(active) = ACTIVE_FUNCTION_RETURN_METADATA
-            .with(|metadata| metadata.borrow().get(&scope_span).cloned())
+        if let Some(active) = syntax_tree
+            .state
+            .dimensions
+            .active_function_return_metadata
+            .borrow()
+            .get(&scope_span)
+            .cloned()
         {
             return active;
         }
-        ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
-            metadata.borrow_mut().insert(scope_span, HashMap::default());
-        });
-        let _guard = ActiveFunctionReturnMetadataGuard { scope_span };
+        {
+            syntax_tree
+                .state
+                .dimensions
+                .active_function_return_metadata
+                .borrow_mut()
+                .insert(scope_span, HashMap::default());
+        };
+        let _guard = ActiveFunctionReturnMetadataGuard {
+            scope_span,
+            state: syntax_tree.state.clone(),
+        };
         let mut declarations = module
             .into_iter()
             .filter_map(|child| {
@@ -1346,7 +1410,9 @@ fn containing_function_return_types(
         // Populate outer declarations first so inner declarations shadow them
         // regardless of their relative order in the source text.
         declarations.sort_by_key(|(depth, _)| *depth);
-        let mut result = scope::imported().function_return_types.clone();
+        let mut result = scope::imported(&syntax_tree.state)
+            .function_return_types
+            .clone();
         // A return range may depend on a function declared later in the
         // module. Revisit declarations after publishing each partial pass;
         // recursive discovery reads that partial map instead of recursing.
@@ -1386,23 +1452,32 @@ fn containing_function_return_types(
                     result.insert(name, metadata);
                 }
             }
-            ACTIVE_FUNCTION_RETURN_METADATA.with(|active| {
-                active.borrow_mut().insert(scope_span, result.clone());
-            });
+            {
+                syntax_tree
+                    .state
+                    .dimensions
+                    .active_function_return_metadata
+                    .borrow_mut()
+                    .insert(scope_span, result.clone());
+            };
         }
         return result;
     }
-    scope::imported().function_return_types.clone()
+    scope::imported(&syntax_tree.state)
+        .function_return_types
+        .clone()
 }
 
 /// Return types alone do not provide the context for an untyped argument pattern.
 pub(super) fn containing_subroutine_param_shapes(
     target: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> HashMap<String, Vec<VariableDimensions>> {
-    let mut shapes = scope::imported().subroutine_shapes.clone();
+    let mut shapes = scope::imported(&syntax_tree.state)
+        .subroutine_shapes
+        .clone();
     let Some(target_span) = ref_node_source_span(target) else {
         return shapes;
     };
@@ -1426,10 +1501,19 @@ pub(super) fn containing_subroutine_param_shapes(
         }
         // Formal bounds can contain another type query. Do not recursively
         // reconstruct this same declaration scope while resolving those bounds.
-        if !ACTIVE_PACKED_DIMENSIONS.with(|active| active.borrow_mut().insert(module_span)) {
+        if !syntax_tree
+            .state
+            .dimensions
+            .active_packed_dimensions
+            .borrow_mut()
+            .insert(module_span)
+        {
             return shapes;
         }
-        let _guard = ActivePackedDimensionsGuard { module_span };
+        let _guard = ActivePackedDimensionsGuard {
+            module_span,
+            state: syntax_tree.state.clone(),
+        };
         let generates = node
             .clone()
             .into_iter()
@@ -1492,7 +1576,7 @@ pub(super) fn ref_node_source_span(node: RefNode<'_>) -> Option<(usize, usize)> 
 
 fn function_declaration_return_metadata(
     declaration: &sv_parser::FunctionDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<(String, FunctionReturnMetadata)> {
@@ -1653,7 +1737,7 @@ pub(super) fn function_packed_dimension_widths(ranges: &[PackedRange]) -> Vec<Pa
 
 pub(super) fn function_param_packed_dimensions(
     data_type: &sv_parser::DataTypeOrImplicit,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<PackedDimension> {
@@ -1801,6 +1885,7 @@ fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> boo
 }
 
 pub(super) fn extend_const_env_with_variable_types<'a>(
+    state: &AnalysisState,
     const_env: &mut HashMap<String, i128>,
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
@@ -1827,7 +1912,7 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
         {
             for (bound, value) in [("left", left), ("right", right)] {
                 let key = variable_dimension_marker(name, index, bound);
-                if let Some(value) = eval_ast_const_expr(value, const_env) {
+                if let Some(value) = eval_ast_const_expr(state, value, const_env) {
                     const_env.insert(key, value);
                 } else {
                     const_env.remove(&key);
@@ -1835,16 +1920,16 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
             }
         }
         let dimension_width = |range: &PackedRange| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
+            let left = eval_ast_const_expr(state, range.left(), const_env)?;
+            let right = eval_ast_const_expr(state, range.right(), const_env)?;
             usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
         };
         let unpacked_widths = r#type
             .unpacked_ranges()
             .iter()
             .map(|range| {
-                let left = eval_ast_const_expr(range.left(), const_env)?;
-                let right = eval_ast_const_expr(range.right(), const_env)?;
+                let left = eval_ast_const_expr(state, range.left(), const_env)?;
+                let right = eval_ast_const_expr(state, range.right(), const_env)?;
                 usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
             })
             .collect::<Option<Vec<_>>>();
@@ -1922,16 +2007,13 @@ pub(super) fn parameter_type_from_lookup(
     Some(ExprType { width, signed })
 }
 
-thread_local! {
-    static ACTIVE_FUNCTION_DIMENSIONS: RefCell<HashSet<(usize, usize)>> =
-        RefCell::new(HashSet::default());
-    static ACTIVE_PACKED_DIMENSIONS: RefCell<HashSet<(usize, usize)>> =
-        RefCell::new(HashSet::default());
-    static DISCOVERED_PACKED_DIMENSIONS: RefCell<HashMap<(usize, usize), PackedDimensions>> =
-        RefCell::new(HashMap::default());
-    static ACTIVE_FUNCTION_RETURN_METADATA:
-        RefCell<HashMap<(usize, usize), HashMap<String, FunctionReturnMetadata>>> =
-        RefCell::new(HashMap::default());
+#[derive(Default)]
+pub(super) struct State {
+    active_function_dimensions: RefCell<HashSet<(usize, usize)>>,
+    active_packed_dimensions: RefCell<HashSet<(usize, usize)>>,
+    discovered_packed_dimensions: RefCell<HashMap<(usize, usize), PackedDimensions>>,
+    active_function_return_metadata:
+        RefCell<HashMap<(usize, usize), HashMap<String, FunctionReturnMetadata>>>,
 }
 
 #[cfg(test)]
@@ -1944,41 +2026,52 @@ thread_local! {
 mod tests;
 
 struct ActiveFunctionDimensionsGuard {
+    state: std::rc::Rc<AnalysisState>,
     function_span: (usize, usize),
 }
 
 impl Drop for ActiveFunctionDimensionsGuard {
     fn drop(&mut self) {
-        ACTIVE_FUNCTION_DIMENSIONS.with(|active| {
-            active.borrow_mut().remove(&self.function_span);
-        });
+        self.state
+            .dimensions
+            .active_function_dimensions
+            .borrow_mut()
+            .remove(&self.function_span);
     }
 }
 
 struct ActivePackedDimensionsGuard {
+    state: std::rc::Rc<AnalysisState>,
     module_span: (usize, usize),
 }
 
 impl Drop for ActivePackedDimensionsGuard {
     fn drop(&mut self) {
-        ACTIVE_PACKED_DIMENSIONS.with(|active| {
-            active.borrow_mut().remove(&self.module_span);
-        });
-        DISCOVERED_PACKED_DIMENSIONS.with(|contexts| {
-            contexts.borrow_mut().remove(&self.module_span);
-        });
+        self.state
+            .dimensions
+            .active_packed_dimensions
+            .borrow_mut()
+            .remove(&self.module_span);
+        self.state
+            .dimensions
+            .discovered_packed_dimensions
+            .borrow_mut()
+            .remove(&self.module_span);
     }
 }
 
 struct ActiveFunctionReturnMetadataGuard {
+    state: std::rc::Rc<AnalysisState>,
     scope_span: (usize, usize),
 }
 
 impl Drop for ActiveFunctionReturnMetadataGuard {
     fn drop(&mut self) {
-        ACTIVE_FUNCTION_RETURN_METADATA.with(|metadata| {
-            metadata.borrow_mut().remove(&self.scope_span);
-        });
+        self.state
+            .dimensions
+            .active_function_return_metadata
+            .borrow_mut()
+            .remove(&self.scope_span);
     }
 }
 

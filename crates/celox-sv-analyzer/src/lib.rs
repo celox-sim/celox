@@ -341,7 +341,7 @@ fn collecting_warnings(
     warnings: Vec<ir::AnalyzerWarning>,
     analysis: impl FnOnce() -> Result<Ir, AnalyzerError>,
 ) -> Result<Ir, AnalyzerError> {
-    finish_analysis(ast::with_call_sites(analysis), warnings)
+    finish_analysis(analysis(), warnings)
 }
 
 pub(crate) fn finish_analysis(
@@ -417,10 +417,8 @@ pub fn source_module_interfaces(
     code: &str,
     path: &Path,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
-    ast::with_call_sites(|| {
-        let syntax_tree = syntax::parse_source(code, path)?;
-        ast::Source::module_interfaces_from_syntax(&syntax_tree)
-    })
+    let syntax_tree = syntax::parse_source(code, path)?;
+    ast::Source::module_interfaces_from_syntax(&syntax_tree)
 }
 
 #[cfg(test)]

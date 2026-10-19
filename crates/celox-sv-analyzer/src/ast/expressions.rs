@@ -4,23 +4,23 @@ use super::*;
 
 pub(super) fn expr_from_expression(
     expr: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Expr> {
     expr_from_expression_with_types(expr, syntax_tree, &PackedDimensions::default())
 }
 
 pub(super) fn expr_from_expression_with_types(
     expr: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     expr_from_expression_with_types_raw(expr, syntax_tree, packed_dimensions)
-        .map(guard_zero_divisions)
+        .map(|expr| guard_zero_divisions(&syntax_tree.state, expr))
 }
 
 fn expr_from_expression_with_types_raw(
     expr: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     match expr {
@@ -107,7 +107,7 @@ fn expr_from_expression_with_types_raw(
 pub(super) fn expr_from_expression_for_lvalue(
     expr: &sv_parser::Expression,
     lhs: &LValue,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     if let sv_parser::Expression::Primary(primary) = expr
@@ -145,7 +145,7 @@ pub(super) fn expr_from_expression_for_lvalue(
 fn expr_from_assignment_pattern(
     pattern: &sv_parser::AssignmentPattern,
     lhs: &LValue,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let target = || unsupported("assignment pattern for this target");
@@ -224,11 +224,13 @@ fn expr_from_assignment_pattern(
         .iter()
         .zip(values)
         .map(|(member, value)| {
-            let width = expr_type_from_type(member.r#type(), &packed_dimensions.const_env)
-                .ok_or_else(|| {
-                    unsupported(format!("type of structure member `{}`", member.name()))
-                })?
-                .width;
+            let width = expr_type_from_type(
+                &syntax_tree.state,
+                member.r#type(),
+                &packed_dimensions.const_env,
+            )
+            .ok_or_else(|| unsupported(format!("type of structure member `{}`", member.name())))?
+            .width;
             let value = lower(value)?;
             let signed = expr_signedness(
                 &value,
@@ -253,7 +255,7 @@ fn expr_from_assignment_pattern(
 /// operands and its matching rules stay visible to later stages.
 fn expr_from_inside_expression(
     inside: &sv_parser::InsideExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let operand =
@@ -294,7 +296,7 @@ fn expr_from_inside_expression(
     })
 }
 
-pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
+pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
     match expr {
         Expr::Ident(_) | Expr::Literal(_) => expr,
         Expr::Select {
@@ -303,39 +305,47 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(guard_zero_divisions(*expr)),
+            expr: Box::new(guard_zero_divisions(state, *expr)),
             msb,
             lsb,
             signed,
         },
-        Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(guard_zero_divisions).collect()),
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .into_iter()
+                .map(|expr| guard_zero_divisions(state, expr))
+                .collect(),
+        ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
-            parts: parts.into_iter().map(guard_zero_divisions).collect(),
+            parts: parts
+                .into_iter()
+                .map(|expr| guard_zero_divisions(state, expr))
+                .collect(),
         },
         Expr::Resize {
             expr,
             width,
             signed,
         } => Expr::Resize {
-            expr: Box::new(guard_zero_divisions(*expr)),
+            expr: Box::new(guard_zero_divisions(state, *expr)),
             width,
             signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(guard_zero_divisions(*expr)),
+            expr: Box::new(guard_zero_divisions(state, *expr)),
         },
         Expr::Binary { left, op, right } => {
-            let left = Box::new(guard_zero_divisions(*left));
-            let right = Box::new(guard_zero_divisions(*right));
+            let left = Box::new(guard_zero_divisions(state, *left));
+            let right = Box::new(guard_zero_divisions(state, *right));
             let operation = Expr::Binary {
                 left,
                 op,
                 right: right.clone(),
             };
-            let divisor_is_nonzero = expr_to_const((*right).clone())
-                .and_then(|right| eval_ast_const_expr(&right, &HashMap::default()))
+            let divisor_is_nonzero = expr_to_const(state, (*right).clone())
+                .and_then(|right| eval_ast_const_expr(state, &right, &HashMap::default()))
                 .is_some_and(|right| right != 0);
             if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
                 Expr::Mux {
@@ -356,15 +366,15 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(guard_zero_divisions(*condition)),
-            then_expr: Box::new(guard_zero_divisions(*then_expr)),
-            else_expr: Box::new(guard_zero_divisions(*else_expr)),
+            condition: Box::new(guard_zero_divisions(state, *condition)),
+            then_expr: Box::new(guard_zero_divisions(state, *then_expr)),
+            else_expr: Box::new(guard_zero_divisions(state, *else_expr)),
         },
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(guard_zero_divisions(*expr)),
+            expr: Box::new(guard_zero_divisions(state, *expr)),
             items: items
                 .into_iter()
-                .map(|item| item.map(&mut |operand| guard_zero_divisions(operand)))
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(state, operand)))
                 .collect(),
         },
         Expr::Call {
@@ -376,7 +386,7 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(guard_zero_divisions))
+                .map(|arg| arg.map(|expr| guard_zero_divisions(state, expr)))
                 .collect(),
         },
     }
@@ -384,14 +394,14 @@ pub(super) fn guard_zero_divisions(expr: Expr) -> Expr {
 
 pub(super) fn expr_from_primary(
     primary: &sv_parser::Primary,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Expr> {
     expr_from_primary_with_types(primary, syntax_tree, &PackedDimensions::default())
 }
 
 pub(super) fn expr_from_primary_with_types(
     primary: &sv_parser::Primary,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     match primary {
@@ -420,11 +430,17 @@ pub(super) fn expr_from_primary_with_types(
                     syntax_tree,
                     packed_dimensions,
                 )?;
-                return Ok(expr_from_lvalue(&value, packed_dimensions));
+                return Ok(expr_from_lvalue(
+                    &syntax_tree.state,
+                    &value,
+                    packed_dimensions,
+                ));
             }
             let name = reference_name(RefNode::PrimaryHierarchical(hierarchical), syntax_tree)
                 .ok_or_else(|| unsupported("hierarchical identifier"))?;
-            if scope::imported().interface_types.contains_key(&name)
+            if scope::imported(&syntax_tree.state)
+                .interface_types
+                .contains_key(&name)
                 && packed_dimensions.get(&name).is_none()
             {
                 return Err(unsupported(format!(
@@ -538,7 +554,7 @@ pub(super) fn expression_is_grouped(expr: &sv_parser::Expression) -> bool {
 
 fn expr_from_conditional_expression(
     expr: &sv_parser::ConditionalExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     Ok(Expr::Mux {
@@ -562,7 +578,7 @@ fn expr_from_conditional_expression(
 
 pub(super) fn expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     expr_from_subroutine_call(&call.nodes.0, syntax_tree, packed_dimensions)
@@ -572,7 +588,7 @@ pub(super) fn expr_from_function_subroutine_call(
 /// system function whose value it discards.
 pub(super) fn expr_from_subroutine_call(
     call: &sv_parser::SubroutineCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     match call {
@@ -594,7 +610,7 @@ pub(super) fn expr_from_subroutine_call(
 /// A system function call as an expression operand.
 fn expr_from_system_function_call(
     call: &sv_parser::SystemTfCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let (name, args) = system_tf_call_parts(call, syntax_tree)
@@ -711,7 +727,8 @@ fn expr_from_system_function_call(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            let width = expr_static_width(&arg, packed_dimensions).ok_or_else(operand_error)?;
+            let width = expr_static_width(&syntax_tree.state, &arg, packed_dimensions)
+                .ok_or_else(operand_error)?;
             Ok(Expr::Resize {
                 expr: Box::new(arg),
                 width,
@@ -748,8 +765,9 @@ fn expr_from_system_function_call(
             )?;
             // `$clog2` of a constant is a constant.
             if function == SystemFunction::Clog2
-                && let Some(argument) = expr_to_const(arg.clone())
+                && let Some(argument) = expr_to_const(&syntax_tree.state, arg.clone())
                 && let Some(value) = eval_ast_const_expr(
+                    &syntax_tree.state,
                     &ConstExpr::Function {
                         callee: Callee::System(function),
                         args: vec![argument],
@@ -774,7 +792,7 @@ fn expr_from_system_function_call(
 fn integral_argument(
     name: &str,
     argument: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let operand_error = || unsupported(format!("operand of `{name}`"));
@@ -794,7 +812,8 @@ fn integral_argument(
             name: name.into(),
             detail: format!("argument must be an integral expression: {error}"),
         })?;
-    expr_static_width(&argument, packed_dimensions).ok_or_else(operand_error)?;
+    expr_static_width(&syntax_tree.state, &argument, packed_dimensions)
+        .ok_or_else(operand_error)?;
     Ok(argument)
 }
 
@@ -815,7 +834,7 @@ pub(super) fn single_expression_argument(
 /// A user function call as an expression operand.
 pub(super) fn expr_from_tf_call(
     call: &sv_parser::TfCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let name = reference_name(
@@ -851,7 +870,7 @@ pub(super) fn expr_from_tf_call(
 fn expr_from_named_call(
     name: String,
     arguments: Option<&sv_parser::ListOfArguments>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let query_formals = packed_dimensions
@@ -958,7 +977,7 @@ fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDimensions) ->
 fn selected_concatenation(
     base: Expr,
     selection: Option<&sv_parser::RangeExpression>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let (msb, lsb) = match selection {

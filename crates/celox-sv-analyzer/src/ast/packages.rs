@@ -21,6 +21,8 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
+    /// Source-call identities shared with modules importing these package bodies.
+    pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
     /// Original syntax shared with interface instances; never generated source.
     pub(crate) interface_sources: HashMap<String, (std::rc::Rc<SyntaxTree>, PathBuf)>,
@@ -211,9 +213,9 @@ impl Packages {
             timescales.select_roots(roots);
         }
         let timescales = Arc::new(timescales);
-        let _timescales = timescales::install(timescales.clone());
-        let mut packages = Self::analyze_packages(trees)?;
-        packages.timescales = timescales;
+        let state = std::rc::Rc::new(AnalysisState::default());
+        let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+        packages.call_sites = state.next_call_site.clone();
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (unit_declaration(tree), *tree, *path))
@@ -224,7 +226,7 @@ impl Packages {
             };
             let visibility = unit_visibility(unit, tree)?;
             let node = RefNode::PackageDeclaration(unit);
-            let scope = analyze_package(UNIT, node, tree, &packages);
+            let scope = analyze_package(UNIT, node, tree, &packages, &state);
             if scope
                 .as_ref()
                 .is_ok_and(|scope| scope.state_module.is_some())
@@ -253,7 +255,11 @@ impl Packages {
         Ok(packages)
     }
 
-    fn analyze_packages(trees: &[(&SyntaxTree, &Path)]) -> Result<Self, AnalyzerError> {
+    fn analyze_packages(
+        trees: &[(&SyntaxTree, &Path)],
+        timescales: Arc<timescales::Timescales>,
+        state: &std::rc::Rc<AnalysisState>,
+    ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, RefNode<'_>, &SyntaxTree)> = Vec::new();
         for (tree, _) in trees {
             // Only modules and packages are analyzed, so an import declared
@@ -284,7 +290,10 @@ impl Packages {
             }
         }
         if declarations.is_empty() {
-            return Ok(Self::default());
+            return Ok(Self {
+                timescales,
+                ..Self::default()
+            });
         }
         let names: HashSet<&str> = declarations
             .iter()
@@ -305,10 +314,15 @@ impl Packages {
         for index in 0..declarations.len() {
             visit(index, &declarations, &dependencies, &mut order, &mut active)?;
         }
-        let mut packages = Self::default();
+        // Package bodies can query selected hierarchy roots while they are
+        // collected, before any module is analyzed.
+        let mut packages = Self {
+            timescales,
+            ..Self::default()
+        };
         for index in order {
             let (name, node, tree) = &declarations[index];
-            let package = analyze_package(name, node.clone(), tree, &packages)?;
+            let package = analyze_package(name, node.clone(), tree, &packages, state)?;
             packages.packages.insert(
                 name.clone(),
                 Arc::new(Package {
@@ -413,10 +427,19 @@ fn analyze_package(
     node: RefNode<'_>,
     tree: &SyntaxTree,
     packages: &Packages,
+    state: &std::rc::Rc<AnalysisState>,
 ) -> Result<Package, AnalyzerError> {
+    let context = AnalysisContext {
+        syntax_tree: tree,
+        state: state.clone(),
+        parameter_overrides: Cow::Owned(HashMap::default()),
+    };
+    let tree = &context;
+    let _timescales =
+        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
     let first = {
         // Inside the package, `p::x` names its own item `x`.
-        let _package = scope::enter_package(name);
+        let _package = scope::enter_package(&tree.state, name);
         analyze_package_scope(name, node.clone(), tree, packages, None)?
     };
     if !imports::ScopeImports::from_node(node.clone(), tree)
@@ -435,7 +458,7 @@ fn analyze_package(
 fn analyze_package_scope(
     name: &str,
     node: RefNode<'_>,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
@@ -654,4 +677,111 @@ fn unit_visibility(
         }
     }
     Ok(visibility)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_and_module_select_calls_have_distinct_sites() {
+        let source = r#"
+            package common;
+                int count;
+                function automatic int draw(); count++; return count; endfunction
+            endpackage
+            package p;
+                function automatic bit pick(input bit [7:0] x);
+                    return x[common::draw()];
+                endfunction
+            endpackage
+            module Top(input bit [7:0] x, output bit y);
+                import p::*;
+                function automatic bit local_pick(input bit [7:0] x);
+                    return x[common::draw()];
+                endfunction
+                assign y = pick(x) ^ local_pick(x);
+            endmodule
+        "#;
+        let path = Path::new("package_module_sites.sv");
+        let tree = crate::syntax::parse_source(source, path).unwrap();
+        for analyzed in [
+            Source::from_syntax(&tree).unwrap(),
+            Source::from_syntax_module_with_parameter_overrides(&tree, "Top", &HashMap::default())
+                .unwrap(),
+        ] {
+            let module = &analyzed.modules[0];
+            let mut indices = Vec::new();
+            for name in ["p::pick", "local_pick"] {
+                let function = module.subroutines.iter().find(|f| f.name == name).unwrap();
+                let [Stmt::Return(Some(Expr::Select { msb, lsb, .. }))] = function.body.as_slice()
+                else {
+                    panic!("unexpected function body: {:?}", function.body);
+                };
+                assert_eq!(msb, lsb);
+                indices.push(msb.clone());
+            }
+            assert_ne!(
+                indices[0], indices[1],
+                "different source calls must not be deduplicated"
+            );
+        }
+    }
+
+    #[test]
+    fn effectful_select_calls_have_distinct_sites_across_packages_and_units() {
+        let source = r#"
+            package common;
+                int count;
+                function automatic int draw();
+                    count++;
+                    return count;
+                endfunction
+            endpackage
+            package p;
+                function automatic bit pick(input bit [7:0] x);
+                    return x[common::draw()];
+                endfunction
+            endpackage
+            package q;
+                function automatic bit pick(input bit [7:0] x);
+                    return x[common::draw()];
+                endfunction
+            endpackage
+            function automatic bit pick(input bit [7:0] x);
+                return x[common::draw()];
+            endfunction
+        "#;
+        let path = Path::new("package_call_sites.sv");
+        let tree = crate::syntax::parse_source(source, path).unwrap();
+        let packages = Packages::analyze(&[(&tree, path)]).unwrap();
+        let scopes = [
+            &packages.packages["p"].symbols,
+            &packages.packages["q"].symbols,
+            &packages.units[path].scope.as_ref().unwrap().symbols,
+        ];
+        let mut sites = HashSet::default();
+        for symbols in scopes {
+            let function = symbols
+                .subroutines
+                .iter()
+                .find(|f| f.name.ends_with("::pick"))
+                .unwrap();
+            let [Stmt::Return(Some(Expr::Select { msb, lsb, .. }))] = function.body.as_slice()
+            else {
+                panic!("unexpected function body: {:?}", function.body);
+            };
+            assert_eq!(msb, lsb, "copies of one select index retain their identity");
+            let ConstExpr::Function {
+                site: Some(site), ..
+            } = msb
+            else {
+                panic!("expected effectful index call: {msb:?}");
+            };
+            assert!(
+                sites.insert(*site),
+                "distinct source calls share site {site}"
+            );
+        }
+    }
 }
