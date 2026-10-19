@@ -1,1 +1,6 @@
-Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.
+Revision history for #1573:
+
+rev 2 (rebase) 2026-10-19 19:20 UTC — Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.
+rev 1 (initial) 2026-10-19 19:20 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1573,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"cf7c588c2f305cbe733d10671c8ee42f84234dc1","timestamp_iso":"2026-10-19T19:20:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"cf7c588c2f305cbe733d10671c8ee42f84234dc1","new_sha":"39dd239a862b39f716668dfbee564b8163be2f60","timestamp_iso":"2026-10-19T19:20:23Z","reason":"Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/cf7c588c2f305cbe733d10671c8ee42f84234dc1...39dd239a862b39f716668dfbee564b8163be2f60"}]} -->
