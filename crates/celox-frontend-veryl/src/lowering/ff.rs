@@ -852,13 +852,20 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
-        let image = crate::module::readmem_image(self.module, filename, destinations, 16, |dst| {
-            dst.index
-                .0
-                .iter()
-                .map(|index| eval_constexpr(index)?.to_usize())
-                .collect()
-        })?;
+        let image = crate::module::readmem_image(
+            self.module,
+            filename,
+            destinations,
+            &self.config.file_dependencies,
+            16,
+            |dst| {
+                dst.index
+                    .0
+                    .iter()
+                    .map(|index| eval_constexpr(index)?.to_usize())
+                    .collect()
+            },
+        )?;
         let variable = &self.module.variables[&image.var_id];
         let is_2state = variable.r#type.is_2state();
         let element_count = variable.r#type.total_array().unwrap_or(1).max(1);
