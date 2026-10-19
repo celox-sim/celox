@@ -333,11 +333,14 @@ export function rustScopeOutputs(files) {
       rust_full: true,
       rust_packages: "",
       rust_targets: "",
+      rust_builds: "",
+      rust_lint_builds: "",
       rust_lint_packages: "",
       rust_lint_features: "",
       rust_lint_targets: "",
       rust_doc_libraries: "",
       rust_sv_tests: true,
+      rust_vpi_e2e: true,
       rust_features: "",
       rust_filter: "",
       rust_libraries: "",
@@ -346,8 +349,12 @@ export function rustScopeOutputs(files) {
   }
   return {
     rust_full: false,
+    rust_vpi_e2e: scope.builds.some((build) => build.packages.includes("celox-vpi") &&
+      (build.targets.length === 0 || build.targets.includes("cocotb_e2e"))),
     rust_packages: scope.packages.join(" "),
     rust_targets: scope.targets.join(" "),
+    rust_builds: JSON.stringify(scope.builds),
+    rust_lint_builds: JSON.stringify(checks.builds),
     rust_lint_packages: checks.packages.join(" "),
     rust_lint_features: checks.features.join(","),
     rust_lint_targets: checks.targets.join(" "),
