@@ -635,3 +635,61 @@
   (top Top)
   (eval)
   (assert_eq width 36))
+
+(case binds_implicit_named_interface_ports
+  (source "implicit_interface_ports.sv" #"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer iface, input logic [7:0] x);
+      assign iface.data = x;
+    endmodule
+    module Reader(Bus.reader iface, output logic [7:0] y);
+      assign y = iface.data;
+    endmodule
+    module Relay(Bus iface, output logic [7:0] y);
+      Reader r(.iface, .y);
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y);
+      Bus iface();
+      Writer w(.iface, .x);
+      Relay r(.iface, .y);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y value)))
+
+(case binds_implicit_named_interface_arrays_in_generate_scopes
+  (source "implicit_interface_arrays.sv" #"
+    interface Bus;
+      logic [7:0] data;
+      modport writer(output data);
+      modport reader(input data);
+    endinterface
+    module Writer(Bus.writer iface[2], input logic [7:0] x);
+      assign iface[0].data = x;
+      assign iface[1].data = x + 8'd1;
+    endmodule
+    module Reader(Bus.reader iface[2], output logic [7:0] y);
+      assign y = iface[0].data ^ iface[1].data;
+    endmodule
+    module Top(input logic [7:0] x, output logic [7:0] y, z);
+      Bus iface[2]();
+      Writer w(.iface, .x);
+      Reader r(.iface, .y);
+      if (1) begin : inner
+        Bus iface[2]();
+        Writer w(.iface, .x(~x));
+        Reader r(.iface, .y(z));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x41 0xff)
+    (modify (set x value))
+    (assert_eq y (^ value (trunc 8 (+ value 1))))
+    (assert_eq z (^ (trunc 8 (~ value)) (trunc 8 (+ (trunc 8 (~ value)) 1))))))
