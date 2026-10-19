@@ -1,1 +1,6 @@
-Use O2 by default for Veryl native testbenches as well as SystemVerilog, as requested; add Veryl observability coverage and simplify option parsing.
+Revision history for #1580:
+
+rev 2 (content) 2026-10-19 22:26 UTC — Use O2 by default for Veryl native testbenches as well as SystemVerilog, as requested; add Veryl observability coverage and simplify option parsing.
+rev 1 (initial) 2026-10-19 22:26 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1580,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f1d2ebbb2865f881102d1cc4df7f42e76639043d","timestamp_iso":"2026-10-19T22:26:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f1d2ebbb2865f881102d1cc4df7f42e76639043d","new_sha":"48dec93e2cac2b1ed736f2736f3b8fd32e5342be","timestamp_iso":"2026-10-19T22:26:56Z","reason":"Use O2 by default for Veryl native testbenches as well as SystemVerilog, as requested; add Veryl observability coverage and simplify option parsing.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f1d2ebbb2865f881102d1cc4df7f42e76639043d...48dec93e2cac2b1ed736f2736f3b8fd32e5342be"}]} -->
