@@ -1,1 +1,6 @@
-Replay unchanged VPI change after the required collector API review fix in #1531.
+Revision history for #1532:
+
+rev 2 (rebase) 2026-10-19 06:42 UTC — Replay unchanged VPI change after the required collector API review fix in #1531.
+rev 1 (initial) 2026-10-19 06:42 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1532,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5678bad90821171df7b9ac87fc1a323c9a1c2313","timestamp_iso":"2026-10-19T06:42:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"5678bad90821171df7b9ac87fc1a323c9a1c2313","new_sha":"9f55e703d1804a32508835413723dc95acade0e7","timestamp_iso":"2026-10-19T06:42:30Z","reason":"Replay unchanged VPI change after the required collector API review fix in #1531.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5678bad90821171df7b9ac87fc1a323c9a1c2313...9f55e703d1804a32508835413723dc95acade0e7"}]} -->
