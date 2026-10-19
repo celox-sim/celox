@@ -402,7 +402,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install the official runner dependency
         run: python -m pip install -r conformance/sv-tests/requirements.txt
