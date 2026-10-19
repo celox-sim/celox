@@ -294,6 +294,7 @@ fn analyze(
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
     Vec<AnalyzerError>,
@@ -499,6 +500,7 @@ fn analyze(
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
     }
@@ -669,6 +671,7 @@ fn analyze(
 ///
 /// This is the shared compilation pipeline used by all backends.
 /// Returns verified optimized SIR and any compilation warnings on success.
+/// Use [`compile_to_sir_with_file_dependencies`] to collect external file lookups.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -690,6 +693,50 @@ pub fn compile_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_to_sir_with_file_dependencies(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &Default::default(),
+    )
+}
+
+/// Compile to SIR while recording external file lookups in the supplied collector.
+///
+/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
+/// to retain readmem lookup paths for cache invalidation. Source files must be
+/// tracked separately.
+pub fn compile_to_sir_with_file_dependencies(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -708,6 +755,7 @@ pub fn compile_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        file_dependencies,
     )
 }
 
@@ -822,6 +870,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
     if !artifact.processes().is_empty() {
@@ -853,6 +902,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -911,6 +961,7 @@ fn compile_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
@@ -932,6 +983,7 @@ fn compile_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -1071,6 +1123,7 @@ fn compile_sv_to_sir_with_layout_mode(
 
 /// Compile a mixed Veryl/SystemVerilog hierarchy to optimized SIR.
 /// Either language may supply the top or instantiate the other language.
+/// Use [`compile_mixed_to_sir_with_file_dependencies`] to collect external file lookups.
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir(
@@ -1095,6 +1148,53 @@ pub fn compile_mixed_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_mixed_to_sir_with_file_dependencies(
+        sources,
+        sv_sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &Default::default(),
+    )
+}
+
+/// Compile to SIR while recording external file lookups in the supplied collector.
+///
+/// Pass the collector supplied by `celox_frontend_veryl::capture_file_dependencies`
+/// to retain readmem lookup paths for cache invalidation. Source files must be
+/// tracked separately.
+#[cfg(feature = "systemverilog")]
+pub fn compile_mixed_to_sir_with_file_dependencies(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_mixed_to_sir_with_layout_mode(
         sources,
         sv_sources,
@@ -1114,6 +1214,7 @@ pub fn compile_mixed_to_sir(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        file_dependencies,
     )
 }
 
@@ -1145,6 +1246,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
         sources,
@@ -1166,6 +1268,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -1227,6 +1330,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     #[cfg(not(feature = "systemverilog"))]
     {
@@ -1249,6 +1353,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         )
     }
     #[cfg(feature = "systemverilog")]
@@ -1271,6 +1376,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
             sv_sources,
@@ -1307,6 +1413,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            file_dependencies,
         ),
     }
 }
@@ -1592,11 +1699,21 @@ mod host {
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
+        file_dependencies: celox_frontend_veryl::FileDependencyCollector,
         _marker: std::marker::PhantomData<Target>,
     }
 
     /// Configuration methods shared by all builder variants.
     impl<'a, Target> SimulatorBuilder<'a, Target> {
+        /// Track external Veryl file lookups in this compilation-owned collector.
+        pub fn file_dependency_collector(
+            mut self,
+            collector: celox_frontend_veryl::FileDependencyCollector,
+        ) -> Self {
+            self.file_dependencies = collector;
+            self
+        }
+
         /// Returns the source files passed to this builder.
         pub fn sources(&self) -> &[(&'a str, &'a Path)] {
             &self.sources
@@ -2085,6 +2202,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2105,6 +2223,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2126,6 +2245,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2152,6 +2272,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2177,6 +2298,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2203,6 +2325,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2285,6 +2408,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        &self.file_dependencies,
                     )?
                 }
             } else {
@@ -2307,6 +2431,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    &self.file_dependencies,
                 )?
             };
             if let Some(start) = compile_start {
@@ -2904,6 +3029,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        &self.file_dependencies,
                     )
                 }
             } else {
@@ -2926,6 +3052,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    &self.file_dependencies,
                 )
             };
 
@@ -3027,6 +3154,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3047,6 +3175,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3069,6 +3198,7 @@ mod host {
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
+                file_dependencies: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
