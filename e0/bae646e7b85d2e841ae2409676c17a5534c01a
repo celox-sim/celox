@@ -1,7 +1,1 @@
-Revision history for #1530:
-
-rev 3 (rebase) 2026-10-19 07:35 UTC — Replay unchanged descendant after the package call-site identity fix in #1526.
-rev 2 (rebase) 2026-10-19 07:08 UTC — Replay unchanged descendant after the CI catalogue assertion fix in #1525.
-rev 1 (initial) 2026-10-19 07:08 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1530,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"aef3c90b450dd6bd35475a3ac05746d4741f679a","timestamp_iso":"2026-10-19T07:08:41Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"aef3c90b450dd6bd35475a3ac05746d4741f679a","new_sha":"bad3c8aacb9edc3a73ba186e2092446be46f8ab9","timestamp_iso":"2026-10-19T07:08:41Z","reason":"Replay unchanged descendant after the CI catalogue assertion fix in #1525.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/aef3c90b450dd6bd35475a3ac05746d4741f679a...bad3c8aacb9edc3a73ba186e2092446be46f8ab9"},{"number":3,"change_type":"rebase","old_sha":"bad3c8aacb9edc3a73ba186e2092446be46f8ab9","new_sha":"1a2c5f8e6a691a3a1fb0b9a2af13e231856d7a07","timestamp_iso":"2026-10-19T07:35:15Z","reason":"Replay unchanged descendant after the package call-site identity fix in #1526.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bad3c8aacb9edc3a73ba186e2092446be46f8ab9...1a2c5f8e6a691a3a1fb0b9a2af13e231856d7a07"}]} -->
+Replay unchanged native ownership change onto the resolved stack.
