@@ -1931,7 +1931,7 @@ fn prove_group(
     // per-iteration and whole-fold proofs below establish the body and final
     // result exactly; only parameterization failure is a rejection.
     parameterize_folded_loop_values(module, &mut first_template, &chunks, &candidate.unrolled)?;
-    let mut scratch = SLTNodeArena::new();
+    let mut scratch = SLTNodeArena::with_context_from(production_arena);
     let mut actual_outputs_by_iteration = Vec::with_capacity(iterations.len());
     let mut proof_bits = ProofBitCanonicalizer::default();
     for (iteration_index, (iteration, actual_chunk)) in
@@ -1996,6 +1996,7 @@ fn prove_group(
     // The recovered loop runs exactly the proven iterations, so its variable
     // stays within their values. Indices proven in range then need no check.
     let _loop_range = super::LoopRangeScope::with_max(
+        &scratch,
         first_iteration.loop_var,
         iterations.iter().map(|iteration| iteration.value).max()?,
     );
@@ -2418,7 +2419,7 @@ fn whole_fold_matches_expansion(
     iterations: &[crate::loop_provenance::UnrolledIteration],
 ) -> Option<bool> {
     let variables = proof_variable_ids(statements, targets)?;
-    let mut proof_arena = SLTNodeArena::new();
+    let mut proof_arena = SLTNodeArena::with_context_from(dynamic_arena);
     let mapped_initial = map_symbolic_store_roots(
         module,
         initial_store,
