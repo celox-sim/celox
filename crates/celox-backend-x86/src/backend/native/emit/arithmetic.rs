@@ -4,7 +4,7 @@ use super::*;
 
 /// Emit setcc instruction for a comparison kind.
 pub(super) fn emit_jcc(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     label: CodeLabel,
     kind: CmpKind,
 ) -> Result<(), IcedError> {
@@ -23,7 +23,7 @@ pub(super) fn emit_jcc(
 }
 
 pub(super) fn emit_inverse_jcc(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     label: CodeLabel,
     kind: CmpKind,
 ) -> Result<(), IcedError> {
@@ -42,7 +42,7 @@ pub(super) fn emit_inverse_jcc(
 }
 
 fn emit_cmovcc(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: AsmRegister64,
     src: AsmRegister64,
     kind: CmpKind,
@@ -62,7 +62,7 @@ fn emit_cmovcc(
 }
 
 fn emit_inverse_cmovcc(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: AsmRegister64,
     src: AsmRegister64,
     kind: CmpKind,
@@ -83,7 +83,7 @@ fn emit_inverse_cmovcc(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_cmp_select(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -119,7 +119,7 @@ pub(super) fn emit_cmp_select(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_cmp_imm_select(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -158,7 +158,7 @@ pub(super) fn emit_cmp_imm_select(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_guarded_cmp_select(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     guard: VReg,
@@ -216,7 +216,7 @@ pub(super) fn emit_guarded_cmp_select(
 }
 
 fn emit_guarded_cmp_select_branchy(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: AsmRegister64,
     guard: AsmRegister64,
     lhs: AsmRegister64,
@@ -269,7 +269,7 @@ fn emit_guarded_cmp_select_branchy(
 }
 
 pub(super) fn emit_setcc(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     d8: AsmRegister8,
     kind: CmpKind,
 ) -> Result<(), IcedError> {
@@ -296,7 +296,7 @@ pub(super) enum ShiftOp {
 
 /// Emit the shift encoding selected by the function's target-feature snapshot.
 pub(super) fn emit_shift(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -304,6 +304,7 @@ pub(super) fn emit_shift(
     op: ShiftOp,
     encoding: VariableShiftEncoding,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let d = preg_to_reg64(resolve(assignment, dst));
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
@@ -321,13 +322,13 @@ pub(super) fn emit_shift(
                 // Moving lhs into RCX first would destroy the count in CL.
                 // Shift an arena-saved copy in place and reload it into RCX, so
                 // the original lhs register remains untouched.
-                asm.mov(qword_ptr(scratch_operand(0)), l)?;
+                asm.mov(qword_ptr(scratch_operand(&context, 0)), l)?;
                 match op {
-                    ShiftOp::Shr => asm.shr(qword_ptr(scratch_operand(0)), cl)?,
-                    ShiftOp::Shl => asm.shl(qword_ptr(scratch_operand(0)), cl)?,
-                    ShiftOp::Sar => asm.sar(qword_ptr(scratch_operand(0)), cl)?,
+                    ShiftOp::Shr => asm.shr(qword_ptr(scratch_operand(&context, 0)), cl)?,
+                    ShiftOp::Shl => asm.shl(qword_ptr(scratch_operand(&context, 0)), cl)?,
+                    ShiftOp::Sar => asm.sar(qword_ptr(scratch_operand(&context, 0)), cl)?,
                 }
-                asm.mov(rcx, qword_ptr(scratch_operand(0)))?;
+                asm.mov(rcx, qword_ptr(scratch_operand(&context, 0)))?;
             } else {
                 if d != l {
                     asm.mov(d, l)?;
@@ -358,13 +359,14 @@ pub(super) enum DivOp {
 /// The assignment phase avoids placing live-across VRegs in RAX/RDX around
 /// div/rem instructions, so no save/restore is needed here.
 pub(super) fn emit_divrem(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
     rhs: VReg,
     op: DivOp,
 ) -> Result<(), IcedError> {
+    let context = asm.context;
     let d = preg_to_reg64(resolve(assignment, dst));
     let l = preg_to_reg64(resolve(assignment, lhs));
     let r = preg_to_reg64(resolve(assignment, rhs));
@@ -379,7 +381,7 @@ pub(super) fn emit_divrem(
     // Use a stack copy instead of an unmodeled scratch register clobber.
     let rhs_on_stack = r == rax || r == rdx;
     if rhs_on_stack {
-        asm.mov(qword_ptr(scratch_operand(0)), r)?;
+        asm.mov(qword_ptr(scratch_operand(&context, 0)), r)?;
     }
 
     if l != rax {
@@ -392,9 +394,9 @@ pub(super) fn emit_divrem(
     }
     if rhs_on_stack {
         if signed {
-            asm.idiv(qword_ptr(scratch_operand(0)))?;
+            asm.idiv(qword_ptr(scratch_operand(&context, 0)))?;
         } else {
-            asm.div(qword_ptr(scratch_operand(0)))?;
+            asm.div(qword_ptr(scratch_operand(&context, 0)))?;
         }
     } else if signed {
         asm.idiv(r)?;
@@ -430,7 +432,7 @@ impl BinOp {
 }
 
 pub(super) fn emit_binop_rr(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -446,7 +448,7 @@ pub(super) fn emit_binop_rr(
 }
 
 pub(super) fn emit_binop_memory(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     op: BinOp,
     narrow32: bool,
@@ -532,7 +534,7 @@ pub(super) fn emit_binop_memory(
 }
 
 fn emit_binop_rr_64(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -576,7 +578,7 @@ fn emit_binop_rr_64(
 }
 
 fn emit_binop_rr_32(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     lhs: VReg,
@@ -624,7 +626,7 @@ fn emit_binop_rr_32(
 }
 
 pub(super) fn emit_select_memory(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     assignment: &AssignmentMap,
     dst: VReg,
     cond: VReg,
@@ -674,7 +676,7 @@ pub(super) fn emit_select_memory(
 /// Emit OR with a potentially 64-bit immediate.
 /// Uses the most efficient encoding available.
 pub(super) fn emit_or_imm64(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     d: AsmRegister64,
     imm: u64,
 ) -> Result<(), IcedError> {
@@ -694,7 +696,7 @@ pub(super) fn emit_or_imm64(
 /// Truncation masks can copy and clear the high bits in one instruction. MIR
 /// does not expose the flags written by AND, so MOVZX/MOV may replace it.
 pub(super) fn emit_and_imm(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: PhysReg,
     src: PhysReg,
     imm: u64,
@@ -733,7 +735,7 @@ pub(super) fn emit_and_imm(
 }
 
 pub(super) fn emit_and_memory_imm(
-    asm: &mut CodeAssembler,
+    asm: &mut EmitAssembler,
     dst: PhysReg,
     memory: AsmMemoryOperand,
     imm: u64,
