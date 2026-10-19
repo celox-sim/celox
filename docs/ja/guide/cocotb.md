@@ -66,6 +66,9 @@ default_target = "smoke"
 [defines]
 SIMULATION = "1"
 
+[diagnostics]
+mixed_timescale = "warn"
+
 [targets.smoke]
 sources = ["test/Tb.sv"]
 top = "Tb"
@@ -102,6 +105,8 @@ includeディレクトリも同じ階層順で追加します。マクロは実�
 複数ターゲットがあり既定値もない場合は`--target`が必要です。
 単独の`.veryl`エントリーファイルをプロジェクトに指定することもでき、
 Veryl側のソース探索には引き続き`Veryl.toml`を使います。
+
+コンパイル時の診断レベルは `[diagnostics]` で設定でき、`[targets.NAME.diagnostics]`、両コマンドの `--diagnostic CODE=allow|warn|error` の順に上書きできます。CLI オプションは繰り返し指定できます。緩和時の動作と使用例は [診断設定](./celox-toml.md#diagnostics) を参照してください。
 
 ### ファイル一覧を直接使う
 

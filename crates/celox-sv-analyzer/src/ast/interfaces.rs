@@ -44,6 +44,15 @@ pub fn interface_prototypes_for(
     sources: &[(&str, &Path)],
     selected: Option<&HashSet<String>>,
 ) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
+    interface_prototypes_with_options(sources, selected, crate::AnalysisOptions::default())
+}
+
+/// Analyze interface prototypes using the selected compatibility policy.
+pub fn interface_prototypes_with_options(
+    sources: &[(&str, &Path)],
+    selected: Option<&HashSet<String>>,
+    options: crate::AnalysisOptions,
+) -> Result<Vec<InterfacePrototype>, AnalyzerError> {
     if selected.is_some_and(HashSet::is_empty) {
         return Ok(Vec::new());
     }
@@ -74,12 +83,13 @@ pub fn interface_prototypes_for(
     let timescales = if declarations.is_empty() {
         None
     } else {
-        Some(super::timescales::Timescales::collect(
+        Some(super::timescales::Timescales::collect_with_options(
             &files
                 .iter()
                 .zip(sources)
                 .map(|(file, (_, path))| (&file.syntax_tree, *path))
                 .collect::<Vec<_>>(),
+            options.allow_mixed_timescales,
         )?)
     };
     let trees = files
@@ -87,8 +97,9 @@ pub fn interface_prototypes_for(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages = packages::Packages::analyze(&trees)
-        .map_err(|error| error.with_warnings(source_warnings))?;
+    let packages =
+        packages::Packages::analyze_with_options(&trees, None, options.allow_mixed_timescales)
+            .map_err(|error| error.with_warnings(source_warnings))?;
     let package_warnings = packages.warnings().to_vec();
     let mut used_names = design
         .modules

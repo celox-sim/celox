@@ -12,6 +12,9 @@ use serde::Deserialize;
 pub(super) struct DesignArgs {
     /// Ordered SV sources, or one Veryl project entry file.
     pub sources: Vec<PathBuf>,
+    /// Override a compilation diagnostic: CODE=allow|warn|error (repeatable).
+    #[arg(long = "diagnostic", value_name = "CODE=LEVEL")]
+    diagnostics: Vec<String>,
     /// Project manifest (otherwise discover celox.toml when no inputs are given).
     #[arg(long, value_name = "FILE")]
     project: Option<PathBuf>,
@@ -42,6 +45,7 @@ enum Input {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Manifest {
+    diagnostics: celox::DiagnosticPolicy,
     sources: Vec<PathBuf>,
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
@@ -56,6 +60,7 @@ struct Manifest {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Target {
+    diagnostics: celox::DiagnosticPolicy,
     sources: Vec<PathBuf>,
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
@@ -67,6 +72,7 @@ struct Target {
 
 #[derive(Default)]
 pub(super) struct Design {
+    pub diagnostics: celox::DiagnosticPolicy,
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
@@ -160,10 +166,12 @@ impl DesignArgs {
                 &config.include_dirs,
                 &config.defines,
             )?;
+            design.diagnostics = config.diagnostics.clone();
             design.top = config.top.clone().unwrap_or_default();
             let mut opt_level = config.opt_level.as_deref();
             design.max_steps = config.max_steps;
             if let Some(target) = selected {
+                design.diagnostics.0.extend(target.diagnostics.0.clone());
                 design.extend(
                     base,
                     &target.sources,
@@ -203,6 +211,9 @@ impl DesignArgs {
                     design.read_filelist(&self.filelists[index], &mut Vec::new())?
                 }
             }
+        }
+        for diagnostic in &self.diagnostics {
+            design.diagnostics.set_override(diagnostic)?;
         }
         design.include_dirs.extend(self.include_dirs);
         for define in &self.defines {

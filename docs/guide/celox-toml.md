@@ -128,3 +128,58 @@ The Vite plugin picks up `test_veryl/` automatically and generates type definiti
 - All test source directories are merged with the project sources at simulation time. Modules from both are available in the same namespace.
 - The Vite plugin regenerates types for test sources on hot reload, just like for production sources.
 - `[simulation]` settings apply to every `Simulation.fromProject` / `Simulation.create` call within the project. A per-call `{ maxSteps }` option always takes precedence over the `celox.toml` value.
+
+### `[diagnostics]`
+
+Override individual compilation diagnostics by their displayed code:
+
+```toml
+[diagnostics]
+mixed_timescale = "warn"
+exit_outside_program = "allow"
+memory_file_word_count = "error"
+```
+
+`allow` suppresses the diagnostic, `warn` retains it without failing compilation,
+and `error` rejects the design. Unlisted codes keep their default severity.
+Existing Veryl and SystemVerilog warnings can be suppressed or promoted this way.
+Use the exact code printed in the diagnostic; entries for codes not encountered
+by a compilation have no effect.
+
+Recoverable errors support relaxation only when the compiler defines a fallback.
+Currently `mixed_timescale` is the supported error: IEEE 1800-2023 §3.14.2.3 requires
+consistent explicit time units and precisions. Its default is `error`. With `warn`
+or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
+explicit settings remain effective, and the global precision includes default
+scopes. Syntax errors, unsupported constructs and invalid precision declarations
+remain errors.
+
+Project simulator constructors load this table alongside `Veryl.toml`. Native
+compilation also supports standalone SystemVerilog projects:
+
+```sh
+celox run bus.sv top.sv --top Top --diagnostic mixed_timescale=warn
+celox vpi build --project ./celox.toml --target compat --diagnostic exit_outside_program=allow
+```
+
+Both commands use the project discovery and path rules in the
+[CLI guide](./cocotb.md). With explicit sources, use `--project FILE` to load
+configuration. With no inputs, or with `--target NAME`, they discover `celox.toml`
+from the current directory and its ancestors. A selected target can override
+individual codes without replacing the entire policy:
+
+```toml
+sources = ["bus.sv", "top.sv"]
+top = "Top"
+
+[diagnostics]
+mixed_timescale = "error"
+
+[targets.compat.diagnostics]
+mixed_timescale = "warn"
+```
+
+The order is common diagnostics → selected target → CLI overrides. Repeat
+`--diagnostic CODE=LEVEL` to override multiple codes; the last assignment to a
+code wins. `celox run` and `celox vpi build` print retained compilation warnings.
+Diagnostic severity does not change optimizer settings or runtime error handling.

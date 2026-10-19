@@ -72,6 +72,9 @@ default_target = "smoke"
 [defines]
 SIMULATION = "1"
 
+[diagnostics]
+mixed_timescale = "warn"
+
 [targets.smoke]
 sources = ["test/Tb.sv"]
 top = "Tb"
@@ -110,6 +113,12 @@ Without `--target`, Celox uses `default_target`, otherwise the root `top`,
 otherwise the sole target. Multiple targets without a default require
 `--target`. A project may also name a single `.veryl` entry file; its Veryl
 project discovery still uses `Veryl.toml`.
+
+Compilation diagnostic levels can be set in `[diagnostics]`, overridden in
+`[targets.NAME.diagnostics]`, and overridden again with repeatable
+`--diagnostic CODE=allow|warn|error` options on either command. See
+[diagnostic configuration](./celox-toml.md#diagnostics) for supported recovery
+behavior and examples.
 
 ### Use a file list directly
 

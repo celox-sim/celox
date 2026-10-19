@@ -220,3 +220,6 @@ pub use simulator::{
 
 #[cfg(test)]
 mod flatting_tests;
+
+mod diagnostic_policy;
+pub use diagnostic_policy::{DiagnosticLevel, DiagnosticPolicy};

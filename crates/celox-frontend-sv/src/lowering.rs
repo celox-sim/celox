@@ -187,6 +187,7 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
     roots: &[&str],
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     analyze_sources_with_requests(
         sources,
@@ -194,6 +195,7 @@ fn analyze_sources(
         &[],
         &[],
         Some(roots),
+        analysis_options,
     )
     .map(|(modules, _)| modules)
 }
@@ -225,8 +227,18 @@ pub fn interface_signatures_for(
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    interface_signatures_for_with_options(sources, names, warnings, sv::AnalysisOptions::default())
+}
+
+/// Probe interface signatures with explicit language compatibility options.
+pub fn interface_signatures_for_with_options(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let mut found = Vec::new();
-    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    let signatures = interface_signatures_collecting(sources, names, &mut found, analysis_options);
     append_error_warnings(&signatures, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
     signatures
@@ -245,8 +257,9 @@ fn interface_signatures_collecting(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    let prototypes = sv::interface_prototypes_for(sources, names)?;
+    let prototypes = sv::interface_prototypes_with_options(sources, names, analysis_options)?;
     if prototypes.is_empty() {
         return Ok(Vec::new());
     }
@@ -321,6 +334,7 @@ fn analyze_sources_with_requests(
     declarations: &[(&str, &Path)],
     requests: &[SvModuleRequest],
     roots: Option<&[&str]>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
     if !declarations.is_empty() {
         for (code, path) in sources {
@@ -347,7 +361,11 @@ fn analyze_sources_with_requests(
             .collect::<Vec<_>>()
     });
     let time_declarations = if declarations.iter().any(|(code, _)| !code.is_empty()) {
-        sv::generated_time_declarations(sources, selected_roots.as_deref())?
+        sv::generated_time_declarations_with_options(
+            sources,
+            selected_roots.as_deref(),
+            analysis_options,
+        )?
     } else {
         String::new()
     };
@@ -433,9 +451,13 @@ fn analyze_sources_with_requests(
                         .unwrap_or(root)
                 })
                 .collect::<Vec<_>>();
-            sv::ParsedSource::analyze_packages_with_roots(&parsed, &roots)?
+            sv::ParsedSource::analyze_packages_with_options(
+                &parsed,
+                Some(&roots),
+                analysis_options,
+            )?
         }
-        None => sv::ParsedSource::analyze_packages(&parsed)?,
+        None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
@@ -1234,6 +1256,34 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver_with_options(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Prepare a mixed hierarchy with explicit language compatibility options.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver_with_options(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ExternalHierarchy, FrontendError> {
     let mut found = Vec::new();
     let hierarchy = prepare_external_hierarchy_collecting(
         sources,
@@ -1245,6 +1295,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         top_parameters,
         requests,
         &mut found,
+        analysis_options,
     );
     append_error_warnings(&hierarchy, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
@@ -1262,6 +1313,7 @@ fn prepare_external_hierarchy_collecting(
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1269,6 +1321,7 @@ fn prepare_external_hierarchy_collecting(
         declarations,
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
+        analysis_options,
     )?;
     package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
@@ -1652,6 +1705,43 @@ pub fn schedule_sources(
     trace: Option<&mut FrontendTrace>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_options(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Schedule a design with explicit language compatibility options.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_options(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ScheduledRtlOutput, FrontendError> {
     let mut found = Vec::new();
     let scheduled = schedule_sources_collecting(
         sources,
@@ -1664,6 +1754,7 @@ pub fn schedule_sources(
         trace_options,
         trace,
         &mut found,
+        analysis_options,
     );
     append_error_warnings(&scheduled, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
@@ -1689,8 +1780,9 @@ fn schedule_sources_collecting(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources, &[top])?;
+    let analyzed = analyze_sources(sources, &[top], analysis_options)?;
     package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
