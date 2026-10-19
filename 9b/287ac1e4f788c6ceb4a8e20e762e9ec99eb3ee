@@ -1,1 +1,6 @@
-Fix CI catalogue validation: additions must preserve unique stable names, not a frozen total.
+Revision history for #1525:
+
+rev 2 (content) 2026-10-19 07:08 UTC — Fix CI catalogue validation: additions must preserve unique stable names, not a frozen total.
+rev 1 (initial) 2026-10-19 07:08 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1525,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0e18bd69c2c667c087667752893b79514a265ef6","timestamp_iso":"2026-10-19T07:08:41Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0e18bd69c2c667c087667752893b79514a265ef6","new_sha":"9b287ac1e4f788c6ceb4a8e20e762e9ec99eb3ee","timestamp_iso":"2026-10-19T07:08:41Z","reason":"Fix CI catalogue validation: additions must preserve unique stable names, not a frozen total.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0e18bd69c2c667c087667752893b79514a265ef6...9b287ac1e4f788c6ceb4a8e20e762e9ec99eb3ee"}]} -->
