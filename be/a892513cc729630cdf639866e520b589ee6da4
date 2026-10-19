@@ -1,1 +1,6 @@
-Integrate current master: preserve explicit analysis state, warnings, simulation time, interface behavior and validated native parser ownership.
+Revision history for #1556:
+
+rev 2 (content) 2026-10-19 14:26 UTC — Integrate current master: preserve explicit analysis state, warnings, simulation time, interface behavior and validated native parser ownership.
+rev 1 (initial) 2026-10-19 14:26 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1556,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1eb84ba9e4f788db6e3187c08039766e4f6df25d","timestamp_iso":"2026-10-19T14:26:38Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"1eb84ba9e4f788db6e3187c08039766e4f6df25d","new_sha":"bea892513cc729630cdf639866e520b589ee6da4","timestamp_iso":"2026-10-19T14:26:38Z","reason":"Integrate current master: preserve explicit analysis state, warnings, simulation time, interface behavior and validated native parser ownership.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1eb84ba9e4f788db6e3187c08039766e4f6df25d...bea892513cc729630cdf639866e520b589ee6da4"}]} -->
