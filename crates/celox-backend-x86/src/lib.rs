@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local instrumentation exists only in unit tests; non-test library builds enforce the ban"
+    )
+)]
 //! Self-contained x86-64 code-generation kernel.
 //!
 //! The crate consumes source-independent SIR plus a finalized physical state
