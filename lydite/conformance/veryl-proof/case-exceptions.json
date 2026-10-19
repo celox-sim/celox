@@ -84,6 +84,11 @@
   "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
   "panic": "interface::test_interface_always_ff_on_member_clock at 200:3: assert_eq count: expected 0x3, got 0x0"
  },
+ "interface::test_interface_array_direct_function_calls": {
+  "kind": "known_celox_failure",
+  "reason": "Veryl 0.22 native IR loses the selected interface array element in function calls. Celox ignores this case on its native backends (crates/celox/tests/interface.rs); emitted SystemVerilog preserves the selection.",
+  "panic": "interface::test_interface_array_direct_function_calls at 1453:5: assert_eq y1: expected 0x8c, got 0x3c"
+ },
  "interface::test_interface_continuous_assign_logic": {
   "kind": "known_celox_failure",
   "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
@@ -93,6 +98,11 @@
   "kind": "known_celox_failure",
   "reason": "Logic declared inside an interface (assign/always_comb/always_ff) is missing from the Veryl analyzer IR, so the Celox frontend never evaluates it; Celox ignores this case on every backend (crates/celox/tests/interface.rs).",
   "panic": "interface::test_interface_param_and_const at 1124:3: assert_eq f12: expected 0x1, got 0x0"
+ },
+ "interface::test_nested_interface_instance": {
+  "kind": "known_celox_failure",
+  "reason": "Veryl 0.22 native IR drops interface body assignments and nested instances. Celox ignores this case on its native backends (crates/celox/tests/interface.rs); emitted SystemVerilog retains them.",
+  "panic": "interface::test_nested_interface_instance at 1506:5: assert_eq y8: expected 0xcd, got 0x0"
  },
  "synth_dynamic_loop::test_constant_signed_bounds_in_unrolled_synth_loops": {
   "kind": "veryl_language_restriction",
@@ -118,5 +128,30 @@
   "kind": "veryl_language_restriction",
   "reason": "Veryl rejects a runtime $clog2/$onehot argument outside a function as unsynthesizable (UnevaluableValue::SystemFunctionArg, veryl-lang/veryl#2604).",
   "panic": "compile system_function::test_direct_ff_onehot_system_function: analyzer-diagnostics:{\"detail\":\"[UnevaluableValue { kind: SystemFunctionArg(\\\"$onehot\\\"), input: MultiSources { sources: [Source { path: \\\"test.veryl\\\", text: \\\"\\\\nmodule Top (\\\\n    clk: input clock,\\\\n    d: input logic<8>,\\\\n    q: output logic,\\\\n) {\\\\n    always_ff (clk) {\\\\n        q = $onehot(d);\\\\n    }\\\\n}\\\\n\\\", line_offset: 0 }] }, error_location: SourceSpan { offset: SourceOffset(126), length: 1 }, token_source: File { path: PathId(0), text: TextId(1) }, instance: None }]\",\"diagnostics\":[{\"code\":\"UnevaluableValue\"}],\"stage\":\"analyzer\"}"
+ },
+ "tb_string::array_elements": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "tb_string::assignment": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "tb_string::comparison": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "tb_string::control_flow": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
+ },
+ "tb_string::function_argument": {
+  "kind": "unsupported_by_proof_backend",
+  "reason": "The proof backend has no native testbench execution (Backend::run_testbench); the case drives its design from a Veryl testbench.",
+  "panic": "run_testbench: this adapter does not support native testbench execution"
  }
 }
