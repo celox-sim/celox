@@ -10,16 +10,52 @@ sources when it runs.
 The CLI is currently built from the Celox source tree:
 
 ```sh
-cargo build --release -p celox-vpi --bin celox
+cargo build --release -p celox-vpi --features systemverilog --bin celox
 ```
 
-Install cocotb into the Python environment you want to use:
+The `run` command below needs no Python installation. For VPI tests, install
+cocotb into the Python environment you want to use:
 
 ```sh
 python3 -m pip install cocotb
 ```
 
 The repository dev container already includes cocotb 2.0.1 and Verilator.
+
+## Run an HDL testbench directly
+
+Use the same command for a SystemVerilog testbench and a Veryl native
+`#[test]` module:
+
+```sh
+target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+target/release/celox run test/Top.veryl --top Top
+```
+
+For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
+uses four-state simulation and runs until `$finish` or no scheduled events
+remain. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
+and collects the project's sources and dependencies. A standalone
+Veryl file also works. Select the native testbench module with `--top`.
+Veryl uses the existing native testbench executor; a test may also complete by
+falling through its initial blocks.
+
+The command uses the existing frontends' supported language subsets; unsupported
+constructs produce compilation diagnostics. `-O O0`, `-O O1` (default), and
+`-O O2` select the existing compiler optimization levels.
+
+Successful completion returns status 0. Compilation errors, runtime errors,
+assertion failures, `$error`, `$fatal`, lost runtime events, and exhausted
+execution limits return status 1. SV `$stop` also returns status 1 because this
+command has no interactive debugger. Invalid command arguments return status 2.
+SV `$display`/`$write` output goes to stdout; the existing Veryl native
+testbench executor sends its HDL output to stderr.
+
+`--max-steps N` sets a positive execution limit (default: 1000000). It counts
+scheduler steps for SV and testbench ticks for Veryl. Reaching the Veryl tick
+limit before completion fails the command. This limit does not bound compilation
+or work within a single step/tick; use an external process timeout when a wall
+clock limit is needed. Source languages cannot be mixed in one invocation.
 
 ## Compile a design
 
