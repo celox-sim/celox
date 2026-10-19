@@ -1,0 +1,1 @@
+Preserve SystemVerilog-enabled VPI CLI defaults introduced by merged #1441 while resolving the project-input conflict.
