@@ -2,8 +2,7 @@
 
 use super::*;
 
-pub(super) fn comb_processes_from_module_node(
-    node: RefNode<'_>,
+pub(super) fn comb_processes_from_scope(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
@@ -11,39 +10,24 @@ pub(super) fn comb_processes_from_module_node(
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    let active = generate::items(
-        node,
-        syntax_tree,
-        const_env,
-        &packed_dimensions.type_aliases,
-    )?;
+    let active = generate::items(syntax_tree, const_env, &packed_dimensions.type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
         let _interface_scope = item.interface_scope();
-        let ScopeItem::Module(node) = item.node else {
-            continue;
-        };
-        let relevant = match item.common() {
-            Some(
-                sv_parser::ModuleCommonItem::ContinuousAssign(_)
-                | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
-                | sv_parser::ModuleCommonItem::NetAlias(_),
-            ) => true,
-            Some(sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration)) => {
-                matches!(&**declaration,
-                    sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration)
-                    if matches!(&**declaration, sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(_)))
-            }
-            _ => false,
-        };
-        if !relevant {
+        if !matches!(
+            &syntax_tree.declarations().body_item(item.id).kind,
+            celox_sv_syntax::BodyItemKind::Assign(_)
+                | celox_sv_syntax::BodyItemKind::Procedure(_)
+                | celox_sv_syntax::BodyItemKind::Net(_)
+                | celox_sv_syntax::BodyItemKind::Unconverted { .. }
+        ) {
             continue;
         }
         let _constant_functions = item.enter();
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
-        comb_processes_from_module_or_generate_item(
-            node,
+        comb_processes_from_item(
+            item,
             None,
             syntax_tree,
             &item.env,
@@ -65,8 +49,8 @@ pub(super) fn comb_processes_from_module_node(
     Ok(processes)
 }
 
-fn comb_processes_from_module_or_generate_item(
-    item: &sv_parser::ModuleOrGenerateItem,
+fn comb_processes_from_item(
+    item: &generate::Item,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
     const_env: &SharedMap<i128>,
@@ -75,60 +59,40 @@ fn comb_processes_from_module_or_generate_item(
     processes: &mut Vec<CombProcess>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<(), AnalyzerError> {
-    if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
-        comb_processes_from_module_common_item(
-            &item.nodes.1,
-            condition,
-            syntax_tree,
-            const_env,
-            packed_dimensions,
-            parameter_literals,
-            processes,
-            state,
-        )?;
-    }
-    Ok(())
-}
-
-fn comb_processes_from_module_common_item(
-    item: &sv_parser::ModuleCommonItem,
-    condition: Option<ConstExpr>,
-    syntax_tree: &AnalysisContext<'_>,
-    const_env: &SharedMap<i128>,
-    packed_dimensions: &PackedDimensions,
-    parameter_literals: &SharedMap<Expr>,
-    processes: &mut Vec<CombProcess>,
-    state: &mut procedural::BodyState<'_>,
-) -> Result<(), AnalyzerError> {
-    match item {
-        sv_parser::ModuleCommonItem::ContinuousAssign(assign) => {
+    match &syntax_tree.declarations().body_item(item.id).kind {
+        celox_sv_syntax::BodyItemKind::Assign(id) => {
             processes.extend(
-                assignments_from_continuous_assign(assign, syntax_tree, packed_dimensions)?
-                    .into_iter()
-                    .map(|assignment| {
-                        substitute_assignment_constants_with_parameter_literals(
-                            &syntax_tree.state,
-                            assignment,
-                            const_env,
-                            parameter_literals,
-                        )
-                    })
-                    .map(|assignment| {
-                        CombProcess::new(
-                            CombProcessKind::ContinuousAssign,
-                            condition.clone().map(|condition| {
-                                substitute_const_expr_constants(condition, const_env)
-                            }),
-                            vec![assignment],
-                        )
-                    }),
+                continuous_assignments(
+                    syntax_tree.declarations().assign_statement(*id),
+                    syntax_tree,
+                    packed_dimensions,
+                )?
+                .into_iter()
+                .map(|assignment| {
+                    substitute_assignment_constants_with_parameter_literals(
+                        &syntax_tree.state,
+                        assignment,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
+                .map(|assignment| {
+                    CombProcess::new(
+                        CombProcessKind::ContinuousAssign,
+                        condition
+                            .clone()
+                            .map(|condition| substitute_const_expr_constants(condition, const_env)),
+                        vec![assignment],
+                    )
+                }),
             );
         }
-        sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
+        celox_sv_syntax::BodyItemKind::Procedure(id) => {
             let local_packed_dimensions =
                 always_dimensions(packed_dimensions, const_env, parameter_literals);
-            if let Some(process) = comb_process_from_always_construct(
-                always,
+            let procedure = syntax_tree.declarations().procedure(*id);
+            if let Some(process) = comb_process_from_procedure(
+                procedure,
                 condition,
                 syntax_tree,
                 &local_packed_dimensions,
@@ -142,11 +106,13 @@ fn comb_processes_from_module_common_item(
                 ));
             }
         }
-        sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) => {
+        celox_sv_syntax::BodyItemKind::Net(id) => {
             // `wire [7:0] w = expr;` declares a net and drives it continuously.
-            for assignment in
-                net_declaration_assignments(declaration, syntax_tree, packed_dimensions)?
-            {
+            for assignment in net_declaration_assignments(
+                syntax_tree.declarations().net_declaration(*id),
+                syntax_tree,
+                packed_dimensions,
+            )? {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
                     &syntax_tree.state,
                     assignment,
@@ -162,7 +128,7 @@ fn comb_processes_from_module_common_item(
                 ));
             }
         }
-        sv_parser::ModuleCommonItem::NetAlias(_) => {
+        celox_sv_syntax::BodyItemKind::Unconverted { category, .. } if category == "alias" => {
             return Err(AnalyzerError::Unsupported(
                 "module-level net alias".to_string(),
             ));
@@ -186,155 +152,125 @@ fn always_dimensions(
 }
 
 fn net_declaration_assignments(
-    declaration: &sv_parser::ModuleOrGenerateItemDeclaration,
+    native: &celox_sv_syntax::NetDeclaration,
     syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
-    let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
-        declaration
-    else {
-        return Ok(Vec::new());
-    };
-    let sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) = &**declaration else {
-        return Ok(Vec::new());
-    };
-    let sv_parser::NetDeclaration::NetType(net) = &**net else {
-        return Ok(Vec::new());
-    };
     let mut assignments = Vec::new();
-    for assignment in net.nodes.5.nodes.0.contents() {
-        let Some((_, expression)) = &assignment.nodes.2 else {
+    for variable in &native.variables {
+        let Some(value) = variable.value else {
             continue;
         };
-        let name = identifier_text(RefNode::NetIdentifier(&assignment.nodes.0), syntax_tree)
-            .ok_or_else(|| AnalyzerError::Unsupported("net declaration assignment".to_string()))?;
+        let name = instances::normalize_identifier(&variable.name.spelling);
         if let Some(target) = packed_dimensions.get(&name) {
-            check_unpacked_array_assignment(
-                expression,
+            array_compatibility::check_native_unpacked_assignment(
+                &syntax_tree.state,
+                value,
+                syntax_tree.declarations(),
                 target,
                 || "net declaration assignment".to_string(),
-                syntax_tree,
                 packed_dimensions,
             )?;
         }
-        let rhs = expr_from_expression_with_types(expression, syntax_tree, packed_dimensions)?;
-        assignments.push(Assignment::new(LValue::Ident(name), rhs));
+        let lhs = LValue::Ident(name);
+        let rhs = native_expressions::expression(
+            value,
+            syntax_tree.declarations(),
+            &lhs,
+            syntax_tree,
+            packed_dimensions,
+        )?;
+        assignments.push(Assignment::new(lhs, rhs));
     }
     Ok(assignments)
 }
 
-fn assignments_from_continuous_assign(
-    assign: &sv_parser::ContinuousAssign,
-    syntax_tree: &AnalysisContext<'_>,
-    packed_dimensions: &PackedDimensions,
-) -> Result<Vec<Assignment>, AnalyzerError> {
-    match assign {
-        sv_parser::ContinuousAssign::Net(assign) => assign
-            .nodes
-            .3
-            .nodes
-            .0
-            .contents()
-            .into_iter()
-            .map(|assignment| {
-                if let Some(target) =
-                    net_lvalue_unpacked_shape(&assignment.nodes.0, syntax_tree, packed_dimensions)
-                {
-                    check_unpacked_array_assignment(
-                        &assignment.nodes.2,
-                        &target,
-                        || "continuous assignment".to_string(),
-                        syntax_tree,
-                        packed_dimensions,
-                    )?;
-                }
-                let lhs =
-                    net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
-                let rhs = expr_from_expression_for_lvalue(
-                    &assignment.nodes.2,
-                    &lhs,
-                    syntax_tree,
-                    packed_dimensions,
-                )?;
-                let rhs = if matches!(
-                    lhs,
-                    LValue::Select {
-                        is_2state: true,
-                        ..
-                    }
-                ) {
-                    coerce_procedural_assignment_rhs(
-                        &syntax_tree.state,
-                        rhs,
-                        &lhs,
-                        packed_dimensions,
-                    )
-                } else {
-                    rhs
-                };
-                Ok(Assignment::new(lhs, rhs))
-            })
-            .collect(),
-        sv_parser::ContinuousAssign::Variable(assign) => assign
-            .nodes
-            .2
-            .nodes
-            .0
-            .contents()
-            .into_iter()
-            .map(|assignment| {
-                if let Some(target) = variable_lvalue_unpacked_shape(
-                    &assignment.nodes.0,
-                    syntax_tree,
-                    packed_dimensions,
-                ) {
-                    check_unpacked_array_assignment(
-                        &assignment.nodes.2,
-                        &target,
-                        || "continuous assignment".to_string(),
-                        syntax_tree,
-                        packed_dimensions,
-                    )?;
-                }
-                let lhs =
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
-                let rhs = expr_from_expression_for_lvalue(
-                    &assignment.nodes.2,
-                    &lhs,
-                    syntax_tree,
-                    packed_dimensions,
-                )?;
-                let rhs = if matches!(
-                    lhs,
-                    LValue::Select {
-                        is_2state: true,
-                        ..
-                    }
-                ) {
-                    coerce_procedural_assignment_rhs(
-                        &syntax_tree.state,
-                        rhs,
-                        &lhs,
-                        packed_dimensions,
-                    )
-                } else {
-                    rhs
-                };
-                Ok(Assignment::new(lhs, rhs))
-            })
-            .collect(),
+/// Native continuous assignment membership and values drive lowering.
+fn continuous_assignments(
+    native: &celox_sv_syntax::AssignSyntax,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> Converted<Vec<Assignment>> {
+    if native.assignments.is_empty() {
+        return Err(AnalyzerError::Parse(
+            "native continuous assignment has no operands".into(),
+        ));
     }
+    let mut ranges = native
+        .assignments
+        .iter()
+        .map(|assignment| assignment.tokens)
+        .collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|range| range.start);
+    if ranges.iter().any(|range| range.start >= range.end)
+        || ranges.windows(2).any(|pair| pair[0].end > pair[1].start)
+    {
+        return Err(AnalyzerError::Parse(
+            "invalid native continuous assignment membership".into(),
+        ));
+    }
+    if native.delay.is_some() {
+        return Err(unsupported("delayed continuous assignment"));
+    }
+    native
+        .assignments
+        .iter()
+        .map(|assignment| {
+            if let Some(shape) = array_compatibility::native_unpacked_shape(
+                assignment.left,
+                tree.declarations(),
+                dimensions,
+            ) {
+                array_compatibility::check_native_unpacked_assignment(
+                    &tree.state,
+                    assignment.right,
+                    tree.declarations(),
+                    &shape,
+                    || "continuous assignment".into(),
+                    dimensions,
+                )?;
+            }
+            let lhs = native_expressions::net_lvalue(
+                assignment.left,
+                tree.declarations(),
+                tree,
+                dimensions,
+            )?;
+            let rhs = native_expressions::expression(
+                assignment.right,
+                tree.declarations(),
+                &lhs,
+                tree,
+                dimensions,
+            )?;
+            let rhs = if matches!(
+                lhs,
+                LValue::Select {
+                    is_2state: true,
+                    ..
+                }
+            ) {
+                coerce_procedural_assignment_rhs(&tree.state, rhs, &lhs, dimensions)
+            } else {
+                rhs
+            };
+            Ok(Assignment::new(lhs, rhs))
+        })
+        .collect()
 }
 
-fn comb_process_from_always_construct(
-    always: &sv_parser::AlwaysConstruct,
+fn comb_process_from_procedure(
+    procedure: &celox_sv_syntax::Procedure,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
-    let Some(body) = always_comb_body(always) else {
+    if procedure.kind == celox_sv_syntax::ProcedureKind::Initial {
+        return Ok(None);
+    }
+    let Some(body) = always_comb_body(procedure, syntax_tree.declarations())? else {
         return Ok(None);
     };
     let mut builder = procedural::BodyBuilder::new(
@@ -343,7 +279,7 @@ fn comb_process_from_always_construct(
         state,
         system_functions::Body::Always,
     );
-    let mut body = builder.statement(body)?;
+    let mut body = builder.native_body(&[body], &procedure.authored_statements)?;
     for stmt in &mut body {
         procedural::substitute_stmt_constants(
             &syntax_tree.state,
@@ -356,7 +292,7 @@ fn comb_process_from_always_construct(
     Ok(Some(CombProcess {
         sensitivity_body,
         ..CombProcess::procedural(
-            if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
+            if procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysComb {
                 CombProcessKind::AlwaysComb
             } else {
                 CombProcessKind::AlwaysStar

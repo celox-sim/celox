@@ -2,50 +2,45 @@
 
 use super::*;
 
-/// Bind only declarations in this module's parameter scope. Offsets identify
-/// declarations rather than names: a nested local type named T must not inherit
-/// the instance's binding for the module parameter T.
+/// Bind native declarations in this module's parameter scope by stable ID.
+/// A nested local type named T must not inherit the module parameter's binding.
 pub(super) fn bind(
-    node: RefNode<'_>,
     tree: &SyntaxTree,
     overrides: &[(String, Type)],
-) -> Result<HashMap<usize, Type>, AnalyzerError> {
+) -> Result<HashMap<celox_sv_syntax::ParameterId, Type>, AnalyzerError> {
     let mut declarations = HashMap::default();
-    let mut collect = |node: RefNode<'_>, local: bool| {
-        for child in node {
-            if let RefNode::TypeAssignment(assignment) = child {
-                let identifier = RefNode::TypeIdentifier(&assignment.nodes.0);
-                if let Some(name) = identifier_text(identifier.clone(), tree)
-                    && let Some(locate) = identifier_locate(identifier)
-                {
-                    declarations.insert(name, (locate.offset, local));
-                }
-            }
-        }
-    };
-    let has_port_list = module_parameter_port_list(node.clone()).is_some();
-    if let Some(list) = module_parameter_port_list(node.clone()) {
-        let mut local = false;
-        for child in list {
-            if let RefNode::ParameterPortDeclaration(declaration) = child {
-                match declaration {
-                    sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(_) => {
-                        local = true
-                    }
-                    sv_parser::ParameterPortDeclaration::ParameterDeclaration(_) => local = false,
-                    _ => {}
-                }
-                collect(RefNode::ParameterPortDeclaration(declaration), local);
-            }
+    let unit = tree.root_unit()?;
+    let has_port_list = unit.parameters.is_some();
+    for parameter in unit.parameters.iter().flatten() {
+        if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+            declarations.insert(
+                instances::normalize_identifier(&parameter.name.spelling),
+                (parameter.id, parameter.local),
+            );
         }
     }
-    for declaration in scope_declarations(node) {
-        match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
-                collect(RefNode::ParameterDeclaration(&declaration.0), has_port_list);
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
-                collect(RefNode::LocalParameterDeclaration(&declaration.0), true);
+    let mut pending = tree
+        .native_body_membership()?
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items.iter().rev()),
+            celox_sv_syntax::BodyItemKind::Parameter(id) => {
+                for parameter in tree
+                    .declarations()
+                    .parameter_declaration(*id)
+                    .parameters
+                    .iter()
+                {
+                    if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. }) {
+                        declarations.insert(
+                            instances::normalize_identifier(&parameter.name.spelling),
+                            (parameter.id, parameter.local || has_port_list),
+                        );
+                    }
+                }
             }
             _ => {}
         }
@@ -108,86 +103,51 @@ pub(super) fn resolve(
     Some(ty)
 }
 
-/// The span of `node` in the original source text. Token offsets refer to
-/// the preprocessed text, which can differ from the source (the preprocessor
-/// widens the space after `"DPI-C"`), so each token is mapped back and text
-/// the preprocessor inserted is skipped.
-pub(super) fn node_span(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<(usize, usize)> {
-    let origin = |offset| {
-        syntax_tree.get_origin(&sv_parser::Locate {
-            offset,
-            line: 0,
-            len: 1,
-        })
-    };
-    let mut range: Option<(usize, usize)> = None;
-    for child in node {
-        if let RefNode::Locate(locate) = child
-            && locate.len > 0
-            && let Some((_, start)) = origin(locate.offset)
-            && let Some((_, last)) = origin(locate.offset + locate.len - 1)
-        {
-            let end = last + 1;
-            range = Some(match range {
-                None => (start, end),
-                Some((low, high)) => (low.min(start), high.max(end)),
-            });
-        }
-    }
-    range
-}
-
 /// Locate value-pattern bindings by declaration, so nested names stay local.
 pub(super) fn bind_patterns(
-    node: RefNode<'_>,
     tree: &SyntaxTree,
     overrides: &[(String, BoundPattern)],
-) -> Converted<HashMap<usize, BoundPattern>> {
-    let allowed = declarations::module_interface_from_node(node.clone(), tree)?.parameters;
-    let mut declarations = module_parameter_port_list(node.clone())
-        .into_iter()
-        .collect::<Vec<_>>();
-    declarations.extend(
-        scope_declarations(node)
-            .into_iter()
-            .filter_map(|declaration| {
-                if let sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(
-                    declaration,
-                ) = declaration
-                {
-                    Some(RefNode::ParameterDeclaration(&declaration.0))
-                } else {
-                    None
+) -> Converted<HashMap<celox_sv_syntax::ParameterId, BoundPattern>> {
+    let unit = tree.root_unit()?;
+    let mut declarations = HashMap::default();
+    for parameter in unit.parameters.iter().flatten() {
+        if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. }) {
+            declarations.insert(
+                instances::normalize_identifier(&parameter.name.spelling),
+                (parameter.id, parameter.local),
+            );
+        }
+    }
+    let mut pending = tree.native_body_membership()?;
+    while let Some(id) = pending.pop() {
+        match &tree.declarations().body_item(id).kind {
+            celox_sv_syntax::BodyItemKind::Region(items) => pending.extend(items),
+            celox_sv_syntax::BodyItemKind::Parameter(id) => {
+                for parameter in &tree.declarations().parameter_declaration(*id).parameters {
+                    if matches!(parameter.kind, celox_sv_syntax::ParameterKind::Value { .. }) {
+                        declarations.insert(
+                            instances::normalize_identifier(&parameter.name.spelling),
+                            (parameter.id, parameter.local || unit.parameters.is_some()),
+                        );
+                    }
                 }
-            }),
-    );
+            }
+            _ => {}
+        }
+    }
     let mut bindings = HashMap::default();
     for (name, value) in overrides {
-        if !allowed.contains(name) {
+        let &(key, local) = declarations.get(name).ok_or_else(|| {
+            unsupported(format!(
+                "pattern override of non-overridable parameter `{name}`"
+            ))
+        })?;
+        if local {
             return Err(unsupported(format!(
                 "pattern override of non-overridable parameter `{name}`"
             )));
         }
-        let param = declarations
-            .iter()
-            .flat_map(|node| node.clone().into_iter())
-            .find_map(|child| {
-                if let RefNode::ParamAssignment(param) = child
-                    && parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), tree)
-                        .ok()
-                        .as_ref()
-                        == Some(name)
-                {
-                    Some(param)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| unsupported(format!("unknown array parameter `{name}`")))?;
-        let offset = identifier_locate(RefNode::ParameterIdentifier(&param.nodes.0))
-            .ok_or_else(|| unsupported("parameter location"))?
-            .offset;
-        if bindings.insert(offset, value.clone()).is_some() {
+        if bindings.insert(key, value.clone()).is_some() {
             return Err(unsupported(format!(
                 "duplicate parameter override `{name}`"
             )));

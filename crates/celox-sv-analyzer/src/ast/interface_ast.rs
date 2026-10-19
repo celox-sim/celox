@@ -1,5 +1,4 @@
-//! Structural views of interface declarations. Tokens retain their original
-//! locations; no generated SystemVerilog is parsed to collect an interface.
+//! Native interface scope analysis and public type contracts.
 use super::*;
 
 type ActiveInstance = (
@@ -21,158 +20,10 @@ impl Drop for InstanceGuard {
     }
 }
 
-pub(super) fn module_view(
-    interface: &sv_parser::InterfaceDeclarationAnsi,
-) -> Converted<sv_parser::ModuleDeclarationAnsi> {
-    use sv_parser::*;
-    let header = &interface.nodes.0.nodes;
-    let items = interface
-        .nodes
-        .2
-        .iter()
-        .filter_map(|item| match item {
-            NonPortInterfaceItem::ModportDeclaration(_) => None,
-            NonPortInterfaceItem::TimeunitsDeclaration(item) => {
-                Some(Ok(NonPortModuleItem::TimeunitsDeclaration(item.clone())))
-            }
-            NonPortInterfaceItem::GenerateRegion(region) => {
-                let mut region = region.clone();
-                Some(
-                    region
-                        .nodes
-                        .1
-                        .iter_mut()
-                        .try_for_each(generate_item)
-                        .map(|()| NonPortModuleItem::GenerateRegion(region)),
-                )
-            }
-            NonPortInterfaceItem::InterfaceOrGenerateItem(item) => Some(
-                module_item(item)
-                    .map(|item| NonPortModuleItem::ModuleOrGenerateItem(Box::new(item))),
-            ),
-            _ => Some(Err(unsupported("nested declaration in interface"))),
-        })
-        .collect::<Converted<Vec<_>>>()?;
-    Ok(ModuleDeclarationAnsi {
-        nodes: (
-            ModuleAnsiHeader {
-                nodes: (
-                    header.0.clone(),
-                    ModuleKeyword::Module(Box::new(header.1.clone())),
-                    header.2.clone(),
-                    ModuleIdentifier {
-                        nodes: header.3.nodes.clone(),
-                    },
-                    header.4.clone(),
-                    header.5.clone(),
-                    header.6.clone(),
-                    header.7.clone(),
-                ),
-            },
-            interface.nodes.1.clone(),
-            items,
-            interface.nodes.3.clone(),
-            interface.nodes.4.as_ref().map(|(colon, name)| {
-                (
-                    colon.clone(),
-                    ModuleIdentifier {
-                        nodes: name.nodes.clone(),
-                    },
-                )
-            }),
-        ),
-    })
-}
-
-fn module_item(
-    item: &sv_parser::InterfaceOrGenerateItem,
-) -> Converted<sv_parser::ModuleOrGenerateItem> {
-    let sv_parser::InterfaceOrGenerateItem::Module(item) = item else {
-        return Err(unsupported("extern subroutine in interface"));
-    };
-    if let sv_parser::ModuleCommonItem::InterfaceInstantiation(instance) = &item.nodes.1 {
-        return Ok(sv_parser::ModuleOrGenerateItem::Module(Box::new(
-            sv_parser::ModuleOrGenerateItemModule {
-                nodes: (
-                    item.nodes.0.clone(),
-                    sv_parser::ModuleInstantiation {
-                        nodes: (
-                            sv_parser::ModuleIdentifier {
-                                nodes: instance.nodes.0.nodes.clone(),
-                            },
-                            instance.nodes.1.clone(),
-                            instance.nodes.2.clone(),
-                            instance.nodes.3.clone(),
-                        ),
-                    },
-                ),
-            },
-        )));
-    }
-    let mut common = item.nodes.1.clone();
-    common_item(&mut common)?;
-    Ok(sv_parser::ModuleOrGenerateItem::ModuleItem(Box::new(
-        sv_parser::ModuleOrGenerateItemModuleItem {
-            nodes: (item.nodes.0.clone(), common),
-        },
-    )))
-}
-
-fn generate_item(item: &mut sv_parser::GenerateItem) -> Converted<()> {
-    match item {
-        sv_parser::GenerateItem::InterfaceOrGenerateItem(interface) => {
-            *item =
-                sv_parser::GenerateItem::ModuleOrGenerateItem(Box::new(module_item(interface)?));
-        }
-        sv_parser::GenerateItem::ModuleOrGenerateItem(item) => {
-            if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item.as_mut() {
-                common_item(&mut item.nodes.1)?;
-            }
-        }
-        _ => return Err(unsupported("checker item in interface")),
-    }
-    Ok(())
-}
-
-fn block(block: &mut sv_parser::GenerateBlock) -> Converted<()> {
-    match block {
-        sv_parser::GenerateBlock::GenerateItem(item) => generate_item(item),
-        sv_parser::GenerateBlock::Multiple(block) => {
-            block.nodes.3.iter_mut().try_for_each(generate_item)
-        }
-    }
-}
-
-fn common_item(item: &mut sv_parser::ModuleCommonItem) -> Converted<()> {
-    use sv_parser::*;
-    match item {
-        ModuleCommonItem::LoopGenerateConstruct(item) => block(&mut item.nodes.2)?,
-        ModuleCommonItem::ConditionalGenerateConstruct(item) => match item.as_mut() {
-            ConditionalGenerateConstruct::If(item) => {
-                block(&mut item.nodes.2)?;
-                if let Some((_, other)) = &mut item.nodes.3 {
-                    block(other)?;
-                }
-            }
-            ConditionalGenerateConstruct::Case(item) => {
-                for case in &mut item.nodes.2 {
-                    match case {
-                        CaseGenerateItem::Nondefault(item) => block(&mut item.nodes.2)?,
-                        CaseGenerateItem::Default(item) => block(&mut item.nodes.2)?,
-                    }
-                }
-            }
-        },
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Analyze the original interface body and retain its symbols for the scope
 /// that instantiates it. The structural view borrows every token's original
 /// source location, including the lexical time scope of processes/functions.
 pub(super) fn analyze(
-    declaration: &sv_parser::InterfaceDeclarationAnsi,
     tree: &AnalysisContext<'_>,
     path: &Path,
     packages: &packages::Packages,
@@ -181,13 +32,10 @@ pub(super) fn analyze(
     interfaces: &ModuleInterfaces,
     declarations_only: bool,
 ) -> Converted<Module> {
-    let view = module_view(declaration)?;
-    let node = RefNode::ModuleDeclarationAnsi(&view);
-    let mut imported =
-        imports::imported_symbols(node.clone(), tree, packages, packages.unit(path))?;
+    let mut imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
     imported.declarations_only = declarations_only;
-    imported.type_parameter_bindings = type_parameters::bind(node.clone(), tree, types)?;
-    let name = module_name_from_node(node.clone(), tree)?;
+    imported.type_parameter_bindings = type_parameters::bind(tree, types)?;
+    let name = tree.root_name()?;
     let instance = (
         path.to_path_buf(),
         name.clone(),
@@ -209,54 +57,30 @@ pub(super) fn analyze(
     let _instance = InstanceGuard {
         state: tree.state.clone(),
     };
-
     let _timescales =
         timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
-    let empty = ModuleInterfaces::default();
     let lookup = InterfaceLookup {
         local: interfaces,
-        extra: &empty,
+        extra: &ModuleInterfaces::default(),
     };
-    let nested = if node
-        .clone()
-        .into_iter()
-        .any(|node| matches!(node, RefNode::ModuleInstantiation(_)))
-    {
-        native_interfaces::analyze_module(
-            &view,
-            tree,
-            path,
-            packages,
-            native_interfaces::Bindings {
-                values: overrides,
-                types,
-                plan: None,
-                export_symbols: true,
-            },
-            &lookup,
-            imported.clone(),
-        )?
-    } else {
-        None
-    };
+    let nested = native_interfaces::analyze_module(
+        tree,
+        path,
+        packages,
+        native_interfaces::Bindings {
+            values: overrides,
+            types,
+            export_symbols: true,
+            plan: None,
+        },
+        &lookup,
+        imported.clone(),
+    )?;
     let mut module = if let Some(module) = nested {
         module
     } else {
-        Module::from_scope_node_with_parameter_overrides(
-            node,
-            tree,
-            &name,
-            overrides,
-            &InterfaceLookup {
-                local: interfaces,
-                extra: &ModuleInterfaces::default(),
-            },
-            Arc::new(imported),
-            true,
-        )?
+        Module::from_scope_with_symbols(tree, &name, overrides, &lookup, Arc::new(imported), true)?
     };
-    // Carry the constants of nested instances and imported packages with the
-    // interface. Its caller may have no import of their simple names.
     let symbols = module.symbols.as_mut().unwrap();
     let mut parameters = module.imported_parameters.clone();
     parameters.extend(
@@ -276,7 +100,6 @@ pub(super) fn analyze(
 }
 
 pub(super) fn signature(
-    declaration: &sv_parser::InterfaceDeclarationAnsi,
     tree: &SyntaxTree,
     path: &Path,
     packages: &packages::Packages,
@@ -284,22 +107,10 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<crate::ir::Module> {
-    let context = AnalysisContext::unspecialized(tree);
+    let projected_tree = native_interfaces::declaration_view(tree)?;
+    let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
-    let mut view = module_view(declaration)?;
-    // Publishing a type contract must not require lowering the interface's
-    // executable processes. Keep declarations and their original locations.
-    view.nodes.2.retain(|item| match item {
-        sv_parser::NonPortModuleItem::TimeunitsDeclaration(_) => true,
-        sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => matches!(
-            item.as_ref(),
-            sv_parser::ModuleOrGenerateItem::ModuleItem(item)
-                if matches!(&item.nodes.1, sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_))
-        ),
-        _ => false,
-    });
-    let node = RefNode::ModuleDeclarationAnsi(&view);
-    let imported = imports::imported_symbols(node.clone(), tree, packages, packages.unit(path))?;
+    let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
     let _timescales =
         timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
     let empty = ModuleInterfaces::default();
@@ -307,8 +118,7 @@ pub(super) fn signature(
         local: &empty,
         extra: &empty,
     };
-    let mut module = Module::from_module_node_with_parameter_overrides(
-        node,
+    let mut module = Module::from_scope_with_parameter_overrides(
         tree,
         "",
         &HashMap::default(),
@@ -322,15 +132,9 @@ pub(super) fn signature(
     let _functions = const_functions::install(&tree.state, module.constant_functions.clone());
     let mut env = imported.const_env.clone();
     extend_const_env_with_parameters(&tree.state, &mut env, &module.parameters);
-    let aliases =
-        type_aliases_from_module_node_with_env(RefNode::ModuleDeclarationAnsi(&view), tree, &env)?;
-    let declarations = declarations::signals_from_module_node_with_declaration_ranges(
-        RefNode::ModuleDeclarationAnsi(&view),
-        tree,
-        &env,
-        &aliases,
-        true,
-    )?;
+    let aliases = type_aliases_from_scope_with_env(tree, &env)?;
+    let declarations =
+        declarations::signals_from_scope_with_declaration_ranges(tree, &env, &aliases, true)?;
     let names = names
         .iter()
         .map(|name| (name.clone(), format!("h${name}")))

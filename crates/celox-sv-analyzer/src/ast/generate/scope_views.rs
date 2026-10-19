@@ -9,8 +9,8 @@ pub(in crate::ast) struct ScopeViews<'a> {
     literals: &'a HashMap<String, Expr>,
     // Retain borrowers of every keyed snapshot. Pointer identities cannot be
     // recycled while an entry exists, even when nested scopes interrupt siblings.
-    views: HashMap<Key, (&'a Item<'a>, PackedDimensions)>,
-    literal_views: HashMap<Key, (&'a Item<'a>, SharedMap<Expr>)>,
+    views: HashMap<Key, (&'a Item, PackedDimensions)>,
+    literal_views: HashMap<Key, (&'a Item, SharedMap<Expr>)>,
 }
 
 impl<'a> ScopeViews<'a> {
@@ -30,7 +30,7 @@ impl<'a> ScopeViews<'a> {
         }
     }
 
-    pub fn dimensions(&mut self, item: &'a Item<'a>) -> &PackedDimensions {
+    pub fn dimensions(&mut self, item: &'a Item) -> &PackedDimensions {
         &self
             .views
             .entry(key(item))
@@ -38,7 +38,7 @@ impl<'a> ScopeViews<'a> {
             .1
     }
 
-    pub fn get(&mut self, item: &'a Item<'a>) -> (&PackedDimensions, &SharedMap<Expr>) {
+    pub fn get(&mut self, item: &'a Item) -> (&PackedDimensions, &SharedMap<Expr>) {
         let dimensions = &self
             .views
             .entry(key(item))
@@ -53,7 +53,7 @@ impl<'a> ScopeViews<'a> {
     }
 }
 
-fn key(item: &Item<'_>) -> Key {
+fn key(item: &Item) -> Key {
     [
         item.env.identity(),
         item.literals.identity(),
@@ -76,13 +76,10 @@ mod tests {
                 writeln!(code, "logic [7:0] s{index};").unwrap();
             }
             code.push_str("end endmodule");
-            let tree = crate::syntax::parse_source(&code, Path::new("scope_scaling.sv")).unwrap();
-            let tree = AnalysisContext::unspecialized(&tree);
-            let node = tree
-                .into_iter()
-                .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
+            let tree = crate::migration::parse_scope_fixture(&code, Path::new("scope_scaling.sv"))
                 .unwrap();
-            let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let tree = AnalysisContext::unspecialized(&tree);
+            let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
             let dimensions = PackedDimensions::default();
             let mut views = ScopeViews::new(&dimensions);
             for item in &active {
@@ -96,17 +93,13 @@ mod tests {
 
     #[test]
     fn preserves_nested_and_interrupted_scopes_and_detaches_changed_snapshots() {
-        let tree = crate::syntax::parse_source(
+        let tree = crate::migration::parse_scope_fixture(
             "module Top(); if (1) begin : g localparam int P=2; logic [P-1:0] x; if (1) begin : inner localparam int P=3; logic [P-1:0] x; end logic y; end if (1) begin : h localparam int P=4; logic [P-1:0] x; end endmodule",
             Path::new("scope_views.sv"),
         ).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
-        let node = tree
-            .into_iter()
-            .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
-            .unwrap();
-        let active = items(node, &tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             source.modules()[0].ports(),
             source.modules()[0].signals(),

@@ -8,6 +8,10 @@ use std::path::Path;
 
 use super::instances::normalize_identifier;
 use super::*;
+use celox_sv_syntax as native;
+type BodyId = native::BodyItemId;
+type ExprId = native::ExprId;
+type ScopeHandle = crate::migration::ScopeHandle;
 
 /// Joins an interface handle (instance or port) and an interface item name.
 const SEPARATOR: &str = "$";
@@ -129,33 +133,16 @@ pub fn interface_prototypes_for(
                     interface.captured_members(&interface.function_closure(&behavior_functions));
                 Ok(InterfacePrototype {
                     name: interface.name.clone(),
-                    warnings: Vec::new(),
+                    warnings: warnings::components(&files[interface.file].syntax_tree)
+                        .remove(&interface.name)
+                        .unwrap_or_default(),
                     header_dependent_cast: interface
                         .header_dependent_cast(&files[interface.file])?,
                     module: {
                         let file = &files[interface.file];
-                        let declaration = file
-                            .syntax_tree
-                            .into_iter()
-                            .find_map(|node| {
-                                if let RefNode::InterfaceDeclarationAnsi(declaration) = node
-                                    && name(
-                                        RefNode::InterfaceIdentifier(&declaration.nodes.0.nodes.3),
-                                        &file.syntax_tree,
-                                    )
-                                    .ok()
-                                    .as_ref()
-                                        == Some(&interface.name)
-                                {
-                                    Some(declaration)
-                                } else {
-                                    None
-                                }
-                            })
-                            .ok_or_else(|| unsupported("non-ANSI interface signature"))?;
+                        let scoped = file.syntax_tree.scoped(interface.scope)?;
                         interface_ast::signature(
-                            declaration,
-                            &file.syntax_tree,
+                            &scoped,
                             sources[interface.file].1,
                             &packages,
                             probe_name.clone(),
@@ -236,17 +223,114 @@ pub fn interface_prototypes_for(
 
 type Span = (usize, usize);
 
-pub(crate) fn component_references(tree: &SyntaxTree) -> HashSet<String> {
-    tree.into_iter()
-        .filter_map(|node| match node {
-            RefNode::ModuleInstantiation(instance) => {
-                identifier_text(RefNode::ModuleIdentifier(&instance.nodes.0), tree)
-            }
-            RefNode::InterfaceIdentifier(identifier) => {
-                identifier_text(RefNode::InterfaceIdentifier(identifier), tree)
-            }
+fn roots(tree: &SyntaxTree) -> Converted<Vec<(ScopeHandle, &native::Unit)>> {
+    let declarations = tree.declarations();
+    let mut pending = declarations
+        .source_items
+        .iter()
+        .filter_map(|item| match item.kind {
+            native::SourceItemKind::Unit(id) => Some(ScopeHandle::SourceUnit(id)),
             _ => None,
         })
+        .collect::<Vec<_>>();
+    pending.reverse();
+    let mut result = Vec::new();
+    let mut seen = HashSet::default();
+    while let Some(handle) = pending.pop() {
+        if !seen.insert(handle) {
+            return Err(AnalyzerError::Parse(
+                "repeated native interface root".into(),
+            ));
+        }
+        let unit = handle
+            .unit(declarations)
+            .ok_or_else(|| unsupported("missing native interface root"))?;
+        pending.extend(unit.children.iter().rev().map(|id| ScopeHandle::Unit(*id)));
+        result.push((handle, unit));
+    }
+    Ok(result)
+}
+fn body_items(unit: &native::Unit, declarations: &native::Declarations) -> Converted<Vec<BodyId>> {
+    let mut pending = unit.items.iter().rev().copied().collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            return Err(AnalyzerError::Parse(
+                "repeated native interface body item".into(),
+            ));
+        }
+        result.push(id);
+        match &declarations.body_item(id).kind {
+            native::BodyItemKind::Region(items)
+            | native::BodyItemKind::Block { items, .. }
+            | native::BodyItemKind::Unconverted { items, .. } => {
+                pending.extend(items.iter().rev().copied())
+            }
+            native::BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                pending.extend(otherwise);
+                pending.push(*then_body);
+            }
+            native::BodyItemKind::Case { arms, .. } => {
+                pending.extend(arms.iter().rev().map(|arm| arm.body))
+            }
+            native::BodyItemKind::Loop { body, .. } => pending.push(*body),
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+fn block_spans(unit: &native::Unit, file: &File<'_>) -> Converted<Vec<Span>> {
+    let native = file.syntax_tree.declarations();
+    let mut ids = HashSet::default();
+    for id in body_items(unit, native)? {
+        match &native.body_item(id).kind {
+            native::BodyItemKind::Block { .. } => {
+                ids.insert(id);
+            }
+            native::BodyItemKind::Loop { body, .. } => {
+                ids.insert(*body);
+            }
+            native::BodyItemKind::Conditional {
+                then_body,
+                otherwise,
+                ..
+            } => {
+                for id in std::iter::once(then_body).chain(otherwise) {
+                    if !matches!(
+                        native.body_item(*id).kind,
+                        native::BodyItemKind::Conditional { .. }
+                    ) {
+                        ids.insert(*id);
+                    }
+                }
+            }
+            native::BodyItemKind::Case { arms, .. } => {
+                for arm in arms {
+                    if !matches!(
+                        native.body_item(arm.body).kind,
+                        native::BodyItemKind::Conditional { .. }
+                    ) {
+                        ids.insert(arm.body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ids.into_iter()
+        .map(|id| file.span(native.body_item(id).tokens))
+        .collect()
+}
+pub(crate) fn body_component_references(tree: &SyntaxTree) -> HashSet<String> {
+    tree.declarations()
+        .instantiations
+        .iter()
+        .map(|instance| normalize_identifier(&instance.name.spelling))
         .collect()
 }
 
@@ -254,9 +338,28 @@ fn unsupported(construct: impl Into<String>) -> AnalyzerError {
     AnalyzerError::Unsupported(construct.into())
 }
 
-fn name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Result<String, AnalyzerError> {
-    identifier_text(node, syntax_tree)
-        .ok_or_else(|| unsupported("interface elaboration of an unnamed node"))
+/// Lexical qualified spelling for contract discovery, before package binding.
+fn expression_name(id: ExprId, native: &native::Declarations) -> Option<String> {
+    match &native
+        .expression(native_expressions::ungroup(id, native))
+        .kind
+    {
+        native::ExprKind::Name(name) => Some(native_name(name)),
+        native::ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } if separator == "::" => Some(format!(
+            "{}::{}",
+            expression_name(*expression, native)?,
+            native_name(name)
+        )),
+        _ => None,
+    }
+}
+
+fn native_name(name: &native::Name) -> String {
+    normalize_identifier(&name.spelling)
 }
 
 struct File<'a> {
@@ -274,88 +377,116 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(code: &'a str, path: &Path) -> Result<Self, AnalyzerError> {
-        let syntax_tree = crate::syntax::parse_source(code, path)?;
-        let mut blanks = Vec::new();
-        let mut locates = Vec::new();
+        let syntax_tree = crate::migration::parse_source(code, path)?;
+        let native = syntax_tree.declarations();
+        let mut tokens = Vec::new();
         let mut identifiers = HashSet::default();
         let mut type_names = HashSet::default();
-        for node in &syntax_tree {
-            match node {
-                RefNode::ModuleInstantiation(instantiation) => {
-                    let root = RefNode::ModuleIdentifier(&instantiation.nodes.0);
-                    let start = match unwrap_node!(root, SimpleIdentifier, EscapedIdentifier) {
-                        Some(RefNode::SimpleIdentifier(identifier)) => {
-                            origin_span(&syntax_tree, &identifier.nodes.0)
-                        }
-                        Some(RefNode::EscapedIdentifier(identifier)) => {
-                            origin_span(&syntax_tree, &identifier.nodes.0)
-                        }
-                        _ => None,
-                    };
-                    type_names.extend(start.map(|(start, _)| start));
-                }
-                RefNode::StructUnionMember(member) => {
-                    for node in RefNode::StructUnionMember(member) {
-                        let RefNode::VariableIdentifier(identifier) = node else {
-                            continue;
-                        };
-                        let start = match &identifier.nodes.0 {
-                            sv_parser::Identifier::SimpleIdentifier(identifier) => {
-                                origin_span(&syntax_tree, &identifier.nodes.0)
-                            }
-                            sv_parser::Identifier::EscapedIdentifier(identifier) => {
-                                origin_span(&syntax_tree, &identifier.nodes.0)
-                            }
-                        };
-                        type_names.extend(start.map(|(start, _)| start));
-                    }
-                }
-                RefNode::SimpleIdentifier(identifier) => {
-                    if let Some((start, _)) = origin_span(&syntax_tree, &identifier.nodes.0) {
-                        identifiers.insert(start);
-                    }
-                }
-                RefNode::EscapedIdentifier(identifier) => {
-                    if let Some((start, _)) = origin_span(&syntax_tree, &identifier.nodes.0) {
-                        identifiers.insert(start);
-                    }
-                }
-                RefNode::WhiteSpace(white_space) => {
-                    if let Some(span) = super::type_parameters::node_span(
-                        RefNode::WhiteSpace(white_space),
-                        &syntax_tree,
-                    ) {
-                        blanks.push(span);
-                    }
-                }
-                RefNode::Locate(locate) => locates.extend(origin_span(&syntax_tree, locate)),
+        for token in &native.tokens {
+            if token.is_trivia() {
+                continue;
+            }
+            let span = native.sources.invocation(token.origin);
+            if native.sources.file(span.file).path != path {
+                continue;
+            }
+            tokens.push((span.start, span.end));
+        }
+        // Value names and authored declarations, rather than keyword-shaped
+        // lexer words: an escaped handle can be named `logic` or `input`.
+        let mut mark = |name: &native::Name| {
+            let span = native.sources.invocation(name.origin);
+            if native.sources.file(span.file).path == path {
+                identifiers.insert(span.start);
+            }
+        };
+        for expression in &native.expressions {
+            match &expression.kind {
+                native::ExprKind::Name(name) | native::ExprKind::Member { name, .. } => mark(name),
                 _ => {}
             }
         }
-        blanks.sort_unstable();
-        let mut tokens: Vec<Span> = locates
-            .into_iter()
-            .filter(|&(start, _)| {
-                let index = blanks.partition_point(|&(blank_start, _)| blank_start <= start);
-                index == 0 || blanks[index - 1].1 <= start
-            })
-            .collect();
+        for unit in native.all_units() {
+            for port in &unit.ports {
+                match &port.kind {
+                    native::PortKind::Named(name) | native::PortKind::Explicit { name, .. } => {
+                        mark(name)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for declaration in &native.instantiations {
+            for instance in &declaration.instances {
+                mark(&instance.name);
+            }
+        }
+        for declaration in &native.data_declarations {
+            if let native::DataDeclaration::Variables(declaration)
+            | native::DataDeclaration::Constructed(declaration) = declaration
+            {
+                for variable in &declaration.variables {
+                    mark(&variable.name);
+                }
+            }
+        }
+        for declaration in &native.net_declarations {
+            for variable in &declaration.variables {
+                mark(&variable.name);
+            }
+        }
+        for instance in &native.instantiations {
+            type_names.insert(native.sources.invocation(instance.name.origin).start);
+        }
+        for ty in &native.types {
+            if let native::DataTypeKind::Struct { fields, .. } = &ty.kind {
+                for field in fields {
+                    type_names.insert(native.sources.invocation(field.name.origin).start);
+                }
+            }
+        }
         tokens.sort_unstable();
         tokens.dedup();
-        let file = Self {
+        Ok(Self {
             code,
             syntax_tree,
             tokens,
             identifiers,
             type_names,
-        };
-        Ok(file)
+        })
+    }
+    fn range_span(&self, range: native::TokenRange) -> Option<Span> {
+        let native = self.syntax_tree.declarations();
+        native
+            .tokens
+            .get(range.start..range.end)?
+            .iter()
+            .filter(|token| !token.is_trivia())
+            .map(|token| native.sources.invocation(token.origin))
+            .fold(None, |range, span| {
+                Some(match range {
+                    None => (span.start, span.end),
+                    Some((start, end)) => (start.min(span.start), end.max(span.end)),
+                })
+            })
+    }
+    fn span(&self, range: native::TokenRange) -> Converted<Span> {
+        self.range_span(range)
+            .ok_or_else(|| unsupported("interface elaboration of an empty node"))
+    }
+    fn name_span(&self, name: &native::Name) -> Span {
+        let span = self
+            .syntax_tree
+            .declarations()
+            .sources
+            .invocation(name.origin);
+        (span.start, span.end)
+    }
+    fn expression_span(&self, id: ExprId) -> Converted<Span> {
+        self.span(self.syntax_tree.declarations().expression(id).tokens)
     }
 
-    /// The span of the tokens of `node`, without the white space and comments
-    /// that the parser attaches to its last token.
-    fn node_span(&self, node: RefNode<'_>) -> Option<Span> {
-        let (start, end) = super::type_parameters::node_span(node, &self.syntax_tree)?;
+    fn token_span(&self, (start, end): Span) -> Span {
         let index = self
             .tokens
             .partition_point(|&(_, token_end)| token_end <= end);
@@ -364,12 +495,14 @@ impl<'a> File<'a> {
             .map(|index| self.tokens[index].1)
             .filter(|&token_end| token_end > start)
             .unwrap_or(start);
-        Some((start, end))
+        (start, end)
     }
 
-    fn span(&self, node: RefNode<'_>) -> Result<Span, AnalyzerError> {
-        self.node_span(node)
-            .ok_or_else(|| unsupported("interface elaboration of an empty node"))
+    fn binding_span(&self, binding: &package_owners::Binding) -> Result<Span, AnalyzerError> {
+        binding
+            .original
+            .map(|range| self.token_span(range))
+            .ok_or_else(|| unsupported("interface elaboration of an empty import"))
     }
 
     fn text(&self, (start, end): Span) -> &'a str {
@@ -381,14 +514,6 @@ impl<'a> File<'a> {
         index
             .checked_sub(1)
             .map(|index| self.text(self.tokens[index]))
-    }
-
-    /// Whether the identifier at `start` is qualified by `$unit::`.
-    fn unit_qualified(&self, start: usize) -> bool {
-        let index = self.tokens.partition_point(|&(_, end)| end <= start);
-        index >= 2
-            && self.text(self.tokens[index - 1]) == "::"
-            && self.text(self.tokens[index - 2]) == "$unit"
     }
 
     /// The references `h<selects>.item` and bare `h` in `span` to a name
@@ -465,27 +590,6 @@ impl<'a> File<'a> {
     }
 }
 
-/// The span of a token in the original source text, or `None` for text the
-/// preprocessor inserted. Token offsets refer to the preprocessed text.
-fn origin_span(syntax_tree: &SyntaxTree, locate: &Locate) -> Option<Span> {
-    if locate.len == 0 {
-        return None;
-    }
-    let origin = |offset| {
-        syntax_tree
-            .get_origin(&Locate {
-                offset,
-                line: 0,
-                len: 1,
-            })
-            .map(|(_, offset)| offset)
-    };
-    Some((
-        origin(locate.offset)?,
-        origin(locate.offset + locate.len - 1)? + 1,
-    ))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
     Input,
@@ -552,6 +656,7 @@ enum ModportItem {
 }
 
 struct InterfaceDecl {
+    scope: crate::migration::ScopeHandle,
     name: String,
     file: usize,
     /// The start of the declaration in its file.
@@ -591,10 +696,31 @@ impl InterfaceDecl {
             .iter()
             .map(|parameter| parameter.name.as_str())
             .collect::<HashSet<_>>();
+        let native = file.syntax_tree.declarations();
+        // Declaration names are not expression references in the native tree.
+        // Include them in the dependency closure so a localparam or typedef
+        // alias of a header parameter cannot hide a dependent cast target.
+        let declarations = native
+            .parameter_declarations
+            .iter()
+            .flat_map(|declaration| {
+                declaration
+                    .parameters
+                    .iter()
+                    .map(|parameter| &parameter.name)
+            })
+            .chain(native.type_aliases.iter().map(|alias| &alias.name))
+            .map(|name| (file.name_span(name), native_name(name)))
+            .collect::<Vec<_>>();
         loop {
             let before = dependent.len();
             for span in &spans {
-                let names = self.referenced(*span).collect::<Vec<_>>();
+                let names = self
+                    .referenced(*span)
+                    .chain(declarations.iter().filter_map(|(name_span, name)| {
+                        (span.0 <= name_span.0 && name_span.1 <= span.1).then_some(name.as_str())
+                    }))
+                    .collect::<Vec<_>>();
                 if names.iter().any(|name| dependent.contains(name)) {
                     dependent.extend(names);
                 }
@@ -603,11 +729,11 @@ impl InterfaceDecl {
                 break;
             }
         }
-        for node in &file.syntax_tree {
-            let RefNode::CastingType(_) = node else {
+        for expression in &native.expressions {
+            let native::ExprKind::Cast { target, .. } = expression.kind else {
                 continue;
             };
-            let target = file.span(node)?;
+            let target = file.expression_span(target)?;
             if spans
                 .iter()
                 .any(|span| span.0 <= target.0 && target.1 <= span.1)
@@ -735,6 +861,7 @@ struct PortDecl {
 }
 
 struct ModuleDecl {
+    scope: crate::migration::ScopeHandle,
     name: String,
     file: usize,
     span: Span,
@@ -852,127 +979,96 @@ impl<'a> Design<'a> {
     fn collect_selected(
         files: &'a [File<'a>],
         selected: Option<&HashSet<String>>,
-    ) -> Result<Self, AnalyzerError> {
+    ) -> Converted<Self> {
+        let interface_names = files
+            .iter()
+            .map(|file| roots(&file.syntax_tree))
+            .collect::<Converted<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .filter(|(_, unit)| unit.kind == native::UnitKind::Interface)
+            .map(|(_, unit)| native_name(&unit.name))
+            .collect::<HashSet<_>>();
         let mut interfaces = HashMap::default();
         for (index, file) in files.iter().enumerate() {
-            for node in &file.syntax_tree {
-                if matches!(
-                    node,
-                    RefNode::InterfaceDeclarationAnsi(_)
-                        | RefNode::InterfaceDeclarationNonansi(_)
-                        | RefNode::InterfaceDeclarationWildcard(_)
-                ) && let Some(selected) = selected
-                    && let Some(identifier) = unwrap_node!(node.clone(), InterfaceIdentifier)
-                    && !selected.contains(&name(identifier, &file.syntax_tree)?)
-                {
+            for (handle, unit) in roots(&file.syntax_tree)? {
+                if unit.kind != native::UnitKind::Interface {
                     continue;
                 }
-                match node {
-                    RefNode::InterfaceDeclarationAnsi(declaration) => {
-                        let mut interface = InterfaceDecl::collect(declaration, index, file)?;
-                        let unit = unit_names(file)?;
-                        let declared: HashSet<String> = declared_names(
-                            RefNode::InterfaceDeclarationAnsi(declaration),
-                            &file.syntax_tree,
-                        )?
-                        .into_iter()
-                        .collect();
-                        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-                            if let RefNode::Identifier(identifier) = node {
-                                let span = file.span(RefNode::Identifier(identifier))?;
-                                // A qualified name does not resolve to the
-                                // compilation unit, unless `$unit::` names it.
-                                if !file.unit_qualified(span.0)
-                                    && (matches!(file.previous_token(span.0), Some("." | "::"))
-                                        || file.next_token(span.1) == Some("::"))
-                                {
-                                    continue;
-                                }
-                                let identifier =
-                                    name(RefNode::Identifier(identifier), &file.syntax_tree)?;
-                                if unit.contains(&identifier) && !declared.contains(&identifier) {
-                                    interface.uses_unit_items = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if interfaces.contains_key(&interface.name) {
-                            return Err(AnalyzerError::DuplicateModule {
-                                name: interface.name,
-                            });
-                        }
-                        interfaces.insert(interface.name.clone(), interface);
-                    }
-                    RefNode::InterfaceDeclarationNonansi(_)
-                    | RefNode::InterfaceDeclarationWildcard(_) => {
-                        return Err(unsupported("non-ANSI interface declarations"));
-                    }
-                    _ => {}
+                let name = native_name(&unit.name);
+                if selected.is_some_and(|selected| !selected.contains(&name)) {
+                    continue;
+                }
+                if unit.port_style != native::PortStyle::Ansi {
+                    return Err(unsupported("non-ANSI interface declarations"));
+                }
+                let mut interface = InterfaceDecl::collect(handle, index, file, &interface_names)?;
+                let unit_names = unit_names(file)?;
+                let declared = declared_names(unit, file)?
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let scoped = file.syntax_tree.scoped(handle)?;
+                interface.uses_unit_items = imports::unqualified_names(&scoped)
+                    .keys()
+                    .any(|name| unit_names.contains(name) && !declared.contains(name));
+                if !interface.uses_unit_items {
+                    let native = file.syntax_tree.declarations();
+                    interface.uses_unit_items=native.expressions.iter().any(|expression|unit.tokens.start<=expression.tokens.start&&expression.tokens.end<=unit.tokens.end&&matches!(&expression.kind,native::ExprKind::Member{expression,separator,name} if separator=="::"&&expression_name(*expression,native).as_deref()==Some("$unit")&&unit_names.contains(&native_name(name))));
+                }
+                if interfaces.insert(name.clone(), interface).is_some() {
+                    return Err(AnalyzerError::DuplicateModule { name });
                 }
             }
         }
         let mut modules = HashMap::default();
         let mut subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>> =
             HashMap::default();
-        let mut packages: HashMap<String, HashSet<String>> = HashMap::default();
         if !interfaces.is_empty() {
             for (index, file) in files.iter().enumerate() {
-                let syntax_tree = &file.syntax_tree;
+                let native = file.syntax_tree.declarations();
                 let scopes = Scope::collect(file)?;
-                for node in syntax_tree {
-                    let subroutine = match node {
-                        RefNode::ModuleDeclarationAnsi(declaration) => {
-                            let module =
-                                ModuleDecl::collect(declaration, index, file, &interfaces)?;
-                            // Modules and interfaces share one name space; the
-                            // module analysis reports duplicate modules.
-                            if interfaces.contains_key(&module.name) {
-                                return Err(AnalyzerError::DuplicateModule { name: module.name });
-                            }
-                            modules.insert(module.name.clone(), module);
-                            continue;
+                for (handle, unit) in roots(&file.syntax_tree)? {
+                    if unit.kind == native::UnitKind::Module
+                        && unit.port_style == native::PortStyle::Ansi
+                    {
+                        let module = ModuleDecl::collect(handle, index, file, &interfaces)?;
+                        if interfaces.contains_key(&module.name) {
+                            return Err(AnalyzerError::DuplicateModule { name: module.name });
                         }
-                        RefNode::PackageDeclaration(declaration) => {
-                            packages.insert(
-                                name(
-                                    RefNode::PackageIdentifier(&declaration.nodes.3),
-                                    syntax_tree,
-                                )?,
-                                package_items(declaration, syntax_tree)?,
-                            );
-                            None
-                        }
-                        RefNode::FunctionDeclaration(declaration) => unwrap_node!(
-                            RefNode::FunctionDeclaration(declaration),
-                            FunctionIdentifier
-                        )
-                        .map(|identifier| (identifier, node.clone())),
-                        RefNode::TaskDeclaration(declaration) => {
-                            unwrap_node!(RefNode::TaskDeclaration(declaration), TaskIdentifier)
-                                .map(|identifier| (identifier, node.clone()))
-                        }
-                        RefNode::FunctionPrototype(prototype) => Some((
-                            RefNode::FunctionIdentifier(&prototype.nodes.2),
-                            node.clone(),
-                        )),
-                        RefNode::TaskPrototype(prototype) => {
-                            Some((RefNode::TaskIdentifier(&prototype.nodes.1), node.clone()))
-                        }
-                        _ => None,
-                    };
-                    if let Some((identifier, root)) = subroutine {
-                        let scope = file
-                            .node_span(root.clone())
-                            .map_or(Scope::Unit, |span| Scope::of(span, &scopes));
-                        subroutines
-                            .entry(name(identifier, syntax_tree)?)
-                            .or_default()
-                            .push((scope, index, subroutine_ports(root, syntax_tree)?));
+                        modules.insert(module.name.clone(), module);
                     }
+                }
+                for subroutine in &native.subroutines {
+                    let scope = Scope::of(file.span(subroutine.tokens)?, &scopes);
+                    subroutines
+                        .entry(native_name(&subroutine.name))
+                        .or_default()
+                        .push((scope, index, subroutine_ports(subroutine)));
+                }
+                for declaration in &native.dpi_declarations {
+                    if !declaration.import {
+                        continue;
+                    }
+                    let scope = Scope::of(file.span(declaration.tokens)?, &scopes);
+                    let mut inherited = false;
+                    let ports = declaration
+                        .ports
+                        .iter()
+                        .map(|port| {
+                            if let Some(direction) = port.direction {
+                                inherited = direction != native::Direction::Input
+                                    && !(direction == native::Direction::Ref && port.constant);
+                            }
+                            (port.name.as_ref().map(native_name), inherited)
+                        })
+                        .collect();
+                    subroutines
+                        .entry(native_name(&declaration.name))
+                        .or_default()
+                        .push((scope, index, ports));
                 }
             }
         }
-        // Compilation-unit imports before an interface are visible in it.
         for (index, file) in files.iter().enumerate() {
             if !interfaces.values().any(|interface| interface.file == index) {
                 continue;
@@ -982,7 +1078,7 @@ impl<'a> Design<'a> {
                 .values_mut()
                 .filter(|interface| interface.file == index)
             {
-                let preceding: Vec<Item> = unit_imports
+                let preceding = unit_imports
                     .iter()
                     .filter(|(span, _)| span.1 <= interface.start)
                     .map(|(span, imports)| Item::Constant {
@@ -991,50 +1087,45 @@ impl<'a> Design<'a> {
                             imports: imports.clone(),
                         },
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 interface.items.splice(0..0, preceding);
             }
         }
-        // A member an interface passes to a written subroutine argument is
-        // assigned as well.
         for interface in interfaces.values_mut() {
             let file = &files[interface.file];
-            let unit: Vec<(String, Option<String>)> = interface
+            let native = file.syntax_tree.declarations();
+            let unit = interface
+                .scope
+                .unit(native)
+                .ok_or_else(|| unsupported("missing native interface scope"))?;
+            let outer = interface
                 .items
                 .iter()
                 .flat_map(|item| match item {
                     Item::Constant {
-                        header: HeaderForm::Import { imports, .. },
+                        header: HeaderForm::Import { imports },
                         ..
                     } => imports.clone(),
                     _ => Vec::new(),
                 })
-                .collect();
-            for node in &file.syntax_tree {
-                let RefNode::InterfaceDeclarationAnsi(declaration) = node else {
-                    continue;
-                };
-                if name(
-                    RefNode::InterfaceIdentifier(&declaration.nodes.0.nodes.3),
-                    &file.syntax_tree,
-                )? != interface.name
+                .collect::<Vec<_>>();
+            let scoped = scoped_imports(interface.scope, file)?;
+            for expression in &native.expressions {
+                if unit.tokens.start <= expression.tokens.start
+                    && expression.tokens.end <= unit.tokens.end
+                    && matches!(expression.kind, native::ExprKind::Call { .. })
                 {
-                    continue;
-                }
-                let scoped = scoped_imports(RefNode::InterfaceDeclarationAnsi(declaration), file)?;
-                for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-                    if let RefNode::TfCall(call) = node {
-                        written_arguments(
-                            call,
-                            &Scope::Interface(interface.name.clone()),
-                            &|_| None,
-                            file,
-                            interface.file,
-                            &subroutines,
-                            &visible_imports(&unit, &scoped, file.span(RefNode::TfCall(call))?),
-                            &mut interface.lvalues,
-                        )?;
-                    }
+                    let span = file.span(expression.tokens)?;
+                    written_arguments(
+                        expression,
+                        &Scope::Interface(interface.name.clone()),
+                        &|_| None,
+                        file,
+                        interface.file,
+                        &subroutines,
+                        &visible_imports(&outer, &scoped, span),
+                        &mut interface.lvalues,
+                    )?;
                 }
             }
         }
@@ -1054,19 +1145,11 @@ impl<'a> Design<'a> {
             .ok_or_else(|| unsupported(format!("unknown interface `{name}`")))
     }
 
-    fn module_node(
-        &self,
-        module: &ModuleDecl,
-    ) -> Result<&'a sv_parser::ModuleDeclarationAnsi, AnalyzerError> {
-        let file = &self.files[module.file];
-        for node in &file.syntax_tree {
-            if let RefNode::ModuleDeclarationAnsi(declaration) = node
-                && file.node_span(RefNode::ModuleDeclarationAnsi(declaration)) == Some(module.span)
-            {
-                return Ok(declaration);
-            }
-        }
-        Err(unsupported(format!("module `{}`", module.name)))
+    fn module_unit(&self, module: &ModuleDecl) -> Converted<&'a native::Unit> {
+        module
+            .scope
+            .unit(self.files[module.file].syntax_tree.declarations())
+            .ok_or_else(|| unsupported("missing native module scope"))
     }
 
     fn expansion(
@@ -1300,12 +1383,14 @@ impl<'a> Design<'a> {
         module_name: &str,
         bound: (&str, &str),
         bindings: &[(String, String)],
-    ) -> Result<ModuleUses, AnalyzerError> {
+    ) -> Converted<ModuleUses> {
         let module = &self.modules[module_name];
         let file = &self.files[module.file];
-        let declaration = self.module_node(module)?;
+        let native = file.syntax_tree.declarations();
+        let unit = self.module_unit(module)?;
+        let items = body_items(unit, native)?;
+        let blocks = block_spans(unit, file)?;
         let mut uses = ModuleUses::default();
-        // The interface of each handle, unless generic or ambiguous.
         let mut handle_interfaces: HashMap<String, Option<String>> = HashMap::default();
         for port in &module.ports {
             if let Some(interface) = &port.interface {
@@ -1320,42 +1405,27 @@ impl<'a> Design<'a> {
                 handle_interfaces.insert(port.name.clone(), interface);
             }
         }
-        let mut blocks = Vec::new();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            if let RefNode::GenerateBlock(block) = node {
-                blocks.extend(file.node_span(RefNode::GenerateBlock(block)));
-            }
-        }
-        // The interface instances with their scopes, which hide a port of
-        // their name.
-        let mut instances: Vec<(String, Span, String)> = Vec::new();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            let RefNode::ModuleInstantiation(instantiation) = node else {
+        let mut instances = Vec::new();
+        for id in &items {
+            let native::BodyItemKind::Instance(instance) = native.body_item(*id).kind else {
                 continue;
             };
-            let type_name = name(
-                RefNode::ModuleIdentifier(&instantiation.nodes.0),
-                &file.syntax_tree,
-            )?;
+            let declaration = native.instantiation(instance);
+            let type_name = native_name(&declaration.name);
             if !self.interfaces.contains_key(&type_name) {
                 continue;
             }
-            let statement = file.span(RefNode::ModuleInstantiation(instantiation))?;
+            let span = file.span(declaration.tokens)?;
             let scope = blocks
                 .iter()
-                .filter(|block| block.0 <= statement.0 && statement.1 <= block.1)
+                .filter(|block| block.0 <= span.0 && span.1 <= block.1)
                 .min_by_key(|block| block.1 - block.0)
                 .copied()
                 .unwrap_or(module.span);
-            for instance in instantiation.nodes.2.contents() {
-                let instance_name = name(
-                    RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                    &file.syntax_tree,
-                )?;
-                instances.push((instance_name, scope, type_name.clone()));
+            for instance in &declaration.instances {
+                instances.push((native_name(&instance.name), scope, type_name.clone()));
             }
         }
-        // The instance `handle` names at `span`, from the innermost scope.
         let instance_at = |handle: &str, span: Span| {
             instances
                 .iter()
@@ -1365,101 +1435,117 @@ impl<'a> Design<'a> {
                 .min_by_key(|(_, scope, _)| scope.1 - scope.0)
                 .map(|(_, _, interface)| interface.clone())
         };
-        // The interface of `handle` at `span`, unless generic.
-        let interface_at = |handle: &str, span: Span| match instance_at(handle, span) {
-            Some(interface) => Some(interface),
-            None => handle_interfaces.get(handle).cloned().flatten(),
+        let interface_at = |handle: &str, span: Span| {
+            instance_at(handle, span).or_else(|| handle_interfaces.get(handle).cloned().flatten())
         };
-        // Whether `handle` at `span` names the port rather than an instance.
         let is_port = |handle: &str, span: Span| instance_at(handle, span).is_none();
-        // The compilation-unit imports before the module, and the module's
-        // own by the scope they are visible in.
-        let unit: Vec<(String, Option<String>)> = unit_imports(file)?
+        let outer = unit_imports(file)?
             .into_iter()
             .filter(|(span, _)| span.1 <= module.span.0)
             .flat_map(|(_, imports)| imports)
-            .collect();
-        let scoped = scoped_imports(RefNode::ModuleDeclarationAnsi(declaration), file)?;
-        // An assignment target starts where its lvalue starts.
+            .collect::<Vec<_>>();
+        let scoped = scoped_imports(module.scope, file)?;
         let mut lvalues = HashSet::default();
         let mut generates = Vec::new();
         let mut subroutines = Vec::new();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            match node {
-                RefNode::FunctionDeclaration(function) => {
-                    subroutines.extend(file.node_span(RefNode::FunctionDeclaration(function)));
-                }
-                RefNode::TaskDeclaration(task) => {
-                    subroutines.extend(file.node_span(RefNode::TaskDeclaration(task)));
-                }
-                RefNode::TfCall(call) => {
-                    let span = file.span(RefNode::TfCall(call))?;
+        for id in &items {
+            let item = native.body_item(*id);
+            match item.kind {
+                native::BodyItemKind::Subroutine(_) => subroutines.push(file.span(item.tokens)?),
+                native::BodyItemKind::Conditional { .. }
+                | native::BodyItemKind::Case { .. }
+                | native::BodyItemKind::Loop { .. } => generates.push(file.span(item.tokens)?),
+                _ => {}
+            }
+        }
+        for expression in &native.expressions {
+            if unit.tokens.start <= expression.tokens.start
+                && expression.tokens.end <= unit.tokens.end
+            {
+                if matches!(expression.kind, native::ExprKind::Call { .. }) {
+                    let span = file.span(expression.tokens)?;
                     written_arguments(
-                        call,
+                        expression,
                         &Scope::Module(module_name.to_string()),
                         &|handle| interface_at(handle, span),
                         file,
                         module.file,
                         &self.subroutines,
-                        &visible_imports(&unit, &scoped, span),
+                        &visible_imports(&outer, &scoped, span),
                         &mut lvalues,
-                    )?
+                    )?;
                 }
-                RefNode::SystemTfCall(call) => {
-                    if let Some(destination) = readmem_destination(call, file)? {
-                        written_expression(destination, file, &mut lvalues);
-                    }
+                if let Some(destination) = readmem_destination(expression, file)? {
+                    written_expression(destination, file, &mut lvalues);
                 }
-                RefNode::VariableLvalue(lvalue) => {
-                    lvalues.extend(
-                        file.node_span(RefNode::VariableLvalue(lvalue))
-                            .map(|span| span.0),
-                    );
+                if let native::ExprKind::Unary {
+                    operator,
+                    expression,
+                    ..
+                } = &expression.kind
+                    && matches!(operator.as_str(), "++" | "--")
+                {
+                    written_expression(*expression, file, &mut lvalues);
                 }
-                RefNode::NetLvalue(lvalue) => {
-                    lvalues.extend(
-                        file.node_span(RefNode::NetLvalue(lvalue))
-                            .map(|span| span.0),
-                    );
-                }
-                RefNode::ConditionalGenerateConstruct(construct) => {
-                    generates
-                        .extend(file.node_span(RefNode::ConditionalGenerateConstruct(construct)));
-                }
-                RefNode::LoopGenerateConstruct(construct) => {
-                    generates.extend(file.node_span(RefNode::LoopGenerateConstruct(construct)));
-                }
-                _ => {}
             }
         }
-        let context = |span: Span| Context::of(span, &generates, &subroutines);
-        // Actuals of child ports: written ones, and ones of children whose
-        // port directions are not known here.
+        for statement in &native.statements {
+            if unit.tokens.start <= statement.tokens.start
+                && statement.tokens.end <= unit.tokens.end
+                && let native::StatementKind::Assignment { left, .. } = statement.kind
+            {
+                written_expression(left, file, &mut lvalues);
+            }
+        }
+        for assign in &native.assign_statements {
+            if unit.tokens.start <= assign.tokens.start && assign.tokens.end <= unit.tokens.end {
+                for assignment in &assign.assignments {
+                    written_expression(assignment.left, file, &mut lvalues);
+                }
+            }
+        }
+        let context = |span| Context::of(span, &generates, &subroutines);
         let mut unknown = HashSet::default();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            let RefNode::ModuleInstantiation(instantiation) = node else {
+        for id in &items {
+            let native::BodyItemKind::Instance(instance) = native.body_item(*id).kind else {
                 continue;
             };
-            let child_name = name(
-                RefNode::ModuleIdentifier(&instantiation.nodes.0),
-                &file.syntax_tree,
-            )?;
+            let instantiation = native.instantiation(instance);
+            let child_name = native_name(&instantiation.name);
             if self.interfaces.contains_key(&child_name) {
                 continue;
             }
             let Some(child) = self.modules.get(&child_name) else {
-                for node in RefNode::ModuleInstantiation(instantiation) {
-                    if let RefNode::Expression(expression) = node {
-                        unknown.extend(
-                            file.node_span(RefNode::Expression(expression))
-                                .map(|span| span.0),
-                        );
+                for instance in &instantiation.instances {
+                    for connection in &instance.connections {
+                        let actual = match connection.kind {
+                            native::InstanceConnectionKind::Ordered(actual) => actual,
+                            native::InstanceConnectionKind::Named {
+                                value: native::ConnectionValue::Expression(actual),
+                                ..
+                            } => Some(actual),
+                            _ => None,
+                        };
+                        if let Some(actual) = actual {
+                            let mut pending = vec![actual];
+                            let mut seen = HashSet::default();
+                            while let Some(id) = pending.pop() {
+                                if !seen.insert(id) {
+                                    continue;
+                                }
+                                unknown.extend(
+                                    file.range_span(native.expression(id).tokens)
+                                        .map(|span| span.0),
+                                );
+                                pending.extend(parameters::skipped::children(id, native));
+                            }
+                        }
                     }
                 }
                 continue;
             };
-            let instance_context = context(file.span(RefNode::ModuleInstantiation(instantiation))?);
-            for instance in instantiation.nodes.2.contents() {
+            let instance_context = context(file.span(instantiation.tokens)?);
+            for instance in &instantiation.instances {
                 let actuals = connections(instance, child, file, child.has_interface_ports())?;
                 let mut bindings = Vec::new();
                 for (formal, actual) in &actuals {
@@ -1499,12 +1585,12 @@ impl<'a> Design<'a> {
                 }
             }
         }
-        let ports: HashSet<&str> = module
+        let ports = module
             .ports
             .iter()
             .filter(|port| port.interface.is_some())
             .map(|port| port.name.as_str())
-            .collect();
+            .collect::<HashSet<_>>();
         for reference in file.handle_references(module.span, |name| ports.contains(name)) {
             if !is_port(&reference.handle, reference.span) {
                 continue;
@@ -1529,79 +1615,91 @@ impl<'a> Design<'a> {
     }
 }
 
-/// The names that variable, net, parameter, type, subroutine, subroutine
-/// port, loop variable and genvar declarations under `root` declare, with
-/// repetitions.
-/// A genvar is listed once per use.
-fn declared_names(
-    root: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Result<Vec<String>, AnalyzerError> {
-    declared_identifiers(root)
-        .into_iter()
-        .map(|identifier| name(identifier, syntax_tree))
-        .collect()
-}
-
-/// The identifiers of the declarations under `root`, other than struct and
-/// union members, which have their own name space.
-fn declared_identifiers(root: RefNode<'_>) -> Vec<RefNode<'_>> {
+fn declared_names(unit: &native::Unit, file: &File<'_>) -> Converted<Vec<String>> {
+    let native = file.syntax_tree.declarations();
     let mut names = Vec::new();
-    let mut members = HashSet::default();
-    for node in root {
-        let identifier = match node {
-            RefNode::StructUnionMember(member) => {
-                for node in RefNode::StructUnionMember(member) {
-                    if let RefNode::VariableDeclAssignmentVariable(declarator) = node {
-                        members.insert(std::ptr::from_ref(declarator));
+    let mut statements = Vec::new();
+    names.extend(
+        unit.parameters
+            .iter()
+            .flatten()
+            .map(|parameter| native_name(&parameter.name)),
+    );
+    for id in body_items(unit, native)? {
+        let item = native.body_item(id);
+        names.extend(imports::item_names(id, &file.syntax_tree));
+        match &item.kind {
+            native::BodyItemKind::Subroutine(id) => {
+                let sub = native.subroutine(*id);
+                names.extend(
+                    sub.ports
+                        .iter()
+                        .flatten()
+                        .chain(sub.port_declarations.iter().flat_map(|group| &group.ports))
+                        .filter_map(|port| port.name.as_ref().map(native_name)),
+                );
+                statements.extend(&sub.authored_statements);
+            }
+            native::BodyItemKind::Procedure(id) => {
+                statements.extend(&native.procedure(*id).authored_statements)
+            }
+            native::BodyItemKind::Loop { variable, .. } => names.push(native_name(variable)),
+            native::BodyItemKind::Unconverted { category, .. } if category == "genvar" => names
+                .extend(
+                    native.tokens[item.tokens.start..item.tokens.end]
+                        .iter()
+                        .filter(|token| token.text != "genvar")
+                        .filter_map(|token| token.identifier().map(normalize_identifier)),
+                ),
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::default();
+    while let Some(id) = statements.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let statement = native.statement(id);
+        match &statement.kind {
+            native::StatementKind::Declaration(declaration) => match declaration {
+                native::LocalDeclaration::Variables(decl)
+                | native::LocalDeclaration::Constructed(decl) => names.extend(
+                    decl.variables
+                        .iter()
+                        .map(|variable| native_name(&variable.name)),
+                ),
+                native::LocalDeclaration::Parameters(id) => names.extend(
+                    native
+                        .parameter_declaration(*id)
+                        .parameters
+                        .iter()
+                        .map(|parameter| native_name(&parameter.name)),
+                ),
+                native::LocalDeclaration::TypeAlias(id) => {
+                    names.push(native_name(&native.type_alias(*id).name))
+                }
+                _ => {}
+            },
+            native::StatementKind::Loop {
+                kind: native::LoopSyntax::For(header),
+                ..
+            } => {
+                if let Some(native::ForInitialization::Declarations(decls)) = &header.initialization
+                {
+                    for decl in decls {
+                        names.extend(
+                            decl.variables
+                                .iter()
+                                .map(|variable| native_name(&variable.name)),
+                        );
                     }
                 }
-                continue;
             }
-            RefNode::VariableDeclAssignmentVariable(declarator)
-                if members.contains(&std::ptr::from_ref(declarator)) =>
-            {
-                continue;
-            }
-            RefNode::VariableDeclAssignmentVariable(declarator) => {
-                RefNode::VariableIdentifier(&declarator.nodes.0)
-            }
-            RefNode::NetDeclAssignment(declarator) => RefNode::NetIdentifier(&declarator.nodes.0),
-            RefNode::ParamAssignment(declarator) => {
-                RefNode::ParameterIdentifier(&declarator.nodes.0)
-            }
-            RefNode::TypeAssignment(declarator) => RefNode::TypeIdentifier(&declarator.nodes.0),
-            RefNode::TypeDeclarationDataType(declarator) => {
-                RefNode::TypeIdentifier(&declarator.nodes.2)
-            }
-            RefNode::TfPortItem(port) => match &port.nodes.4 {
-                Some((identifier, _, _)) => RefNode::PortIdentifier(identifier),
-                None => continue,
-            },
-            RefNode::ForVariableDeclaration(declaration) => {
-                for (identifier, _, _) in declaration.nodes.2.contents() {
-                    names.push(RefNode::VariableIdentifier(identifier));
-                }
-                continue;
-            }
-            RefNode::GenvarIdentifier(identifier) => RefNode::GenvarIdentifier(identifier),
-            RefNode::FunctionDeclaration(function) => {
-                match unwrap_node!(RefNode::FunctionDeclaration(function), FunctionIdentifier) {
-                    Some(identifier) => identifier,
-                    None => continue,
-                }
-            }
-            RefNode::TaskDeclaration(task) => {
-                match unwrap_node!(RefNode::TaskDeclaration(task), TaskIdentifier) {
-                    Some(identifier) => identifier,
-                    None => continue,
-                }
-            }
-            _ => continue,
-        };
-        names.push(identifier);
+            _ => {}
+        }
+        statements.extend(statement.kind.children());
     }
-    names
+    Ok(names)
 }
 
 fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
@@ -1618,7 +1716,7 @@ fn clone_module_name(module: &str, bindings: &[(String, String)]) -> String {
 /// when its declarations disagree about an argument, the call is
 /// rejected.
 fn written_arguments(
-    call: &sv_parser::TfCall,
+    call: &native::Expr,
     local: &Scope,
     handle_interface: &dyn Fn(&str) -> Option<String>,
     file: &File<'_>,
@@ -1627,11 +1725,40 @@ fn written_arguments(
     imports: &[(String, Option<String>)],
     writes: &mut HashSet<usize>,
 ) -> Result<(), AnalyzerError> {
-    let Some((_, arguments, _)) = call.nodes.2.as_ref().map(|paren| &paren.nodes) else {
+    let native = file.syntax_tree.declarations();
+    let native::ExprKind::Call {
+        expression,
+        arguments,
+    } = &call.kind
+    else {
         return Ok(());
     };
-    let text = file.text(file.span(RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0))?);
-    let callee = normalize_identifier(text.rsplit(['.', ':']).next().unwrap_or(text).trim());
+    let (callee, package, handle) = match &native.expression(*expression).kind {
+        native::ExprKind::Name(name) => (native_name(name), None, None),
+        native::ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } => {
+            if separator == "::" {
+                (
+                    native_name(name),
+                    expression_name(*expression, native),
+                    None,
+                )
+            } else if separator == "." {
+                let mut base = *expression;
+                while let native::ExprKind::Select { expression, .. } = native.expression(base).kind
+                {
+                    base = expression;
+                }
+                (native_name(name), None, expression_name(base, native))
+            } else {
+                return Ok(());
+            }
+        }
+        _ => return Ok(()),
+    };
     let Some(declared) = subroutines.get(&callee) else {
         return Ok(());
     };
@@ -1649,15 +1776,13 @@ fn written_arguments(
             .map(|(_, _, ports)| ports)
             .collect()
     };
-    let declarations = if let Some((package, _)) = text.rsplit_once("::") {
-        let package = normalize_identifier(package.rsplit("::").next().unwrap_or(package).trim());
+    let declarations = if let Some(package) = package {
         in_scope(&|scope| match scope {
             Scope::Package(name) => *name == package,
             Scope::Unit => package == "$unit",
             _ => false,
         })
-    } else if let Some((handle, _)) = text.split_once('.') {
-        let handle = normalize_identifier(handle.split('[').next().unwrap_or(handle).trim());
+    } else if let Some(handle) = handle {
         match handle_interface(&handle) {
             Some(interface) => in_scope(&|scope| *scope == Scope::Interface(interface.clone())),
             None => in_scope(&|scope| matches!(scope, Scope::Interface(_))),
@@ -1677,34 +1802,20 @@ fn written_arguments(
         }
     };
     // Positional actuals by index, named ones by formal name.
-    let mut actuals: Vec<(Result<usize, String>, &sv_parser::Expression)> = Vec::new();
-    let named = match arguments {
-        sv_parser::ListOfArguments::Ordered(list) => {
-            for (index, actual) in list.nodes.0.contents().into_iter().enumerate() {
-                if let Some(actual) = actual {
-                    actuals.push((Ok(index), actual));
-                }
-            }
-            &list.nodes.1
-        }
-        sv_parser::ListOfArguments::Named(list) => {
-            if let Some(actual) = &list.nodes.2.nodes.1 {
-                actuals.push((
-                    Err(name(RefNode::Identifier(&list.nodes.1), &file.syntax_tree)?),
+    let actuals = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| {
+            argument.value.map(|actual| {
+                (
+                    argument
+                        .name
+                        .as_ref()
+                        .map_or(Ok(index), |name| Err(native_name(name))),
                     actual,
-                ));
-            }
-            &list.nodes.3
-        }
-    };
-    for (_, _, formal, actual) in named {
-        if let Some(actual) = &actual.nodes.1 {
-            actuals.push((
-                Err(name(RefNode::Identifier(formal), &file.syntax_tree)?),
-                actual,
-            ));
-        }
-    }
+                )
+            })
+        });
     for (formal, actual) in actuals {
         let mut directions = declarations.iter().filter_map(|ports| match &formal {
             Ok(index) => ports.get(*index).map(|(_, writes)| *writes),
@@ -1731,24 +1842,53 @@ fn written_arguments(
 /// The package imports under `root`, each with the scope it is visible in:
 /// the innermost subroutine or block around it, or `root`.
 fn scoped_imports(
-    root: RefNode<'_>,
+    handle: ScopeHandle,
     file: &File<'_>,
 ) -> Result<Vec<(Span, Vec<(String, Option<String>)>)>, AnalyzerError> {
-    let root_span = file.span(root.clone())?;
+    let root_span = file.span(
+        handle
+            .unit(file.syntax_tree.declarations())
+            .ok_or_else(|| unsupported("missing native import scope"))?
+            .tokens,
+    )?;
     let mut scopes = Vec::new();
     let mut imports = Vec::new();
-    for node in root {
-        match node {
-            RefNode::FunctionDeclaration(_)
-            | RefNode::TaskDeclaration(_)
-            | RefNode::SeqBlock(_)
-            | RefNode::ParBlock(_)
-            | RefNode::GenerateBlock(_) => scopes.extend(file.node_span(node)),
-            RefNode::PackageImportDeclaration(import) => imports.push((
-                file.span(RefNode::PackageImportDeclaration(import))?,
-                imported_items(RefNode::PackageImportDeclaration(import), &file.syntax_tree)?,
-            )),
-            _ => {}
+    let scoped = file.syntax_tree.scoped(handle)?;
+    for view in package_owners::scope(&scoped)? {
+        if file
+            .syntax_tree
+            .declarations()
+            .package_binding(view.id)
+            .kind
+            == celox_sv_syntax::PackageBindingKind::Import
+        {
+            imports.push((
+                file.binding_span(&view)?,
+                imported_items(view.id, &file.syntax_tree)?,
+            ));
+        }
+    }
+    let native = file.syntax_tree.declarations();
+    let unit = scoped.root_unit()?;
+    for id in body_items(unit, native)? {
+        if matches!(
+            native.body_item(id).kind,
+            native::BodyItemKind::Block { .. }
+                | native::BodyItemKind::Loop { .. }
+                | native::BodyItemKind::Subroutine(_)
+        ) {
+            scopes.extend(file.range_span(native.body_item(id).tokens));
+        }
+    }
+    for statement in &native.statements {
+        if unit.tokens.start <= statement.tokens.start
+            && statement.tokens.end <= unit.tokens.end
+            && matches!(
+                statement.kind,
+                native::StatementKind::Block { .. } | native::StatementKind::Parallel { .. }
+            )
+        {
+            scopes.extend(file.range_span(statement.tokens));
         }
     }
     Ok(imports
@@ -1783,60 +1923,40 @@ fn visible_imports(
 
 /// Record the start of `expression`, and of each name in it outside a
 /// select, as an assignment target, for a concatenation of members.
-fn written_expression(
-    expression: &sv_parser::Expression,
-    file: &File<'_>,
-    writes: &mut HashSet<usize>,
-) {
-    let root = RefNode::Expression(expression);
-    writes.extend(file.node_span(root.clone()).map(|span| span.0));
-    let mut selects = Vec::new();
-    for node in root.clone() {
-        if matches!(
-            node,
-            RefNode::BitSelect(_)
-                | RefNode::PartSelectRange(_)
-                | RefNode::ConstantBitSelect(_)
-                | RefNode::ConstantPartSelectRange(_)
-        ) {
-            selects.extend(file.node_span(node));
+fn written_expression(expression: ExprId, file: &File<'_>, writes: &mut HashSet<usize>) {
+    let native = file.syntax_tree.declarations();
+    let mut pending = vec![expression];
+    let mut seen = HashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
         }
-    }
-    for node in root {
-        if let RefNode::PrimaryHierarchical(primary) = node
-            && let Some(span) = file.node_span(RefNode::PrimaryHierarchical(primary))
-            && !selects
-                .iter()
-                .any(|select| select.0 <= span.0 && span.1 <= select.1)
-        {
-            writes.insert(span.0);
+        let expression = native.expression(id);
+        writes.extend(file.range_span(expression.tokens).map(|span| span.0));
+        match &expression.kind {
+            native::ExprKind::Select { expression, .. }
+            | native::ExprKind::Member { expression, .. }
+            | native::ExprKind::Group(expression) => pending.push(*expression),
+            native::ExprKind::Concatenation(items) => pending.extend(items),
+            _ => {}
         }
     }
 }
-
-/// The destination of a `$readmemh` or `$readmemb` call.
-fn readmem_destination<'b>(
-    call: &'b sv_parser::SystemTfCall,
-    file: &File<'_>,
-) -> Result<Option<&'b sv_parser::Expression>, AnalyzerError> {
-    let (identifier, arguments): (_, Vec<&Option<sv_parser::Expression>>) = match call {
-        sv_parser::SystemTfCall::ArgOptionl(call) => (
-            &call.nodes.0,
-            match call.nodes.1.as_ref().map(|paren| &paren.nodes.1) {
-                Some(sv_parser::ListOfArguments::Ordered(list)) => list.nodes.0.contents(),
-                _ => return Ok(None),
-            },
-        ),
-        sv_parser::SystemTfCall::ArgExpression(call) => {
-            (&call.nodes.0, call.nodes.1.nodes.1.0.contents())
-        }
-        sv_parser::SystemTfCall::ArgDataType(_) => return Ok(None),
+fn readmem_destination(call: &native::Expr, file: &File<'_>) -> Converted<Option<ExprId>> {
+    let native::ExprKind::Call {
+        expression,
+        arguments,
+    } = &call.kind
+    else {
+        return Ok(None);
     };
-    let name = file.text(file.span(RefNode::SystemTfIdentifier(identifier))?);
-    if !matches!(SystemTask::from_name(name), Some(SystemTask::Readmem(_))) {
+    let Some(name) = expression_name(*expression, file.syntax_tree.declarations()) else {
+        return Ok(None);
+    };
+    if !matches!(SystemTask::from_name(&name), Some(SystemTask::Readmem(_))) {
         return Ok(None);
     }
-    Ok(arguments.get(1).and_then(|argument| argument.as_ref()))
+    Ok(arguments.get(1).and_then(|argument| argument.value))
 }
 
 /// Whether `code` has a backtick outside comments and string literals, for
@@ -1884,17 +2004,18 @@ fn has_directive(code: &str) -> bool {
 fn unit_imports(
     file: &File<'_>,
 ) -> Result<Vec<(Span, Vec<(String, Option<String>)>)>, AnalyzerError> {
-    let scopes = Scope::collect(file)?;
     let mut imports = Vec::new();
-    for node in &file.syntax_tree {
-        let RefNode::PackageImportDeclaration(import) = node else {
-            continue;
-        };
-        let span = file.span(RefNode::PackageImportDeclaration(import))?;
-        if Scope::of(span, &scopes) == Scope::Unit {
+    for view in package_owners::compilation(&file.syntax_tree)? {
+        if file
+            .syntax_tree
+            .declarations()
+            .package_binding(view.id)
+            .kind
+            == celox_sv_syntax::PackageBindingKind::Import
+        {
             imports.push((
-                span,
-                imported_items(RefNode::PackageImportDeclaration(import), &file.syntax_tree)?,
+                file.binding_span(&view)?,
+                imported_items(view.id, &file.syntax_tree)?,
             ));
         }
     }
@@ -1904,77 +2025,34 @@ fn unit_imports(
 /// What the package imports under `root` import: `(package, item)`, with
 /// no item for a wildcard import.
 fn imported_items(
-    root: RefNode<'_>,
+    id: celox_sv_syntax::PackageBindingId,
     syntax_tree: &SyntaxTree,
 ) -> Result<Vec<(String, Option<String>)>, AnalyzerError> {
-    let mut items = Vec::new();
-    for node in root {
-        match node {
-            RefNode::PackageImportItemIdentifier(item) => items.push((
-                name(RefNode::PackageIdentifier(&item.nodes.0), syntax_tree)?,
-                Some(name(RefNode::Identifier(&item.nodes.2), syntax_tree)?),
+    use celox_sv_syntax::{PackageBindingItemKind, PackageBindingKind};
+    let binding = syntax_tree.declarations().package_binding(id);
+    if binding.kind != PackageBindingKind::Import {
+        return Err(AnalyzerError::Parse(
+            "native dependency import has a different declaration kind".into(),
+        ));
+    }
+    Ok(binding
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            PackageBindingItemKind::Named { package, name } => Some((
+                normalize_identifier(&package.spelling),
+                Some(normalize_identifier(&name.spelling)),
             )),
-            RefNode::PackageImportItemAsterisk(item) => items.push((
-                name(RefNode::PackageIdentifier(&item.nodes.0), syntax_tree)?,
-                None,
-            )),
-            _ => {}
-        }
-    }
-    Ok(items)
+            PackageBindingItemKind::Wildcard(package) => {
+                Some((normalize_identifier(&package.spelling), None))
+            }
+            PackageBindingItemKind::All => None,
+        })
+        .collect())
 }
 
-/// The names that the items of `package` declare.
-fn package_items(
-    package: &sv_parser::PackageDeclaration,
-    syntax_tree: &SyntaxTree,
-) -> Result<HashSet<String>, AnalyzerError> {
-    let mut names = HashSet::default();
-    for (_, item) in &package.nodes.6 {
-        names.extend(package_item_names(item, syntax_tree)?);
-    }
-    Ok(names)
-}
-
-/// The names that the compilation-unit items of `file` declare.
-fn unit_names(file: &File<'_>) -> Result<HashSet<String>, AnalyzerError> {
-    let mut names = HashSet::default();
-    for node in &file.syntax_tree {
-        if let RefNode::DescriptionPackageItem(item) = node {
-            names.extend(package_item_names(&item.nodes.1, &file.syntax_tree)?);
-        }
-    }
-    Ok(names)
-}
-
-/// The names that a package item declares.
-pub(super) fn package_item_names(
-    item: &sv_parser::PackageItem,
-    syntax_tree: &SyntaxTree,
-) -> Result<HashSet<String>, AnalyzerError> {
-    let root = RefNode::PackageItem(item);
-    // Only the name of a subroutine; its ports and locals are its own.
-    let subroutine = unwrap_node!(root.clone(), FunctionDeclaration)
-        .and_then(|function| unwrap_node!(function, FunctionIdentifier))
-        .or_else(|| {
-            unwrap_node!(root.clone(), TaskDeclaration)
-                .and_then(|task| unwrap_node!(task, TaskIdentifier))
-        });
-    let mut names = HashSet::default();
-    if let Some(identifier) = subroutine {
-        names.insert(name(identifier, syntax_tree)?);
-        return Ok(names);
-    }
-    names.extend(declared_names(root.clone(), syntax_tree)?);
-    for node in root {
-        if let RefNode::EnumNameDeclaration(declaration) = node {
-            names.insert(name(
-                RefNode::EnumIdentifier(&declaration.nodes.0),
-                syntax_tree,
-            )?);
-        }
-    }
-    Ok(names)
+fn unit_names(file: &File<'_>) -> Converted<HashSet<String>> {
+    imports::scope_names(&file.syntax_tree.compilation_scope())
 }
 
 /// The scope that declares a subroutine.
@@ -1992,33 +2070,25 @@ enum Scope {
 
 impl Scope {
     /// The design elements and classes of `file` with their spans.
-    fn collect(file: &File<'_>) -> Result<Vec<(Span, Self)>, AnalyzerError> {
+    fn collect(file: &File<'_>) -> Converted<Vec<(Span, Self)>> {
         let mut scopes = Vec::new();
-        for node in &file.syntax_tree {
-            let (identifier, scope): (Option<RefNode<'_>>, fn(String) -> Self) = match node {
-                RefNode::ModuleDeclaration(_) => {
-                    (unwrap_node!(node.clone(), ModuleIdentifier), Self::Module)
-                }
-                RefNode::InterfaceDeclaration(_) => (
-                    unwrap_node!(node.clone(), InterfaceIdentifier),
-                    Self::Interface,
-                ),
-                RefNode::PackageDeclaration(_) => {
-                    (unwrap_node!(node.clone(), PackageIdentifier), Self::Package)
-                }
-                RefNode::ProgramDeclaration(_) | RefNode::ClassDeclaration(_) => {
-                    (None, |_| Self::Other)
-                }
-                _ => continue,
+        let native = file.syntax_tree.declarations();
+        for (_, unit) in roots(&file.syntax_tree)? {
+            let name = native_name(&unit.name);
+            let scope = match unit.kind {
+                native::UnitKind::Module => Self::Module(name),
+                native::UnitKind::Interface => Self::Interface(name),
+                native::UnitKind::Package => Self::Package(name),
+                _ => Self::Other,
             };
-            let Some(span) = file.node_span(node.clone()) else {
-                continue;
-            };
-            let name = match identifier {
-                Some(identifier) => name(identifier, &file.syntax_tree)?,
-                None => String::new(),
-            };
-            scopes.push((span, scope(name)));
+            scopes.push((file.span(unit.tokens)?, scope));
+        }
+        for item in &native.body_items {
+            if let native::BodyItemKind::Unconverted { category, .. } = &item.kind
+                && category == "class"
+            {
+                scopes.push((file.span(item.tokens)?, Self::Other));
+            }
         }
         Ok(scopes)
     }
@@ -2077,48 +2147,26 @@ impl Context {
 /// the subroutine may write the actual argument (`output`, `inout`, `ref`).
 type SubroutinePorts = Vec<(Option<String>, bool)>;
 
-fn subroutine_ports(
-    root: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
-) -> Result<SubroutinePorts, AnalyzerError> {
-    let writes = |direction: &sv_parser::TfPortDirection| match direction {
-        sv_parser::TfPortDirection::PortDirection(direction) => {
-            !matches!(direction.as_ref(), sv_parser::PortDirection::Input(_))
-        }
-        sv_parser::TfPortDirection::ConstRef(_) => false,
-    };
-    let mut ports = Vec::new();
-    // A port without a direction inherits the previous one, initially input.
+fn subroutine_ports(subroutine: &native::Subroutine) -> SubroutinePorts {
     let mut inherited = false;
-    for node in root {
-        match node {
-            RefNode::TfPortItem(item) => {
-                if let Some(direction) = &item.nodes.1 {
-                    inherited = writes(direction);
-                }
-                let port = item
-                    .nodes
-                    .4
-                    .as_ref()
-                    .map(|(identifier, _, _)| {
-                        name(RefNode::PortIdentifier(identifier), syntax_tree)
-                    })
-                    .transpose()?;
-                ports.push((port, inherited));
+    subroutine
+        .ports
+        .iter()
+        .flatten()
+        .chain(
+            subroutine
+                .port_declarations
+                .iter()
+                .flat_map(|group| &group.ports),
+        )
+        .map(|port| {
+            if let Some(direction) = port.direction {
+                inherited = direction != native::Direction::Input
+                    && !(direction == native::Direction::Ref && port.constant);
             }
-            RefNode::TfPortDeclaration(declaration) => {
-                let writes = writes(&declaration.nodes.1);
-                for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
-                    ports.push((
-                        Some(name(RefNode::PortIdentifier(identifier), syntax_tree)?),
-                        writes,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(ports)
+            (port.name.as_ref().map(native_name), inherited)
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -2144,146 +2192,52 @@ struct TokenReference {
 
 /// Whether a primary has a class qualifier or package scope. The parser
 /// gives a plain name an empty class qualifier.
-fn has_qualifier(primary: &sv_parser::PrimaryHierarchical, file: &File<'_>) -> bool {
-    primary.nodes.0.as_ref().is_some_and(|qualifier| {
-        file.node_span(RefNode::ClassQualifierOrPackageScope(qualifier))
-            .is_some()
-    })
-}
-
-/// The interface handle a port connection names: `h`, `h[i]`, or `h.mp`.
-fn actual_handle(
-    expression: &sv_parser::Expression,
-    file: &File<'_>,
-) -> Result<Option<Actual>, AnalyzerError> {
-    let sv_parser::Expression::Primary(primary) = expression else {
-        return Ok(None);
-    };
-    let sv_parser::Primary::Hierarchical(primary) = primary.as_ref() else {
-        return Ok(None);
-    };
-    if has_qualifier(primary, file) || primary.nodes.1.nodes.0.is_some() {
-        return Ok(None);
-    }
-    let syntax_tree = &file.syntax_tree;
-    let identifier = &primary.nodes.1;
-    let non_empty = |span: Option<Span>| span.filter(|span| span.1 > span.0);
-    let trailing = non_empty(file.node_span(RefNode::Select(&primary.nodes.2)));
-    match identifier.nodes.1.as_slice() {
-        [] => Ok(Some(Actual {
-            handle: name(RefNode::Identifier(&identifier.nodes.2), syntax_tree)?,
-            selects: trailing,
-            modport: None,
-        })),
-        [(head, selects, _)] if trailing.is_none() => Ok(Some(Actual {
-            handle: name(RefNode::Identifier(head), syntax_tree)?,
-            selects: non_empty(file.node_span(RefNode::ConstantBitSelect(selects))),
-            modport: Some(name(RefNode::Identifier(&identifier.nodes.2), syntax_tree)?),
-        })),
-        _ => Ok(None),
-    }
-}
-
-/// The connections of `instance` to `module` as `(formal, actual)`.
-/// Unless `strict`, implicit and wildcard connections are skipped.
-fn connections<'b>(
-    instance: &'b sv_parser::HierarchicalInstance,
-    module: &ModuleDecl,
-    file: &File<'_>,
-    strict: bool,
-) -> Result<Vec<(String, Connection<'b>)>, AnalyzerError> {
-    let Some(list) = &instance.nodes.1.nodes.1 else {
-        return Ok(Vec::new());
-    };
-    match list {
-        sv_parser::ListOfPortConnections::Ordered(list) => {
-            let connections = list.nodes.0.contents();
-            if connections.len() == 1 && connections[0].nodes.1.is_none() && module.ports.is_empty()
-            {
-                return Ok(Vec::new());
-            }
-            if connections.len() > module.ports.len() {
-                return Err(unsupported(format!(
-                    "more port connections than ports of `{}`",
-                    module.name
-                )));
-            }
-            Ok(module
-                .ports
-                .iter()
-                .zip(
-                    connections
-                        .into_iter()
-                        .map(|connection| connection.nodes.1.as_ref())
-                        .chain(std::iter::repeat(None)),
-                )
-                .map(|(port, actual)| (port.name.clone(), Connection::Explicit(actual)))
-                .collect())
+/// The interface handle an actual names, optionally selected and qualified by a modport.
+fn actual_handle(expression: ExprId, file: &File<'_>) -> Converted<Option<Actual>> {
+    let native = file.syntax_tree.declarations();
+    let mut base = expression;
+    let mut modport = None;
+    if let native::ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(base).kind
+    {
+        if separator != "." {
+            return Ok(None);
         }
-        sv_parser::ListOfPortConnections::Named(list) => {
-            let mut connections: Vec<(String, Connection<'b>)> = list
-                .nodes
-                .0
-                .contents()
-                .into_iter()
-                .filter_map(|connection| match connection {
-                    sv_parser::NamedPortConnection::Identifier(connection) => {
-                        let formal = match name(
-                            RefNode::PortIdentifier(&connection.nodes.2),
-                            &file.syntax_tree,
-                        ) {
-                            Ok(formal) => formal,
-                            Err(error) => return Some(Err(error)),
-                        };
-                        match &connection.nodes.3 {
-                            Some(actual) => {
-                                Some(Ok((formal, Connection::Explicit(actual.nodes.1.as_ref()))))
-                            }
-                            None if !strict => None,
-                            None => Some(
-                                file.span(RefNode::PortIdentifier(&connection.nodes.2))
-                                    .map(|span| (formal, Connection::Implicit(span))),
-                            ),
-                        }
-                    }
-                    sv_parser::NamedPortConnection::Asterisk(_) if !strict => None,
-                    sv_parser::NamedPortConnection::Asterisk(_) => {
-                        Some(Err(unsupported("wildcard port connection")))
-                    }
-                })
-                .collect::<Result<_, _>>()?;
-            // An omitted interface port is unconnected, which the caller
-            // rejects.
-            if strict {
-                for port in &module.ports {
-                    if port.interface.is_some()
-                        && !connections.iter().any(|(formal, _)| *formal == port.name)
-                    {
-                        connections.push((port.name.clone(), Connection::Explicit(None)));
-                    }
-                }
-            }
-            Ok(connections)
-        }
+        modport = Some(native_name(name));
+        base = *expression;
     }
+    let end = native.expression(base).tokens.end;
+    let mut selected = false;
+    while let native::ExprKind::Select { expression, .. } = &native.expression(base).kind {
+        selected = true;
+        base = *expression;
+    }
+    let native::ExprKind::Name(name) = &native.expression(base).kind else {
+        return Ok(None);
+    };
+    let start = native.expression(base).tokens.end;
+    let selects = if selected {
+        file.range_span(native::TokenRange { start, end })
+    } else {
+        None
+    };
+    Ok(Some(Actual {
+        handle: native_name(name),
+        selects,
+        modport,
+    }))
 }
-
-/// The actual of a port connection.
 #[derive(Clone, Copy)]
-enum Connection<'b> {
-    /// `.x(expression)`, or `.x()` and positional gaps without one.
-    Explicit(Option<&'b sv_parser::Expression>),
-    /// `.x`, connecting the signal of the port's name.
+enum Connection {
+    Explicit(Option<ExprId>),
     Implicit(Span),
 }
-
-impl Connection<'_> {
-    /// Resolve `.p` and `.p(p)` through the same interface lookup path.
-    fn interface_actual(
-        self,
-        formal: &str,
-        file: &File<'_>,
-    ) -> Result<Option<(Actual, Span)>, AnalyzerError> {
+impl Connection {
+    /// Resolve `.p` and `.p(p)` through the same lexical handle lookup.
+    fn interface_actual(self, formal: &str, file: &File<'_>) -> Converted<Option<(Actual, Span)>> {
         match self {
             Self::Implicit(span) => Ok(Some((
                 Actual {
@@ -2294,120 +2248,170 @@ impl Connection<'_> {
                 span,
             ))),
             Self::Explicit(Some(expression)) => actual_handle(expression, file)?
-                .map(|actual| {
-                    file.span(RefNode::Expression(expression))
-                        .map(|span| (actual, span))
-                })
+                .map(|actual| file.expression_span(expression).map(|span| (actual, span)))
                 .transpose(),
             Self::Explicit(None) => Ok(None),
         }
     }
 }
-
+fn connections(
+    instance: &native::InstanceDeclarator,
+    module: &ModuleDecl,
+    file: &File<'_>,
+    strict: bool,
+) -> Converted<Vec<(String, Connection)>> {
+    use native::{ConnectionValue, InstanceConnectionKind};
+    if instance.connections.is_empty() {
+        return Ok(Vec::new());
+    }
+    if instance
+        .connections
+        .iter()
+        .all(|connection| matches!(connection.kind, InstanceConnectionKind::Ordered(_)))
+    {
+        if instance.connections.len() == 1
+            && matches!(
+                instance.connections[0].kind,
+                InstanceConnectionKind::Ordered(None)
+            )
+            && module.ports.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        if instance.connections.len() > module.ports.len() {
+            return Err(unsupported(format!(
+                "more port connections than ports of `{}`",
+                module.name
+            )));
+        }
+        return Ok(module
+            .ports
+            .iter()
+            .enumerate()
+            .map(|(index, port)| {
+                let actual =
+                    instance
+                        .connections
+                        .get(index)
+                        .and_then(|connection| match connection.kind {
+                            InstanceConnectionKind::Ordered(value) => value,
+                            _ => None,
+                        });
+                (port.name.clone(), Connection::Explicit(actual))
+            })
+            .collect());
+    }
+    let mut connections = Vec::new();
+    for connection in &instance.connections {
+        match &connection.kind {
+            InstanceConnectionKind::Named { name, value } => {
+                let formal = native_name(name);
+                let actual = match value {
+                    ConnectionValue::Expression(id) => Connection::Explicit(Some(*id)),
+                    ConnectionValue::Empty => Connection::Explicit(None),
+                    ConnectionValue::Implicit if !strict => continue,
+                    ConnectionValue::Implicit => Connection::Implicit(file.name_span(name)),
+                };
+                connections.push((formal, actual));
+            }
+            InstanceConnectionKind::Wildcard if !strict => {}
+            InstanceConnectionKind::Wildcard => {
+                return Err(unsupported("wildcard port connection"));
+            }
+            _ => return Err(unsupported("mixed named and positional port connections")),
+        }
+    }
+    if strict {
+        for port in &module.ports {
+            if port.interface.is_some()
+                && !connections.iter().any(|(formal, _)| formal == &port.name)
+            {
+                connections.push((port.name.clone(), Connection::Explicit(None)));
+            }
+        }
+    }
+    Ok(connections)
+}
 fn parameter_overrides(
-    assignment: Option<&sv_parser::ParameterValueAssignment>,
+    arguments: Option<&[native::Argument]>,
     parameters: &[String],
     file: &File<'_>,
-) -> Result<Vec<(String, Span)>, AnalyzerError> {
-    let Some(assignment) = assignment else {
+) -> Converted<Vec<(String, Span)>> {
+    let Some(arguments) = arguments else {
         return Ok(Vec::new());
     };
-    let Some(list) = &assignment.nodes.1.nodes.1 else {
-        return Ok(Vec::new());
-    };
-    match list {
-        sv_parser::ListOfParameterAssignments::Ordered(list) => {
-            let values = list.nodes.0.contents();
-            if values.len() > parameters.len() {
-                return Err(unsupported("more parameter values than parameters"));
-            }
-            values
-                .into_iter()
-                .zip(parameters)
-                .map(|(value, parameter)| {
-                    Ok((
-                        parameter.clone(),
-                        file.span(RefNode::ParamExpression(&value.nodes.0))?,
-                    ))
-                })
-                .collect()
-        }
-        sv_parser::ListOfParameterAssignments::Named(list) => list
-            .nodes
-            .0
-            .contents()
-            .into_iter()
-            .filter_map(|assignment| {
-                let parameter = match name(
-                    RefNode::ParameterIdentifier(&assignment.nodes.1),
-                    &file.syntax_tree,
-                ) {
-                    Ok(parameter) => parameter,
-                    Err(error) => return Some(Err(error)),
-                };
-                let value = assignment.nodes.2.nodes.1.as_ref()?;
-                Some(
-                    file.span(RefNode::ParamExpression(value))
-                        .map(|value| (parameter, value)),
-                )
-            })
-            .collect(),
+    if arguments.iter().all(|argument| argument.name.is_none())
+        && arguments.len() > parameters.len()
+    {
+        return Err(unsupported("more parameter values than parameters"));
     }
+    arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| {
+            let expression = argument.value?;
+            let parameter = argument
+                .name
+                .as_ref()
+                .map(native_name)
+                .or_else(|| parameters.get(index).cloned())?;
+            Some(
+                file.expression_span(expression)
+                    .map(|span| (parameter, span)),
+            )
+        })
+        .collect()
 }
-
-fn check_no_connections(
-    instance: &sv_parser::HierarchicalInstance,
-    interface: &str,
-) -> Result<(), AnalyzerError> {
-    match &instance.nodes.1.nodes.1 {
-        None => Ok(()),
-        Some(sv_parser::ListOfPortConnections::Ordered(list)) if matches!(list.nodes.0.contents()[..], [connection] if connection.nodes.1.is_none()) => {
-            Ok(())
-        }
-        Some(_) => Err(unsupported(format!("ports of interface `{interface}`"))),
+fn check_no_connections(instance: &native::InstanceDeclarator, interface: &str) -> Converted<()> {
+    if instance.connections.is_empty()
+        || matches!(
+            instance.connections.as_slice(),
+            [native::InstanceConnection {
+                kind: native::InstanceConnectionKind::Ordered(None),
+                ..
+            }]
+        )
+    {
+        Ok(())
+    } else {
+        Err(unsupported(format!("ports of interface `{interface}`")))
     }
 }
 
 impl InterfaceDecl {
     fn collect(
-        declaration: &sv_parser::InterfaceDeclarationAnsi,
+        handle: ScopeHandle,
         file_index: usize,
         file: &File<'_>,
-    ) -> Result<Self, AnalyzerError> {
-        let syntax_tree = &file.syntax_tree;
-        let header = &declaration.nodes.0;
-        let interface_name = name(RefNode::InterfaceIdentifier(&header.nodes.3), syntax_tree)?;
-        if header
-            .nodes
-            .6
-            .as_ref()
-            .is_some_and(|ports| ports.nodes.0.nodes.1.is_some())
-        {
+        interfaces: &HashSet<String>,
+    ) -> Converted<Self> {
+        let tree = file.syntax_tree.scoped(handle)?;
+        let unit = tree.root_unit()?;
+        let native = tree.declarations();
+        let interface_name = native_name(&unit.name);
+        if !unit.ports.is_empty() {
             return Err(unsupported(format!(
                 "ports of interface `{interface_name}`"
             )));
         }
-        // Enumerators are declared in the enclosing scope and would not be
-        // renamed per instance.
-        if unwrap_node!(
-            RefNode::InterfaceDeclarationAnsi(declaration),
-            EnumNameDeclaration
-        )
-        .is_some()
-        {
+        if native.types.iter().any(|ty| {
+            unit.tokens.start <= ty.tokens.start
+                && ty.tokens.end <= unit.tokens.end
+                && matches!(ty.kind, native::DataTypeKind::Enum { .. })
+        }) {
             return Err(unsupported(format!(
                 "enum type in interface `{interface_name}`"
             )));
         }
+        let span = file.span(unit.tokens)?;
         let mut interface = Self {
+            scope: handle,
             name: interface_name.clone(),
             file: file_index,
-            start: file.span(RefNode::InterfaceDeclarationAnsi(declaration))?.0,
-            has_parameter_port_list: header.nodes.5.is_some(),
+            start: span.0,
+            has_parameter_port_list: unit.parameters.is_some(),
             uses_unit_items: false,
-            uses_macros: has_directive(
-                file.text(file.span(RefNode::InterfaceDeclarationAnsi(declaration))?),
-            ),
+            uses_macros: has_directive(file.text(span)),
             parameters: Vec::new(),
             type_parameters: Vec::new(),
             parameter_order: Vec::new(),
@@ -2419,25 +2423,22 @@ impl InterfaceDecl {
             references: Vec::new(),
             lvalues: HashSet::default(),
         };
-        // IEEE 1800-2023 26.4: header imports are visible throughout the
-        // interface, including its parameter declarations. Keep them before
-        // parameters when cloning the interface declarations into each scope.
-        for import in &header.nodes.4 {
-            interface.items.push(Item::Constant {
-                span: file.span(RefNode::PackageImportDeclaration(import))?,
-                header: HeaderForm::Import {
-                    imports: imported_items(
-                        RefNode::PackageImportDeclaration(import),
-                        syntax_tree,
-                    )?,
-                },
-            });
+        for id in &unit.package_bindings {
+            let binding = native.package_binding(*id);
+            if unit.header.start <= binding.tokens.start && binding.tokens.end <= unit.header.end {
+                interface.items.push(Item::Constant {
+                    span: file.span(binding.tokens)?,
+                    header: HeaderForm::Import {
+                        imports: imported_items(*id, &tree)?,
+                    },
+                });
+            }
         }
-        if let Some(list) = &header.nodes.5 {
-            interface.collect_parameter_port_list(list, file)?;
+        for parameter in unit.parameters.iter().flatten() {
+            interface.collect_parameter(parameter, true, file)?;
         }
-        for item in &declaration.nodes.2 {
-            interface.collect_item(item, file)?;
+        for id in &unit.items {
+            interface.collect_item(*id, file, interfaces)?;
         }
         for (modport, items) in &interface.modports {
             for item in items {
@@ -2458,572 +2459,403 @@ impl InterfaceDecl {
                 });
             }
         }
-        // Declarations in nested scopes must not shadow interface-scope names,
-        // which are renamed without regard to scopes.
         let mut declared: HashMap<String, usize> = HashMap::default();
-        for declared_name in
-            declared_names(RefNode::InterfaceDeclarationAnsi(declaration), syntax_tree)?
-        {
-            *declared.entry(declared_name).or_default() += 1;
+        for name in declared_names(unit, file)? {
+            *declared.entry(name).or_default() += 1;
         }
-        for (declared_name, count) in &declared {
-            if *count > 1 && interface.names.contains(declared_name) {
+        for (name, count) in &declared {
+            if *count > 1 && interface.names.contains(name) {
                 return Err(unsupported(format!(
-                    "declaration of `{declared_name}` in a nested scope of interface `{interface_name}`, which shadows an interface item"
+                    "declaration of `{name}` in a nested scope of interface `{interface_name}`, which shadows an interface item"
                 )));
             }
         }
-        // Unnamed generate blocks get names such as `genblk1` that would not
-        // be renamed per instance.
-        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-            if let RefNode::Identifier(identifier) = node {
-                let identifier_name = name(RefNode::Identifier(identifier), syntax_tree)?;
-                if identifier_name
-                    .strip_prefix("genblk")
-                    .is_some_and(|suffix| {
-                        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
-                    })
-                    && !declared.contains_key(&identifier_name)
-                {
-                    return Err(unsupported(format!(
-                        "reference to the implicit generate block name `{identifier_name}` in interface `{interface_name}`"
-                    )));
+        for id in body_items(unit, native)? {
+            if let native::BodyItemKind::Block {
+                leading_label,
+                label,
+                ..
+            } = &native.body_item(id).kind
+            {
+                if let Some(name) = label.as_ref().or(leading_label.as_ref()) {
+                    interface.names.insert(native_name(name));
                 }
             }
         }
-        // Generate block names belong to the interface scope as well.
-        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-            if let RefNode::GenerateBlockIdentifier(identifier) = node {
-                interface.names.insert(name(
-                    RefNode::GenerateBlockIdentifier(identifier),
-                    syntax_tree,
-                )?);
-            }
-        }
-        // References: identifiers that name an interface-scope item, other
-        // than members of a struct or a hierarchical name, named connections,
-        // and package-qualified names.
-        let mut member_spans = Vec::new();
-        let declared: HashSet<String> =
-            declared_names(RefNode::InterfaceDeclarationAnsi(declaration), syntax_tree)?
-                .into_iter()
-                .collect();
-        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-            match node {
-                RefNode::MemberIdentifier(identifier) => {
-                    member_spans.push(file.span(RefNode::MemberIdentifier(identifier))?);
-                }
-                RefNode::VariableLvalue(lvalue) => {
-                    interface.lvalues.extend(
-                        file.node_span(RefNode::VariableLvalue(lvalue))
-                            .map(|span| span.0),
-                    );
-                }
-                RefNode::NetLvalue(lvalue) => {
-                    interface.lvalues.extend(
-                        file.node_span(RefNode::NetLvalue(lvalue))
-                            .map(|span| span.0),
-                    );
-                    // An undeclared target would be an implicit net of the
-                    // interface, which is not renamed per instance.
-                    // With macros the text need not show the target, but
-                    // using the interface is rejected anyway.
-                    if let sv_parser::NetLvalue::Identifier(target) = lvalue
-                        && !interface.uses_macros
-                    {
-                        let target_name = file.text(
-                            file.span(RefNode::PsOrHierarchicalNetIdentifier(&target.nodes.0))?,
-                        );
-                        if !target_name.contains(['.', ':']) {
-                            let target_name = normalize_identifier(target_name.trim());
-                            if !interface.names.contains(&target_name)
-                                && !declared.contains(&target_name)
-                            {
-                                return Err(unsupported(format!(
-                                    "implicit net `{target_name}` in interface `{interface_name}`"
-                                )));
-                            }
-                        }
-                    }
-                }
-                RefNode::SystemTfCall(call) => {
-                    if let Some(destination) = readmem_destination(call, file)? {
-                        written_expression(destination, file, &mut interface.lvalues);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for node in RefNode::InterfaceDeclarationAnsi(declaration) {
-            let RefNode::Identifier(identifier) = node else {
-                continue;
-            };
-            let identifier_name = name(RefNode::Identifier(identifier), syntax_tree)?;
-            if !interface.names.contains(&identifier_name) {
-                continue;
-            }
-            let identifier_span = file.span(RefNode::Identifier(identifier))?;
-            if member_spans
-                .iter()
-                .any(|span| span.0 <= identifier_span.0 && identifier_span.1 <= span.1)
-                || matches!(file.previous_token(identifier_span.0), Some("." | "::"))
-                || file.next_token(identifier_span.1) == Some("::")
+        let qualified: HashSet<_> = native
+            .expressions
+            .iter()
+            .filter_map(|expression| match &expression.kind {
+                native::ExprKind::Member {
+                    expression,
+                    separator,
+                    ..
+                } if separator == "::" => Some(native.expression(*expression).tokens.start),
+                _ => None,
+            })
+            .collect();
+        for expression in &native.expressions {
+            if expression.tokens.start < unit.tokens.start
+                || expression.tokens.end > unit.tokens.end
             {
                 continue;
             }
-            interface
-                .references
-                .push((identifier_span, identifier_name));
+            if let native::ExprKind::Name(name) = &expression.kind {
+                let name_text = native_name(name);
+                if name_text.strip_prefix("genblk").is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                }) && !declared.contains_key(&name_text)
+                {
+                    return Err(unsupported(format!(
+                        "reference to the implicit generate block name `{name_text}` in interface `{interface_name}`"
+                    )));
+                }
+                if interface.names.contains(&name_text)
+                    && !qualified.contains(&expression.tokens.start)
+                {
+                    interface.references.push((file.name_span(name), name_text));
+                }
+            }
+            if let native::ExprKind::Unary {
+                operator,
+                expression,
+                ..
+            } = &expression.kind
+                && matches!(operator.as_str(), "++" | "--")
+            {
+                written_expression(*expression, file, &mut interface.lvalues);
+            }
+            if let Some(destination) = readmem_destination(expression, file)? {
+                written_expression(destination, file, &mut interface.lvalues);
+            }
+        }
+        for ty in &native.types {
+            if unit.tokens.start <= ty.tokens.start
+                && ty.tokens.end <= unit.tokens.end
+                && let native::DataTypeKind::Named(path) = &ty.kind
+                && let [segment] = path.as_slice()
+            {
+                let name = native_name(&segment.name);
+                if interface.names.contains(&name) {
+                    interface
+                        .references
+                        .push((file.name_span(&segment.name), name));
+                }
+            }
+        }
+        for statement in &native.statements {
+            if unit.tokens.start <= statement.tokens.start
+                && statement.tokens.end <= unit.tokens.end
+                && let native::StatementKind::Assignment { left, .. } = statement.kind
+            {
+                written_expression(left, file, &mut interface.lvalues);
+            }
+        }
+        for assignment in &native.assign_statements {
+            if unit.tokens.start <= assignment.tokens.start
+                && assignment.tokens.end <= unit.tokens.end
+            {
+                for assignment in &assignment.assignments {
+                    written_expression(assignment.left, file, &mut interface.lvalues);
+                    let mut base = assignment.left;
+                    while let native::ExprKind::Select { expression, .. } =
+                        native.expression(base).kind
+                    {
+                        base = expression;
+                    }
+                    if !interface.uses_macros
+                        && let native::ExprKind::Name(name) = &native.expression(base).kind
+                    {
+                        let name = native_name(name);
+                        if !interface.names.contains(&name) && !declared.contains_key(&name) {
+                            return Err(unsupported(format!(
+                                "implicit net `{name}` in interface `{interface_name}`"
+                            )));
+                        }
+                    }
+                }
+            }
         }
         Ok(interface)
     }
-
-    fn collect_parameter_port_list(
+    fn collect_parameter(
         &mut self,
-        list: &sv_parser::ParameterPortList,
+        parameter: &native::Parameter,
+        header: bool,
         file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        let mut declarations = Vec::new();
-        match list {
-            sv_parser::ParameterPortList::Assignment(list) => {
-                for assignment in list.nodes.1.nodes.1.0.nodes.0.contents() {
-                    self.add_parameter(assignment, None, file)?;
-                }
-                declarations.extend(
-                    list.nodes
-                        .1
-                        .nodes
-                        .1
-                        .1
-                        .iter()
-                        .map(|(_, declaration)| declaration),
-                );
-            }
-            sv_parser::ParameterPortList::Declaration(list) => {
-                declarations.extend(list.nodes.1.nodes.1.contents());
-            }
-            sv_parser::ParameterPortList::Empty(_) => {}
-        }
-        for declaration in declarations {
-            match declaration {
-                sv_parser::ParameterPortDeclaration::ParameterDeclaration(declaration) => {
-                    match declaration.as_ref() {
-                        sv_parser::ParameterDeclaration::Param(parameter) => {
-                            let data_type =
-                                file.node_span(RefNode::DataTypeOrImplicit(&parameter.nodes.1));
-                            for assignment in parameter.nodes.2.nodes.0.contents() {
-                                self.add_parameter(assignment, data_type, file)?;
-                            }
-                        }
-                        sv_parser::ParameterDeclaration::Type(parameter) => {
-                            self.collect_type_parameters(
-                                RefNode::ParameterDeclarationType(parameter),
-                                file,
-                            )?;
-                        }
-                    }
-                }
-                sv_parser::ParameterPortDeclaration::ParamList(list) => {
-                    let data_type = Some(file.span(RefNode::DataType(&list.nodes.0))?);
-                    for assignment in list.nodes.1.nodes.0.contents() {
-                        self.add_parameter(assignment, data_type, file)?;
-                    }
-                }
-                sv_parser::ParameterPortDeclaration::LocalParameterDeclaration(declaration) => {
-                    let item_span = file.span(RefNode::LocalParameterDeclaration(declaration))?;
-                    self.add_constant((item_span.0, item_span.1), declaration, file)?;
-                }
-                sv_parser::ParameterPortDeclaration::TypeList(list) => {
-                    self.collect_type_parameters(
-                        RefNode::ParameterPortDeclarationTypeList(list),
-                        file,
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_type_parameters(
-        &mut self,
-        root: RefNode<'_>,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        for node in root {
-            if let RefNode::TypeAssignment(assignment) = node {
-                let name = name(
-                    RefNode::TypeIdentifier(&assignment.nodes.0),
-                    &file.syntax_tree,
-                )?;
-                self.declare(name.clone())?;
+    ) -> Converted<()> {
+        let local = parameter.local || (!header && self.has_parameter_port_list);
+        let native::ParameterKind::Value {
+            data_type,
+            dimensions,
+            default,
+        } = &parameter.kind
+        else {
+            let name = native_name(&parameter.name);
+            self.declare(name.clone())?;
+            if !local {
                 self.parameter_order.push(name.clone());
                 self.type_parameters.push(name);
+                return Ok(());
             }
+            self.items.push(Item::Constant {
+                span: file.span(parameter.tokens)?,
+                header: HeaderForm::Constant,
+            });
+            return Ok(());
+        };
+        if local {
+            self.declare(native_name(&parameter.name))?;
+            self.items.push(Item::Constant {
+                span: file.span(parameter.tokens)?,
+                header: HeaderForm::Constant,
+            });
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn add_parameter(
-        &mut self,
-        assignment: &sv_parser::ParamAssignment,
-        data_type: Option<Span>,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        if !assignment.nodes.1.is_empty() {
+        if !dimensions.is_empty() {
             return Err(unsupported(format!(
                 "unpacked array parameter of interface `{}`",
                 self.name
             )));
         }
-        let parameter_name = name(
-            RefNode::ParameterIdentifier(&assignment.nodes.0),
-            &file.syntax_tree,
-        )?;
-        self.declare(parameter_name.clone())?;
-        self.parameter_order.push(parameter_name.clone());
+        let name = native_name(&parameter.name);
+        self.declare(name.clone())?;
+        self.parameter_order.push(name.clone());
         self.items.push(Item::Parameter(self.parameters.len()));
         self.parameters.push(InterfaceParameter {
-            name: parameter_name,
-            data_type,
-            default: assignment
-                .nodes
-                .2
-                .as_ref()
-                .map(|(_, value)| file.span(RefNode::ConstantParamExpression(value)))
-                .transpose()?,
+            name,
+            data_type: file
+                .range_span(file.syntax_tree.declarations().data_type(*data_type).tokens),
+            default: default.map(|id| file.expression_span(id)).transpose()?,
         });
         Ok(())
     }
-
-    /// A `localparam` declaration (from the header or the body).
-    fn add_constant(
-        &mut self,
-        item_span: Span,
-        declaration: &sv_parser::LocalParameterDeclaration,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        let header = match declaration {
-            sv_parser::LocalParameterDeclaration::Param(parameter) => {
-                for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.declare(name(
-                        RefNode::ParameterIdentifier(&assignment.nodes.0),
-                        &file.syntax_tree,
-                    )?)?;
-                }
-                HeaderForm::Constant
-            }
-            sv_parser::LocalParameterDeclaration::Type(parameter) => {
-                for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.declare(name(
-                        RefNode::TypeIdentifier(&assignment.nodes.0),
-                        &file.syntax_tree,
-                    )?)?;
-                }
-                HeaderForm::Constant
-            }
-        };
-        self.items.push(Item::Constant {
-            span: item_span,
-            header,
-        });
-        Ok(())
-    }
-
     fn collect_item(
         &mut self,
-        item: &sv_parser::NonPortInterfaceItem,
+        id: BodyId,
         file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        let syntax_tree = &file.syntax_tree;
-        let item = match item {
-            sv_parser::NonPortInterfaceItem::ModportDeclaration(declaration) => {
-                return self.collect_modports(declaration, file);
+        interfaces: &HashSet<String>,
+    ) -> Converted<()> {
+        let native = file.syntax_tree.declarations();
+        let item = native.body_item(id);
+        let span = file.span(item.tokens)?;
+        match &item.kind {
+            native::BodyItemKind::Modport(id) => {
+                self.collect_modports(native.modport_declaration(*id))?
             }
-            sv_parser::NonPortInterfaceItem::TimeunitsDeclaration(_) => return Ok(()),
-            sv_parser::NonPortInterfaceItem::GenerateRegion(region) => {
-                // Only the items: `generate` regions do not nest, and an
-                // instance array places the logic in a generate loop.
-                let (_, start) = file.span(RefNode::Keyword(&region.nodes.0))?;
-                let (end, _) = file.span(RefNode::Keyword(&region.nodes.2))?;
-                self.items.push(Item::Process((start, end)));
-                return Ok(());
+            native::BodyItemKind::Time(_) => {}
+            native::BodyItemKind::Parameter(id) => {
+                for parameter in &native.parameter_declaration(*id).parameters {
+                    self.collect_parameter(parameter, false, file)?;
+                }
             }
-            sv_parser::NonPortInterfaceItem::InterfaceOrGenerateItem(item) => item,
+            native::BodyItemKind::TypeAlias(id) => {
+                let alias = native.type_alias(*id);
+                if !matches!(alias.target, native::TypeAliasTarget::DataType(_)) {
+                    return Err(unsupported(format!(
+                        "forward type declaration in interface `{}`",
+                        self.name
+                    )));
+                }
+                if !alias.dimensions.is_empty() {
+                    return Err(unsupported(format!(
+                        "unpacked typedef in interface `{}`",
+                        self.name
+                    )));
+                }
+                self.declare(native_name(&alias.name))?;
+                self.items.push(Item::Constant {
+                    span,
+                    header: HeaderForm::Constant,
+                });
+            }
+            native::BodyItemKind::PackageBinding(id) => {
+                self.items.push(Item::Constant {
+                    span,
+                    header: HeaderForm::Import {
+                        imports: imported_items(*id, &file.syntax_tree)?,
+                    },
+                });
+            }
+            native::BodyItemKind::Subroutine(id) => {
+                let subroutine = native.subroutine(*id);
+                if subroutine.prototype {
+                    return Err(unsupported(format!(
+                        "extern subroutine in interface `{}`",
+                        self.name
+                    )));
+                }
+                if subroutine.kind != native::SubroutineKind::Function {
+                    return Err(unsupported(format!(
+                        "task, class, or verification declaration in interface `{}`",
+                        self.name
+                    )));
+                }
+                let name = native_name(&subroutine.name);
+                self.declare(name.clone())?;
+                self.functions.push(Function { name, span });
+                self.items.push(Item::Function);
+            }
+            native::BodyItemKind::Data(id) => {
+                let native::DataDeclaration::Variables(declaration) = native.data_declaration(*id)
+                else {
+                    return Err(unsupported(format!(
+                        "dynamic array or class variable in interface `{}`",
+                        self.name
+                    )));
+                };
+                if declaration.constant {
+                    return Err(unsupported(format!(
+                        "const variable in interface `{}`",
+                        self.name
+                    )));
+                }
+                let data_type = file.range_span(native.data_type(declaration.data_type).tokens);
+                for variable in &declaration.variables {
+                    self.add_member(Member {
+                        name: native_name(&variable.name),
+                        data_type,
+                        dimensions: variable
+                            .dimensions
+                            .iter()
+                            .map(|dimension| file.span(dimension.tokens))
+                            .collect::<Converted<_>>()?,
+                        initializer: variable
+                            .value
+                            .map(|id| file.expression_span(id))
+                            .transpose()?,
+                    })?;
+                }
+            }
+            native::BodyItemKind::Net(id) => {
+                let declaration = native.net_declaration(*id);
+                if declaration.net_type == "interconnect" {
+                    return Err(unsupported(format!(
+                        "interconnect in interface `{}`",
+                        self.name
+                    )));
+                }
+                if declaration.strength.is_some()
+                    || declaration.vector.is_some()
+                    || declaration.delay.is_some()
+                {
+                    return Err(unsupported(format!(
+                        "net strength, vectored, or delay in interface `{}`",
+                        self.name
+                    )));
+                }
+                let data_type = file.range_span(native.data_type(declaration.data_type).tokens);
+                for variable in &declaration.variables {
+                    if variable.value.is_some() {
+                        return Err(unsupported(format!(
+                            "net declaration assignment in interface `{}`",
+                            self.name
+                        )));
+                    }
+                    self.add_member(Member {
+                        name: native_name(&variable.name),
+                        data_type,
+                        dimensions: variable
+                            .dimensions
+                            .iter()
+                            .map(|dimension| file.span(dimension.tokens))
+                            .collect::<Converted<_>>()?,
+                        initializer: None,
+                    })?;
+                }
+            }
+            native::BodyItemKind::Instance(id) => {
+                let declaration = native.instantiation(*id);
+                if interfaces.contains(&native_name(&declaration.name)) {
+                    for instance in &declaration.instances {
+                        self.declare(native_name(&instance.name))?;
+                    }
+                    self.items.push(Item::Process(span));
+                    return Ok(());
+                }
+                if declaration.parameters.is_some()
+                    || declaration
+                        .instances
+                        .iter()
+                        .any(|instance| !instance.connections.is_empty())
+                {
+                    return Err(unsupported(format!(
+                        "instantiation, assertion, or alias in interface `{}`",
+                        self.name
+                    )));
+                }
+                let data_type = Some(file.name_span(&declaration.name));
+                for variable in &declaration.instances {
+                    self.add_member(Member {
+                        name: native_name(&variable.name),
+                        data_type,
+                        dimensions: variable
+                            .dimensions
+                            .iter()
+                            .map(|dimension| file.span(dimension.tokens))
+                            .collect::<Converted<_>>()?,
+                        initializer: None,
+                    })?;
+                }
+            }
+            native::BodyItemKind::Assign(_)
+            | native::BodyItemKind::Procedure(_)
+            | native::BodyItemKind::Region(_)
+            | native::BodyItemKind::Block { .. }
+            | native::BodyItemKind::Conditional { .. }
+            | native::BodyItemKind::Case { .. }
+            | native::BodyItemKind::Loop { .. } => self.items.push(Item::Process(span)),
+            native::BodyItemKind::Unconverted { category, .. } => match category.as_str() {
+                ";" => {}
+                "genvar" => {
+                    for token in &native.tokens[item.tokens.start..item.tokens.end] {
+                        if token.text != "genvar"
+                            && let Some(name) = token.identifier()
+                        {
+                            self.names.insert(normalize_identifier(name));
+                        }
+                    }
+                    self.items.push(Item::Process(span));
+                }
+                "$fatal" | "$error" | "$warning" | "$info" => self.items.push(Item::Process(span)),
+                "interconnect" => {
+                    return Err(unsupported(format!(
+                        "interconnect in interface `{}`",
+                        self.name
+                    )));
+                }
+                "nettype" => {
+                    return Err(unsupported(format!(
+                        "nettype declaration in interface `{}`",
+                        self.name
+                    )));
+                }
+                "clocking" | "default" => {
+                    return Err(unsupported(format!(
+                        "clocking or default disable declaration in interface `{}`",
+                        self.name
+                    )));
+                }
+                "bind" | "alias" | "assert" | "assume" | "cover" | "restrict" => {
+                    return Err(unsupported(format!(
+                        "instantiation, assertion, or alias in interface `{}`",
+                        self.name
+                    )));
+                }
+                _ => {
+                    return Err(unsupported(format!(
+                        "task, class, or verification declaration in interface `{}`",
+                        self.name
+                    )));
+                }
+            },
             _ => {
                 return Err(unsupported(format!(
                     "nested declaration in interface `{}`",
                     self.name
                 )));
             }
-        };
-        let sv_parser::InterfaceOrGenerateItem::Module(item) = item.as_ref() else {
-            return Err(unsupported(format!(
-                "extern subroutine in interface `{}`",
-                self.name
-            )));
-        };
-        let common = &item.nodes.1;
-        let common_span = file.span(RefNode::ModuleCommonItem(common))?;
-        match common {
-            sv_parser::ModuleCommonItem::InterfaceInstantiation(instantiation) => {
-                for instance in instantiation.nodes.2.contents() {
-                    self.declare(name(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0), syntax_tree)?)?;
-                }
-                self.items.push(Item::Process(common_span));
-            }
-            sv_parser::ModuleCommonItem::ContinuousAssign(_)
-            | sv_parser::ModuleCommonItem::AlwaysConstruct(_)
-            | sv_parser::ModuleCommonItem::InitialConstruct(_)
-            | sv_parser::ModuleCommonItem::FinalConstruct(_)
-            | sv_parser::ModuleCommonItem::LoopGenerateConstruct(_)
-            | sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(_)
-            | sv_parser::ModuleCommonItem::ElaborationSystemTask(_) => {
-                self.items.push(Item::Process(common_span));
-            }
-            sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) => {
-                match declaration.as_ref() {
-                    sv_parser::ModuleOrGenerateItemDeclaration::GenvarDeclaration(genvars) => {
-                        for node in RefNode::GenvarDeclaration(genvars) {
-                            if let RefNode::GenvarIdentifier(identifier) = node {
-                                self.names
-                                    .insert(name(RefNode::GenvarIdentifier(identifier), syntax_tree)?);
-                            }
-                        }
-                        self.items.push(Item::Process(common_span));
-                    }
-                    sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
-                        declaration,
-                    ) => self.collect_declaration(declaration, common_span, file)?,
-                    _ => {
-                        return Err(unsupported(format!(
-                            "clocking or default disable declaration in interface `{}`",
-                            self.name
-                        )));
-                    }
-                }
-            }
-            _ => {
-                return Err(unsupported(format!(
-                    "instantiation, assertion, or alias in interface `{}`",
-                    self.name
-                )));
-            }
         }
-        Ok(())
-    }
-
-    fn collect_declaration(
-        &mut self,
-        declaration: &sv_parser::PackageOrGenerateItemDeclaration,
-        item_span: Span,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        let syntax_tree = &file.syntax_tree;
-        match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::Empty(_) => {}
-            sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(declaration) => {
-                self.add_constant(item_span, &declaration.0, file)?;
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(declaration) => {
-                // A body `parameter` of an interface with a parameter port list
-                // is a localparam; without one it can be overridden (IEEE
-                // 1800-2023 6.20.1).
-                let sv_parser::ParameterDeclaration::Param(parameter) = &declaration.0 else {
-                    return Err(unsupported(format!(
-                        "type parameter of interface `{}`",
-                        self.name
-                    )));
-                };
-                if !self.has_parameter_port_list {
-                    let data_type = file.node_span(RefNode::DataTypeOrImplicit(&parameter.nodes.1));
-                    for assignment in parameter.nodes.2.nodes.0.contents() {
-                        self.add_parameter(assignment, data_type, file)?;
-                    }
-                    return Ok(());
-                }
-                for assignment in parameter.nodes.2.nodes.0.contents() {
-                    self.declare(name(
-                        RefNode::ParameterIdentifier(&assignment.nodes.0),
-                        syntax_tree,
-                    )?)?;
-                }
-                self.items.push(Item::Constant {
-                    span: item_span,
-                    header: HeaderForm::Constant,
-                });
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::FunctionDeclaration(function) => {
-                let function_name = name(
-                    unwrap_node!(RefNode::FunctionDeclaration(function), FunctionIdentifier)
-                        .ok_or_else(|| unsupported("function without a name"))?,
-                    syntax_tree,
-                )?;
-                self.declare(function_name.clone())?;
-                self.functions.push(Function {
-                    name: function_name,
-                    span: item_span,
-                });
-                self.items.push(Item::Function);
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(declaration) => {
-                match declaration.as_ref() {
-                    sv_parser::NetDeclaration::NetType(net) => {
-                        if net.nodes.1.is_some() || net.nodes.2.is_some() || net.nodes.4.is_some() {
-                            return Err(unsupported(format!(
-                                "net strength, vectored, or delay in interface `{}`",
-                                self.name
-                            )));
-                        }
-                        let data_type = file.node_span(RefNode::DataTypeOrImplicit(&net.nodes.3));
-                        for declarator in net.nodes.5.nodes.0.contents() {
-                            self.add_net_member(declarator, data_type, file)?;
-                        }
-                    }
-                    sv_parser::NetDeclaration::NetTypeIdentifier(net) => {
-                        // `T name;` with a user-defined type parses as a net of
-                        // a user net type; it declares a variable of type `T`.
-                        if net.nodes.1.is_some() {
-                            return Err(unsupported(format!(
-                                "delayed net in interface `{}`",
-                                self.name
-                            )));
-                        }
-                        let data_type = Some(file.span(RefNode::NetTypeIdentifier(&net.nodes.0))?);
-                        for declarator in net.nodes.2.nodes.0.contents() {
-                            self.add_net_member(declarator, data_type, file)?;
-                        }
-                    }
-                    sv_parser::NetDeclaration::Interconnect(_) => {
-                        return Err(unsupported(format!(
-                            "interconnect in interface `{}`",
-                            self.name
-                        )));
-                    }
-                }
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(declaration) => {
-                match declaration.as_ref() {
-                    sv_parser::DataDeclaration::Variable(variable) => {
-                        if variable.nodes.0.is_some() {
-                            return Err(unsupported(format!(
-                                "const variable in interface `{}`",
-                                self.name
-                            )));
-                        }
-                        let data_type =
-                            file.node_span(RefNode::DataTypeOrImplicit(&variable.nodes.3));
-                        for declarator in variable.nodes.4.nodes.0.contents() {
-                            let sv_parser::VariableDeclAssignment::Variable(declarator) =
-                                declarator
-                            else {
-                                return Err(unsupported(format!(
-                                    "dynamic array or class variable in interface `{}`",
-                                    self.name
-                                )));
-                            };
-                            let initializer = declarator
-                                .nodes
-                                .2
-                                .as_ref()
-                                .map(|(_, value)| file.span(RefNode::Expression(value)))
-                                .transpose()?;
-                            let member_name = name(
-                                RefNode::VariableIdentifier(&declarator.nodes.0),
-                                syntax_tree,
-                            )?;
-                            let dimensions = declarator
-                                .nodes
-                                .1
-                                .iter()
-                                .map(|dimension| file.span(RefNode::VariableDimension(dimension)))
-                                .collect::<Result<_, _>>()?;
-                            self.add_member(Member {
-                                name: member_name,
-                                data_type,
-                                dimensions,
-                                initializer,
-                            })?;
-                        }
-                    }
-                    sv_parser::DataDeclaration::TypeDeclaration(declaration) => {
-                        let sv_parser::TypeDeclaration::DataType(typedef) = declaration.as_ref()
-                        else {
-                            return Err(unsupported(format!(
-                                "forward type declaration in interface `{}`",
-                                self.name
-                            )));
-                        };
-                        if !typedef.nodes.3.is_empty() {
-                            return Err(unsupported(format!(
-                                "unpacked typedef in interface `{}`",
-                                self.name
-                            )));
-                        }
-                        self.declare(name(
-                            RefNode::TypeIdentifier(&typedef.nodes.2),
-                            syntax_tree,
-                        )?)?;
-                        self.items.push(Item::Constant {
-                            span: item_span,
-                            header: HeaderForm::Constant,
-                        });
-                    }
-                    sv_parser::DataDeclaration::PackageImportDeclaration(import) => {
-                        self.items.push(Item::Constant {
-                            span: item_span,
-                            header: HeaderForm::Import {
-                                imports: imported_items(
-                                    RefNode::PackageImportDeclaration(import),
-                                    syntax_tree,
-                                )?,
-                            },
-                        });
-                    }
-                    sv_parser::DataDeclaration::NetTypeDeclaration(_) => {
-                        return Err(unsupported(format!(
-                            "nettype declaration in interface `{}`",
-                            self.name
-                        )));
-                    }
-                }
-            }
-            _ => {
-                return Err(unsupported(format!(
-                    "task, class, or verification declaration in interface `{}`",
-                    self.name
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn add_net_member(
-        &mut self,
-        declarator: &sv_parser::NetDeclAssignment,
-        data_type: Option<Span>,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        if declarator.nodes.2.is_some() {
-            return Err(unsupported(format!(
-                "net declaration assignment in interface `{}`",
-                self.name
-            )));
-        }
-        let dimensions = declarator
-            .nodes
-            .1
-            .iter()
-            .map(|dimension| file.span(RefNode::UnpackedDimension(dimension)))
-            .collect::<Result<_, _>>()?;
-        self.add_member(Member {
-            name: name(
-                RefNode::NetIdentifier(&declarator.nodes.0),
-                &file.syntax_tree,
-            )?,
-            data_type,
-            dimensions,
-            initializer: None,
-        })?;
         Ok(())
     }
 
@@ -3045,21 +2877,16 @@ impl InterfaceDecl {
         Ok(())
     }
 
-    fn collect_modports(
-        &mut self,
-        declaration: &sv_parser::ModportDeclaration,
-        file: &File<'_>,
-    ) -> Result<(), AnalyzerError> {
-        let syntax_tree = &file.syntax_tree;
-        for modport in declaration.nodes.1.contents() {
-            let modport_name = name(RefNode::ModportIdentifier(&modport.nodes.0), syntax_tree)?;
+    fn collect_modports(&mut self, declaration: &native::ModportDeclaration) -> Converted<()> {
+        for modport in &declaration.modports {
+            let modport_name = native_name(&modport.name);
             let mut items = Vec::new();
-            for ports in modport.nodes.1.nodes.1.contents() {
-                match ports {
-                    sv_parser::ModportPortsDeclaration::Simple(simple) => {
-                        let direction = match &simple.nodes.1.nodes.0 {
-                            sv_parser::PortDirection::Input(_) => Direction::Input,
-                            sv_parser::PortDirection::Output(_) => Direction::Output,
+            for group in &modport.ports {
+                match group {
+                    native::ModportPorts::Members { direction, ports } => {
+                        let direction = match direction {
+                            native::Direction::Input => Direction::Input,
+                            native::Direction::Output => Direction::Output,
                             _ => {
                                 return Err(unsupported(format!(
                                     "inout or ref modport port in interface `{}`",
@@ -3067,40 +2894,34 @@ impl InterfaceDecl {
                                 )));
                             }
                         };
-                        for port in simple.nodes.1.nodes.1.contents() {
-                            let sv_parser::ModportSimplePort::Ordered(port) = port else {
+                        for port in ports {
+                            let native::ModportMember::Named(name) = port else {
                                 return Err(unsupported(format!(
                                     "modport expression in interface `{}`",
                                     self.name
                                 )));
                             };
-                            items.push(ModportItem::Member(
-                                direction,
-                                name(RefNode::PortIdentifier(&port.nodes.0), syntax_tree)?,
-                            ));
+                            items.push(ModportItem::Member(direction, native_name(name)));
                         }
                     }
-                    sv_parser::ModportPortsDeclaration::Tf(tf) => {
-                        if matches!(tf.nodes.1.nodes.0, sv_parser::ImportExport::Export(_)) {
+                    native::ModportPorts::Subroutines { export, ports } => {
+                        if *export {
                             return Err(unsupported(format!(
                                 "modport export in interface `{}`",
                                 self.name
                             )));
                         }
-                        for port in tf.nodes.1.nodes.1.contents() {
-                            let sv_parser::ModportTfPort::TfIdentifier(function) = port else {
+                        for port in ports {
+                            let native::ModportSubroutine::Named(name) = port else {
                                 return Err(unsupported(format!(
                                     "modport import with a prototype in interface `{}`",
                                     self.name
                                 )));
                             };
-                            items.push(ModportItem::Import(name(
-                                RefNode::TfIdentifier(function),
-                                syntax_tree,
-                            )?));
+                            items.push(ModportItem::Import(native_name(name)));
                         }
                     }
-                    sv_parser::ModportPortsDeclaration::Clocking(_) => {
+                    native::ModportPorts::Clocking(_) => {
                         return Err(unsupported(format!(
                             "modport clocking in interface `{}`",
                             self.name
@@ -3110,22 +2931,21 @@ impl InterfaceDecl {
             }
             let mut listed = HashSet::default();
             for item in &items {
-                let (ModportItem::Member(_, item_name) | ModportItem::Import(item_name)) = item;
-                if !listed.insert(item_name) {
+                let (ModportItem::Member(_, name) | ModportItem::Import(name)) = item;
+                if !listed.insert(name) {
                     return Err(AnalyzerError::DuplicateModportItem {
                         interface: self.name.clone(),
                         modport: modport_name,
-                        name: item_name.clone(),
+                        name: name.clone(),
                     });
                 }
             }
-            if self.modports.contains_key(&modport_name) {
+            if self.modports.insert(modport_name.clone(), items).is_some() {
                 return Err(AnalyzerError::DuplicateModport {
                     interface: self.name.clone(),
                     name: modport_name,
                 });
             }
-            self.modports.insert(modport_name, items);
         }
         Ok(())
     }
@@ -3133,148 +2953,75 @@ impl InterfaceDecl {
 
 impl ModuleDecl {
     fn collect(
-        declaration: &sv_parser::ModuleDeclarationAnsi,
+        handle: ScopeHandle,
         file_index: usize,
         file: &File<'_>,
         interfaces: &HashMap<String, InterfaceDecl>,
-    ) -> Result<Self, AnalyzerError> {
-        let syntax_tree = &file.syntax_tree;
-        let header = &declaration.nodes.0;
-        let module_name = name(RefNode::ModuleIdentifier(&header.nodes.3), syntax_tree)?;
+    ) -> Converted<Self> {
+        let tree = file.syntax_tree.scoped(handle)?;
+        let unit = tree.root_unit()?;
+        let native = tree.declarations();
         let mut ports = Vec::new();
-        if let Some(list) = &header.nodes.6
-            && let Some(list) = &list.nodes.0.nodes.1
-        {
-            // A port without a header inherits the interface and modport of
-            // the previous port (IEEE 1800-2023 23.2.2.3).
-            let mut previous: Option<InterfacePort> = None;
-            // A port without a direction inherits the previous one; the first
-            // defaults to inout.
-            let mut writes = true;
-            for (_, port) in list.contents() {
-                let direction = match port {
-                    sv_parser::AnsiPortDeclaration::Net(net) => match &net.nodes.0 {
-                        Some(sv_parser::NetPortHeaderOrInterfacePortHeader::NetPortHeader(
-                            header,
-                        )) => header.nodes.0.as_ref(),
-                        _ => None,
-                    },
-                    sv_parser::AnsiPortDeclaration::Variable(variable) => variable
-                        .nodes
-                        .0
-                        .as_ref()
-                        .and_then(|header| header.nodes.0.as_ref()),
-                    sv_parser::AnsiPortDeclaration::Paren(paren) => paren.nodes.0.as_ref(),
-                };
-                if let Some(direction) = direction {
-                    writes = !matches!(direction, sv_parser::PortDirection::Input(_));
-                }
-                let (identifier, interface) = match port {
-                    sv_parser::AnsiPortDeclaration::Net(net) => {
-                        let interface = match &net.nodes.0 {
-                            Some(
-                                sv_parser::NetPortHeaderOrInterfacePortHeader::InterfacePortHeader(
-                                    header,
-                                ),
-                            ) => match header.as_ref() {
-                                sv_parser::InterfacePortHeader::Identifier(header) => {
-                                    let interface = name(
-                                        RefNode::InterfaceIdentifier(&header.nodes.0),
-                                        syntax_tree,
-                                    )?;
-                                    // `T p` is an interface port only when `T`
-                                    // names an interface; otherwise a typed port.
-                                    interfaces
-                                        .contains_key(&interface)
-                                        .then_some((Some(interface), header.nodes.1.as_ref()))
-                                }
-                                sv_parser::InterfacePortHeader::Interface(header) => {
-                                    Some((None, header.nodes.1.as_ref()))
-                                }
-                            },
-                            _ => None,
-                        };
-                        let interface = match interface {
-                            Some((interface, modport)) => Some(InterfacePort {
-                                interface,
-                                modport: modport
-                                    .map(|(_, modport)| {
-                                        name(RefNode::ModportIdentifier(modport), syntax_tree)
-                                    })
-                                    .transpose()?,
-                                dimensions: Vec::new(),
-                            }),
-                            None if net.nodes.0.is_none() => previous.clone(),
-                            None => None,
-                        };
-                        let interface = interface
-                            .map(|interface| -> Result<_, AnalyzerError> {
-                                if net.nodes.3.is_some() {
-                                    return Err(unsupported("default value of an interface port"));
-                                }
-                                Ok(InterfacePort {
-                                    dimensions: net
-                                        .nodes
-                                        .2
-                                        .iter()
-                                        .map(|dimension| {
-                                            file.span(RefNode::UnpackedDimension(dimension))
-                                        })
-                                        .collect::<Result<_, _>>()?,
-                                    ..interface
-                                })
-                            })
-                            .transpose()?;
-                        (RefNode::PortIdentifier(&net.nodes.1), interface)
-                    }
-                    sv_parser::AnsiPortDeclaration::Variable(variable)
-                        if variable.nodes.0.is_none() && previous.is_some() =>
-                    {
-                        let interface =
-                            previous
-                                .clone()
-                                .map(|previous| -> Result<_, AnalyzerError> {
-                                    if variable.nodes.3.is_some() {
-                                        return Err(unsupported(
-                                            "default value of an interface port",
-                                        ));
-                                    }
-                                    Ok(InterfacePort {
-                                        dimensions: variable
-                                            .nodes
-                                            .2
-                                            .iter()
-                                            .map(|dimension| {
-                                                file.span(RefNode::VariableDimension(dimension))
-                                            })
-                                            .collect::<Result<_, _>>()?,
-                                        ..previous
-                                    })
-                                });
-                        (
-                            RefNode::PortIdentifier(&variable.nodes.1),
-                            interface.transpose()?,
-                        )
-                    }
-                    sv_parser::AnsiPortDeclaration::Variable(variable) => {
-                        (RefNode::PortIdentifier(&variable.nodes.1), None)
-                    }
-                    sv_parser::AnsiPortDeclaration::Paren(paren) => {
-                        (RefNode::PortIdentifier(&paren.nodes.2), None)
-                    }
-                };
-                previous.clone_from(&interface);
-                ports.push(PortDecl {
-                    name: name(identifier, syntax_tree)?,
-                    interface,
-                    writes,
-                });
+        let mut writes = true;
+        for port in &unit.ports {
+            if let Some(direction) = port.direction {
+                writes = direction != native::Direction::Input;
             }
+            let name = match &port.kind {
+                native::PortKind::Named(name) | native::PortKind::Explicit { name, .. } => {
+                    native_name(name)
+                }
+                _ => return Err(unsupported("non-ANSI module port")),
+            };
+            let interface = if matches!(port.kind, native::PortKind::Explicit { .. })
+                || port.direction.is_some()
+                || port.net_type.is_some()
+                || port.variable
+            {
+                None
+            } else {
+                port.data_type
+                    .and_then(|id| match &native.data_type(id).kind {
+                        native::DataTypeKind::Interface { name, modport } => Some((
+                            name.as_ref().map(native_name),
+                            modport.as_ref().map(native_name),
+                        )),
+                        native::DataTypeKind::Named(path)
+                            if path.len() == 1
+                                && interfaces.contains_key(&native_name(&path[0].name)) =>
+                        {
+                            Some((Some(native_name(&path[0].name)), None))
+                        }
+                        _ => None,
+                    })
+            };
+            let interface = interface
+                .map(|(interface, modport)| -> Converted<InterfacePort> {
+                    if port.default.is_some() {
+                        return Err(unsupported("default value of an interface port"));
+                    }
+                    Ok(InterfacePort {
+                        interface,
+                        modport,
+                        dimensions: port
+                            .dimensions
+                            .iter()
+                            .map(|dimension| file.span(dimension.tokens))
+                            .collect::<Converted<_>>()?,
+                    })
+                })
+                .transpose()?;
+            ports.push(PortDecl {
+                name,
+                interface,
+                writes,
+            });
         }
         Ok(Self {
-            name: module_name,
+            scope: handle,
+            name: native_name(&unit.name),
             file: file_index,
-            span: file.span(RefNode::ModuleDeclarationAnsi(declaration))?,
+            span: file.span(unit.tokens)?,
             ports,
         })
     }
@@ -3292,7 +3039,7 @@ pub struct NativeModulePlan {
     pub original: String,
     pub ports: Vec<NativePortPlan>,
     /// Child instance identifier offsets and their bound module names.
-    pub children: HashMap<usize, String>,
+    pub children: HashMap<(BodyId, usize), String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3374,7 +3121,9 @@ pub fn plan_interfaces(
         }
         let module = &design.modules[&name];
         let file = &files[module.file];
-        let declaration = design.module_node(module)?;
+        let declaration = design.module_unit(module)?;
+        let native = file.syntax_tree.declarations();
+        let items = body_items(declaration, native)?;
         let mut handles = Handles::default();
         let mut ports = Vec::new();
         for port in &module.ports {
@@ -3464,29 +3213,21 @@ pub fn plan_interfaces(
                     .collect(),
             });
         }
-        let blocks = RefNode::ModuleDeclarationAnsi(declaration)
-            .into_iter()
-            .filter_map(|node| {
-                if let RefNode::GenerateBlock(block) = node {
-                    file.node_span(RefNode::GenerateBlock(block))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            let RefNode::ModuleInstantiation(instantiation) = node else {
+        let blocks = block_spans(declaration, file)?;
+        for id in &items {
+            let native::BodyItemKind::Instance(instance) = native.body_item(*id).kind else {
                 continue;
             };
-            let interface = name_of_instantiation(instantiation, &file.syntax_tree)?;
+            let instantiation = native.instantiation(instance);
+            let interface = native_name(&instantiation.name);
             if !design.interfaces.contains_key(&interface) {
                 continue;
             }
-            let span = file.span(RefNode::ModuleInstantiation(instantiation))?;
+            let span = file.span(instantiation.tokens)?;
             let parameter_names = &design.interfaces[&interface].parameter_order;
             let mut supplied = HashSet::default();
             for (name, _) in
-                parameter_overrides(instantiation.nodes.1.as_ref(), parameter_names, file)?
+                parameter_overrides(instantiation.parameters.as_deref(), parameter_names, file)?
             {
                 if !parameter_names.contains(&name) {
                     return Err(AnalyzerError::UnknownInterfaceParameter {
@@ -3508,20 +3249,16 @@ pub fn plan_interfaces(
                 .min_by_key(|block| block.1 - block.0)
                 .copied()
                 .unwrap_or(module.span);
-            for instance in instantiation.nodes.2.contents() {
+            for instance in &instantiation.instances {
                 check_no_connections(instance, &interface)?;
-                let handle = identifier_text(
-                    RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                    &file.syntax_tree,
-                )
-                .unwrap();
+                let handle = native_name(&instance.name);
                 handles.insert(
                     handle,
                     scope,
                     Handle {
                         interface: interface.clone(),
                         port: None,
-                        arrayed: !instance.nodes.0.nodes.1.is_empty(),
+                        arrayed: !instance.dimensions.is_empty(),
                     },
                 );
             }
@@ -3551,18 +3288,19 @@ pub fn plan_interfaces(
             }
         }
         let mut children = HashMap::default();
-        for node in RefNode::ModuleDeclarationAnsi(declaration) {
-            let RefNode::ModuleInstantiation(instantiation) = node else {
+        for id in &items {
+            let native::BodyItemKind::Instance(instance) = native.body_item(*id).kind else {
                 continue;
             };
-            let child_name = name_of_instantiation(instantiation, &file.syntax_tree)?;
+            let instantiation = native.instantiation(instance);
+            let child_name = native_name(&instantiation.name);
             let Some(child) = design.modules.get(&child_name) else {
                 continue;
             };
             if !child.has_interface_ports() {
                 continue;
             }
-            for instance in instantiation.nodes.2.contents() {
+            for (index, instance) in instantiation.instances.iter().enumerate() {
                 let mut generic = Vec::new();
                 for (formal, actual) in connections(instance, child, file, true)? {
                     let Some(port) = child.port(&formal).and_then(|port| port.interface.as_ref())
@@ -3649,11 +3387,7 @@ pub fn plan_interfaces(
                 } else {
                     clone_module_name(&child_name, &generic)
                 };
-                let offset =
-                    identifier_locate(RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0))
-                        .unwrap()
-                        .offset;
-                children.insert(offset, child_alias);
+                children.insert((*id, index), child_alias);
                 queue.push((child_name.clone(), generic));
             }
         }
@@ -3667,12 +3401,4 @@ pub fn plan_interfaces(
         );
     }
     Ok(result)
-}
-
-fn name_of_instantiation(
-    instantiation: &sv_parser::ModuleInstantiation,
-    tree: &SyntaxTree,
-) -> Converted<String> {
-    identifier_text(RefNode::ModuleIdentifier(&instantiation.nodes.0), tree)
-        .ok_or_else(|| unsupported("instance type name"))
 }

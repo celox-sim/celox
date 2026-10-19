@@ -93,19 +93,11 @@ pub(super) fn lvalue_expr_type(
     }
 }
 
-pub(super) fn expr_from_cond_predicate(
-    predicate: &sv_parser::CondPredicate,
-    syntax_tree: &AnalysisContext<'_>,
+pub(super) fn simplify_condition(
+    state: &AnalysisState,
+    expression: Expr,
     packed_dimensions: &PackedDimensions,
-) -> Converted<Expr> {
-    if cond_predicate_has_conjunction_operator(predicate, syntax_tree) {
-        return Err(unsupported("`&&&` in a condition"));
-    }
-    let entries = predicate.nodes.0.contents();
-    let [sv_parser::ExpressionOrCondPattern::Expression(expr)] = entries.as_slice() else {
-        return Err(unsupported("pattern matching condition"));
-    };
-    let expression = expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)?;
+) -> Expr {
     // Prove this before call expansion, while scoped return metadata can tell
     // two-state functions apart from four-state functions of the same name.
     if let Expr::Binary {
@@ -113,33 +105,11 @@ pub(super) fn expr_from_cond_predicate(
         op: BinaryOp::LogicOr,
         right,
     } = &expression
-        && two_state_conditions_are_complements(&syntax_tree.state, left, right, packed_dimensions)
+        && two_state_conditions_are_complements(state, left, right, packed_dimensions)
     {
-        return Ok(Expr::Literal("1'b1".to_string()));
+        return Expr::Literal("1'b1".to_string());
     }
-    Ok(expression)
-}
-
-fn cond_predicate_has_conjunction_operator(
-    predicate: &sv_parser::CondPredicate,
-    syntax_tree: &SyntaxTree,
-) -> bool {
-    let mut previous = None;
-    for node in RefNode::CondPredicate(predicate) {
-        let RefNode::Symbol(symbol) = node else {
-            continue;
-        };
-        let locate = symbol.nodes.0;
-        if previous.is_some_and(|previous: sv_parser::Locate| {
-            previous.offset + previous.len == locate.offset
-                && syntax_tree.get_str(&previous) == Some("&&")
-                && syntax_tree.get_str(&locate) == Some("&")
-        }) {
-            return true;
-        }
-        previous = Some(locate);
-    }
-    false
+    expression
 }
 
 pub(super) fn assignment_op_expr(
@@ -259,12 +229,26 @@ pub(super) fn expr_from_lvalue(
         else {
             return base;
         };
-        parts.push(Expr::Select {
-            expr: Box::new(base.clone()),
-            msb: ConstExpr::Literal(part_msb.to_string()),
-            lsb: ConstExpr::Literal(offset.to_string()),
-            signed,
-        });
+        if let Expr::Select { expr, lsb, .. } = &base {
+            let bound = |offset: usize| ConstExpr::Binary {
+                left: Box::new(lsb.clone()),
+                op: BinaryOp::Add,
+                right: Box::new(ConstExpr::Literal(offset.to_string())),
+            };
+            parts.push(Expr::Select {
+                expr: expr.clone(),
+                msb: bound(part_msb),
+                lsb: bound(offset),
+                signed,
+            });
+        } else {
+            parts.push(Expr::Select {
+                expr: Box::new(base.clone()),
+                msb: ConstExpr::Literal(part_msb.to_string()),
+                lsb: ConstExpr::Literal(offset.to_string()),
+                signed,
+            });
+        }
     }
     Expr::Concat(parts)
 }

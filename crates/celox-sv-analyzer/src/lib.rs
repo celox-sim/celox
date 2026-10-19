@@ -1,11 +1,8 @@
 //! SystemVerilog analyzer for Celox.
 //!
-//! This crate intentionally mirrors the role of `veryl-analyzer`: it owns
-//! SystemVerilog syntax parsing, semantic analysis, elaboration, and analyzer
-//! IR. It does not depend on `celox` and must not know about SLT or SIR.
-
-// Rustdoc's auto-trait analysis traverses sv-parser's deeply nested syntax tree.
-#![recursion_limit = "512"]
+//! Native syntax and source storage belong to [`celox_sv_syntax`]. This crate
+//! owns semantic binding, elaboration and analyzer IR over native syntax.
+//! It does not depend on `celox` and must not know about SLT or SIR.
 
 use std::path::Path;
 
@@ -15,6 +12,7 @@ use thiserror::Error;
 pub mod analyze;
 pub mod ast;
 pub mod ir;
+mod migration;
 mod parsed;
 pub mod procedural;
 pub mod symbol;
@@ -225,13 +223,14 @@ pub fn generated_time_declarations(
 
 /// Parse and analyze a SystemVerilog source string.
 pub fn analyze_source(code: &str, path: &Path) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let warnings = ast::warnings::functions(&syntax_tree, &syntax_tree);
+    let syntax_tree = migration::parse_source(code, path)?;
+    let warnings = ast::warnings::source(&syntax_tree);
     collecting_warnings(warnings, || {
-        if syntax_tree
-            .into_iter()
-            .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
-        {
+        if syntax_tree.declarations().all_units().any(|unit| {
+            unit.kind == celox_sv_syntax::UnitKind::Interface
+                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
+                && !unit.external
+        }) {
             return analyze_interface_source(code, path, "", &HashMap::default());
         }
         let source = ast::Source::from_syntax(&syntax_tree)?;
@@ -247,13 +246,14 @@ pub fn analyze_source_with_module_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    let warnings = ast::warnings::functions(&syntax_tree, &syntax_tree);
+    let syntax_tree = migration::parse_source(code, path)?;
+    let warnings = ast::warnings::source(&syntax_tree);
     collecting_warnings(warnings, || {
-        if syntax_tree
-            .into_iter()
-            .any(|node| matches!(node, sv_parser::RefNode::InterfaceDeclarationAnsi(_)))
-        {
+        if syntax_tree.declarations().all_units().any(|unit| {
+            unit.kind == celox_sv_syntax::UnitKind::Interface
+                && unit.port_style == celox_sv_syntax::PortStyle::Ansi
+                && !unit.external
+        }) {
             return analyze_interface_source(code, path, module_name, parameter_overrides);
         }
         let source = ast::Source::from_syntax_with_module_parameter_overrides(
@@ -357,7 +357,7 @@ pub(crate) fn finish_analysis(
 /// Return the module names declared in a SystemVerilog source without
 /// performing semantic lowering of their bodies or port declarations.
 pub fn source_module_names(code: &str, path: &Path) -> Result<Vec<String>, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = migration::parse_source(code, path)?;
     ast::Source::module_names_from_syntax(&syntax_tree)
 }
 
@@ -378,7 +378,7 @@ pub fn analyze_source_module_with_parameter_overrides(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
+    let syntax_tree = migration::parse_source(code, path)?;
     let warnings = ast::warnings::components(&syntax_tree)
         .remove(module_name)
         .unwrap_or_default();
@@ -417,8 +417,7 @@ pub fn source_module_interfaces(
     code: &str,
     path: &Path,
 ) -> Result<ModuleInterfaces, AnalyzerError> {
-    let syntax_tree = syntax::parse_source(code, path)?;
-    ast::Source::module_interfaces_from_syntax(&syntax_tree)
+    Ok(ParsedSource::parse(code, path)?.module_interfaces().clone())
 }
 
 #[cfg(test)]

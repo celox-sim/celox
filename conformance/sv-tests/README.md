@@ -80,6 +80,18 @@ expectations. A single-mode update preserves the other mode’s rows. Missing
 cases and changed results are checked independently for each selected mode.
 Update `revision` and the measured expectations together when upgrading upstream.
 
+The native-parser transition reviews twenty expectation rows separately from grammar
+repairs. The six module-level deferred `assert`, `assume`, and `cover` probes
+(`16.2--*0` and `16.2--*-final`) now fail elaboration explicitly: they are legal
+syntax (IEEE 1800-2023 16.4), but their module execution is unsupported. The old
+analyzer dropped these items, producing misleading passes. Parsing these forms
+still succeeds, with a separate analyzer regression checking the support boundary.
+The three anonymous-enum declaration probes now pass because the analyzer creates
+the declared storage. The negative `6.20.5--specparam_inv` probe now passes because
+assigning a specparam to a value parameter is rejected, as required by 6.20.5;
+an unreferenced specparam declaration remains accepted. No other expectation rows
+are changed for these repairs.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.
