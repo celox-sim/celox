@@ -9,6 +9,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -33,6 +34,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -57,6 +59,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -81,6 +84,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -105,6 +109,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -129,6 +134,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -153,6 +159,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -188,6 +195,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -212,6 +220,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -236,6 +245,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -260,6 +270,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -293,6 +304,7 @@
         "evidence": [
           "verification/sv/limitations/icarus.json",
           "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },
@@ -390,6 +402,56 @@
       },
       "phase": "skip",
       "status": "ignored"
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interfaces",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "interfaces::binds_implicit_named_interface_arrays_in_generate_scopes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_interfaces",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": []
+      },
+      "name": "interfaces::binds_implicit_named_interface_ports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -1428,30 +1428,25 @@ impl<'a> Design<'a> {
                             .interface
                             .as_ref()
                             .is_some_and(|port| port.interface.is_none())
-                        && let Connection::Explicit(Some(expression)) = actual
-                        && let Some(actual) = actual_handle(expression, file)?
-                        && let Some(interface) = interface_at(
-                            &actual.handle,
-                            file.span(RefNode::Expression(expression))?,
-                        )
+                        && let Some((actual, span)) = actual.interface_actual(formal, file)?
+                        && let Some(interface) = interface_at(&actual.handle, span)
                     {
                         bindings.push((formal.clone(), interface));
                     }
                 }
                 bindings.sort();
                 for (formal, actual) in actuals {
-                    // An implicit connection names no interface member.
-                    let (Some(port), Connection::Explicit(Some(expression))) =
-                        (child.port(&formal), actual)
-                    else {
+                    let Some(port) = child.port(&formal) else {
                         continue;
                     };
                     if port.interface.is_none() {
-                        if port.writes {
+                        if port.writes
+                            && let Connection::Explicit(Some(expression)) = actual
+                        {
                             written_expression(expression, file, &mut lvalues);
                         }
-                    } else if let Some(actual) = actual_handle(expression, file)?
-                        && is_port(&actual.handle, file.span(RefNode::Expression(expression))?)
+                    } else if let Some((actual, span)) = actual.interface_actual(&formal, file)?
+                        && is_port(&actual.handle, span)
                     {
                         uses.children.push(ChildBinding {
                             module: child_name.clone(),
@@ -2149,12 +2144,8 @@ fn actual_handle(
     }
 }
 
-/// The port connections of `instance` of `module` as `(formal, actual)`.
-/// Implicit and wildcard named connections, which cannot name an interface
-/// item, are rejected when `strict`, and skipped otherwise.
-/// The connections of `instance` to `module` as `(formal, actual)`. An
-/// implicit named connection `.x` to an ordinary port is `(x, Implicit)`;
-/// unless `strict`, implicit connections are skipped instead.
+/// The connections of `instance` to `module` as `(formal, actual)`.
+/// Unless `strict`, implicit and wildcard connections are skipped.
 fn connections<'b>(
     instance: &'b sv_parser::HierarchicalInstance,
     module: &ModuleDecl,
@@ -2191,33 +2182,36 @@ fn connections<'b>(
         }
         sv_parser::ListOfPortConnections::Named(list) => {
             let mut connections: Vec<(String, Connection<'b>)> = list
-            .nodes
-            .0
-            .contents()
-            .into_iter()
-            .filter_map(|connection| match connection {
-                sv_parser::NamedPortConnection::Identifier(connection) => {
-                    let formal = match name(RefNode::PortIdentifier(&connection.nodes.2), &file.syntax_tree) {
-                        Ok(formal) => formal,
-                        Err(error) => return Some(Err(error)),
-                    };
-                    match &connection.nodes.3 {
-                        Some(actual) => Some(Ok((formal, Connection::Explicit(actual.nodes.1.as_ref())))),
-                        None if !strict => None,
-                        None if module.port(&formal).is_some_and(|port| port.interface.is_none()) => {
-                            Some(Ok((formal, Connection::Implicit)))
+                .nodes
+                .0
+                .contents()
+                .into_iter()
+                .filter_map(|connection| match connection {
+                    sv_parser::NamedPortConnection::Identifier(connection) => {
+                        let formal = match name(
+                            RefNode::PortIdentifier(&connection.nodes.2),
+                            &file.syntax_tree,
+                        ) {
+                            Ok(formal) => formal,
+                            Err(error) => return Some(Err(error)),
+                        };
+                        match &connection.nodes.3 {
+                            Some(actual) => {
+                                Some(Ok((formal, Connection::Explicit(actual.nodes.1.as_ref()))))
+                            }
+                            None if !strict => None,
+                            None => Some(
+                                file.span(RefNode::PortIdentifier(&connection.nodes.2))
+                                    .map(|span| (formal, Connection::Implicit(span))),
+                            ),
                         }
-                        None => Some(Err(unsupported(format!(
-                            "implicit named port connection `.{formal}` to a module with interface ports"
-                        )))),
                     }
-                }
-                sv_parser::NamedPortConnection::Asterisk(_) if !strict => None,
-                sv_parser::NamedPortConnection::Asterisk(_) => {
-                    Some(Err(unsupported("wildcard port connection")))
-                }
-            })
-            .collect::<Result<_, _>>()?;
+                    sv_parser::NamedPortConnection::Asterisk(_) if !strict => None,
+                    sv_parser::NamedPortConnection::Asterisk(_) => {
+                        Some(Err(unsupported("wildcard port connection")))
+                    }
+                })
+                .collect::<Result<_, _>>()?;
             // An omitted interface port is unconnected, which the caller
             // rejects.
             if strict {
@@ -2240,7 +2234,34 @@ enum Connection<'b> {
     /// `.x(expression)`, or `.x()` and positional gaps without one.
     Explicit(Option<&'b sv_parser::Expression>),
     /// `.x`, connecting the signal of the port's name.
-    Implicit,
+    Implicit(Span),
+}
+
+impl Connection<'_> {
+    /// Resolve `.p` and `.p(p)` through the same interface lookup path.
+    fn interface_actual(
+        self,
+        formal: &str,
+        file: &File<'_>,
+    ) -> Result<Option<(Actual, Span)>, AnalyzerError> {
+        match self {
+            Self::Implicit(span) => Ok(Some((
+                Actual {
+                    handle: formal.to_string(),
+                    selects: None,
+                    modport: None,
+                },
+                span,
+            ))),
+            Self::Explicit(Some(expression)) => actual_handle(expression, file)?
+                .map(|actual| {
+                    file.span(RefNode::Expression(expression))
+                        .map(|span| (actual, span))
+                })
+                .transpose(),
+            Self::Explicit(None) => Ok(None),
+        }
+    }
 }
 
 fn parameter_overrides(
@@ -3472,19 +3493,15 @@ pub fn plan_interfaces(
                     else {
                         continue;
                     };
-                    let Connection::Explicit(Some(expression)) = actual else {
-                        return Err(unsupported(format!(
-                            "missing interface actual of `{child_name}.{formal}`"
-                        )));
-                    };
-                    let actual = actual_handle(expression, file)?.ok_or_else(|| {
-                        unsupported(format!("interface actual of `{child_name}.{formal}`"))
-                    })?;
-                    let handle = handles
-                        .at(&actual.handle, file.span(RefNode::Expression(expression))?)
-                        .ok_or_else(|| {
-                            unsupported(format!("unknown interface handle `{}`", actual.handle))
+                    let (actual, span) =
+                        actual.interface_actual(&formal, file)?.ok_or_else(|| {
+                            unsupported(format!(
+                                "missing interface actual of `{child_name}.{formal}`"
+                            ))
                         })?;
+                    let handle = handles.at(&actual.handle, span).ok_or_else(|| {
+                        unsupported(format!("unknown interface handle `{}`", actual.handle))
+                    })?;
                     if handle.arrayed && actual.selects.is_none() && port.dimensions.is_empty() {
                         return Err(unsupported(format!(
                             "whole interface array `{}` connected to scalar port `{formal}`",
@@ -3513,14 +3530,9 @@ pub fn plan_interfaces(
                                 .into_iter()
                                 .find(|(name, _)| name == &formal.name)?
                                 .1;
-                            let Connection::Explicit(Some(expression)) = actual else {
-                                return None;
-                            };
-                            let actual = actual_handle(expression, file).ok()??;
-                            let handle = handles.at(
-                                &actual.handle,
-                                file.span(RefNode::Expression(expression)).ok()?,
-                            )?;
+                            let (actual, span) =
+                                actual.interface_actual(&formal.name, file).ok()??;
+                            let handle = handles.at(&actual.handle, span)?;
                             Some((formal.name.clone(), handle.interface.clone()))
                         })
                         .collect::<Vec<_>>();

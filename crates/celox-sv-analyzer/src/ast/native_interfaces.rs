@@ -530,7 +530,12 @@ pub(super) fn analyze_module(
                         tree,
                     )?;
                     let env = &item.env;
-                    let handle = actual_handle_key(actual, tree, env, &active_scope.type_aliases)?;
+                    let handle = match actual {
+                        Some(actual) => {
+                            actual_handle_key(actual, tree, env, &active_scope.type_aliases)?
+                        }
+                        None => port.name.clone(),
+                    };
                     let actuals = if port.array_rank == 0 {
                         ArrayBinding {
                             elements: vec![handle.clone()],
@@ -970,7 +975,7 @@ fn connection_expression<'a>(
     formal: &str,
     interface: Option<&ModuleInterface>,
     tree: &SyntaxTree,
-) -> Converted<&'a sv_parser::Expression> {
+) -> Converted<Option<&'a sv_parser::Expression>> {
     let found = match instance.nodes.1.nodes.1.as_ref() {
         Some(sv_parser::ListOfPortConnections::Named(connections)) => connections
             .nodes
@@ -986,7 +991,10 @@ fn connection_expression<'a>(
                 {
                     return None;
                 }
-                connection.nodes.3.as_ref()?.nodes.1.as_ref()
+                match &connection.nodes.3 {
+                    None => Some(None),
+                    Some(actual) => actual.nodes.1.as_ref().map(Some),
+                }
             }),
         Some(sv_parser::ListOfPortConnections::Ordered(connections)) => interface
             .and_then(|interface| interface.ports.iter().position(|name| name == formal))
@@ -997,6 +1005,7 @@ fn connection_expression<'a>(
                     .contents()
                     .get(index)
                     .and_then(|connection| connection.nodes.1.as_ref())
+                    .map(Some)
             }),
         _ => None,
     };
