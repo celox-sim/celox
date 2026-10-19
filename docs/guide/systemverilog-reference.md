@@ -29,7 +29,7 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
-| Parameters | integral parameters, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
+| Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
 
@@ -84,8 +84,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   constructs that run past 10,000 iterations are rejected ([#448](https://github.com/celox-sim/celox/issues/448)), and genvar
   updates with bitwise compound operators are rejected ([#455](https://github.com/celox-sim/celox/issues/455)).
 - Expressions: streaming concatenations ([#447](https://github.com/celox-sim/celox/issues/447)), reduction operators in parameter expressions
-  ([#456](https://github.com/celox-sim/celox/issues/456)), and parameter overrides that are not plain integers, such as X/Z
-  values or values wider than 128 bits ([#461](https://github.com/celox-sim/celox/issues/461)).
+  ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
   `$realtime` in an expression or `$fopen`, is

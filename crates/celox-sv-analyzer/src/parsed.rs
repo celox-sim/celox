@@ -26,7 +26,7 @@ impl ParsedSource {
     pub fn parse(code: &str, path: &Path) -> Result<Self, AnalyzerError> {
         let tree = syntax::parse_source(code, path)?;
         let warnings = ast::warnings::components(&tree);
-        let index = ast::with_call_sites(|| ast::module_index::ModuleIndex::new(&tree))
+        let index = ast::module_index::ModuleIndex::new(&tree)
             .map_err(|error| error.with_warnings(ast::warnings::functions(&tree, &tree)))?;
         Ok(Self {
             code: code.into(),
@@ -98,7 +98,7 @@ impl ParsedSource {
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
             .collect();
         let mut warnings = Vec::new();
-        let packages = ast::with_call_sites(|| {
+        let packages = (|| {
             let mut packages = Packages::analyze_with_roots(&trees, roots)?;
             ast::warnings::append(&mut warnings, packages.warnings().iter().cloned());
             for source in sources {
@@ -129,7 +129,7 @@ impl ParsedSource {
                     std::sync::Arc::new(ast::interfaces::plan_interfaces(&sources, &[])?);
             }
             Ok(packages)
-        });
+        })();
         match packages {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
@@ -169,23 +169,21 @@ impl ParsedSource {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
             .collect();
-        ast::with_call_sites(|| {
-            let source = ast::Source::from_indexed_syntax_module(
-                &self.tree,
-                &self.path,
-                &self.index,
-                module_name,
-                ast::ModuleParameterBindings {
-                    declarations_only: true,
-                    values: &overrides,
-                    types: &[],
-                    patterns: &[],
-                },
-                &ModuleInterfaces::default(),
-                packages,
-            )?;
-            analyze::analyze_source(source)
-        })
+        let source = ast::Source::from_indexed_syntax_module(
+            &self.tree,
+            &self.path,
+            &self.index,
+            module_name,
+            ast::ModuleParameterBindings {
+                declarations_only: true,
+                values: &overrides,
+                types: &[],
+                patterns: &[],
+            },
+            &ModuleInterfaces::default(),
+            packages,
+        )?;
+        analyze::analyze_source(source)
     }
 
     /// Analyze without rewriting the source, retaining literal override
@@ -219,7 +217,7 @@ impl ParsedSource {
             .get(module_name)
             .map_or(module_name, |plan| plan.original.as_str());
         let warnings = self.warnings.get(original).cloned().unwrap_or_default();
-        let ir = ast::with_call_sites(|| {
+        let ir = (|| {
             let source = ast::Source::from_indexed_syntax_module(
                 &self.tree,
                 &self.path,
@@ -235,7 +233,7 @@ impl ParsedSource {
                 packages,
             )?;
             analyze::analyze_source(source)
-        });
+        })();
         crate::finish_analysis(ir, warnings)
     }
 }
