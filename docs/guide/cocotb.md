@@ -41,8 +41,10 @@ Veryl uses the existing native testbench executor; a test may also complete by
 falling through its initial blocks.
 
 The command uses the existing frontends' supported language subsets; unsupported
-constructs produce compilation diagnostics. `-O O0`, `-O O1` (default), and
-`-O O2` select the existing compiler optimization levels.
+constructs produce compilation diagnostics. `-O O0`, `-O O1`, and `-O O2` select
+the existing compiler optimization levels. Both languages default to O2, including
+dead store elimination; signals read by the HDL testbench are retained
+automatically. An explicit `-O` overrides the default.
 
 Successful completion returns status 0. Compilation errors, runtime errors,
 assertion failures, `$error`, `$fatal`, lost runtime events, and exhausted

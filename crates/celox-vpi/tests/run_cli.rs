@@ -16,6 +16,41 @@ fn run(sources: &[(&str, &str)], extra: &[&str]) -> std::process::Output {
 
 #[cfg(feature = "systemverilog")]
 #[test]
+fn sv_optimization_preserves_testbench_reads_of_internal_combinational_signals() {
+    let source = r#"
+        module Dut(input logic [7:0] value, output logic [7:0] result);
+            logic [7:0] observed, unused;
+            always_comb begin
+                observed = value ^ 8'h55;
+                unused = value + 8'd1;
+                result = observed;
+            end
+        endmodule
+        module Top;
+            logic [7:0] value, result;
+            Dut dut(value, result);
+            initial begin
+                value = 8'h12;
+                #1;
+                assert (result === 8'h47) else $fatal(1, "first result");
+                $display("result=%h", result);
+                value = 8'h34;
+                #1;
+                assert (result === 8'h61) else $fatal(1, "second result");
+                $display("result=%h", result);
+                $finish;
+            end
+        endmodule
+    "#;
+    for extra in [vec![], vec!["-O", "O0"], vec!["-O", "O1"], vec!["-O", "O2"]] {
+        let output = run(&[("top.sv", source)], &extra);
+        assert!(output.status.success(), "{extra:?}: {output:?}");
+        assert_eq!(output.stdout, b"result=47\nresult=61\n", "{extra:?}");
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
 fn runs_multiple_sources_and_preserves_display_and_write_output() {
     let output = run(
         &[
@@ -104,6 +139,36 @@ fn requires_sources_top_and_positive_step_limit() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
+    }
+}
+
+#[test]
+fn veryl_optimization_preserves_native_testbench_reads_of_internal_signals() {
+    let source = r#"
+        #[test(Top)]
+        module Top {
+            var source: logic<8>;
+            var observed: logic<8>;
+            var unused: logic<8>;
+            assign observed = source ^ 8'h55;
+            assign unused = source + 8'd1;
+            initial {
+                source = 8'h12;
+                $assert(observed == 8'h47, "first result");
+                $display("result=%h", observed);
+                source = 8'h34;
+                $assert(observed == 8'h61, "second result");
+                $display("result=%h", observed);
+                $finish();
+            }
+        }
+    "#;
+    for extra in [vec![], vec!["-O", "O0"], vec!["-O", "O1"], vec!["-O", "O2"]] {
+        let output = run(&[("top.veryl", source)], &extra);
+        assert!(output.status.success(), "{extra:?}: {output:?}");
+        let messages = String::from_utf8_lossy(&output.stderr);
+        assert!(messages.contains("result=47"), "{extra:?}: {messages}");
+        assert!(messages.contains("result=61"), "{extra:?}: {messages}");
     }
 }
 

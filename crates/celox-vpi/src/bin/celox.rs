@@ -46,7 +46,7 @@ struct RunArgs {
     top: String,
 
     /// Compiler optimization level: O0, O1, O2.
-    #[arg(short = 'O', long, default_value = "O1", value_parser = parse_opt_level)]
+    #[arg(short = 'O', long, default_value = "O2", value_parser = parse_opt_level)]
     opt_level: celox::OptLevel,
 
     /// Maximum SV scheduler steps or Veryl testbench ticks before failing.
@@ -754,6 +754,33 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_defaults_to_o2_for_both_languages_and_allows_overrides() {
+        for (source, default) in [
+            ("top.sv", celox::OptLevel::O2),
+            ("top.v", celox::OptLevel::O2),
+            ("top.veryl", celox::OptLevel::O2),
+        ] {
+            for (extra, expected) in [
+                (Vec::new(), default),
+                (vec!["-O", "O0"], celox::OptLevel::O0),
+                (vec!["-O", "O1"], celox::OptLevel::O1),
+                (vec!["--opt-level", "O2"], celox::OptLevel::O2),
+            ] {
+                let cli = Cli::try_parse_from(
+                    ["celox", "run", source, "--top", "Top"]
+                        .into_iter()
+                        .chain(extra),
+                )
+                .unwrap();
+                let CliCommand::Run(arguments) = cli.command else {
+                    panic!("expected the run command");
+                };
+                assert_eq!(arguments.opt_level, expected, "{source}");
+            }
+        }
+    }
 
     #[cfg(feature = "systemverilog")]
     #[test]
