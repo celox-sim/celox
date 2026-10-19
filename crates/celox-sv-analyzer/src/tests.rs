@@ -5160,7 +5160,7 @@ fn named_constant_calls_retain_parameter_dependencies() {
         crate::syntax::parse_source(source, std::path::Path::new("named_dependency.sv")).unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
-    let _functions = module.install_constant_functions();
+    let state = module.constant_function_state();
     let expression: ir::ConstExpr = module
         .parameters()
         .iter()
@@ -5171,7 +5171,16 @@ fn named_constant_calls_retain_parameter_dependencies() {
         .clone()
         .into();
     let values = fxhash::FxHashMap::from_iter([("W".to_string(), 16i128)]);
-    assert_eq!(typecheck::eval_const_expr(&expression, &values), Some(17));
+    assert_eq!(
+        typecheck::eval_const_expr_in_env(
+            &expression,
+            &ast::const_functions::Environment {
+                constants: &values,
+                functions: &state.const_functions
+            }
+        ),
+        Some(17)
+    );
 }
 
 #[test]

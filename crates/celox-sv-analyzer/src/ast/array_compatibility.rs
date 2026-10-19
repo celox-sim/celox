@@ -13,6 +13,7 @@ use typecheck::UnpackedArrayType;
 /// The type of an unpacked array of `shape`, or `None` when `shape` is not an
 /// unpacked array or its type cannot be resolved.
 fn unpacked_array_type(
+    state: &AnalysisState,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<UnpackedArrayType> {
@@ -20,7 +21,8 @@ fn unpacked_array_type(
         return None;
     }
     let count = |width: &ConstExpr| {
-        eval_ast_const_expr(width, &dims.const_env).and_then(|width| usize::try_from(width).ok())
+        eval_ast_const_expr(state, width, &dims.const_env)
+            .and_then(|width| usize::try_from(width).ok())
     };
     Some(UnpackedArrayType {
         dims: shape
@@ -59,7 +61,7 @@ pub(super) fn selected_unpacked_shape(
 /// selects, calls, concatenations) are not resolved.
 fn expression_unpacked_shape(
     expr: &sv_parser::Expression,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Option<VariableDimensions> {
     let sv_parser::Expression::Primary(primary) = expr else {
@@ -131,14 +133,14 @@ pub(super) fn check_unpacked_array_assignment(
     value: &sv_parser::Expression,
     target: &VariableDimensions,
     context: impl FnOnce() -> String,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let Some(target) = unpacked_array_type(target, dims) else {
+    let Some(target) = unpacked_array_type(&tree.state, target, dims) else {
         return Ok(());
     };
     let Some(actual) = expression_unpacked_shape(value, tree, dims)
-        .and_then(|shape| unpacked_array_type(&shape, dims))
+        .and_then(|shape| unpacked_array_type(&tree.state, &shape, dims))
     else {
         return Ok(());
     };

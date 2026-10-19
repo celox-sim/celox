@@ -109,25 +109,35 @@ pub(super) struct Timescales {
     specified: [u8; 2],
 }
 
-thread_local! {
-    static INTERFACE_INSTANCE: RefCell<Option<String>> = const { RefCell::new(None) };
+/// Time-query state owned by one analysis, shared explicitly by nested scopes.
+#[derive(Default)]
+pub(super) struct State {
+    design: RefCell<QueryContext>,
+    interface_instance: RefCell<Option<String>>,
 }
 
-pub(super) fn with_interface_instance<T>(name: &str, analyze: impl FnOnce() -> T) -> T {
-    struct Restore(Option<String>);
-    impl Drop for Restore {
+pub(super) fn with_interface_instance<T>(
+    state: &State,
+    name: &str,
+    analyze: impl FnOnce() -> T,
+) -> T {
+    struct Restore<'a> {
+        state: &'a State,
+        previous: Option<String>,
+    }
+    impl Drop for Restore<'_> {
         fn drop(&mut self) {
-            INTERFACE_INSTANCE.with(|current| *current.borrow_mut() = self.0.take());
+            *self.state.interface_instance.borrow_mut() = self.previous.take();
         }
     }
-    let previous = INTERFACE_INSTANCE.with(|current| {
-        let mut current = current.borrow_mut();
+    let previous = {
+        let mut current = state.interface_instance.borrow_mut();
         let nested = current
             .as_ref()
             .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"));
         current.replace(nested)
-    });
-    let _restore = Restore(previous);
+    };
+    let _restore = Restore { state, previous };
     analyze()
 }
 
@@ -136,10 +146,6 @@ thread_local! {
     static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PARENT_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SCOPE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-thread_local! {
-    static DESIGN: RefCell<QueryContext> = RefCell::new(QueryContext::default());
 }
 
 #[derive(Default)]
@@ -155,32 +161,20 @@ struct PreparedTree {
 
 pub(super) struct Installed<'a> {
     previous: QueryContext,
+    state: &'a State,
     // A prepared tree's address is used only while this guard borrows it.
-    // The guard must also stay on the thread whose context it installed.
     _tree: Option<&'a SyntaxTree>,
-    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 impl Drop for Installed<'_> {
     fn drop(&mut self) {
-        DESIGN.with(|current| {
-            *current.borrow_mut() = std::mem::take(&mut self.previous);
-        });
+        *self.state.design.borrow_mut() = std::mem::take(&mut self.previous);
     }
 }
-pub(super) fn install(design: Arc<Timescales>) -> Installed<'static> {
-    install_context(
-        QueryContext {
-            design,
-            prepared: None,
-        },
-        None,
-    )
-}
-
-pub(super) fn install_for_tree(
+pub(super) fn install_for_tree<'a>(
+    state: &'a State,
     design: Arc<Timescales>,
-    tree: &SyntaxTree,
-) -> Converted<Installed<'_>> {
+    tree: &'a SyntaxTree,
+) -> Converted<Installed<'a>> {
     let source = key(tree);
     // Missing sources and type-specialized trees contribute to the same design.
     // Collect and merge once, before any query or module-body analysis.
@@ -197,16 +191,21 @@ pub(super) fn install_for_tree(
         unit,
     });
     Ok(install_context(
+        state,
         QueryContext { design, prepared },
         Some(tree),
     ))
 }
 
-fn install_context(context: QueryContext, tree: Option<&SyntaxTree>) -> Installed<'_> {
+fn install_context<'a>(
+    state: &'a State,
+    context: QueryContext,
+    tree: Option<&'a SyntaxTree>,
+) -> Installed<'a> {
     Installed {
-        previous: DESIGN.with(|current| current.replace(context)),
+        previous: state.design.replace(context),
+        state,
         _tree: tree,
-        _thread: std::marker::PhantomData,
     }
 }
 
@@ -778,13 +777,14 @@ impl Timescales {
         &self,
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<i32> {
         let source = key(tree);
         let extended = (!self.units.contains_key(source))
             .then(|| self.including_tree(tree))
             .transpose()?;
         let design = extended.as_ref().unwrap_or(self);
-        design.query_in_unit(call, tree, &design.units[source])
+        design.query_in_unit(call, tree, &design.units[source], interface_types)
     }
 
     fn query_in_unit(
@@ -792,9 +792,16 @@ impl Timescales {
         call: &sv_parser::SystemTfCall,
         tree: &SyntaxTree,
         unit: &Unit,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<i32> {
-        self.resolve(call, tree, unit, system_functions::CallSite::Expression)
-            .map(|scope| scope.value())
+        self.resolve(
+            call,
+            tree,
+            unit,
+            system_functions::CallSite::Expression,
+            interface_types,
+        )
+        .map(|scope| scope.value())
     }
 
     /// The time units of the simulation, which counts the global time
@@ -815,6 +822,7 @@ impl Timescales {
         tree: &SyntaxTree,
         unit: &Unit,
         site: system_functions::CallSite,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<ResolvedScope> {
         let (name, args) =
             system_tf_call_parts(call, tree).ok_or_else(|| unsupported("timescale query name"))?;
@@ -870,9 +878,8 @@ impl Timescales {
                             .ok_or_else(|| unsupported("timescale query identifier"))?,
                     );
                     let first = &path[0];
-                    let imported = scope::imported();
                     let (mut target, start) = if hierarchy.nodes.0.is_none()
-                        && let Some(interface) = imported.interface_types.get(first)
+                        && let Some(interface) = interface_types.get(first)
                         && let Some(target) = self.definitions.get(interface)
                     {
                         display = DisplayScope::Relative(path.join("."));
@@ -949,6 +956,7 @@ impl Timescales {
         tree: &SyntaxTree,
         site: system_functions::CallSite,
         prefix: Option<&str>,
+        interface_types: &HashMap<String, String>,
     ) -> Converted<String> {
         let source = key(tree);
         let extended = (!self.units.contains_key(source))
@@ -956,32 +964,42 @@ impl Timescales {
             .transpose()?;
         let design = extended.as_ref().unwrap_or(self);
         design
-            .resolve(call, tree, &design.units[source], site)
+            .resolve(call, tree, &design.units[source], site, interface_types)
             .map(|scope| scope.message(prefix))
     }
 }
 
 pub(super) fn print_message(
     call: &sv_parser::SystemTfCall,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     site: system_functions::CallSite,
 ) -> Converted<String> {
-    let prefix = INTERFACE_INSTANCE.with(|current| current.borrow().clone());
-    DESIGN.with(|context| {
-        let context = context.borrow();
+    let prefix = tree.state.timescales.interface_instance.borrow().clone();
+    {
+        let context = tree.state.timescales.design.borrow();
         if let Some(prepared) = &context.prepared
-            && prepared.address == tree as *const SyntaxTree as usize
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
             context
                 .design
-                .resolve(call, tree, &prepared.unit, site)
+                .resolve(
+                    call,
+                    tree,
+                    &prepared.unit,
+                    site,
+                    &scope::imported(&tree.state).interface_types,
+                )
                 .map(|scope| scope.message(prefix.as_deref()))
         } else {
-            context
-                .design
-                .print_message(call, tree, site, prefix.as_deref())
+            context.design.print_message(
+                call,
+                tree,
+                site,
+                prefix.as_deref(),
+                &scope::imported(&tree.state).interface_types,
+            )
         }
-    })
+    }
 }
 
 pub(super) fn argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Expression> {
@@ -1010,27 +1028,34 @@ pub(super) fn argument(call: &sv_parser::SystemTfCall) -> Option<&sv_parser::Exp
     }
 }
 
-pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &SyntaxTree) -> Converted<i32> {
-    DESIGN.with(|context| {
-        let context = context.borrow();
+pub(super) fn query(call: &sv_parser::SystemTfCall, tree: &AnalysisContext<'_>) -> Converted<i32> {
+    {
+        let context = tree.state.timescales.design.borrow();
         if let Some(prepared) = &context.prepared
-            && prepared.address == tree as *const SyntaxTree as usize
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
-            context.design.query_in_unit(call, tree, &prepared.unit)
+            context.design.query_in_unit(
+                call,
+                tree,
+                &prepared.unit,
+                &scope::imported(&tree.state).interface_types,
+            )
         } else {
-            context.design.query(call, tree)
+            context
+                .design
+                .query(call, tree, &scope::imported(&tree.state).interface_types)
         }
-    })
+    }
 }
 
 /// The simulation's time units in one time unit of the scope of `node`: the
 /// divisor that scales the simulation time to `$time` (20.3.1), and the
 /// factor that scales a delay to the simulation time (3.14.1).
-pub(super) fn time_divisor(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<u64> {
-    DESIGN.with(|context| {
-        let context = context.borrow();
+pub(super) fn time_divisor(node: RefNode<'_>, tree: &AnalysisContext<'_>) -> Converted<u64> {
+    {
+        let context = tree.state.timescales.design.borrow();
         if let Some(prepared) = &context.prepared
-            && prepared.address == tree as *const SyntaxTree as usize
+            && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
             return Ok(context.design.time_divisor_in_unit(node, &prepared.unit));
         }
@@ -1041,26 +1066,45 @@ pub(super) fn time_divisor(node: RefNode<'_>, tree: &SyntaxTree) -> Converted<u6
             .transpose()?;
         let design = extended.as_ref().unwrap_or(design);
         Ok(design.time_divisor_in_unit(node, &design.units[source]))
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn nested_interface_instances_keep_their_full_path() {
-        super::with_interface_instance("outer", || {
-            super::with_interface_instance("child[2]", || {
-                super::INTERFACE_INSTANCE.with(|current| {
-                    assert_eq!(current.borrow().as_deref(), Some("outer.child[2]"))
-                });
+        let state = State::default();
+        with_interface_instance(&state, "outer", || {
+            with_interface_instance(&state, "child[2]", || {
+                assert_eq!(
+                    state.interface_instance.borrow().as_deref(),
+                    Some("outer.child[2]")
+                );
             });
-            super::INTERFACE_INSTANCE
-                .with(|current| assert_eq!(current.borrow().as_deref(), Some("outer")));
+            assert_eq!(state.interface_instance.borrow().as_deref(), Some("outer"));
         });
-        super::INTERFACE_INSTANCE.with(|current| assert!(current.borrow().is_none()));
+        assert!(state.interface_instance.borrow().is_none());
     }
 
     use super::*;
+
+    #[test]
+    fn independent_analysis_states_do_not_share_interface_paths() {
+        let first = State::default();
+        let second = State::default();
+        with_interface_instance(&first, "first", || {
+            with_interface_instance(&second, "second", || {
+                assert_eq!(first.interface_instance.borrow().as_deref(), Some("first"));
+                assert_eq!(
+                    second.interface_instance.borrow().as_deref(),
+                    Some("second")
+                );
+            });
+            assert!(second.interface_instance.borrow().is_none());
+            assert_eq!(first.interface_instance.borrow().as_deref(), Some("first"));
+        });
+    }
+
     #[test]
     fn current_query_scope_lookup_scales_logarithmically() {
         let mut code = String::new();
@@ -1077,7 +1121,8 @@ mod tests {
         let tree = crate::syntax::parse_source(&code, Path::new("many_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("many_queries.sv"))]).unwrap());
-        let _guard = install_for_tree(design, &tree).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
         let before = SCOPE_CHECKS.with(|count| count.get());
         let mut calls = 0;
         for node in &tree {
@@ -1106,7 +1151,8 @@ mod tests {
         let tree = crate::syntax::parse_source(code, Path::new("nested_queries.sv")).unwrap();
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("nested_queries.sv"))]).unwrap());
-        let _guard = install_for_tree(design, &tree).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
         let values: Vec<_> = tree
             .into_iter()
             .filter_map(|node| match node {
@@ -1430,7 +1476,7 @@ mod tests {
                     })
                     .unwrap();
                 // Exercise both collected design metadata and the local-tree fallback.
-                let local = Timescales::default().query(call, &tree);
+                let local = Timescales::default().query(call, &tree, &HashMap::default());
                 if operand == "P" {
                     let expected: i32 = if function == "$timeunit" { -7 } else { -11 };
                     let ir = result.unwrap();
@@ -1591,12 +1637,15 @@ mod tests {
                 })
                 .unwrap()
         }
-        let _outer = install_for_tree(design.clone(), &a).unwrap();
+        let a = AnalysisContext::unspecialized(&a);
+        let overrides = HashMap::default();
+        let b = a.child(&b, &overrides);
+        let _outer = install_for_tree(&a.state.timescales, design.clone(), &a).unwrap();
         assert_eq!(query(call(&a), &a).unwrap(), -6);
         {
-            let _inner = install_for_tree(design.clone(), &b).unwrap();
+            let _inner = install_for_tree(&b.state.timescales, design.clone(), &b).unwrap();
             assert_eq!(query(call(&b), &b).unwrap(), -9);
-            assert!(install_for_tree(design, &invalid).is_err());
+            assert!(install_for_tree(&b.state.timescales, design, &invalid).is_err());
             assert_eq!(query(call(&b), &b).unwrap(), -9);
         }
         assert_eq!(query(call(&a), &a).unwrap(), -6);

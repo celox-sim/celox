@@ -28,7 +28,7 @@ outline: [2, 3]
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
-| パラメータ | 整数のパラメータと、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
+| パラメータ | 整数のパラメータ、128ビットを超える幅と X/Z を保持するパラメータ上書き、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 
 ### プロセスと制御
 
@@ -80,8 +80,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   超えると拒否し（[#448](https://github.com/celox-sim/celox/issues/448)）、ビット演算の複合代入による genvar の更新は拒否します
   （[#455](https://github.com/celox-sim/celox/issues/455)）。
 - 式：ストリーミング連結（[#447](https://github.com/celox-sim/celox/issues/447)）、パラメータ式での
-  リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）、X/Z を含む値や 128 ビットを超える値など、単純な整数で
-  ないパラメータ上書き（[#461](https://github.com/celox-sim/celox/issues/461)）。
+  リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）。
 - システムタスクとシステム関数：Celox は IEEE 1800-2023 が定義するすべての名前を、
   附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$realtime`、`$fopen` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた

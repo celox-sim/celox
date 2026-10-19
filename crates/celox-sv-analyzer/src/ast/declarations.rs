@@ -41,7 +41,7 @@ pub(super) fn identifier_locate(node: RefNode<'_>) -> Option<Locate> {
 
 pub(super) fn ports_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Port>, AnalyzerError> {
@@ -139,7 +139,12 @@ pub(super) fn ports_from_module_node(
             _ => continue,
         }
         if let Some(span) = scope_span {
-            dimensions::publish_declaration_dimensions(span, &ports[ports.len() - 1..], &[]);
+            dimensions::publish_declaration_dimensions(
+                &syntax_tree.state,
+                span,
+                &ports[ports.len() - 1..],
+                &[],
+            );
         }
     }
     Ok(ports)
@@ -248,13 +253,14 @@ pub(super) fn module_interface_from_node(
 
 pub(super) fn parameters_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     base_const_env: &HashMap<String, i128>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
-    let mut environment = parameters::ParameterEnvironment::new(&parameters, base_const_env);
+    let mut environment =
+        parameters::ParameterEnvironment::new(&syntax_tree.state, &parameters, base_const_env);
     let parameter_port_list = module_parameter_port_list(node.clone());
     // IEEE 1800-2023 6.20.1: with a parameter port list, even an empty one,
     // a `parameter` declared in the module body is a localparam.
@@ -309,7 +315,7 @@ pub(super) fn parameters_from_module_node(
 
 fn parameters_from_parameter_port_list(
     list: &sv_parser::ParameterPortList,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     parameters: &mut Vec<Parameter>,
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
@@ -360,7 +366,7 @@ fn parameters_from_parameter_port_list(
 
 fn parameters_from_parameter_port_declaration(
     declaration: &sv_parser::ParameterPortDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     parameters: &mut Vec<Parameter>,
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
@@ -391,7 +397,7 @@ fn parameters_from_parameter_port_declaration(
 
 pub(super) fn signals_from_module_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
@@ -406,7 +412,7 @@ pub(super) fn signals_from_module_node(
 
 pub(super) fn signals_from_module_node_with_declaration_ranges(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     preserve_parameters: bool,
@@ -484,7 +490,7 @@ pub(super) fn signals_from_module_node_with_declaration_ranges(
 /// re-evaluating parameter initializers and generate conditions during discovery.
 pub(super) fn signals_from_scope_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<(), AnalyzerError> {
@@ -508,6 +514,7 @@ pub(super) fn signals_from_scope_node(
                 &mut |parameter| {
                     if let Some(span) = scope_span {
                         dimensions::publish_declaration_dimensions(
+                            &syntax_tree.state,
                             span,
                             &[],
                             std::slice::from_ref(&parameter.signal),
@@ -582,7 +589,12 @@ pub(super) fn signals_from_scope_node(
                 _ => continue,
             }
             if let Some(span) = scope_span {
-                dimensions::publish_declaration_dimensions(span, &[], &declared);
+                dimensions::publish_declaration_dimensions(
+                    &syntax_tree.state,
+                    span,
+                    &[],
+                    &declared,
+                );
             }
         }
     }
@@ -602,7 +614,7 @@ fn item_is_value_declaration(item: &sv_parser::ModuleOrGenerateItem) -> bool {
 
 pub(super) fn signals_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -637,7 +649,7 @@ pub(super) fn signals_from_module_or_generate_item(
 
 fn signals_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -696,7 +708,7 @@ fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap
 
 fn signals_from_net_declaration(
     net: &sv_parser::NetDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -779,7 +791,7 @@ fn signals_from_net_declaration(
 
 fn signals_from_type_alias_instantiation(
     instantiation: &sv_parser::ModuleInstantiation,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -820,7 +832,7 @@ fn signals_from_type_alias_instantiation(
 
 pub(super) fn signals_from_data_declaration(
     data: &sv_parser::DataDeclaration,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
     const_env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -886,7 +898,7 @@ pub(super) fn signals_from_data_declaration(
 
 pub(super) fn type_alias_from_ref_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
     // A cast within a built-in type's range does not make the declared type
