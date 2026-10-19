@@ -42,6 +42,13 @@ produce a patch version while the changelog still displays a title containing
 Release Please maintains one release pull request against `master`. Every Monday
 (and on manual dispatch), the release workflow adds `merge-ready` and waits for
 Mergify's `queued` acknowledgment. A timeout or `dequeued` result fails the job.
+While the open release PR carries `merge-ready` or `queued`, Release Please
+stops updating its branch on every workflow trigger, including scheduled and
+manual runs. This keeps its head stable for the merge queue and PRs tested
+behind it. Tag and GitHub Release creation remain enabled.
+To refresh a failed or withdrawn release, remove `merge-ready` and dequeue it
+before rerunning Release Management; the manual run refreshes it before
+requesting queueing again.
 `release:hold` prevents queueing and merging; a hold observed while waiting also
 removes `merge-ready`. The release PR runs full CI and external comparisons
 before it can merge, including after Mergify updates it with the target branch.
