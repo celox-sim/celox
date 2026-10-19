@@ -435,3 +435,7 @@ test("scoped checks preserve full-run fallbacks and use their own package scopes
   assert.match(lint, /TARGETS: \$\{\{ needs\.changes\.outputs\.rust_lint_targets \}\}/);
   assert.match(lint, /name: Build the API documentation this pull request can affect\n        if: .*outputs\.rust_doc_libraries != ''/);
 });
+
+test("full Clippy validation covers every workspace crate", () => {
+  assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+});

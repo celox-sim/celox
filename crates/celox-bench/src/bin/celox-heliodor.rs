@@ -1,5 +1,4 @@
-#![allow(clippy::disallowed_macros)] // CLI errors and progress intentionally use stderr
-
+use std::io::Write as _;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -176,7 +175,7 @@ fn main() {
         .with_ansi(false)
         .init();
     if let Err(e) = run() {
-        eprintln!("error: {e}");
+        let _ = writeln!(std::io::stderr().lock(), "error: {e}");
         std::process::exit(1);
     }
 }
@@ -393,7 +392,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         ) {
             Ok(cache) => Some(cache),
             Err(error) => {
-                eprintln!("build cache disabled: {error}");
+                let _ = writeln!(std::io::stderr().lock(), "build cache disabled: {error}");
                 println!("CELOX_BUILD_CACHE test={} status=bypass", opts.test);
                 None
             }
@@ -494,7 +493,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
             let sir = trace.format_post_optimized_sir();
             if let Some(pre_optimized_sir) = &pre_optimized_sir {
                 fs::write(&pre_sir_path, pre_optimized_sir)?;
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr().lock(),
                     "wrote pre-optimized SIR ({} bytes) to {}",
                     pre_optimized_sir.len(),
                     pre_sir_path.display()
@@ -502,7 +502,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
             }
             if let Some(sir) = &sir {
                 fs::write(&sir_path, sir)?;
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr().lock(),
                     "wrote post-optimized SIR ({} bytes) to {}",
                     sir.len(),
                     sir_path.display()
@@ -547,22 +548,26 @@ fn run() -> Result<(), CeloxHeliodorError> {
             fs::write(&mir_path, &mir)?;
             fs::write(&reactive_graph_path, &reactive_graph)?;
             fs::write(&state_layout_path, &state_layout)?;
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "wrote native optimized SIR ({} bytes) to {}",
                 native_sir.len(),
                 native_sir_path.display()
             );
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "wrote full native MIR ({} bytes) to {}",
                 mir.len(),
                 mir_path.display()
             );
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "wrote reactive event graph ({} bytes) to {}",
                 reactive_graph.len(),
                 reactive_graph_path.display()
             );
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "wrote native state-layout analysis ({} bytes) to {}",
                 state_layout.len(),
                 state_layout_path.display()
