@@ -1,0 +1,1 @@
+Fix review r4311401472 by sharing source-call identities with module analyses; preserve merged explicit diagnostics.
