@@ -27,6 +27,7 @@ macro_rules! parsed {
 /// The next value of a genvar, or `None` for an update Celox does not
 /// support. `evaluate` converts the right-hand side of an assignment update.
 pub(super) fn next_genvar_value(
+    state: &AnalysisState,
     value: i128,
     iteration: &sv_parser::GenvarIteration,
     syntax_tree: &SyntaxTree,
@@ -52,7 +53,7 @@ pub(super) fn next_genvar_value(
             let op = some!(syntax_tree.get_str(&iteration.nodes.1.nodes.0.nodes.0));
             let rhs = parsed!(evaluate(&iteration.nodes.2.nodes.0));
             if op == "=" {
-                return Ok(eval_ast_const_expr(&rhs, const_env));
+                return Ok(eval_ast_const_expr(state, &rhs, const_env));
             }
             let op = match op {
                 "+=" => BinaryOp::Add,
@@ -67,6 +68,7 @@ pub(super) fn next_genvar_value(
             // A compound assignment performs the typed binary operation before
             // assignment conversion. Do not erase the RHS width or signedness.
             eval_ast_const_expr(
+                state,
                 &ConstExpr::Binary {
                     left: Box::new(ConstExpr::Literal(format_typed_parameter_literal(
                         value, 32, true,
@@ -81,12 +83,14 @@ pub(super) fn next_genvar_value(
 }
 
 pub(super) fn bind_generate_parameter(
+    state: &AnalysisState,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
     let mut parameter_types = parameter_types_from_const_env(const_env);
     bind_generate_parameter_with_types(
+        state,
         parameter,
         const_env,
         parameter_literals,
@@ -95,6 +99,7 @@ pub(super) fn bind_generate_parameter(
 }
 
 pub(super) fn bind_generate_parameter_with_types(
+    state: &AnalysisState,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
@@ -114,7 +119,7 @@ pub(super) fn bind_generate_parameter_with_types(
     );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
-        parameter.resolved_value_and_literal(const_env, parameter_types, parameter_literals);
+        parameter.resolved_value_and_literal(state, const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -124,7 +129,7 @@ pub(super) fn bind_generate_parameter_with_types(
         }))
     } else {
         resolved_literal.or_else(|| {
-            parameter_value_env(std::slice::from_ref(&parameter), const_env)
+            parameter_value_env(state, std::slice::from_ref(&parameter), const_env)
                 .remove(parameter.name())
                 .map(|value| substitute_expr_idents(value, parameter_literals))
         })
@@ -139,6 +144,7 @@ pub(super) fn bind_generate_parameter_with_types(
 }
 
 pub(super) fn eval_ast_const_expr(
+    state: &AnalysisState,
     expr: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> Option<i128> {
@@ -149,24 +155,37 @@ pub(super) fn eval_ast_const_expr(
         const_env,
         &|name| parameter_type_from_const_env(const_env, name),
     );
-    typecheck::eval_const_expr(&expr.into(), const_env)
+    typecheck::eval_const_expr_in_env(
+        &expr.into(),
+        &const_functions::Environment {
+            constants: const_env,
+            functions: &state.const_functions,
+        },
+    )
 }
 
 pub(super) fn substitute_process_constants(
+    state: &AnalysisState,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
-    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::default())
+    substitute_process_constants_with_parameter_literals(
+        state,
+        process,
+        const_env,
+        &HashMap::default(),
+    )
 }
 
 pub(super) fn substitute_process_constants_with_parameter_literals(
+    state: &AnalysisState,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
     let mut sensitivity_body = process.sensitivity_body;
     for stmt in &mut sensitivity_body {
-        procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
     }
     let condition = process
         .condition
@@ -174,7 +193,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     if process.assignments.is_empty() {
         let mut body = process.body;
         for stmt in &mut body {
-            procedural::substitute_stmt_constants(stmt, const_env, parameter_literals);
+            procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
         }
         return CombProcess {
             creation_order: process.creation_order,
@@ -190,6 +209,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .into_iter()
             .map(|assignment| {
                 substitute_assignment_constants_with_parameter_literals(
+                    state,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -203,6 +223,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
 }
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
+    state: &AnalysisState,
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -210,6 +231,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
         substitute_expr_constants_with_parameter_literals(
+            state,
             assignment.rhs,
             const_env,
             parameter_literals,
@@ -245,6 +267,7 @@ pub(super) fn substitute_lvalue_constants(
 }
 
 pub(super) fn substitute_expr_constants_with_parameter_literals(
+    state: &AnalysisState,
     expr: Expr,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -286,6 +309,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Select {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -299,6 +323,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
+                        state,
                         part,
                         const_env,
                         parameter_literals,
@@ -312,6 +337,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
+                        state,
                         part,
                         const_env,
                         parameter_literals,
@@ -325,6 +351,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Resize {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -335,6 +362,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         Expr::Unary { op, expr } => Expr::Unary {
             op,
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -342,12 +370,14 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Binary { left, op, right } => Expr::Binary {
             left: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *left,
                 const_env,
                 parameter_literals,
             )),
             op,
             right: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *right,
                 const_env,
                 parameter_literals,
@@ -359,16 +389,19 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             else_expr,
         } => Expr::Mux {
             condition: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *condition,
                 const_env,
                 parameter_literals,
             )),
             then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *then_expr,
                 const_env,
                 parameter_literals,
             )),
             else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *else_expr,
                 const_env,
                 parameter_literals,
@@ -376,6 +409,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                state,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -385,6 +419,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|item| {
                     item.map(&mut |operand| {
                         substitute_expr_constants_with_parameter_literals(
+                            state,
                             operand,
                             const_env,
                             parameter_literals,
@@ -403,6 +438,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|arg| {
                     arg.map(|arg| {
                         substitute_expr_constants_with_parameter_literals(
+                            state,
                             arg,
                             const_env,
                             parameter_literals,
@@ -413,7 +449,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             let function = callee.system();
             if let Some(function @ (SystemFunction::Signed | SystemFunction::Unsigned)) = function
                 && let [Some(arg)] = args.as_slice()
-                && let Some(constant) = expr_to_const(arg.clone())
+                && let Some(constant) = expr_to_const(state, arg.clone())
                 && let Some(ty) =
                     infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
             {
@@ -425,6 +461,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             } else if function == Some(SystemFunction::Countbits) {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
                 fold_const_integral_expr_preserving_mask(
+                    state,
                     Expr::Call {
                         callee,
                         args,
@@ -619,7 +656,7 @@ fn substitute_const_expr_constants_impl(
 /// converts instead. An error is a call that no path can convert.
 pub(super) fn const_expr_from_expr(
     expr: &sv_parser::Expression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Option<ConstExpr>> {
     // Indexed selects need the typed path, including when nested in call arguments.
     if expr
@@ -668,7 +705,7 @@ pub(super) fn const_expr_from_expr(
 
 fn const_expr_from_primary(
     primary: &sv_parser::Primary,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Option<ConstExpr>> {
     match primary {
         sv_parser::Primary::Dollar(_) => Ok(Some(ConstExpr::Literal("$".into()))),
@@ -714,7 +751,7 @@ fn const_expr_from_primary(
         },
         _ => Ok(expr_from_primary(primary, syntax_tree)
             .ok()
-            .and_then(expr_to_const)),
+            .and_then(|expr| expr_to_const(&syntax_tree.state, expr))),
     }
 }
 
@@ -795,21 +832,21 @@ fn binary_precedence(op: BinaryOp) -> u8 {
     }
 }
 
-pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
+pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstExpr> {
     match expr {
         Expr::Ident(name) => Some(ConstExpr::Ident(name)),
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_const(*expr)?),
+            expr: Box::new(expr_to_const(state, *expr)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_const(*left)?),
+            left: Box::new(expr_to_const(state, *left)?),
             op,
-            right: Box::new(expr_to_const(*right)?),
+            right: Box::new(expr_to_const(state, *right)?),
         }),
         Expr::Select { expr, msb, lsb, .. } if msb == lsb => Some(ConstExpr::Select {
-            expr: Box::new(expr_to_const(*expr)?),
+            expr: Box::new(expr_to_const(state, *expr)?),
             bit: Box::new(msb),
         }),
         Expr::Mux {
@@ -817,9 +854,9 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_const(*condition)?),
-            then_expr: Box::new(expr_to_const(*then_expr)?),
-            else_expr: Box::new(expr_to_const(*else_expr)?),
+            condition: Box::new(expr_to_const(state, *condition)?),
+            then_expr: Box::new(expr_to_const(state, *then_expr)?),
+            else_expr: Box::new(expr_to_const(state, *else_expr)?),
         }),
         Expr::Call {
             callee,
@@ -830,9 +867,10 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
                 return None;
             }
             Some(ConstExpr::call(
+                state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_const(arg?))
+                    .map(|arg| expr_to_const(state, arg?))
                     .collect::<Option<_>>()?,
             ))
         }
@@ -844,7 +882,11 @@ pub(super) fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
     }
 }
 
-pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> Option<ConstExpr> {
+pub(super) fn expr_to_index_const(
+    state: &AnalysisState,
+    expr: Expr,
+    dimensions: &PackedDimensions,
+) -> Option<ConstExpr> {
     match expr {
         Expr::Resize {
             expr,
@@ -855,7 +897,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                 return Some(ConstExpr::Literal("0".into()));
             }
             Some(ConstExpr::Resize {
-                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
                 width,
                 signed,
             })
@@ -864,12 +906,12 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+            expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_index_const(*left, dimensions)?),
+            left: Box::new(expr_to_index_const(state, *left, dimensions)?),
             op,
-            right: Box::new(expr_to_index_const(*right, dimensions)?),
+            right: Box::new(expr_to_index_const(state, *right, dimensions)?),
         }),
         Expr::Select {
             expr,
@@ -878,7 +920,7 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             signed,
         } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
             Some(ConstExpr::SelectRange {
-                expr: Box::new(expr_to_index_const(*expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
                 msb: Box::new(msb),
                 lsb: Box::new(lsb),
                 signed,
@@ -889,9 +931,9 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_index_const(*condition, dimensions)?),
-            then_expr: Box::new(expr_to_index_const(*then_expr, dimensions)?),
-            else_expr: Box::new(expr_to_index_const(*else_expr, dimensions)?),
+            condition: Box::new(expr_to_index_const(state, *condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(state, *then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(state, *else_expr, dimensions)?),
         }),
         Expr::Call {
             callee,
@@ -904,9 +946,10 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                 return None;
             }
             Some(ConstExpr::call(
+                state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_index_const(arg?, dimensions))
+                    .map(|arg| expr_to_index_const(state, arg?, dimensions))
                     .collect::<Option<_>>()?,
             ))
         }
@@ -916,8 +959,8 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
             lsb,
             signed: false,
         } => {
-            let msb = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+            let msb = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
             let width = usize::try_from(msb.abs_diff(lsb).checked_add(1)?).ok()?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -938,13 +981,13 @@ pub(super) fn expr_to_index_const(expr: Expr, dimensions: &PackedDimensions) -> 
                     if inlining::calls_subroutine(&expr) {
                         return None;
                     }
-                    let source = IndexBitSource::from_expr(expr, dimensions)?;
+                    let source = IndexBitSource::from_expr(state, expr, dimensions)?;
                     positions
                         .map(|bit| source.bit(bit))
                         .collect::<Option<_>>()?
                 }
                 expr => {
-                    let expr = expr_to_index_const(expr, dimensions)?;
+                    let expr = expr_to_index_const(state, expr, dimensions)?;
                     positions
                         .map(|bit| ConstExpr::Select {
                             expr: Box::new(expr.clone()),
@@ -1027,18 +1070,18 @@ enum IndexBitSource {
 }
 
 impl IndexBitSource {
-    fn from_expr(expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
-        let width = expr_static_width(&expr, dimensions)?;
+    fn from_expr(state: &AnalysisState, expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
+        let width = expr_static_width(state, &expr, dimensions)?;
         Some(match expr {
             Expr::Concat(parts) => Self::Concat {
                 parts: parts
                     .into_iter()
-                    .map(|part| Self::from_expr(part, dimensions))
+                    .map(|part| Self::from_expr(state, part, dimensions))
                     .collect::<Option<_>>()?,
                 width,
             },
             Expr::RepeatConcat { parts, .. } => Self::Repeat {
-                part: Box::new(Self::from_expr(Expr::Concat(parts), dimensions)?),
+                part: Box::new(Self::from_expr(state, Expr::Concat(parts), dimensions)?),
                 width,
             },
             Expr::Resize { expr, .. } => {
@@ -1049,7 +1092,7 @@ impl IndexBitSource {
                     &dimensions.function_return_types,
                 )?;
                 Self::Resize {
-                    part: Box::new(Self::from_expr(*expr, dimensions)?),
+                    part: Box::new(Self::from_expr(state, *expr, dimensions)?),
                     width,
                     extend_signed,
                 }
@@ -1062,10 +1105,10 @@ impl IndexBitSource {
             } => {
                 match *expr {
                     expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
-                        let left = eval_ast_const_expr(&msb, &dimensions.const_env)?;
-                        let right = eval_ast_const_expr(&lsb, &dimensions.const_env)?;
+                        let left = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
                         Self::Slice {
-                            part: Box::new(Self::from_expr(expr, dimensions)?),
+                            part: Box::new(Self::from_expr(state, expr, dimensions)?),
                             width,
                             right,
                             step: if left >= right { 1 } else { -1 },
@@ -1075,6 +1118,7 @@ impl IndexBitSource {
                         // The selected value has [width-1:0] coordinates even
                         // when its position in an unpacked array is dynamic.
                         expr: expr_to_index_const(
+                            state,
                             Expr::Select {
                                 expr: Box::new(expr),
                                 msb,
@@ -1096,14 +1140,14 @@ impl IndexBitSource {
                     && !variable.packed[0].normalize_single
                 {
                     let range = &variable.packed[0];
-                    let left = eval_ast_const_expr(&range.left, &dimensions.const_env)?;
-                    let right = eval_ast_const_expr(&range.right, &dimensions.const_env)?;
+                    let left = eval_ast_const_expr(state, &range.left, &dimensions.const_env)?;
+                    let right = eval_ast_const_expr(state, &range.right, &dimensions.const_env)?;
                     (right, if left >= right { 1 } else { -1 })
                 } else {
                     (0, 1)
                 };
                 Self::Scalar {
-                    expr: expr_to_index_const(expr, dimensions)?,
+                    expr: expr_to_index_const(state, expr, dimensions)?,
                     width,
                     right,
                     step,
@@ -1167,7 +1211,7 @@ impl IndexBitSource {
 
 pub(super) fn const_expr_from_constant_param_with_env(
     expr: &sv_parser::ConstantParamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<ConstExpr>> {
@@ -1190,7 +1234,7 @@ pub(super) fn const_expr_from_constant_param_with_env(
 
 pub(super) fn const_expr_from_param_expression(
     expr: &sv_parser::ParamExpression,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Option<ConstExpr>> {
     match expr {
         sv_parser::ParamExpression::MintypmaxExpression(expr) => match &**expr {
@@ -1206,14 +1250,14 @@ pub(super) fn const_expr_from_param_expression(
 
 pub(super) fn const_expr_from_ref_node(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
 ) -> Converted<Option<ConstExpr>> {
     const_expr_from_ref_node_with_env(node, syntax_tree, &HashMap::default(), &HashMap::default())
 }
 
 pub(super) fn const_expr_from_ref_node_with_env(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<ConstExpr>> {
@@ -1305,7 +1349,11 @@ pub(super) fn const_expr_from_ref_node_with_env(
                     };
                     path.push('.');
                     path.push_str(&member);
-                    if let Some(name) = scope::imported().interface_members.get(&path).cloned() {
+                    if let Some(name) = scope::imported(&syntax_tree.state)
+                        .interface_members
+                        .get(&path)
+                        .cloned()
+                    {
                         let mut select = parameter.nodes.1.clone();
                         select.nodes.0 = None;
                         return const_select_expr(
@@ -1408,7 +1456,7 @@ pub(super) fn const_expr_from_ref_node_with_env(
                                 type_aliases,
                                 None,
                             )
-                            .and_then(expr_to_const));
+                            .and_then(|expr| expr_to_const(&syntax_tree.state, expr)));
                         }
                         _ => {}
                     }
@@ -1507,7 +1555,7 @@ fn constant_expression_is_grouped(expr: &sv_parser::ConstantExpression) -> bool 
 
 fn const_expr_from_constant_expression_ternary_with_env(
     expr: &sv_parser::ConstantExpressionTernary,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<ConstExpr>> {
@@ -1592,7 +1640,7 @@ mod tests;
 fn const_select_expr(
     base: ConstExpr,
     select: &sv_parser::ConstantSelect,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<ConstExpr>> {
@@ -1614,7 +1662,9 @@ fn const_select_expr(
                 const_env,
                 type_aliases,
             )?;
-            indices.push(index.and_then(|index| eval_ast_const_expr(&index, const_env)));
+            indices.push(
+                index.and_then(|index| eval_ast_const_expr(&syntax_tree.state, &index, const_env)),
+            );
         }
         if let Some(indices) = indices.into_iter().collect::<Option<Vec<_>>>()
             && let Some(literal) = parameter_element_literal(name, &indices, const_env)
@@ -1639,11 +1689,12 @@ fn const_select_expr(
 
 fn const_user_call(
     call: &sv_parser::TfCall,
-    tree: &SyntaxTree,
+    tree: &AnalysisContext<'_>,
     mut dimensions: PackedDimensions,
     constants: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    dimensions.subroutine_param_names = const_functions::argument_names();
+    dimensions.subroutine_param_names =
+        const_functions::argument_names(&tree.state.const_functions);
     let expression = expr_from_tf_call(call, tree, &dimensions).ok()?;
     if let Expr::Call {
         args, arg_order, ..
@@ -1652,7 +1703,11 @@ fn const_user_call(
     {
         // Effectful runtime named calls keep their source order. Constant calls
         // are folded only when their bodies and actuals evaluate successfully.
-        let literal = const_functions::eval_expression_literal(&expression, constants)?;
+        let literal = const_functions::eval_expression_literal(
+            &tree.state.const_functions,
+            &expression,
+            constants,
+        )?;
         let Expr::Call { callee, args, .. } = &expression else {
             unreachable!()
         };
@@ -1660,30 +1715,35 @@ fn const_user_call(
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        let args = const_functions::resolved_arguments(callee, args)?
+        let args = const_functions::resolved_arguments(&tree.state.const_functions, callee, args)?
             .into_iter()
             .map(|arg| {
-                expr_to_const(arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(&arg, constants, &types)
+                expr_to_const(&tree.state, arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(
+                        &tree.state,
+                        &arg,
+                        constants,
+                        &types,
+                    )
                 })
             })
             .collect::<Option<Vec<_>>>()?;
         // Keep references to parameters for consumers that re-specialize the
         // declaration contract; retain the native function's result type too.
         return Some(ConstExpr::Resize {
-            expr: Box::new(ConstExpr::call(callee.clone(), args)),
+            expr: Box::new(ConstExpr::call(&tree.state, callee.clone(), args)),
             width: literal.width,
             signed: literal.signed,
         });
     }
-    expr_to_const(expression)
+    expr_to_const(&tree.state, expression)
 }
 
 /// A system function call in a constant expression. The call is checked
 /// against the system function catalog: no path converts a call it rejects.
 fn const_expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
 ) -> Converted<Option<ConstExpr>> {
     let system_call = match &call.nodes.0 {
@@ -1725,6 +1785,7 @@ fn const_expr_from_function_subroutine_call(
         }
         let argument = expressions::single_expression_argument(system_call).unwrap();
         return Ok(Some(ConstExpr::call(
+            &syntax_tree.state,
             Callee::System(function),
             vec![const_expr_from_expr(argument, syntax_tree)?.unwrap()],
         )));
@@ -1750,9 +1811,9 @@ fn const_expr_from_function_subroutine_call(
         .ok();
         return Ok(expression.and_then(|expression| {
             if function == SystemFunction::Countbits {
-                countbits_constant_call(expression, const_env)
+                countbits_constant_call(&syntax_tree.state, expression, const_env)
             } else {
-                expr_to_const(expression)
+                expr_to_const(&syntax_tree.state, expression)
             }
         }));
     }
@@ -1762,13 +1823,18 @@ fn const_expr_from_function_subroutine_call(
         let argument = some!(argument.as_ref());
         lowered.push(parsed!(const_expr_from_expr(argument, syntax_tree)));
     }
-    Ok(Some(ConstExpr::call(Callee::System(function), lowered)))
+    Ok(Some(ConstExpr::call(
+        &syntax_tree.state,
+        Callee::System(function),
+        lowered,
+    )))
 }
 
 // ConstExpr represents bit selects but not concatenations or part selects.
 // Counting each stream segment separately keeps parameter dependencies symbolic
 // and preserves the selected width, including when zero bits are counted.
 fn countbits_constant_call(
+    state: &AnalysisState,
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
@@ -1781,16 +1847,17 @@ fn countbits_constant_call(
         .into_iter()
         .map(|control| match control {
             Expr::Select { expr, lsb, .. } => Some(ConstExpr::Select {
-                expr: Box::new(expr_to_const(*expr)?),
+                expr: Box::new(expr_to_const(state, *expr)?),
                 bit: Box::new(lsb),
             }),
-            control => expr_to_const(control),
+            control => expr_to_const(state, control),
         })
         .collect::<Option<Vec<_>>>()?;
-    countbits_constant_operand(operand, &controls, const_env)
+    countbits_constant_operand(state, operand, &controls, const_env)
 }
 
 fn countbits_constant_operand(
+    state: &AnalysisState,
     operand: Expr,
     controls: &[ConstExpr],
     const_env: &HashMap<String, i128>,
@@ -1799,7 +1866,7 @@ fn countbits_constant_operand(
         let mut args = Vec::with_capacity(controls.len() + 1);
         args.push(operand);
         args.extend_from_slice(controls);
-        ConstExpr::call(Callee::System(SystemFunction::Countbits), args)
+        ConstExpr::call(state, Callee::System(SystemFunction::Countbits), args)
     };
     let sum = |mut terms: Vec<ConstExpr>| {
         // Keep large selected vectors from creating a deeply nested sum.
@@ -1822,13 +1889,13 @@ fn countbits_constant_operand(
     };
     match operand {
         Expr::Select { expr, msb, lsb, .. } if msb != lsb => {
-            let msb = usize::try_from(eval_ast_const_expr(&msb, const_env)?).ok()?;
-            let lsb = usize::try_from(eval_ast_const_expr(&lsb, const_env)?).ok()?;
+            let msb = usize::try_from(eval_ast_const_expr(state, &msb, const_env)?).ok()?;
+            let lsb = usize::try_from(eval_ast_const_expr(state, &lsb, const_env)?).ok()?;
             let width = msb.checked_sub(lsb)?.checked_add(1)?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
-            let operand = expr_to_const(*expr)?;
+            let operand = expr_to_const(state, *expr)?;
             sum((lsb..=msb)
                 .map(|bit| {
                     call(ConstExpr::Select {
@@ -1840,21 +1907,22 @@ fn countbits_constant_operand(
         }
         Expr::Concat(parts) => sum(parts
             .into_iter()
-            .map(|part| countbits_constant_operand(part, controls, const_env))
+            .map(|part| countbits_constant_operand(state, part, controls, const_env))
             .collect::<Option<Vec<_>>>()?),
         Expr::RepeatConcat { count, parts } => {
-            let count = eval_ast_const_expr(&count, const_env)?;
+            let count = eval_ast_const_expr(state, &count, const_env)?;
             if count < 0 {
                 return None;
             }
-            let counted = countbits_constant_operand(Expr::Concat(parts), controls, const_env)?;
+            let counted =
+                countbits_constant_operand(state, Expr::Concat(parts), controls, const_env)?;
             Some(ConstExpr::Binary {
                 left: Box::new(counted),
                 op: BinaryOp::Mul,
                 right: Box::new(ConstExpr::Literal(format!("32'sd{count}"))),
             })
         }
-        operand => Some(call(expr_to_const(operand)?)),
+        operand => Some(call(expr_to_const(state, operand)?)),
     }
 }
 

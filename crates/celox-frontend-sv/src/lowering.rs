@@ -2288,7 +2288,12 @@ fn evaluated_parameter_overrides(
             continue;
         };
         if !matches!(value, sv::ir::ConstExpr::Literal(value) if value == "$") {
-            sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+            sv::typecheck::eval_const_integral_literal_with_types(
+                value,
+                &constants,
+                &HashMap::default(),
+            )
+            .ok_or_else(|| {
                 sv::AnalyzerError::Unsupported(format!(
                     "non-integer module parameter override `{}`",
                     parameter.name

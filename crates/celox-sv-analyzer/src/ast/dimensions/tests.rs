@@ -19,9 +19,11 @@ fn function_result_queries_preserve_expression_bodies() {
         Path::new("function_result_query.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(module.parameters());
+    let env = const_env_from_parameters(state, module.parameters());
     let node = tree
         .into_iter()
         .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -30,7 +32,7 @@ fn function_result_queries_preserve_expression_bodies() {
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
+    dimensions.parameter_values = parameter_value_env(state, module.parameters(), &env).into();
     let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
     assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
 }
@@ -59,9 +61,11 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
         endmodule
     "#;
     let tree = crate::syntax::parse_source(code, Path::new("query_context.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    let state = tree.state.as_ref();
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(module.parameters());
+    let env = const_env_from_parameters(state, module.parameters());
     let node = tree
         .into_iter()
         .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -70,7 +74,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(module.parameters(), &env).into();
+    dimensions.parameter_values = parameter_value_env(state, module.parameters(), &env).into();
     let functions = functions_from_module_node(node, &tree, &env, &dimensions).unwrap();
     dimensions
         .function_return_types
@@ -170,6 +174,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
         Path::new("preliminary_scope.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let call = tree
         .into_iter()
         .find_map(|node| match node {
@@ -237,9 +242,11 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         "#
         );
         let tree = crate::syntax::parse_source(&code, Path::new("typedef_shadow.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let state = tree.state.as_ref();
         let source = Source::from_syntax(&tree).unwrap();
         let module = &source.modules()[0];
-        let env = const_env_from_parameters(module.parameters());
+        let env = const_env_from_parameters(state, module.parameters());
         let node = tree
             .into_iter()
             .find(|node| matches!(node, RefNode::ModuleDeclarationAnsi(_)))
@@ -303,6 +310,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
         endmodule
     "#;
     let tree = crate::syntax::parse_source(code, Path::new("nonansi_validation.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let node = tree
         .into_iter()
         .find(|node| matches!(node, RefNode::ModuleDeclarationNonansi(_)))
@@ -328,6 +336,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
         endmodule
     "#;
     let tree = crate::syntax::parse_source(source, Path::new("dpi_query.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     Source::from_syntax(&tree).unwrap();
     for call in tree.into_iter().filter_map(|node| match node {
         RefNode::SystemTfCall(call) => Some(call),
@@ -355,6 +364,7 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
         endmodule
     "#;
     let tree = crate::syntax::parse_source(source, Path::new("runtime_query_range.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     Source::from_syntax(&tree).unwrap();
     let call = tree
         .into_iter()
@@ -380,6 +390,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
     ] {
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
         let tree = crate::syntax::parse_source(&code, Path::new("preceding_query.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let module = tree
             .into_iter()
             .find(|node| {
@@ -421,6 +432,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
         let code = format!("{declaration} localparam W = $bits(b); endmodule");
         let tree =
             crate::syntax::parse_source(&code, Path::new("array_parameter_query.sv")).unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
         let calls = tree
             .into_iter()
             .filter_map(|node| match node {
@@ -470,6 +482,7 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
         Path::new("imported_query.sv"),
     )
     .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let package = tree
         .into_iter()
         .find(|node| matches!(node, RefNode::PackageDeclaration(_)))
@@ -486,4 +499,62 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
         unpacked_dimensions_call_value(call, &tree, &HashMap::default(), &aliases, None),
         Some(0)
     );
+}
+
+#[test]
+fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
+    let tree = crate::syntax::parse_source(
+        r#"
+        module Top #(parameter logic [255:0] P = '0,
+                     parameter logic [3:0] Q = '0)(output int y);
+            if (P === 256'h8000000000000000000000000000000000000000000000000000000000000000) begin : g
+                logic [12:0] data;
+            end else if (Q === 4'bxz01) begin : g
+                logic [8:0] data;
+            end else begin : g
+                logic [4:0] data;
+            end
+            assign y = $bits(g.data);
+        endmodule
+        "#,
+        Path::new("explicit_generate_dimensions.sv"),
+    )
+    .unwrap();
+    let wide = HashMap::from_iter([(
+        "P".into(),
+        ConstExpr::Literal(
+            "256'h8000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+    )]);
+    let four_state = HashMap::from_iter([("Q".into(), ConstExpr::Literal("4'bxz01".into()))]);
+    let wide_context = AnalysisContext::new(&tree, &wide);
+    let state = wide_context.state.as_ref();
+    let four_state_context = AnalysisContext::new(&tree, &four_state);
+    let default_context = AnalysisContext::unspecialized(&tree);
+    let target = (&tree)
+        .into_iter()
+        .find(|node| matches!(node, RefNode::SystemTfCall(_)))
+        .unwrap();
+    // Keep the contexts alive together and revisit each specialization, so the
+    // recursive discovery cannot depend on whichever binding was installed last.
+    for (context, expected) in [
+        (&wide_context, 13),
+        (&default_context, 5),
+        (&four_state_context, 9),
+        (&wide_context, 13),
+        (&default_context, 5),
+    ] {
+        let dimensions = containing_packed_dimensions(
+            target.clone(),
+            context,
+            &HashMap::default(),
+            &HashMap::default(),
+        )
+        .unwrap();
+        let data = dimensions.get("g.data").unwrap();
+        assert_eq!(
+            eval_ast_const_expr(state, &data.packed[0].width, &dimensions.const_env),
+            Some(expected),
+        );
+    }
 }

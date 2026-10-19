@@ -242,3 +242,34 @@
   ; After 8 total rising edges (1 start + 7 more), counter should have hit N-1=7
   ; and running should be 0 -> done should be 1
   (assert_eq done 1 "done should be 1 after N=8 cycles"))
+
+(case test_wide_integral_instance_override
+  (source "wide_override.veryl" #"
+module Child #(param VALUE: logic<256> = 0) (hi: output logic<8>, lo: output logic<8>) {
+    if VALUE[255] == 1: high {
+        assign hi = VALUE[255:248];
+    } else {
+        assign hi = 0;
+    }
+    assign lo = VALUE[7:0];
+}
+module Top (hi: output logic<8>, lo: output logic<8>) {
+    inst child: Child #(VALUE: 256'h80000000000000000000000000000000000000000000000000000000000000a5) (hi, lo);
+}
+"#)
+  (top Top)
+  (assert_eq hi 0x80)
+  (assert_eq lo 0xA5))
+
+(case test_four_state_integral_instance_override
+  (four_state)
+  (source "four_state_override.veryl" #"
+module Child #(param VALUE: logic<8> = 0) (y: output logic<8>) {
+    assign y = VALUE;
+}
+module Top (y: output logic<8>) {
+    inst child: Child #(VALUE: 8'b10xz_01zx) (y);
+}
+"#)
+  (top Top)
+  (assert_eq y (fourstate 0xA5 0x33)))

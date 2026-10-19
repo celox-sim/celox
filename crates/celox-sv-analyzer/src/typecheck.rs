@@ -83,6 +83,9 @@ pub(crate) fn resolve_packed_width_in_env(
 /// Value lookup shared by immutable module environments and function frames.
 /// Dynamic dispatch keeps recursive calls from nesting generic frame types.
 pub(crate) trait ConstantEnvironment {
+    fn function_state(&self) -> Option<&crate::ast::const_functions::State> {
+        None
+    }
     fn get(&self, name: &str) -> Option<&i128>;
 }
 

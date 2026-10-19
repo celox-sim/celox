@@ -4,7 +4,7 @@ use super::*;
 
 fn hierarchical_path(
     node: RefNode<'_>,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<Vec<String>> {
     let Some(RefNode::HierarchicalIdentifier(identifier)) =
@@ -27,7 +27,7 @@ fn hierarchical_path(
             )
             .ok()
             .flatten()?;
-            let value = eval_ast_const_expr(&value, &dimensions.const_env)?;
+            let value = eval_ast_const_expr(&syntax_tree.state, &value, &dimensions.const_env)?;
             name.push_str(&format!("[{value}]"));
         }
         path.push(name);
@@ -52,7 +52,11 @@ pub(in crate::ast) fn has_member_access(node: RefNode<'_>, select: RefNode<'_>) 
 
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
-fn bind_interface_path(path: &mut Vec<String>, dimensions: &PackedDimensions) -> bool {
+fn bind_interface_path(
+    state: &AnalysisState,
+    path: &mut Vec<String>,
+    dimensions: &PackedDimensions,
+) -> bool {
     // A lexical variable wins over an enclosing interface handle, even if its
     // member path is invalid. Never fall back to the interface in that case.
     if path
@@ -61,7 +65,7 @@ fn bind_interface_path(path: &mut Vec<String>, dimensions: &PackedDimensions) ->
     {
         return false;
     }
-    let imported = scope::imported();
+    let imported = scope::imported(state);
     for length in (2..=path.len()).rev() {
         if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
             path.splice(..length, [name.clone()]);
@@ -112,20 +116,21 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
 }
 
 fn finish_lvalue(
+    state: &AnalysisState,
     path: &[String],
     offset: usize,
     r#type: &Type,
     relative: LValue,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
-    let width = expr_type_from_type(r#type, &dimensions.const_env)?.width;
+    let width = expr_type_from_type(state, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
         } => (
-            eval_ast_const_expr(&msb, &dimensions.const_env)?,
-            eval_ast_const_expr(&lsb, &dimensions.const_env)?,
+            eval_ast_const_expr(state, &msb, &dimensions.const_env)?,
+            eval_ast_const_expr(state, &lsb, &dimensions.const_env)?,
             signed,
         ),
     };
@@ -147,7 +152,7 @@ fn finish_lvalue(
 fn variable_path(
     node: RefNode<'_>,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<Vec<String>> {
     let mut path = hierarchical_path(node, syntax_tree, dimensions)?;
@@ -172,11 +177,11 @@ fn variable_path(
 pub(in crate::ast) fn member_first_dimension_width(
     node: RefNode<'_>,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
     let mut path = variable_path(node, select, syntax_tree, dimensions)?;
-    bind_interface_path(&mut path, dimensions);
+    bind_interface_path(&syntax_tree.state, &mut path, dimensions);
     let (_, r#type) = selected_member(&path, dimensions)?;
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
@@ -191,7 +196,7 @@ pub(in crate::ast) fn member_first_dimension_width(
             )
             .ok()
             .flatten()?;
-            eval_ast_const_expr(&expr, &dimensions.const_env)
+            eval_ast_const_expr(&syntax_tree.state, &expr, &dimensions.const_env)
         };
         return usize::try_from(bound(&range.nodes.0)?.abs_diff(bound(&range.nodes.2)?))
             .ok()?
@@ -202,19 +207,19 @@ pub(in crate::ast) fn member_first_dimension_width(
         return Some(1);
     }
     let range = r#type.packed_ranges.get(index_count)?;
-    let left = eval_ast_const_expr(range.left(), &dimensions.const_env)?;
-    let right = eval_ast_const_expr(range.right(), &dimensions.const_env)?;
+    let left = eval_ast_const_expr(&syntax_tree.state, range.left(), &dimensions.const_env)?;
+    let right = eval_ast_const_expr(&syntax_tree.state, range.right(), &dimensions.const_env)?;
     usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
 }
 
 pub(in crate::ast) fn member_dimension_count(
     node: RefNode<'_>,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Option<usize> {
     let mut path = variable_path(node, select, syntax_tree, dimensions)?;
-    bind_interface_path(&mut path, dimensions);
+    bind_interface_path(&syntax_tree.state, &mut path, dimensions);
     let (_, ty) = selected_member(&path, dimensions)?;
     let remaining = ty
         .packed_ranges
@@ -232,12 +237,12 @@ pub(in crate::ast) fn variable_member(
     node: RefNode<'_>,
     base: Option<String>,
     select: &sv_parser::Select,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     let mut path = variable_path(node, select, syntax_tree, dimensions)
         .ok_or_else(|| unsupported("member access through an indexed structure"))?;
-    let bound_interface = bind_interface_path(&mut path, dimensions);
+    let bound_interface = bind_interface_path(&syntax_tree.state, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
@@ -261,7 +266,15 @@ pub(in crate::ast) fn variable_member(
         &member_dimensions(&path[0], r#type, dimensions),
         true,
     )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(
+        &syntax_tree.state,
+        &path,
+        offset,
+        r#type,
+        relative,
+        dimensions,
+    )
+    .ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")
@@ -272,7 +285,7 @@ pub(in crate::ast) fn variable_member(
 pub(in crate::ast) fn net_member(
     node: RefNode<'_>,
     select: &sv_parser::ConstantSelect,
-    syntax_tree: &SyntaxTree,
+    syntax_tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
     let indexed = || unsupported("member access through an indexed structure");
@@ -292,7 +305,7 @@ pub(in crate::ast) fn net_member(
                 .ok_or_else(|| unsupported("structure member name"))?,
         );
     }
-    let bound_interface = bind_interface_path(&mut path, dimensions);
+    let bound_interface = bind_interface_path(&syntax_tree.state, &mut path, dimensions);
     let mut leaf_select = select.clone();
     leaf_select.nodes.0 = None;
     if bound_interface && path.len() == 1 {
@@ -313,7 +326,15 @@ pub(in crate::ast) fn net_member(
         &member_dimensions(&path[0], r#type, dimensions),
         true,
     )?;
-    finish_lvalue(&path, offset, r#type, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(
+        &syntax_tree.state,
+        &path,
+        offset,
+        r#type,
+        relative,
+        dimensions,
+    )
+    .ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")

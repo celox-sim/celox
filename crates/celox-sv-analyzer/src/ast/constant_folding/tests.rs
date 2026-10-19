@@ -4,6 +4,7 @@ use super::*;
 
 #[test]
 fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
+    let state = &crate::ast::AnalysisState::default();
     let mut env = HashMap::from_iter([
         ("A".into(), -2),
         ("B".into(), 1),
@@ -152,12 +153,13 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
     ];
     for (expr, expected_lookups) in cases {
         let lookups = Cell::new(0);
-        let direct = eval_const_integral_expr_preserving_mask(&expr, &env, &|name| {
+        let direct = eval_const_integral_expr_preserving_mask(state, &expr, &env, &|name| {
             lookups.set(lookups.get() + 1);
             parameter_type_from_const_env(&env, name).map(|ty| (ty.width, ty.signed))
         });
-        let rebuilt =
-            eval_const_integral_expr_preserving_mask(&expr, &env, &|name| types.get(name).copied());
+        let rebuilt = eval_const_integral_expr_preserving_mask(state, &expr, &env, &|name| {
+            types.get(name).copied()
+        });
         assert_eq!(direct, rebuilt, "{expr:?}");
         assert_eq!(lookups.get(), expected_lookups, "{expr:?}");
         let expected = rebuilt
@@ -170,12 +172,13 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
             expected
         };
         assert_eq!(
-            fold_const_integral_expr_preserving_mask(expr.clone(), &env),
+            fold_const_integral_expr_preserving_mask(state, expr.clone(), &env),
             expected
         );
     }
     // Fixed expected results also guard against losing typed signed shifts.
     let shifted = fold_const_integral_expr_preserving_mask(
+        state,
         Expr::Binary {
             left: boxed_a(),
             op: BinaryOp::Shr,
@@ -191,6 +194,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
     assert!(shifted.signed);
     assert_eq!(shifted.value, num_bigint::BigUint::from(127u8));
     let two_state = fold_const_integral_expr_preserving_mask(
+        state,
         Expr::Unary {
             op: UnaryOp::ToTwoState,
             expr: Box::new(literal("8'b1xz001xz")),
@@ -204,7 +208,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
         typecheck::parse_integral_literal(&two_state),
         typecheck::parse_integral_literal("8'h84")
     );
-    let wide = fold_const_integral_expr_preserving_mask(ident("W"), &env);
+    let wide = fold_const_integral_expr_preserving_mask(state, ident("W"), &env);
     let Expr::Literal(wide) = wide else {
         panic!("wide typed parameter must fold")
     };
@@ -219,6 +223,7 @@ fn lazy_types_preserve_width_signedness_and_masks_across_expression_shapes() {
 
 #[test]
 fn numeric_two_state_parameter_values_do_not_scan_visible_type_tables() {
+    let state = &crate::ast::AnalysisState::default();
     for count in [16, 64, 256] {
         let mut code = String::from("module Top;\n");
         for index in 0..count {
@@ -234,9 +239,9 @@ fn numeric_two_state_parameter_values_do_not_scan_visible_type_tables() {
             .unwrap();
         let source = Source::from_syntax(&tree).unwrap();
         let parameters = source.modules()[0].parameters();
-        let env = const_env_from_parameters(parameters);
+        let env = const_env_from_parameters(state, parameters);
         dimensions::PARAMETER_TYPE_SCAN_ENTRIES.with(|counter| counter.set(0));
-        let values = parameter_value_env(parameters, &env);
+        let values = parameter_value_env(state, parameters, &env);
         assert_eq!(
             dimensions::PARAMETER_TYPE_SCAN_ENTRIES.with(|counter| counter.get()),
             0
