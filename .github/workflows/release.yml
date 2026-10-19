@@ -35,6 +35,23 @@ jobs:
           permission-pull-requests: write
           permission-workflows: write
 
+      # Freeze the source PR as soon as queueing is requested, including while
+      # waiting for admission or after a dequeue. Rewriting it invalidates the
+      # queue's speculative trees, including those of PRs stacked behind it.
+      - name: Check whether the release pull request is frozen
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        shell: bash
+        run: |
+          pull_requests="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open --base master \
+            --head release-please--branches--master--components--celox \
+            --json isCrossRepository,labels)"
+          frozen="$(jq -r 'any(.[]; .isCrossRepository == false and any(.labels[]; .name == "merge-ready" or .name == "queued"))' <<< "$pull_requests")"
+          echo "frozen=$frozen" >> "$GITHUB_OUTPUT"
+
       - name: Create release or update release pull request
         id: release
         uses: googleapis/release-please-action@v5
@@ -42,6 +59,8 @@ jobs:
           token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          # Keep tag/Release creation active when a frozen PR has merged.
+          skip-github-pull-request: ${{ steps.release-pr.outputs.frozen == 'true' }}
 
       # A merge queue can push several merged PRs together. The release tag
       # then points at an earlier commit than github.sha. Publish the tag that
