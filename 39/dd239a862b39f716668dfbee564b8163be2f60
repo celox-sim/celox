@@ -1,0 +1,1 @@
+Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.
