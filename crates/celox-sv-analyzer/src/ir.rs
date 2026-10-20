@@ -630,12 +630,21 @@ fn convert_type(
     let unpacked_ranges: Vec<_> = r#type
         .unpacked_ranges()
         .iter()
-        .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
+        .map(|range| {
+            let left = range.left().clone().into();
+            let right = range.right().clone().into();
+            let resolved_bounds = typecheck::eval_const_expr_in_env(&left, constants)
+                .zip(typecheck::eval_const_expr_in_env(&right, constants));
+            UnpackedRange {
+                left,
+                right,
+                resolved_bounds,
+            }
+        })
         .collect();
     let packed_width = typecheck::resolve_packed_width_in_env(&packed_ranges, constants);
     let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
-        let left = typecheck::eval_const_expr_in_env(range.left(), constants)?;
-        let right = typecheck::eval_const_expr_in_env(range.right(), constants)?;
+        let (left, right) = range.resolved_bounds()?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     });
@@ -664,11 +673,15 @@ pub struct PackedRange {
 pub struct UnpackedRange {
     left: ConstExpr,
     right: ConstExpr,
+    resolved_bounds: Option<(i128, i128)>,
 }
 
 impl UnpackedRange {
-    pub(crate) fn new(left: ConstExpr, right: ConstExpr) -> Self {
-        Self { left, right }
+    /// Bounds evaluated in the declaring scope, including its constant
+    /// functions. The original expressions remain available for contracts
+    /// that must be specialized again with different parameters.
+    pub fn resolved_bounds(&self) -> Option<(i128, i128)> {
+        self.resolved_bounds
     }
 
     pub fn left(&self) -> &ConstExpr {
