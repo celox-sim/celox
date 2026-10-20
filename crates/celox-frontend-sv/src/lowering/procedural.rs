@@ -33,6 +33,7 @@ pub(super) struct ProcModule<'a> {
     /// Number of extern calls lowered so far.
     pub extern_calls: usize,
     pub four_state: bool,
+    pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
@@ -127,7 +128,20 @@ impl<'a> ProcModule<'a> {
                 unpacked_bounds.insert(id, bounds);
             }
         }
+        let forceable = variables
+            .iter()
+            .filter_map(|(&enabled, var)| {
+                let (target, true) = var.force_control? else {
+                    return None;
+                };
+                let value = variables.iter().find_map(|(&id, var)| {
+                    (var.force_control == Some((target, false))).then_some(id)
+                })?;
+                Some((target, (enabled, value)))
+            })
+            .collect();
         Self {
+            forceable,
             variables,
             name_to_id,
             next_id,
@@ -498,6 +512,10 @@ impl<'a> ProcModule<'a> {
         self.name_to_id.get(name).copied()
     }
 
+    pub fn force_controls(&self, id: SourceVarId) -> Option<(SourceVarId, SourceVarId)> {
+        self.forceable.get(&id).copied()
+    }
+
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
         &self.variables[&id]
     }
@@ -552,6 +570,7 @@ impl<'a> ProcModule<'a> {
                 },
                 source: None,
                 hidden: true,
+                force_control: None,
             },
         );
         self.name_to_id.insert(name, id);
@@ -613,6 +632,7 @@ impl<'a> ProcModule<'a> {
             type_kind: source.type_kind,
             source: None,
             hidden: true,
+            force_control: None,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -1007,6 +1027,7 @@ pub(super) fn register_locals(
                 type_kind: type_info.type_kind,
                 source: None,
                 hidden: true,
+                force_control: None,
             },
         );
         name_to_id.insert(local.name.clone(), id);

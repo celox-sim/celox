@@ -55,6 +55,11 @@ pub enum FrontendError {
     Lowering(#[from] ParserError),
 }
 
+// These names cannot be authored as unescaped SV identifiers and are hidden
+// from the source-facing hierarchy. The runtime image records their addresses.
+const FORCE_ENABLE: &str = "@force-enable:";
+const FORCE_VALUE: &str = "@force-value:";
+
 #[derive(Clone)]
 struct SvVariable {
     path: Vec<String>,
@@ -69,6 +74,8 @@ struct SvVariable {
     source: Option<SourceLocation>,
     /// A procedural local or a lowering temporary: not addressable by name.
     hidden: bool,
+    /// Compiler-generated external override slot: (target, is_enable).
+    force_control: Option<(SourceVarId, bool)>,
 }
 
 impl SvVariable {
@@ -97,7 +104,7 @@ impl SvVariable {
     /// A hidden variable other than the time slot, whose value the lowered
     /// code computes. The time slot is state the scheduler writes.
     fn is_scratch(&self) -> bool {
-        self.hidden && self.path != [TIME_SLOT]
+        self.hidden && self.path != [TIME_SLOT] && self.force_control.is_none()
     }
 }
 
@@ -121,7 +128,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
-    interface_ports: HashSet<String>,
+    interface_member_paths: HashMap<String, Vec<String>>,
     source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
@@ -135,6 +142,7 @@ struct AnalyzedSvModule {
 pub(crate) struct LoweredSvInstance {
     pub module_name: String,
     pub instance_name: String,
+    pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
     pub port_connections: Vec<LoweredSvPortConnection>,
     /// For an element of an instance array: its position in declaration order
@@ -163,6 +171,7 @@ pub(crate) struct LoweredSvPortConnection {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LoweredSvModuleKey {
     pub name: String,
+    pub force_signals: Vec<String>,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
 }
 
@@ -170,6 +179,7 @@ impl LoweredSvModuleKey {
     pub fn base(name: String) -> Self {
         Self {
             name,
+            force_signals: Vec::new(),
             parameter_overrides: Vec::new(),
         }
     }
@@ -179,6 +189,7 @@ impl LoweredSvModuleKey {
         parameter_overrides.sort_by(|left, right| left.name.cmp(&right.name));
         Self {
             name: instance.module_name.clone(),
+            force_signals: instance.force_signals.clone(),
             parameter_overrides,
         }
     }
@@ -187,6 +198,7 @@ impl LoweredSvModuleKey {
 fn analyze_sources(
     sources: &[(&str, &Path)],
     roots: &[&str],
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     analyze_sources_with_requests(
         sources,
@@ -194,6 +206,7 @@ fn analyze_sources(
         &[],
         &[],
         Some(roots),
+        analysis_options,
     )
     .map(|(modules, _)| modules)
 }
@@ -225,8 +238,18 @@ pub fn interface_signatures_for(
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
+    interface_signatures_for_with_options(sources, names, warnings, sv::AnalysisOptions::default())
+}
+
+/// Probe interface signatures with explicit language compatibility options.
+pub fn interface_signatures_for_with_options(
+    sources: &[(&str, &Path)],
+    names: Option<&HashSet<String>>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<Vec<InterfaceSignature>, FrontendError> {
     let mut found = Vec::new();
-    let signatures = interface_signatures_collecting(sources, names, &mut found);
+    let signatures = interface_signatures_collecting(sources, names, &mut found, analysis_options);
     append_error_warnings(&signatures, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
     signatures
@@ -245,8 +268,9 @@ fn interface_signatures_collecting(
     sources: &[(&str, &Path)],
     names: Option<&HashSet<String>>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<Vec<InterfaceSignature>, FrontendError> {
-    let prototypes = sv::interface_prototypes_for(sources, names)?;
+    let prototypes = sv::interface_prototypes_with_options(sources, names, analysis_options)?;
     if prototypes.is_empty() {
         return Ok(Vec::new());
     }
@@ -254,7 +278,7 @@ fn interface_signatures_collecting(
         .into_iter()
         .map(|prototype| {
             warnings.extend(crate::warning::analyzer_warnings(&prototype.warnings));
-            let lowered = lower_module(&prototype.module, false, true, false, warnings)?;
+            let lowered = lower_module(&prototype.module, false, true, false, warnings, &[])?;
             Ok(InterfaceSignature {
                 name: prototype.name,
                 module: lowered.source,
@@ -321,6 +345,7 @@ fn analyze_sources_with_requests(
     declarations: &[(&str, &Path)],
     requests: &[SvModuleRequest],
     roots: Option<&[&str]>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<(HashMap<String, AnalyzedSvModule>, HashMap<String, String>), sv::AnalyzerError> {
     if !declarations.is_empty() {
         for (code, path) in sources {
@@ -347,7 +372,11 @@ fn analyze_sources_with_requests(
             .collect::<Vec<_>>()
     });
     let time_declarations = if declarations.iter().any(|(code, _)| !code.is_empty()) {
-        sv::generated_time_declarations(sources, selected_roots.as_deref())?
+        sv::generated_time_declarations_with_options(
+            sources,
+            selected_roots.as_deref(),
+            analysis_options,
+        )?
     } else {
         String::new()
     };
@@ -372,7 +401,8 @@ fn analyze_sources_with_requests(
             )
         })
         .collect::<Vec<_>>();
-    let elaboration = sv::plan_interfaces(sources, &bindings)?;
+    let (elaboration, interface_member_paths) =
+        sv::plan_interfaces_with_member_paths(sources, &bindings)?;
     let root_names = elaboration.root_names.clone();
     let mut modules = HashMap::default();
     let sources: Vec<_> = sources
@@ -433,9 +463,13 @@ fn analyze_sources_with_requests(
                         .unwrap_or(root)
                 })
                 .collect::<Vec<_>>();
-            sv::ParsedSource::analyze_packages_with_roots(&parsed, &roots)?
+            sv::ParsedSource::analyze_packages_with_options(
+                &parsed,
+                Some(&roots),
+                analysis_options,
+            )?
         }
-        None => sv::ParsedSource::analyze_packages(&parsed)?,
+        None => sv::ParsedSource::analyze_packages_with_options(&parsed, None, analysis_options)?,
     };
     packages.set_interface_plan(elaboration.clone());
     let packages = std::rc::Rc::new(packages);
@@ -465,10 +499,9 @@ fn analyze_sources_with_requests(
             modules.insert(
                 name,
                 AnalyzedSvModule {
-                    interface_ports: elaboration
-                        .modules
+                    interface_member_paths: interface_member_paths
                         .get(&module_name)
-                        .map(|plan| plan.ports.iter().map(|port| port.name.clone()).collect())
+                        .cloned()
                         .unwrap_or_default(),
                     implicit_nets_allowed: implicit_net_permissions
                         .get(
@@ -752,7 +785,7 @@ fn lower_package_states(
         .into_iter()
         .enumerate()
         .map(|(index, module)| {
-            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings)?;
+            let mut lowered = lower_module(module, four_state, true, ff_parts, warnings, &[])?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
                     .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1243,6 +1276,34 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver_with_options(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Prepare a mixed hierarchy with explicit language compatibility options.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver_with_options(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ExternalHierarchy, FrontendError> {
     let mut found = Vec::new();
     let hierarchy = prepare_external_hierarchy_collecting(
         sources,
@@ -1254,6 +1315,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver(
         top_parameters,
         requests,
         &mut found,
+        analysis_options,
     );
     append_error_warnings(&hierarchy, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
@@ -1271,6 +1333,7 @@ fn prepare_external_hierarchy_collecting(
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let (analyzed, bound_names) = analyze_sources_with_requests(
         sources,
@@ -1278,6 +1341,7 @@ fn prepare_external_hierarchy_collecting(
         declarations,
         requests,
         Some(&root_names.iter().map(String::as_str).collect::<Vec<_>>()),
+        analysis_options,
     )?;
     package_warnings(&analyzed, warnings);
     let dummy = sv::ParsedSource::parse(
@@ -1316,6 +1380,7 @@ fn prepare_external_hierarchy_collecting(
                         type_kind: variable.metadata.type_kind,
                         source: variable.source.clone(),
                         hidden: !variable.module_affiliated,
+                        force_control: None,
                     },
                 )
             })
@@ -1612,25 +1677,9 @@ fn prepare_external_hierarchy_collecting(
             }
         }
     }
-    // Structured paths carry the original interface port identity to foreign
-    // consumers. Ordinary identifiers containing '$' remain a single segment.
     for (key, id) in &module_ids {
-        let Some(base) = analyzed.get(&key.name) else {
-            continue;
-        };
-        for port in &lowered_modules[id].port_order {
-            let variable = modules
-                .get_mut(id)
-                .unwrap()
-                .sim_module
-                .variables
-                .get_mut(port)
-                .unwrap();
-            if let Some((root, member)) = variable.path[0].split_once('$')
-                && base.interface_ports.contains(root)
-            {
-                variable.path = vec![root.to_string(), member.to_string()];
-            }
+        if let Some(base) = analyzed.get(&key.name) {
+            restore_interface_member_paths(&mut modules.get_mut(id).unwrap().sim_module, base);
         }
     }
     Ok(ExternalHierarchy {
@@ -1661,6 +1710,83 @@ pub fn schedule_sources(
     trace: Option<&mut FrontendTrace>,
     warnings: &mut Vec<crate::FrontendWarning>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_options(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Schedule a design with explicit language compatibility options.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_options(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_force_signals(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        analysis_options,
+        &[],
+    )
+}
+
+/// Schedule with explicitly forceable signal names. Only these objects receive
+/// external override inputs; unrelated logic retains its normal optimization.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_force_signals(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
     let mut found = Vec::new();
     let scheduled = schedule_sources_collecting(
         sources,
@@ -1673,6 +1799,8 @@ pub fn schedule_sources(
         trace_options,
         trace,
         &mut found,
+        analysis_options,
+        force_signals,
     );
     append_error_warnings(&scheduled, &mut found);
     crate::warning::append_unique_warnings(sources, warnings, found);
@@ -1698,12 +1826,19 @@ fn schedule_sources_collecting(
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources, &[top])?;
+    let analyzed = analyze_sources(sources, &[top], analysis_options)?;
     package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
+        force_signals: force_signals
+            .iter()
+            .filter_map(|path| path.strip_prefix(&format!("{top}.")))
+            .map(str::to_string)
+            .collect(),
         parameter_overrides: parameter_overrides
             .iter()
             .map(|(name, value)| LoweredSvParameterOverride {
@@ -1820,6 +1955,9 @@ fn schedule_sources_collecting(
             .map(|(&module_id, lowered)| (module_id, lowered)),
         &package_states,
     )?;
+    for (key, id) in &module_ids {
+        restore_interface_member_paths(modules.get_mut(id).unwrap(), &analyzed[&key.name]);
+    }
     let symbolic = SymbolicRtl {
         modules,
         module_names,
@@ -1837,6 +1975,24 @@ fn schedule_sources_collecting(
         trace,
     )
     .map_err(FrontendError::from)
+}
+
+// Use elaboration provenance rather than treating every '$' as a separator:
+// legal authored identifiers may themselves contain '$'.
+fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvModule) {
+    for variable in module.variables.values_mut() {
+        variable.path = variable
+            .path
+            .iter()
+            .flat_map(|segment| {
+                source
+                    .interface_member_paths
+                    .get(segment)
+                    .cloned()
+                    .unwrap_or_else(|| vec![segment.clone()])
+            })
+            .collect();
+    }
 }
 
 fn sv_specialization_limit_error(name: String) -> ParserError {
@@ -1926,13 +2082,42 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
+    let local_forces = key
+        .force_signals
+        .iter()
+        .map(|path| {
+            module
+                .interface_member_paths
+                .iter()
+                .find(|(_, segments)| segments.join(".") == *path)
+                .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
+        })
+        .collect::<Vec<_>>();
     let mut lowered = lower_module(
         specialized,
         four_state,
         module.implicit_nets_allowed,
         ff_parts,
         warnings,
+        &local_forces,
     )?;
+    for instance in &mut lowered.instances {
+        let name = if let Some((index, _)) = instance.array_element {
+            format!(
+                "{}[{}]",
+                instance.instance_name,
+                instance.array_index_base + index
+            )
+        } else {
+            instance.instance_name.clone()
+        };
+        let prefix = format!("{name}.");
+        instance.force_signals = key
+            .force_signals
+            .iter()
+            .filter_map(|path| path.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+    }
     lowered.sim_module.time_precision = Some(
         celox_design::TimePrecision::try_from(module.packages.global_time_precision())
             .map_err(|reason| sv::AnalyzerError::Unsupported(reason.to_string()))?,
@@ -1964,6 +2149,7 @@ fn lower_module(
     implicit_nets_allowed: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_signals: &[String],
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -1972,6 +2158,7 @@ fn lower_module(
         implicit_nets_allowed,
         ff_parts,
         warnings,
+        force_signals,
     )
 }
 
@@ -1984,6 +2171,7 @@ fn lower_module_with_overrides(
     implicit_nets_allowed: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
+    force_signals: &[String],
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
@@ -2032,6 +2220,7 @@ fn lower_module_with_overrides(
             type_kind: type_info.type_kind,
             source: None,
             hidden: false,
+            force_control: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -2080,6 +2269,7 @@ fn lower_module_with_overrides(
             type_kind: type_info.type_kind,
             source: None,
             hidden: false,
+            force_control: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         // The package's object has its own default value.
@@ -2100,6 +2290,50 @@ fn lower_module_with_overrides(
             });
         }
         variables.insert(id, variable);
+    }
+
+    let forceable = variables
+        .iter()
+        .filter_map(|(&id, var)| {
+            let name = &var.path[0];
+            force_signals.iter().any(|path| name == path).then_some(id)
+        })
+        .collect::<Vec<_>>();
+    for id in forceable {
+        let target = variables[&id].clone();
+        // Whole packed variables only. Array elements require a separately
+        // specified addressing contract rather than a guessed flat offset.
+        if !target.array_dims.is_empty() {
+            continue;
+        }
+        for (prefix, width, is_4state) in [
+            (FORCE_ENABLE, 1, false),
+            (FORCE_VALUE, target.width, target.is_4state),
+        ] {
+            let control_name = format!("{prefix}{}", target.path[0]);
+            if name_to_id.contains_key(&control_name) {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "signal `{control_name}` conflicts with a compiler force control"
+                )));
+            }
+            let mut control = target.clone();
+            control.force_control = Some((id, prefix == FORCE_ENABLE));
+            control.path = vec![control_name.clone()];
+            control.width = width;
+            control.signed = false;
+            control.is_4state = is_4state;
+            control.kind = VariableKind::Variable;
+            control.hidden = true;
+            control.packed_ranges = vec![(width as i128 - 1, 0)];
+            control.type_kind = if is_4state {
+                PortTypeKind::Logic
+            } else {
+                PortTypeKind::Bit
+            };
+            let control_id = next_var_id(&mut next_id);
+            variables.insert(control_id, control);
+            name_to_id.insert(control_name, control_id);
+        }
     }
 
     if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
@@ -2207,6 +2441,7 @@ fn lower_module_with_overrides(
             instances.push(LoweredSvInstance {
                 module_name: instance.module_name().to_string(),
                 instance_name: instance.name().to_string(),
+                force_signals: Vec::new(),
                 parameter_overrides: lower_parameter_overrides(
                     instance,
                     &constants,
@@ -3078,6 +3313,7 @@ fn lower_initial_processes(
                         source: None,
                         // Control slots are not signals of the design.
                         hidden: true,
+                        force_control: None,
                     },
                 );
                 id
@@ -3409,6 +3645,7 @@ fn ensure_parent_output_signals(
             type_kind: PortTypeKind::Logic,
             source: None,
             hidden: false,
+            force_control: None,
         };
         parent
             .variables

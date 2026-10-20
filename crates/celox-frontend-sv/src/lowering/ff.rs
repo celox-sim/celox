@@ -344,7 +344,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             expr
         };
-        let expr = self.propagate(&expr);
+        let expr = force_reads(&self.propagate(&expr), self.m);
         if let (sv::ir::Expr::Literal(literal), Some((width, _))) = (&expr, context)
             && let Some(fill) = unbased_fill_literal(literal)
         {
@@ -1391,6 +1391,28 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
+            let condition = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Load(
+                condition,
+                stable(enabled),
+                SIROffset::Static(0),
+                1,
+            ));
+            let replacement = self.b.alloc_reg(self.b.register(&value).clone());
+            self.b.emit(SIRInstruction::Load(
+                replacement,
+                stable(forced),
+                offset.clone(),
+                width,
+            ));
+            let selected = self.b.alloc_reg(self.b.register(&value).clone());
+            self.b
+                .emit(SIRInstruction::Mux(selected, condition, replacement, value));
+            selected
+        } else {
+            value
+        };
         let target = self.target(id);
         self.b.emit(SIRInstruction::Store(
             target,
@@ -3928,6 +3950,93 @@ fn substitute_overlay(
         Expr::Concat(parts) => Expr::Concat(parts.iter().map(go).collect()),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count: substitute_overlay_const(count, overlay),
+            parts: parts.iter().map(go).collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(go(expr)),
+            width: *width,
+            signed: *signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op: *op,
+            expr: Box::new(go(expr)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(go(left)),
+            op: *op,
+            right: Box::new(go(right)),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(go(condition)),
+            then_expr: Box::new(go(then_expr)),
+            else_expr: Box::new(go(else_expr)),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            arg_order: arg_order.clone(),
+            callee: callee.clone(),
+            args: args.iter().map(|arg| arg.as_ref().map(go)).collect(),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: Box::new(go(expr)),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |operand| go(operand)))
+                .collect(),
+        },
+    }
+}
+
+fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
+    if m.forceable.is_empty() {
+        return expr.clone();
+    }
+    use sv::ir::Expr;
+    let go = |expr: &Expr| force_reads(expr, m);
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(id) = m.id(name)
+                && let Some((enabled, forced)) = m.force_controls(id)
+            {
+                Expr::Resize {
+                    width: m.var(id).width,
+                    signed: m.var(id).signed,
+                    expr: Box::new(Expr::Mux {
+                        condition: Box::new(Expr::Ident(m.var(enabled).path[0].clone())),
+                        then_expr: Box::new(Expr::Ident(m.var(forced).path[0].clone())),
+                        else_expr: Box::new(expr.clone()),
+                    }),
+                }
+            } else {
+                expr.clone()
+            }
+        }
+        Expr::Literal(_) => expr.clone(),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: Box::new(go(expr)),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+            signed: *signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(parts.iter().map(go).collect()),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count: count.clone(),
             parts: parts.iter().map(go).collect(),
         },
         Expr::Resize {

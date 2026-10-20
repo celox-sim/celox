@@ -489,3 +489,44 @@ fn compile_reports_a_missing_additional_source() {
         "{error}"
     );
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+#[ignore = "requires a cocotb installation"]
+fn cocotb_uses_declared_force_targets_in_an_optimized_native_image() {
+    let python = env::var("CELOX_COCOTB_PYTHON").expect("set CELOX_COCOTB_PYTHON");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb");
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("force-sim");
+    let results = temporary.path().join("results.xml");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args(["vpi", "build"])
+        .arg(fixture.join("force_profile.sv"))
+        .args(["--top", "Top", "-O", "O2", "--force-signal", "Top.x", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(compile.status.success(), "{compile:?}");
+    let site = python_output(
+        &python,
+        &["-c", "import site; print(':'.join(site.getsitepackages()))"],
+    );
+    let runtime = Command::new(&executable)
+        .args([
+            "--test-module",
+            "test_force_profile",
+            "--python",
+            &python,
+            "--results-file",
+        ])
+        .arg(&results)
+        .current_dir(&fixture)
+        .env("PYTHONPATH", format!("{}:{site}", fixture.display()))
+        .output()
+        .unwrap();
+    assert!(runtime.status.success(), "cocotb force failed: {runtime:?}");
+    let xml = fs::read_to_string(results).unwrap();
+    assert_eq!(xml.matches("<testcase ").count(), 1, "{xml}");
+    assert!(!xml.contains("<failure"), "{xml}");
+    assert!(!xml.contains("<error"), "{xml}");
+}
