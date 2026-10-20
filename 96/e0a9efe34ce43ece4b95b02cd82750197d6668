@@ -1,1 +1,6 @@
-Correct the PR description to the implemented two-state default and add its CLI/native-image regression.
+Revision history for #1646:
+
+rev 2 (content) 2026-10-20 23:30 UTC — Correct the PR description to the implemented two-state default and add its CLI/native-image regression.
+rev 1 (initial) 2026-10-20 23:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1646,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"28be65a1037f54e9576e43c4c784fa21fb54ce23","timestamp_iso":"2026-10-20T23:30:08Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"28be65a1037f54e9576e43c4c784fa21fb54ce23","new_sha":"96e0a9efe34ce43ece4b95b02cd82750197d6668","timestamp_iso":"2026-10-20T23:30:08Z","reason":"Correct the PR description to the implemented two-state default and add its CLI/native-image regression.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/28be65a1037f54e9576e43c4c784fa21fb54ce23...96e0a9efe34ce43ece4b95b02cd82750197d6668"}]} -->
