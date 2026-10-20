@@ -1,1 +1,6 @@
-Rebase onto current master and latest #1566, preserve O2 run defaults and precedence tests; verify Taxi and all cocotb integrations without extra patches.
+Revision history for #1591:
+
+rev 2 (rebase) 2026-10-20 10:43 UTC — Rebase onto current master and latest #1566, preserve O2 run defaults and precedence tests; verify Taxi and all cocotb integrations without extra patches.
+rev 1 (initial) 2026-10-20 10:43 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1591,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d4e5db33732757fb73f2fb52f1a58b4c3a66c1b9","timestamp_iso":"2026-10-20T10:43:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"d4e5db33732757fb73f2fb52f1a58b4c3a66c1b9","new_sha":"834663f4b1af8f419a762ddf642d2b74738d5536","timestamp_iso":"2026-10-20T10:43:09Z","reason":"Rebase onto current master and latest #1566, preserve O2 run defaults and precedence tests; verify Taxi and all cocotb integrations without extra patches.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d4e5db33732757fb73f2fb52f1a58b4c3a66c1b9...834663f4b1af8f419a762ddf642d2b74738d5536"}]} -->
