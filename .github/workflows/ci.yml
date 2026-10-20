@@ -673,6 +673,11 @@ jobs:
       - name: Test AArch64 facade integration
         run: cargo test --locked -p celox --lib --test native_exec
 
+      - name: Test partial-word reduction AND on AArch64
+        run: >-
+          cargo test --locked -p celox --features systemverilog
+          --test systemverilog wide_reduction_and_respects_partial_storage_words::native
+
       - name: Check x86-64 cross-codegen from AArch64
         run: >-
           cargo check --locked -p celox -p celox-bench

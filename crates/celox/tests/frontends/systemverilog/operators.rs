@@ -158,3 +158,9 @@ sv_backends! {
         @case "operators::wide_wildcard_comparisons_normalize_unknown_to_x";
     }
 }
+
+sv_backends! {
+    fn wide_reduction_and_respects_partial_storage_words(sim) {
+        @case "operators::wide_reduction_and_respects_partial_storage_words";
+    }
+}
