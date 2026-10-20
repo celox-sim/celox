@@ -53,6 +53,14 @@ pub(super) struct DesignArgs {
     /// SystemVerilog macro, NAME or NAME=VALUE (repeatable; last value wins).
     #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
     defines: Vec<String>,
+    /// Override a numeric top parameter (repeatable; last value wins).
+    #[arg(
+        short = 'G',
+        long = "parameter",
+        visible_alias = "param",
+        value_name = "NAME=VALUE"
+    )]
+    parameters: Vec<String>,
     /// Top-level module; overrides the selected target.
     #[arg(long)]
     top: Option<String>,
@@ -73,6 +81,7 @@ struct Manifest {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
     live_signals: Option<Vec<String>>,
@@ -90,6 +99,7 @@ struct Target {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
     live_signals: Option<Vec<String>>,
@@ -103,6 +113,7 @@ pub(super) struct Design {
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
+    pub parameters: BTreeMap<String, u64>,
     pub top: String,
     pub opt_level: Option<celox::OptLevel>,
     pub signal_access: celox::SignalAccessOptions,
@@ -194,6 +205,7 @@ impl DesignArgs {
                 &config.include_dirs,
                 &config.defines,
             )?;
+            design.extend_parameters(&config.parameters)?;
             design.diagnostics = config.diagnostics.clone();
             design.top = config.top.clone().unwrap_or_default();
             let mut opt_level = config.opt_level.as_deref();
@@ -201,6 +213,7 @@ impl DesignArgs {
             design.signal_access.force_signals = config.force_signals.clone().unwrap_or_default();
             design.max_steps = config.max_steps;
             if let Some(target) = selected {
+                design.extend_parameters(&target.parameters)?;
                 design.diagnostics.0.extend(target.diagnostics.0.clone());
                 design.extend(
                     base,
@@ -266,6 +279,12 @@ impl DesignArgs {
         for define in &self.defines {
             design.define(define)?;
         }
+        for parameter in self.parameters {
+            let (name, value) = parameter
+                .split_once('=')
+                .ok_or_else(|| format!("invalid parameter `{parameter}`: expected NAME=VALUE"))?;
+            design.set_parameter(name, parse_parameter_value(value)?)?;
+        }
         if let Some(top) = self.top {
             design.top = top;
         }
@@ -286,7 +305,80 @@ impl DesignArgs {
     }
 }
 
+/// TOML integers cover ordinary values; strings also permit radix prefixes
+/// and the full unsigned 64-bit range supported by SimulatorBuilder::param.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ParameterValue {
+    Integer(u64),
+    String(String),
+}
+
+fn parse_parameter_value(value: &str) -> Result<u64, String> {
+    let (radix, digits) = if let Some(digits) = value.strip_prefix("0x") {
+        (16, digits)
+    } else if let Some(digits) = value.strip_prefix("0b") {
+        (2, digits)
+    } else if let Some(digits) = value.strip_prefix("0o") {
+        (8, digits)
+    } else {
+        (10, value)
+    };
+    let invalid = || {
+        format!(
+            "invalid parameter value `{value}`: expected an unsigned 64-bit integer (decimal, 0x, 0o, or 0b)"
+        )
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+        || digits.starts_with('+')
+    {
+        return Err(invalid());
+    }
+    u64::from_str_radix(&digits.replace('_', ""), radix).map_err(|_| invalid())
+}
+
 impl Design {
+    pub fn apply_parameters<'a, T>(
+        &self,
+        mut builder: celox::SimulatorBuilder<'a, T>,
+    ) -> celox::SimulatorBuilder<'a, T> {
+        for (name, value) in &self.parameters {
+            builder = builder.param(name, *value);
+        }
+        builder
+    }
+
+    fn extend_parameters(
+        &mut self,
+        parameters: &BTreeMap<String, ParameterValue>,
+    ) -> Result<(), String> {
+        for (name, value) in parameters {
+            let value = match value {
+                ParameterValue::Integer(value) => *value,
+                ParameterValue::String(value) => parse_parameter_value(value)?,
+            };
+            self.set_parameter(name, value)?;
+        }
+        Ok(())
+    }
+
+    fn set_parameter(&mut self, name: &str, value: u64) -> Result<(), String> {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_'
+                    || byte.is_ascii_alphabetic()
+                    || (index != 0 && (byte.is_ascii_digit() || byte == b'$'))
+            })
+        {
+            return Err(format!("invalid top parameter name `{name}`"));
+        }
+        self.parameters.insert(name.to_string(), value);
+        Ok(())
+    }
+
     pub fn is_sv(&self) -> bool {
         self.sources.iter().all(|path| {
             path.extension()

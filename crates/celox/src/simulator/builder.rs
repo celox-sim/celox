@@ -176,6 +176,20 @@ pub(super) fn elaborate_parameterized_module(
         .map(|(name, value)| (resource_table::insert_str(name), value.clone()))
         .collect();
 
+    for name in values.keys() {
+        if !property
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == *name)
+        {
+            return Err(ParserError::illegal_context(
+                "top-level parameter override",
+                format!("unknown top-level parameter override `{name}`"),
+                Some(&top_token),
+            ));
+        }
+    }
+
     // push_override expects expressions that have already been evaluated in
     // the formal parameter type (as get_overridden_params does for HDL insts).
     // Resolve the header in declaration order so dependent widths/defaults see

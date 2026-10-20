@@ -229,3 +229,38 @@ and `[]` clears it. Repeat `--live-signal` or `--force-signal` for multiple path
 `--no-live-signals` and `--no-force-signals` clear inherited lists and conflict
 with the corresponding path options. These settings apply to the two CLI
 compilation commands; JavaScript simulator options are configured separately.
+
+## CLI top parameter overrides
+
+Both `run` and `vpi build` accept repeatable `-G NAME=VALUE` or
+`--parameter NAME=VALUE` (`--param` is an alias). These override numeric
+parameters of the selected top module in SystemVerilog or Veryl, before
+elaboration, without modifying source files.
+
+```sh
+celox vpi build --project celox.toml -G ID_EN=1 -G DEST_EN=1 -o dut-sim
+```
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+
+[parameters]
+ID_EN = 1
+DEST_EN = 1
+DATA_W = 8
+
+[targets.wide.parameters]
+DATA_W = 64
+```
+
+Common parameters are merged with the selected target's parameters, followed
+by CLI assignments. The last assignment to each name wins; unrelated entries
+are inherited. Values are unsigned 64-bit integers: decimal, `0x` hexadecimal,
+`0o` octal, or `0b` binary. Digit separators such as `0x12_34` are accepted.
+TOML values can be integers or strings (`DATA_W = "0x40"`); use strings for
+values above TOML's signed 64-bit integer range. Negative numbers, HDL
+expressions/literals, strings as HDL values, and type parameters are not
+supported by this interface. Declared HDL parameter types still determine
+conversion and truncation. Invalid assignments and unknown parameter names
+produce errors.

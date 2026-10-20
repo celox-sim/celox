@@ -425,3 +425,147 @@ fn native_build_applies_target_and_cli_signal_access_contracts() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Top.typo"));
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn top_parameters_merge_common_target_and_cli_without_editing_sv() {
+    let root = tempfile::tempdir().unwrap();
+    let source = "module Top #(parameter W=8, parameter V=1, parameter NEXT=V+1) (output logic [W-1:0] y); assign y=NEXT; initial begin #1; $display(\"v=%0d w=%0d\", y, $bits(y)); $finish; end endmodule";
+    fs::write(root.path().join("top.sv"), source).unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+      sources = ["top.sv"]
+      top = "Top"
+      [parameters]
+      W = 8
+      V = 2
+      [targets.wide.parameters]
+      W = 16
+      V = "0x1233"
+    "#,
+    )
+    .unwrap();
+    let output = invoke(root.path(), &["run", "--target", "wide"]);
+    success(&output);
+    assert_eq!(output.stdout, b"v=4660 w=16\n");
+    let output = invoke(
+        root.path(),
+        &[
+            "run",
+            "--target",
+            "wide",
+            "-GV=0b11",
+            "--parameter",
+            "V=0o10",
+        ],
+    );
+    success(&output);
+    assert_eq!(output.stdout, b"v=9 w=16\n");
+    success(&invoke(
+        root.path(),
+        &[
+            "vpi",
+            "build",
+            "--target",
+            "wide",
+            "--param",
+            "V=18446744073709551615",
+            "-o",
+            "sim",
+        ],
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: the CLI just compiled this test's source.
+    let sim = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    let signal = sim.signal_ref("Top.y").unwrap();
+    assert_eq!(signal.width, 16);
+    assert_eq!(celox::SimBackend::get_as::<u16>(sim.backend(), signal), 0);
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+    let output = invoke(root.path(), &["run", "--target", "wide", "-GMISSING=1"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown top-level parameter override")
+    );
+}
+
+#[test]
+fn top_parameters_reach_veryl_run_and_native_build() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("tb.veryl"),
+        "#[test(Top)] module Top #(param V: u32 = 1) { initial { $assert(V == 7); $finish(); } }",
+    )
+    .unwrap();
+    success(&invoke(
+        root.path(),
+        &["run", "tb.veryl", "--top", "Top", "-G", "V=7"],
+    ));
+    fs::write(
+        root.path().join("dut.veryl"),
+        "module Top #(param W: u32 = 8, param V: u32 = 1) (y: output logic<W>) { assign y=V; }",
+    )
+    .unwrap();
+    success(&invoke(
+        root.path(),
+        &[
+            "vpi",
+            "build",
+            "dut.veryl",
+            "--top",
+            "Top",
+            "-GW=16",
+            "-GV=0x1234",
+            "-o",
+            "sim",
+        ],
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: the CLI just compiled this test's source.
+    let sim = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    let signal = sim.signal_ref("Top.y").unwrap();
+    assert_eq!(signal.width, 16);
+    assert_eq!(
+        celox::SimBackend::get_as::<u16>(sim.backend(), signal),
+        0x1234
+    );
+    let output = invoke(
+        root.path(),
+        &["vpi", "build", "dut.veryl", "--top", "Top", "-GWIDHT=16"],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown top-level parameter override")
+    );
+}
+
+#[test]
+fn invalid_parameter_assignments_are_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    for value in [
+        "V",
+        "=1",
+        "x.y=1",
+        "V=",
+        "V=-1",
+        "V=1+2",
+        "V=18446744073709551616",
+        "V=0x",
+        "V=0b2",
+        "V=_1",
+    ] {
+        let output = invoke(root.path(), &["run", "dut.sv", "--top", "Top", "-G", value]);
+        rejected(&output, "parameter");
+    }
+}

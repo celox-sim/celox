@@ -164,6 +164,7 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     .opt_level(arguments.opt_level)
     .diagnostic_policy(arguments.design.diagnostics.clone())
     .signal_access(arguments.design.signal_access.clone());
+    builder = arguments.design.apply_parameters(builder);
     if let Some(metadata) = metadata {
         builder = builder.with_metadata(metadata);
     }
@@ -198,11 +199,14 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .iter()
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
-    let simulation = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
+    let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
         .four_state(true)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
-        .signal_access(arguments.design.signal_access.clone())
+        .signal_access(arguments.design.signal_access.clone());
+    let simulation = arguments
+        .design
+        .apply_parameters(builder)
         .build()
         .map_err(|error| format!("compilation failed:\n{error}"))?;
     report_warnings(simulation.warnings())?;
@@ -430,11 +434,13 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
-            let simulator = celox::Simulator::from_sv_sources(refs, &design.top)
+            let builder = celox::Simulator::from_sv_sources(refs, &design.top)
                 .four_state(true)
                 .diagnostic_policy(design.diagnostics.clone())
                 .signal_access(design.signal_access.clone())
-                .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1))
+                .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
+            let simulator = design
+                .apply_parameters(builder)
                 .build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             report_warnings(simulator.warnings())?;
@@ -453,12 +459,13 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let (image, warnings) = celox_vpi::driver::compile_native_image_with_options(
+    let (image, warnings) = celox_vpi::driver::compile_native_image_with_parameters(
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
         design.opt_level.unwrap_or(celox::OptLevel::O1),
         design.signal_access.clone(),
+        &design.parameters,
     )?;
     report_warnings(&warnings)?;
     Ok(image)

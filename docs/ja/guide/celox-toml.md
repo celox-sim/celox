@@ -181,3 +181,26 @@ celox run --project celox.toml --target observe --no-force-signals
 ```
 
 共通設定→選択したターゲット→CLIの順に優先されます。信号リストは全体を置き換えます。ターゲットで省略したリストは共通設定を継承し、`[]` で空にできます。CLIでは `--live-signal` / `--force-signal` を繰り返して列挙し、`--no-live-signals` / `--no-force-signals` で継承したリストを空にできます。リストを空にするオプションと、対応するパス指定は併用できません。これらの設定はCLIの2つのコンパイルコマンドに適用されます。JavaScriptのシミュレータオプションは別に指定します。
+
+## CLIのtopパラメータ指定
+
+`run` と `vpi build` では、`-G NAME=VALUE` または `--parameter NAME=VALUE` を繰り返し指定できます（`--param` も同じ意味です）。選択したtopモジュールの数値パラメータをエラボレーション前に上書きします。SystemVerilog・Verylの両方で使え、ソースの書き換えは不要です。
+
+```sh
+celox vpi build --project celox.toml -G ID_EN=1 -G DEST_EN=1 -o dut-sim
+```
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+
+[parameters]
+ID_EN = 1
+DEST_EN = 1
+DATA_W = 8
+
+[targets.wide.parameters]
+DATA_W = 64
+```
+
+共通設定→選択したターゲット→CLIの順に、パラメータ名ごとに上書きします。同じ名前の最後の指定が有効になり、他の名前の指定は継承します。値は符号なし64bit整数で、10進数・`0x`（16進）・`0o`（8進）・`0b`（2進）を使えます。`0x12_34` のような桁区切りも使えます。TOMLでは整数または文字列（`DATA_W = "0x40"`）で指定し、TOMLの符号付き64bit整数の範囲を超える値は文字列にします。負数、HDLの式やリテラル、HDLの文字列値、型パラメータには対応していません。型変換と切り詰めには、HDL側で宣言したパラメータの型が使われます。不正な指定や存在しないパラメータ名はエラーになります。
