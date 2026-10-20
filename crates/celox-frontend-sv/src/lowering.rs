@@ -4803,6 +4803,23 @@ struct SvSignalType {
     type_kind: PortTypeKind,
 }
 
+fn unpacked_range_bounds(
+    range: &sv::ir::UnpackedRange,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<(i128, i128)> {
+    // User constant functions belong to the analyzer session, which has
+    // ended by lowering. Retain its evaluated bounds as a fallback while
+    // keeping the symbolic declaration contract available to other consumers.
+    sv::typecheck::eval_const_expr_with_types(range.left(), constants, parameter_types)
+        .zip(sv::typecheck::eval_const_expr_with_types(
+            range.right(),
+            constants,
+            parameter_types,
+        ))
+        .or_else(|| range.resolved_bounds())
+}
+
 fn signal_type_from_sv(
     typ: &sv::ir::Type,
     constants: &HashMap<String, i128>,
@@ -4837,16 +4854,7 @@ fn signal_type_from_sv(
         .unpacked_ranges()
         .iter()
         .map(|range| {
-            let left = sv::typecheck::eval_const_expr_with_types(
-                range.left(),
-                constants,
-                parameter_types,
-            )?;
-            let right = sv::typecheck::eval_const_expr_with_types(
-                range.right(),
-                constants,
-                parameter_types,
-            )?;
+            let (left, right) = unpacked_range_bounds(range, constants, parameter_types)?;
             usize::try_from(left.abs_diff(right))
                 .ok()
                 .and_then(|width| width.checked_add(1))
