@@ -170,8 +170,26 @@ pub(super) fn lower_wide_unary(
                 value: u64::MAX,
             });
             let mut acc = all_ones;
-            for i in 0..n_chunks {
-                let c = ctx.wide_chunk_or_zero(&src_chunks, i, block);
+            for i in 0..ISelContext::num_chunks(src_width) {
+                let mut c = ctx.wide_chunk_or_zero(&src_chunks, i, block);
+                let valid_bits = (src_width - i * 64).min(64);
+                if valid_bits < 64 {
+                    // Padding outside the declared source width must not
+                    // make an all-ones packed value reduce to zero.
+                    let padding = u64::MAX << valid_bits;
+                    let mask = ctx.alloc_vreg(SpillDesc::remat(padding));
+                    block.push(MInst::LoadImm {
+                        dst: mask,
+                        value: padding,
+                    });
+                    let filled = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: filled,
+                        lhs: c,
+                        rhs: mask,
+                    });
+                    c = filled;
+                }
                 let next = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::And {
                     dst: next,

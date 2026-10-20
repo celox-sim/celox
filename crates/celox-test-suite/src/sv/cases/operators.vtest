@@ -1500,3 +1500,19 @@ endmodule
   (modify (set row 5) (set col 3))
   (assert_eq selected 0x38)
   (assert_eq bit_value 1))
+
+(case wide_reduction_and_respects_partial_storage_words
+  (source "partial_reduction.sv" #"
+    module Top(input logic [980:0] a, output logic all_set);
+      assign all_set = &a;
+    endmodule
+  "#)
+  (top Top)
+  (let ones (- (<< 1 981) 1))
+  (modify (set a ones))
+  (assert_eq all_set 1)
+  (for bit (range 0 981)
+    (modify (set a (^ ones (<< 1 bit))))
+    (assert_eq all_set 0 "each declared bit contributes, including the partial last word"))
+  (modify (set a ones))
+  (assert_eq all_set 1))
