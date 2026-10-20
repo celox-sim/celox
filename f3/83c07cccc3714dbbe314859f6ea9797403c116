@@ -1,0 +1,1 @@
+Split independent fixes at reviewer request: retain only Vite cache resolution in #1596, move one-bit aggregate lowering to an independent master-based PR, and address /@fs/ cached external-project imports.
