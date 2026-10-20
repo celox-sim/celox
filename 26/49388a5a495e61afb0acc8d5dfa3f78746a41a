@@ -1,0 +1,1 @@
+Fix the CI retained-report contract: retain the missing ignored row for the reviewed Icarus automatic-task-array exclusion, and validate the entire test-suite package including retained_reports integration tests.
