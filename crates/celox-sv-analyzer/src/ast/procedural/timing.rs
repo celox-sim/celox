@@ -13,6 +13,15 @@ impl BodyBuilder<'_, '_, '_> {
                 parenthesized,
             } => {
                 self.allow_timing("delay control")?;
+                let literal = expression_binding::ungroup(*value, self.tree.declarations());
+                if let ExprKind::Literal(text) = &self.tree.declarations().expression(literal).kind
+                    && let Some(ticks) = timescales::delay_literal(literal, text, self.tree)?
+                {
+                    return Ok(Stmt::Delay {
+                        amount: Expr::Literal(format!("64'd{ticks}")),
+                        ticks_per_unit: 1,
+                    });
+                }
                 Ok(Stmt::Delay {
                     amount: self.native_delay(*value, *parenthesized)?,
                     ticks_per_unit: timescales::time_divisor(*value, self.tree)?,

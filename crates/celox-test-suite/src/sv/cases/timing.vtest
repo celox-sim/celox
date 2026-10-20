@@ -1035,3 +1035,24 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 2) (assert_eq a 10) (assert_eq b 20)
   (run_until 3) (assert_eq a 11) (assert_eq b 21)
   (run_until 6) (assert_eq a 12) (assert_eq b 21))
+
+(case time_literal_delays_accept_all_units
+  (source "time_literal_units.sv" #"
+    module Top(output int count);
+      initial begin
+        count = 0;
+        #5ns; count++;
+        #(2.5ns); count++;
+        #40ps; count++;
+        #1fs; count++;
+        #1000ps; count++;
+        #2.5us; count++;
+        #1ms; count++;
+        #0.001s; count++;
+        $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq count 8))

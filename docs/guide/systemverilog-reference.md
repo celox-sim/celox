@@ -61,6 +61,13 @@ until shared argument storage and its change notifications are supported.
 Event expressions have the same restrictions
 as waits written directly in a process.
 
+### Time literal delays
+
+Standalone delay controls accept time literals such as `#5ns`, `#(2.75ns)` and
+`#40ps`, with all six units from `fs` to `s`. Values round at the declaring
+scope's precision before conversion to scheduler ticks (5.8, 3.14.1). Real-valued
+arithmetic expressions remain unsupported.
+
 ### Built-in functions and tasks
 
 | Area | Supported |
