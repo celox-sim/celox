@@ -1,0 +1,6 @@
+Revision history for #1612:
+
+rev 2 (content) 2026-10-20 14:37 UTC — Resolve PR #1612 conflicts with current master while preserving constant-function unpacked dimension regressions
+rev 1 (initial) 2026-10-20 14:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1612,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3af7a102b61c98ec300c1acc4cdcc888bf029c9f","timestamp_iso":"2026-10-20T14:37:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3af7a102b61c98ec300c1acc4cdcc888bf029c9f","new_sha":"89d92d7889fac023aeeb34a0edc5c69ba184cde5","timestamp_iso":"2026-10-20T14:37:33Z","reason":"Resolve PR #1612 conflicts with current master while preserving constant-function unpacked dimension regressions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3af7a102b61c98ec300c1acc4cdcc888bf029c9f...89d92d7889fac023aeeb34a0edc5c69ba184cde5"}]} -->
