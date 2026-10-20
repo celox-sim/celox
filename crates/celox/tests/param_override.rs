@@ -329,7 +329,7 @@ fn test_top_param_override_does_not_change_child_default() {
 }
 
 #[test]
-fn test_unknown_top_param_does_not_override_child_param() {
+fn test_unknown_top_param_cannot_target_child_param() {
     let code = r#"
         module Child #(
             param WIDTH: u32 = 3,
@@ -348,10 +348,29 @@ fn test_unknown_top_param_does_not_override_child_param() {
         }
     "#;
 
-    let mut sim = Simulator::builder(code, "Top")
+    let error = Simulator::builder(code, "Top")
         .param("WIDTH", 16)
         .build()
-        .unwrap();
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("unknown top-level parameter override `WIDTH`"),
+        "{error}"
+    );
+}
 
-    assert_eq!(sim.get(sim.signal("value")), 3u32.into());
+#[test]
+fn unknown_top_parameter_override_is_rejected() {
+    let source = "module Top #(param WIDTH: u32 = 8) (y: output logic<WIDTH>) { assign y=0; }";
+    let error = Simulator::builder(source, "Top")
+        .param("WIDHT", 16)
+        .build()
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("unknown top-level parameter override `WIDHT`"),
+        "{error}"
+    );
 }
