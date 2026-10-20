@@ -288,8 +288,20 @@ impl NativeProgramInstance {
         value: BigUint,
         mask: BigUint,
     ) -> bool {
-        if !self.shared.supports_forces() {
+        let bindings = self
+            .runtime_schema()
+            .force_bindings
+            .iter()
+            .filter(|binding| binding.signal == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.shared.supports_forces() && bindings.is_empty() {
             return false;
+        }
+        for binding in bindings {
+            self.backend
+                .set_four_state(binding.value, value.clone(), mask.clone());
+            self.backend.set(binding.enabled, 1u8);
         }
         let Some(identity) = self.signal_identity(id) else {
             return false;
@@ -305,6 +317,19 @@ impl NativeProgramInstance {
 
     /// Restore normal design-driver control for a reflected signal.
     pub fn release_signal(&mut self, id: celox_runtime::ReflectionSignalId) {
+        let bindings = self
+            .runtime_schema()
+            .force_bindings
+            .iter()
+            .filter(|binding| binding.signal == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.shared.supports_forces() && bindings.is_empty() {
+            return;
+        }
+        for binding in bindings {
+            self.backend.set(binding.enabled, 0u8);
+        }
         if let Some(identity) = self.signal_identity(id) {
             self.forced_values.remove(&identity);
         }
@@ -446,6 +471,16 @@ impl NativeProgramInstance {
         for (signal, value, mask) in &overrides {
             self.backend
                 .set_four_state(*signal, value.clone(), mask.clone());
+        }
+        // Explicit force targets use compiler-inserted override inputs. They
+        // execute the ordinary optimized kernel, including parallel kernels.
+        if !self.shared.supports_forces() {
+            let result = self.backend.eval_comb();
+            for (signal, value, mask) in &overrides {
+                self.backend
+                    .set_four_state(*signal, value.clone(), mask.clone());
+            }
+            return result.map_err(|error| self.decorate_runtime_error(error));
         }
         self.backend
             .eval_comb_units_with(|backend| {

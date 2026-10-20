@@ -2804,3 +2804,118 @@ fn callback_teardown_keeps_its_host_selected_until_dispatch_returns() {
         assert!(info.argv.is_null());
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn interface_members_are_navigable_after_native_image_round_trip() {
+    let _serial = lock_vpi();
+    let source = r#"
+        interface Axis;
+            logic [7:0] data, cost$usd;
+            logic valid, ready;
+            modport sink(input data, valid, output ready);
+        endinterface
+        module Child(Axis.sink s_axis, output logic [7:0] y);
+            assign s_axis.ready = 1;
+            assign y = s_axis.valid ? s_axis.data + 1 : 0;
+        endmodule
+        module Top(output logic [7:0] y);
+            Axis s_axis(), s$axis();
+            logic [7:0] cash$flow;
+            assign cash$flow = 3;
+            Child uut(s_axis, y);
+        endmodule
+    "#;
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("axis.sv"))], "Top")
+            .native_force_support(true)
+            .four_state(true)
+            .build_native()
+            .unwrap();
+    let container = simulator
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let runtime = unsafe { NativeProgramInstance::from_attached_bytes(&container) }.unwrap();
+    drop(simulator);
+    let _session = install_runtime(runtime).unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let bus = vpi_handle_by_name(c"s_axis".as_ptr(), top);
+        assert!(!bus.is_null(), "the declared interface must have a scope");
+        let data = vpi_handle_by_name(c"data".as_ptr(), bus);
+        let valid = vpi_handle_by_name(c"valid".as_ptr(), bus);
+        let ready = vpi_handle_by_name(c"ready".as_ptr(), bus);
+        assert!(!data.is_null() && !valid.is_null() && !ready.is_null());
+        assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, data)), c"data");
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, data)),
+            c"Top.s_axis.data"
+        );
+        assert_eq!(vpi_get(VPI_SIZE, data), 8);
+        let parent = vpi_handle(VPI_SCOPE, data);
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, parent)),
+            c"Top.s_axis"
+        );
+        let child_data = vpi_handle_by_name(c"Top.uut.s_axis.data".as_ptr(), ptr::null_mut());
+        assert!(
+            !child_data.is_null(),
+            "interface ports must retain their paths too"
+        );
+        put_int(data, 41);
+        put_int(valid, 1);
+        let y = vpi_handle_by_name(c"y".as_ptr(), top);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(y, &mut value);
+        assert_eq!(value.value.integer, 42);
+        vpi_get_value(child_data, &mut value);
+        assert_eq!(
+            value.value.integer, 41,
+            "child member alias must see the deposited value"
+        );
+        let members = vpi_iterate(VPI_REG, bus);
+        let mut names = Vec::new();
+        loop {
+            let member = vpi_scan(members);
+            if member.is_null() {
+                break;
+            }
+            names.push(
+                CStr::from_ptr(vpi_get_str(VPI_NAME, member))
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+            vpi_free_object(member);
+        }
+        names.sort();
+        assert_eq!(names, ["cost$usd", "data", "ready", "valid"]);
+        let dollar_member = vpi_handle_by_name(c"cost$usd".as_ptr(), bus);
+        let dollar_interface = vpi_handle_by_name(c"Top.s$axis.data".as_ptr(), ptr::null_mut());
+        let dollar_signal = vpi_handle_by_name(c"Top.cash$flow".as_ptr(), ptr::null_mut());
+        assert!(
+            !dollar_member.is_null() && !dollar_interface.is_null() && !dollar_signal.is_null()
+        );
+        assert!(vpi_handle_by_name(c"Top.cash".as_ptr(), ptr::null_mut()).is_null());
+        for handle in [
+            top,
+            bus,
+            data,
+            valid,
+            ready,
+            parent,
+            child_data,
+            y,
+            dollar_member,
+            dollar_interface,
+            dollar_signal,
+        ] {
+            vpi_free_object(handle);
+        }
+    }
+}

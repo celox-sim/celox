@@ -6,6 +6,8 @@ use crate::procedural::SourceSpan;
 /// A non-fatal source diagnostic, independent of constant evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalyzerWarning {
+    /// Explicit and implementation-default time scales occur in one design.
+    MixedTimescale,
     /// An ignored `$exit` in a function outside a program (IEEE 1800-2023 24.7).
     ExitOutsideProgram { site: Option<SourceSpan> },
 }

@@ -115,9 +115,39 @@ impl miette::Diagnostic for CompilationWarning {
     }
 }
 
+/// Keep the original code, source span and help when promoting a warning.
+#[derive(Debug)]
+struct PromotedDiagnostic<'a>(&'a CompilationWarning);
+
+impl fmt::Display for PromotedDiagnostic<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for PromotedDiagnostic<'_> {}
+impl miette::Diagnostic for PromotedDiagnostic<'_> {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        miette::Diagnostic::code(self.0)
+    }
+    fn severity(&self) -> Option<miette::Severity> {
+        Some(miette::Severity::Error)
+    }
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        miette::Diagnostic::source_code(self.0)
+    }
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        miette::Diagnostic::labels(self.0)
+    }
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        miette::Diagnostic::help(self.0)
+    }
+}
+
 /// The specific kind of simulator error.
 #[derive(Debug)]
 pub enum SimulatorErrorKind {
+    /// Recoverable diagnostics promoted to errors by the caller.
+    DiagnosticPolicy(Vec<CompilationWarning>),
     FrontendArtifact(crate::FrontendArtifactError),
     SIRParser(crate::ParserError),
     /// The Veryl source could not be parsed.
@@ -247,6 +277,20 @@ impl SimulatorError {
         self
     }
 
+    /// Suppress configured warnings accompanying an existing failure.
+    /// The original fatal diagnostic remains authoritative.
+    pub fn apply_diagnostic_policy(mut self, policy: &crate::DiagnosticPolicy) -> Self {
+        use miette::Diagnostic;
+        self.warnings.retain(|warning| {
+            let code = warning
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_default();
+            policy.level(&code) != crate::DiagnosticLevel::Allow
+        });
+        self
+    }
+
     /// Returns a reference to the error kind.
     pub fn kind(&self) -> &SimulatorErrorKind {
         &self.kind
@@ -261,6 +305,11 @@ impl SimulatorError {
 impl fmt::Display for SimulatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind.as_ref() {
+            SimulatorErrorKind::DiagnosticPolicy(errors) => {
+                for error in errors {
+                    f.write_str(&render_diagnostic(&PromotedDiagnostic(error)))?;
+                }
+            }
             SimulatorErrorKind::FrontendArtifact(error) => write!(f, "{error}")?,
             SimulatorErrorKind::SIRParser(e) => f.write_str(&render_diagnostic(e))?,
             SimulatorErrorKind::Syntax(e) => f.write_str(&render_diagnostic(e))?,
