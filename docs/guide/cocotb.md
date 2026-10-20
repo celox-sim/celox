@@ -59,6 +59,88 @@ limit before completion fails the command. This limit does not bound compilation
 or work within a single step/tick; use an external process timeout when a wall
 clock limit is needed. Source languages cannot be mixed in one invocation.
 
+## Manage a multi-file project
+
+Save common inputs and named targets in `celox.toml`:
+
+```toml
+sources = ["rtl/pkg.sv"]
+filelists = ["rtl/design.f"]
+include_dirs = ["include"]
+default_target = "smoke"
+
+[defines]
+SIMULATION = "1"
+
+[targets.smoke]
+sources = ["test/Tb.sv"]
+top = "Tb"
+opt_level = "O1"
+max_steps = 1000000
+
+[targets.dut]
+top = "Dut"
+```
+
+Both commands resolve the same sources, include directories, macros and top:
+
+```sh
+celox run --target smoke
+celox vpi build --target dut -o build/dut-sim
+celox run --project /path/to/celox.toml --target smoke
+```
+
+With no explicit sources or `-f` arguments, or when `--target` is present, Celox
+searches the current directory and its parents for `celox.toml`. Explicit
+`--project FILE` selects a manifest directly. Relative manifest paths resolve
+from the manifest's directory, including paths in its targets. Positional
+sources and `-f` alone run independently of any nearby manifest.
+
+Targets inherit the root settings. Sources are collected in this order: root
+`sources`, root `filelists`, target `sources`, target `filelists`, then CLI
+sources and `-f` expansions in command-line order. Each list retains its source order. Include
+directories accumulate in the same layer order. Macro definitions are global
+to the invocation; later definitions win, with CLI `-D` definitions applied last.
+TOML macro values are strings. Configured macros apply to each source; macros
+defined in HDL files retain the frontend's per-file compilation-unit scope. `--top` overrides the selected top; `run`'s `-O`
+and `--max-steps` override the target/root run settings. VPI builds retain the
+existing force-compatible compilation settings.
+
+Without `--target`, Celox uses `default_target`, otherwise the root `top`,
+otherwise the sole target. Multiple targets without a default require
+`--target`. A project may also name a single `.veryl` entry file; its Veryl
+project discovery still uses `Veryl.toml`.
+
+### Use a file list directly
+
+```sh
+celox run -f test/all.f --top Tb
+celox vpi build -f rtl/design.f --top Dut -o build/dut-sim
+```
+
+A `.f` file contains whitespace-separated source paths and can contain nested
+lists and preprocessing options:
+
+```text
+# Paths resolve from this file's directory.
+../rtl/pkg.sv
+-f ../rtl/design.f
++incdir+../include
++define+SIMULATION=1
+"../test/with spaces/Tb.sv"
+```
+
+Supported options are `-f FILE`, `-I DIR`/`-IDIR`, `-D NAME[=VALUE]`/`-DNAME[=VALUE]`,
+`+incdir+DIR[+DIR...]` and `+define+NAME[=VALUE][+NAME[=VALUE]...]`.
+Bare macro names expand to `1`. Paths may be quoted or use backslash escapes;
+`#` and `//` start comments at a token boundary, and `/* ... */` comments are
+also accepted. Every nested list resolves paths from its own directory.
+The file-list reader performs no environment, wildcard or shell expansion.
+Unknown options, unknown TOML fields and cyclic file lists are errors.
+The CLI accepts `-I`/`--include-dir` and `-D`/`--define` directly as well.
+Include directories and macros require SystemVerilog inputs and a build with
+`--features systemverilog`.
+
 ## Compile a design
 
 Pass one source in the Veryl project and name the top-level module:
