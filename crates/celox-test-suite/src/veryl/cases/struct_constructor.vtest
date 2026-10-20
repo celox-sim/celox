@@ -53,3 +53,63 @@ o_cut = Cut'{y: wide};
   (assert_eq o_pad 0x0B)
   ; wide(8bit) -> member logic<4> should keep lower 4 bits.
   (assert_eq o_cut 0xB))
+
+(case test_single_bit_aggregate_members
+  (source "test.veryl" #"
+module Top (
+    i: input logic,
+    rst: input reset_sync_low,
+    members: output logic<3>,
+    reset_member: output logic,
+) {
+    struct Single { value: logic, }
+    struct Nested { inner: Single, }
+    struct Reset { value: reset_sync_low, }
+    union Overlay { value: logic, other: logic, }
+    var single: Single;
+    var nested: Nested;
+    var reset_pair: Reset;
+    var overlay: Overlay;
+    assign single.value = i;
+    assign nested.inner.value = i;
+    assign reset_pair.value = rst;
+    assign overlay.value = i;
+    assign members = {single.value, nested.inner.value, overlay.other};
+    assign reset_member = reset_pair.value;
+}
+"#)
+  (top Top)
+  (modify (set i 0) (set rst 1))
+  (assert_eq members 0)
+  (assert_eq reset_member 1)
+  (modify (set i 1) (set rst 0))
+  (assert_eq members 7)
+  (assert_eq reset_member 0))
+
+(case test_single_bit_struct_ff
+  (source "test.veryl" #"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    i: input logic,
+    o: output logic,
+) {
+    struct Single { value: logic, }
+    var registered: Single;
+    always_ff (clk, rst) {
+        if_reset { registered.value = 1'b0; }
+        else { registered.value = i; }
+    }
+    assign o = registered.value;
+}
+"#)
+  (top Top)
+  (modify (set rst 0) (set i 1))
+  (tick clk)
+  (assert_eq o 0)
+  (modify (set rst 1))
+  (tick clk)
+  (assert_eq o 1)
+  (modify (set i 0))
+  (tick clk)
+  (assert_eq o 0))
