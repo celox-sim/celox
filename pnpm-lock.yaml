@@ -170,6 +170,9 @@ overrides:
   '@emnapi/runtime': 2.0.0-beta.1
   emnapi: 2.0.0-beta.1
 
+patchedDependencies:
+  '@napi-rs/wasm-runtime@1.2.5': 55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce
+
 importers:
 
   .:
@@ -185,7 +188,7 @@ importers:
         version: 2.0.0-beta.1
       '@napi-rs/wasm-runtime':
         specifier: 1.2.5
-        version: 1.2.5(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
+        version: 1.2.5(patch_hash=55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce)(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
       '@tybys/wasm-util':
         specifier: ^0.10.1
         version: 0.10.4
@@ -3085,7 +3088,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 2.0.0-beta.1
       '@emnapi/runtime': 2.0.0-beta.1
-      '@napi-rs/wasm-runtime': 1.2.5(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
+      '@napi-rs/wasm-runtime': 1.2.5(patch_hash=55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce)(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
     optional: true
 
   '@napi-rs/lzma-win32-arm64-msvc@1.5.1':
@@ -3157,7 +3160,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 2.0.0-beta.1
       '@emnapi/runtime': 2.0.0-beta.1
-      '@napi-rs/wasm-runtime': 1.2.5(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
+      '@napi-rs/wasm-runtime': 1.2.5(patch_hash=55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce)(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
     optional: true
 
   '@napi-rs/tar-win32-arm64-msvc@1.1.1':
@@ -3188,7 +3191,7 @@ snapshots:
       '@napi-rs/tar-win32-ia32-msvc': 1.1.1
       '@napi-rs/tar-win32-x64-msvc': 1.1.1
 
-  '@napi-rs/wasm-runtime@1.2.5(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)':
+  '@napi-rs/wasm-runtime@1.2.5(patch_hash=55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce)(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)':
     dependencies:
       '@emnapi/core': 2.0.0-beta.1
       '@emnapi/runtime': 2.0.0-beta.1
@@ -3225,7 +3228,7 @@ snapshots:
     dependencies:
       '@emnapi/core': 2.0.0-beta.1
       '@emnapi/runtime': 2.0.0-beta.1
-      '@napi-rs/wasm-runtime': 1.2.5(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
+      '@napi-rs/wasm-runtime': 1.2.5(patch_hash=55fd5d25b61174ba200fd92f6cb049e5d2baa68950bd8f903097f783c4f829ce)(@emnapi/core@2.0.0-beta.1)(@emnapi/runtime@2.0.0-beta.1)
     optional: true
 
   '@napi-rs/wasm-tools-win32-arm64-msvc@1.1.0':
