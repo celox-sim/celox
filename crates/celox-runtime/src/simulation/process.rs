@@ -13,7 +13,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// whether it resumes at once (a queued nonblocking assignment or a
     /// yield), in which case the caller checks the state before running it
     /// again: the return separates the writes before and after it.
-    fn run_process<E>(
+    pub(super) fn run_process<E>(
         &mut self,
         executor: &mut E,
         current_time: u64,

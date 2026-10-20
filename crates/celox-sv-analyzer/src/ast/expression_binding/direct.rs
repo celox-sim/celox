@@ -725,6 +725,7 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::DistUniform
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
+                                    | SystemFunction::Fopen
                                     | SystemFunction::UrandomRange
                             ) {
                                 for (position, arg) in operands.iter().enumerate() {

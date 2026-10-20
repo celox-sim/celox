@@ -147,7 +147,22 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             Vec::new()
         };
-        let ready = self.take_ready_processes(current_time);
+        let mut ready = self.take_ready_processes(current_time);
+        if current_time == 0 {
+            // Converted always_ff kernels have a leading event control rather
+            // than an initial body. Arm it before scheduled inputs change, as
+            // for ordinary FF domains; leave initial processes in their usual
+            // process phase and declaration order (IEEE 1800-2023 4.5, 9.2.2.4).
+            let mut returns = 0;
+            for &process in &ready {
+                if self.model.processes[process].starts_with_event_wait
+                    && self.run_process(executor, current_time, process, &mut returns)?
+                {
+                    return Err(SimulatorErrorCode::InternalError.into());
+                }
+            }
+            ready.retain(|&process| !self.model.processes[process].starts_with_event_wait);
+        }
         self.step_round(executor, current_time, events_to_process, ready, true)?;
         self.end_time(executor, current_time)
     }

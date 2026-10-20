@@ -470,6 +470,23 @@ impl<'a> ProcModule<'a> {
         self.warnings.push((kind, site.cloned()));
     }
 
+    pub fn file_memory_shape(
+        &self,
+        id: SourceVarId,
+    ) -> Result<(i128, i128, usize), sv::AnalyzerError> {
+        let Some(bounds) = self.unpacked_bounds.get(&id) else {
+            return Err(unsupported("$writemem requires a static unpacked array"));
+        };
+        let Some(width) = unpacked_element_width(self.var(id)) else {
+            return Err(unsupported("$writemem packed element type"));
+        };
+        let (left, right) = match bounds.as_slice() {
+            [bound] => *bound,
+            _ => (0, (self.var(id).width / width) as i128 - 1),
+        };
+        Ok((left, right, width))
+    }
+
     /// Register a runtime event site and return its local number.
     pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
         self.runtime_event_sites.push(site);
@@ -895,7 +912,13 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Fatal => SystemTaskKind::Fatal,
         SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
         SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
-        SystemTask::Readmem(_) | SystemTask::Printtimescale | SystemTask::Exit => return None,
+        SystemTask::Readmem(_)
+        | SystemTask::Writemem(_)
+        | SystemTask::Fclose
+        | SystemTask::Fdisplay(_)
+        | SystemTask::Fwrite(_)
+        | SystemTask::Printtimescale
+        | SystemTask::Exit => return None,
     })
 }
 

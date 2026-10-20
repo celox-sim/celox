@@ -1706,6 +1706,7 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
+            requires_timed_simulation: false,
             resume: lowering
                 .hidden
                 .declare(name("resume"), PROCESS_RESUME_WIDTH, false),

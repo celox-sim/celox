@@ -9,6 +9,8 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod file_io;
+
 use super::procedural::*;
 use super::*;
 use celox_design::{CounterKind, NbaSite, WaitSite};
@@ -816,6 +818,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
+                args,
+                ..
+            } => self.fopen(args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
                 args,
@@ -2401,6 +2408,15 @@ impl<'p, 'a> Ff<'p, 'a> {
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         site: Option<&sv::ir::SourceSpan>,
     ) -> Result<bool, sv::AnalyzerError> {
+        if matches!(
+            task,
+            sv::ir::SystemTask::Fclose
+                | sv::ir::SystemTask::Fdisplay(_)
+                | sv::ir::SystemTask::Fwrite(_)
+                | sv::ir::SystemTask::Writemem(_)
+        ) {
+            return self.file_task(task, args);
+        }
         if let sv::ir::SystemTask::Readmem(format) = task {
             let mut addresses = [None, None];
             for (slot, arg) in addresses.iter_mut().zip(args.iter().skip(2)) {
