@@ -229,6 +229,8 @@ pub enum SystemTask {
     Write(Radix),
     /// `$readmemb` and `$readmemh` (21.4).
     Readmem(MemoryFormat),
+    /// Value change dump controls (21.7.1).
+    Vcd(VcdTask),
     /// File output tasks (21.3).
     Fclose,
     Fdisplay(Radix),
@@ -240,6 +242,18 @@ pub enum SystemTask {
     /// condition fails, and `$assert_continue`, which reports and continues.
     Assert,
     AssertContinue,
+}
+
+/// Four-state VCD control system tasks (IEEE 1800-2023 21.7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VcdTask {
+    File,
+    Vars,
+    Flush,
+    On,
+    Off,
+    All,
+    Limit,
 }
 
 /// The severity of `$error`, `$warning` and `$info`.
@@ -293,7 +307,7 @@ impl SystemTask {
     pub fn is_host_request(self) -> bool {
         matches!(
             self,
-            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_)
+            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_) | Self::Vcd(_)
         )
     }
 
@@ -330,6 +344,13 @@ impl SystemTask {
             Self::Writemem(MemoryFormat::Hexadecimal) => "$writememh",
             Self::Readmem(MemoryFormat::Binary) => "$readmemb",
             Self::Readmem(MemoryFormat::Hexadecimal) => "$readmemh",
+            Self::Vcd(VcdTask::File) => "$dumpfile",
+            Self::Vcd(VcdTask::Vars) => "$dumpvars",
+            Self::Vcd(VcdTask::Flush) => "$dumpflush",
+            Self::Vcd(VcdTask::On) => "$dumpon",
+            Self::Vcd(VcdTask::Off) => "$dumpoff",
+            Self::Vcd(VcdTask::All) => "$dumpall",
+            Self::Vcd(VcdTask::Limit) => "$dumplimit",
             Self::Assert => "$assert",
             Self::AssertContinue => "$assert_continue",
         }
@@ -839,13 +860,48 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::TestPlusargs, 1, Some(1)),
     function(SystemFunction::ValuePlusargs, 2, Some(2)),
     // 21.7 Value change dump (VCD) files
-    unsupported("$dumpfile", Task),
-    unsupported("$dumpvars", Task),
-    unsupported("$dumpoff", Task),
-    unsupported("$dumpon", Task),
-    unsupported("$dumpall", Task),
-    unsupported("$dumplimit", Task),
-    unsupported("$dumpflush", Task),
+    task(
+        SystemTask::Vcd(VcdTask::File),
+        ProceduralAndInitial,
+        0,
+        Some(1),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Vars),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Off),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::On),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::All),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Limit),
+        ProceduralAndInitial,
+        1,
+        Some(1),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Flush),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
     unsupported("$dumpports", Task),
     unsupported("$dumpportsoff", Task),
     unsupported("$dumpportson", Task),

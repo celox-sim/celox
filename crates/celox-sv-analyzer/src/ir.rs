@@ -7,7 +7,7 @@ pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask,
+    ArrayQuery, Callee, MemoryFormat, Radix, Severity, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.

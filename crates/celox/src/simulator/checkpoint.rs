@@ -123,10 +123,10 @@ pub enum CheckpointError {
         "checkpoints are not supported for designs with external components, whose state Celox cannot capture"
     )]
     ExternalComponents,
-    /// Source-driven files have host state that is
+    /// Source-driven files and waveform controls have host state that is
     /// not represented in the saved HDL memory image.
     #[error(
-        "checkpoints and state files are not supported for designs with SystemVerilog file I/O"
+        "checkpoints and state files are not supported for designs with SystemVerilog file I/O or VCD control tasks"
     )]
     ExternalSystemTasks,
     #[error("the checkpoint was taken from a different design")]
@@ -210,7 +210,12 @@ impl<B: SimBackend> Simulator<B> {
             .runtime_schema
             .host_request_sites
             .iter()
-            .any(|site| matches!(site.kind, celox_design::HostRequestKind::FileIo))
+            .any(|site| {
+                matches!(
+                    site.kind,
+                    celox_design::HostRequestKind::FileIo | celox_design::HostRequestKind::Vcd
+                )
+            })
         {
             return Err(CheckpointError::ExternalSystemTasks);
         }

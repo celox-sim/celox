@@ -1555,6 +1555,17 @@ mod host {
     ) -> Result<(), SimulatorError> {
         if program
             .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message: "source VCD controls require Simulation; Simulator does not execute initial process kernels".into(),
+                signals: Vec::new(),
+            }));
+        }
+        if program
+            .runtime_schema
             .processes
             .iter()
             .any(|slots| slots.requires_timed_simulation)
@@ -1565,7 +1576,7 @@ mod host {
                 .any(|site| site.requires_timed_simulation)
         {
             return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
-                message: "edge procedures using system file I/O or plusargs require Simulation; Simulator does not execute scheduled process kernels".into(),
+                message: "edge procedures using system file I/O, plusargs, or VCD controls require Simulation; Simulator does not execute scheduled process kernels".into(),
                 signals: Vec::new(),
             }));
         }
@@ -1590,7 +1601,13 @@ mod host {
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
-        if vcd_path.is_some() {
+        let source_vcd = sim
+            .program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+        if vcd_path.is_some() || source_vcd {
             if sim.layout().unpacked_arrays.values().any(|array| {
                 !array.element_width.is_multiple_of(8)
                     || array.element_stride != array.element_width / 8
@@ -2549,11 +2566,24 @@ mod host {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
             }
 
+            // A source request can originate in an include or mixed-language
+            // child. Decide from the elaborated schema before physical layout.
+            let vcd_recording = self.vcd_path.is_some()
+                || program
+                    .runtime_schema
+                    .host_request_sites
+                    .iter()
+                    .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+            let layout_mode = if vcd_recording {
+                crate::backend::memory_layout::MemoryLayoutMode::Packed
+            } else {
+                layout_mode
+            };
             // Build memory layout (consumes semantic layout requirements).
             let layout_start = phase_timing.then(crate::timing::now);
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-            if self.vcd_path.is_some() {
+            if vcd_recording {
                 laid_out.enable_vcd_tracking();
             }
             if let Some(start) = layout_start {
@@ -3187,10 +3217,21 @@ mod host {
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
             let sim_res = program_res.and_then(|(program, mut warnings)| {
                 self.options.diagnostic_policy.apply(&mut warnings)?;
+                let vcd_recording = self.vcd_path.is_some()
+                    || program
+                        .runtime_schema
+                        .host_request_sites
+                        .iter()
+                        .any(|site| site.kind == celox_design::HostRequestKind::Vcd);
+                let layout_mode = if vcd_recording {
+                    crate::backend::memory_layout::MemoryLayoutMode::Packed
+                } else {
+                    layout_mode
+                };
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
                 validate_untimed_host_requests(laid_out.runtime())?;
-                if self.vcd_path.is_some() {
+                if vcd_recording {
                     laid_out.enable_vcd_tracking();
                 }
 
@@ -3468,6 +3509,69 @@ mod host {
         Ok(())
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn typed_vcd_selections_survive_native_image_roundtrip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native.vcd");
+        let source = format!(
+            r#"
+            package p; logic state=1; endpackage
+            module Child(output logic \state.value ); initial \state.value = 1; endmodule
+            module Top #(parameter int INDEX=1) (output logic [1:0] bus, output logic \literal[0] );
+                Child u[0:1](bus);
+                logic package_use;
+                assign package_use=p::state;
+                assign \literal[0] = 0;
+                initial begin $dumpfile("{}");
+                    $dumpvars(0, Top.u[INDEX].\state.value , p::state, \literal[0] );
+                end
+            endmodule"#,
+            path.display()
+        );
+        let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("native-vcd.sv"))],
+            "Top",
+        )
+        .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+        .unwrap();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let runtime = image.runtime_program();
+        assert!(
+            runtime
+                .runtime_schema
+                .host_request_sites
+                .iter()
+                .flat_map(|site| &site.strings)
+                .any(|path| path.contains("\0local\0"))
+        );
+        // SAFETY: the image was compiled from this test's trusted source.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut simulation = crate::Simulation::new(simulator);
+        simulation.run_until(1).unwrap();
+        simulation.flush_vcd().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.matches("$var wire ").count(), 3, "{text}");
+        assert!(text.contains("Top.u[1]"), "{text}");
+        assert!(text.contains("\\state.value"), "{text}");
+        assert!(text.contains("\\literal[0]"), "{text}");
+    }
+
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
     fn run_dead_store_elimination(
         program: &mut LaidOutProgram,
@@ -3476,6 +3580,21 @@ mod host {
     ) {
         use crate::HashSet;
         let mut externally_live = HashSet::default();
+        if program
+            .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
+        {
+            // A runtime hierarchy selection may observe every authored object.
+            externally_live.extend(
+                program
+                    .design
+                    .instances()
+                    .flat_map(|instance| instance.state_addresses().iter().copied()),
+            );
+        }
+
         // Native testbench expressions bypass SIR and read simulator memory
         // directly. Their inputs are therefore external DSE roots just like
         // signals named with `live_signal()`.

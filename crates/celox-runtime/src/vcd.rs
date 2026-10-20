@@ -119,8 +119,11 @@ pub struct VcdWriter<W: Write = File> {
     timestamp: u64,
     time_precision: celox_design::TimePrecision,
     header_written: bool,
+    /// Complete header commands awaiting emission after a byte-limit pause.
+    header_records: Option<std::collections::VecDeque<Vec<u8>>>,
     initial_values_written: bool,
     external_count: usize,
+    suspended: bool,
 }
 
 struct VcdOutput<W: Write> {
@@ -133,6 +136,9 @@ struct VcdOutput<W: Write> {
     /// Bytes already accepted by BufWriter, including short writes before an error.
     written: usize,
     encoded_changes: u64,
+    accepted_bytes: u64,
+    byte_limit: Option<u64>,
+    limit_comment_written: bool,
     stats: VcdStatistics,
 }
 
@@ -158,9 +164,11 @@ impl VcdWriter<File> {
     /// signals, in a new file at `path`. The first dump there records every
     /// value, and its timestamps start over.
     pub fn restart<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
+        self.flush()?;
         let mut next = Self::new_with_time_precision(path, &self.descs, self.time_precision)?;
         next.add_external_signals(&self.external_descs)?;
-        self.flush()?;
+        next.suspended = self.suspended;
+        next.output.byte_limit = self.output.byte_limit;
         *self = next;
         Ok(())
     }
@@ -199,6 +207,9 @@ impl<W: Write> VcdWriter<W> {
                 encoded: Vec::new(),
                 written: 0,
                 encoded_changes: 0,
+                accepted_bytes: 0,
+                byte_limit: None,
+                limit_comment_written: false,
                 stats: VcdStatistics::default(),
             },
             headers,
@@ -212,8 +223,10 @@ impl<W: Write> VcdWriter<W> {
             timestamp: 0,
             time_precision,
             header_written: false,
+            header_records: None,
             initial_values_written: false,
             external_count: 0,
+            suspended: false,
         }
     }
 
@@ -241,6 +254,110 @@ impl<W: Write> VcdWriter<W> {
     /// checkpoint.
     pub fn rescan(&mut self) {
         self.rescan_pending = true;
+    }
+
+    /// Set the maximum output size requested by `$dumplimit`. Zero removes
+    /// the limit. Complete records may take the file beyond the limit.
+    pub fn set_byte_limit(&mut self, limit: u64) {
+        if self.output.limit_reached() {
+            // Skipped output may have consumed the backend's activity flags,
+            // and a partial initial snapshot has not initialized every value.
+            self.rescan_pending = true;
+            self.initial_values_written = false;
+        }
+        self.output.byte_limit = (limit != 0).then_some(limit);
+        self.output.limit_comment_written = false;
+    }
+
+    fn limit_reached(&mut self) -> bool {
+        let reached = self.output.limit_reached();
+        if reached {
+            self.output.note_limit();
+        }
+        reached
+    }
+
+    /// Emit a SystemVerilog VCD checkpoint. `off` writes unknowns and
+    /// suspends changes; `on` writes current values and resumes; `all`
+    /// writes current values without changing suspension (21.7.1.3–4).
+    pub fn checkpoint(
+        &mut self,
+        command: &str,
+        timestamp: u64,
+        memory: &[u8],
+        external: &[(BigUint, BigUint)],
+    ) -> std::io::Result<()> {
+        if !matches!(command, "dumpoff" | "dumpon" | "dumpall") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid VCD checkpoint",
+            ));
+        }
+        self.validate_external_count(external.len())?;
+        // Suppressing header or value records must not suppress controls.
+        match command {
+            "dumpoff" => self.suspended = true,
+            "dumpon" => self.suspended = false,
+            _ => {}
+        }
+        if self.limit_reached() || !self.begin_timestamp(timestamp)? {
+            return Ok(());
+        }
+        writeln!(self.output.encoded, "${command}")?;
+        if command == "dumpoff" {
+            for index in 0..self.headers.len() {
+                if self.output.limit_reached() {
+                    break;
+                }
+                let width = self.headers[index].width;
+                let size = width.div_ceil(8);
+                self.output.encoded.reserve(width + 16);
+                let len = encode_value(
+                    self.output.encoded.spare_capacity_mut(),
+                    width,
+                    &vec![255; size],
+                    &vec![255; size],
+                );
+                self.output.finish_record(len, self.plan.suffix(index))?;
+            }
+            self.suspended = true;
+        } else {
+            self.plan
+                .dump::<true, W>(memory, external, None, &mut self.output)?;
+            self.initial_values_written = true;
+            if command == "dumpon" {
+                self.suspended = false;
+            }
+        }
+        writeln!(self.output.encoded, "$end")?;
+        self.output.note_limit();
+        self.rescan_pending = true;
+        Ok(())
+    }
+
+    fn begin_timestamp(&mut self, timestamp: u64) -> std::io::Result<bool> {
+        if self.header_written && timestamp < self.timestamp {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "VCD timestamp {timestamp} is earlier than the last dumped timestamp {}; start a new file to record a rewound simulation",
+                    self.timestamp
+                ),
+            ));
+        }
+        self.output.write_encoded()?;
+        if !self.header_written && !self.write_header()? {
+            return Ok(false);
+        }
+        if self.limit_reached() {
+            return Ok(false);
+        }
+        if timestamp > self.timestamp || timestamp == 0 {
+            writeln!(self.output.encoded, "#{timestamp}")?;
+            self.timestamp = timestamp;
+            self.output.write_encoded()?;
+        }
+        Ok(true)
     }
 
     /// Dump as the backend's sole incremental waveform observer. Multiple
@@ -309,7 +426,7 @@ impl<W: Write> VcdWriter<W> {
                 return Ok(());
             }
         }
-        if self.header_written {
+        if self.header_written || self.header_records.is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "cannot add external VCD signals after the first dump",
@@ -330,20 +447,18 @@ impl<W: Write> VcdWriter<W> {
     }
 
     #[cold]
-    fn write_header(&mut self) -> std::io::Result<()> {
-        writeln!(self.output.encoded, "$date")?;
-        writeln!(
-            self.output.encoded,
-            "  {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )?;
-        writeln!(self.output.encoded, "$end")?;
-        writeln!(self.output.encoded, "$version")?;
-        writeln!(self.output.encoded, "  celox")?;
-        writeln!(self.output.encoded, "$end")?;
+    fn prepare_header(&mut self) -> std::collections::VecDeque<Vec<u8>> {
+        let mut records = std::collections::VecDeque::new();
+        records.push_back(
+            format!(
+                "$date\n  {}\n$end\n",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            )
+            .into_bytes(),
+        );
+        records.push_back(b"$version\n  celox\n$end\n".to_vec());
         let (magnitude, unit) = self.time_precision.vcd_timescale();
-        writeln!(self.output.encoded, "$timescale {magnitude}{unit} $end")?;
-
+        records.push_back(format!("$timescale {magnitude}{unit} $end\n").into_bytes());
         let mut scope_order = Vec::<String>::new();
         let mut scope_groups = Vec::<Vec<usize>>::new();
         let mut scope_idx = fxhash::FxHashMap::<String, usize>::default();
@@ -359,23 +474,42 @@ impl<W: Write> VcdWriter<W> {
         }
         let mut next_id = 0;
         for (scope, group) in scope_order.iter().zip(scope_groups) {
-            writeln!(self.output.encoded, "$scope module {} $end", scope)?;
+            records.push_back(format!("$scope module {scope} $end\n").into_bytes());
             for signal_index in group {
                 let signal = &mut self.headers[signal_index];
                 let id = Self::generate_vcd_id(next_id);
                 *self.plan.suffix(signal_index) = VcdRecordSuffix::new(signal.width, &id);
                 next_id += 1;
-                writeln!(
-                    self.output.encoded,
-                    "$var wire {} {} {} $end",
-                    signal.width, id, signal.name
-                )?;
+                records.push_back(
+                    format!("$var wire {} {} {} $end\n", signal.width, id, signal.name)
+                        .into_bytes(),
+                );
             }
-            writeln!(self.output.encoded, "$upscope $end")?;
+            records.push_back(b"$upscope $end\n".to_vec());
         }
-        writeln!(self.output.encoded, "$enddefinitions $end")?;
-        writeln!(self.output.encoded, "$dumpvars")?;
-        writeln!(self.output.encoded, "$end")?;
+        records.push_back(b"$enddefinitions $end\n".to_vec());
+        records.push_back(b"$dumpvars\n$end\n".to_vec());
+        records
+    }
+
+    #[cold]
+    fn write_header(&mut self) -> std::io::Result<bool> {
+        if self.header_records.is_none() {
+            self.header_records = Some(self.prepare_header());
+        }
+        while self
+            .header_records
+            .as_ref()
+            .is_some_and(|records| !records.is_empty())
+        {
+            if self.limit_reached() {
+                return Ok(false);
+            }
+            let record = self.header_records.as_mut().unwrap().pop_front().unwrap();
+            self.output.encoded.extend_from_slice(&record);
+            self.output.write_encoded()?;
+        }
+        self.header_records = None;
         let record_capacity = self
             .headers
             .iter()
@@ -402,7 +536,7 @@ impl<W: Write> VcdWriter<W> {
             // A large header must not permanently enlarge the value buffer.
             self.output.encoded.shrink_to(capacity);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn generate_vcd_id(num: usize) -> String {
@@ -457,27 +591,12 @@ impl<W: Write> VcdWriter<W> {
         activity: Option<&[usize]>,
     ) -> std::io::Result<()> {
         self.validate_external_count(external.len())?;
-        if self.header_written && timestamp < self.timestamp {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "VCD timestamp {timestamp} is earlier than the last dumped timestamp {}; \
-                     start a new file to record a rewound simulation",
-                    self.timestamp
-                ),
-            ));
+        if self.suspended || self.limit_reached() {
+            return Ok(());
         }
-        // Finish the previous attempt before starting a new timestamp or
-        // consulting caches that include its queued value records.
-        self.output.write_encoded()?;
         let first_dump = !self.initial_values_written;
-        if !self.header_written {
-            self.write_header()?;
-        }
-        if timestamp > self.timestamp || timestamp == 0 {
-            writeln!(self.output.encoded, "#{}", timestamp)?;
-            self.timestamp = timestamp;
-            self.output.write_encoded()?;
+        if !self.begin_timestamp(timestamp)? {
+            return Ok(());
         }
         self.selected.clear();
         // Dense activity is cheaper to walk directly in registration order.
@@ -510,11 +629,26 @@ impl<W: Write> VcdWriter<W> {
                 &mut self.output,
             )?;
         }
+        self.output.note_limit();
         Ok(())
     }
 }
 
 impl<W: Write> VcdOutput<W> {
+    #[inline]
+    fn limit_reached(&self) -> bool {
+        self.byte_limit
+            .is_some_and(|limit| self.accepted_bytes + self.encoded.len() as u64 >= limit)
+    }
+
+    fn note_limit(&mut self) {
+        if self.limit_reached() && !self.limit_comment_written {
+            self.encoded
+                .extend_from_slice(b"$comment VCD dump limit reached $end\n");
+            self.limit_comment_written = true;
+        }
+    }
+
     // Keep suffix publication with the value encoder so SIMD constants and
     // output state can stay in registers between records.
     #[inline(always)]
@@ -548,6 +682,7 @@ impl<W: Write> VcdOutput<W> {
                 self.stats.changes += self.encoded_changes;
                 self.stats.value_bytes += self.encoded.len() as u64;
             }
+            self.accepted_bytes += self.encoded.len() as u64;
             self.encoded.clear();
             self.written = 0;
             self.encoded_changes = 0;
@@ -735,6 +870,211 @@ const BINARY: [[u8; 8]; 256] = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_checkpoints_preserve_on_off_state_when_recording_resumes() {
+        for command in ["dumpoff", "dumpon"] {
+            let descs = [VcdSignalDesc {
+                scope: "Top".into(),
+                name: "value".into(),
+                offset: 0,
+                width: 1,
+                is_4state: false,
+            }];
+            let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+            writer.dump(0, &[0]).unwrap();
+            if command == "dumpon" {
+                writer.checkpoint("dumpoff", 1, &[0], &[]).unwrap();
+            }
+            writer.set_byte_limit(1);
+            writer.checkpoint(command, 2, &[1], &[]).unwrap();
+            writer.set_byte_limit(0);
+            writer.dump(3, &[1]).unwrap();
+            let output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+            assert_eq!(
+                output.contains("#3\n1"),
+                command == "dumpon",
+                "{command}: {output}"
+            );
+            if command == "dumpoff" {
+                assert!(
+                    !output.contains("#3"),
+                    "off under the limit must remain suspended: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn byte_limit_pauses_header_at_command_boundaries_and_resumes_once() {
+        let descs = (0..100)
+            .map(|index| VcdSignalDesc {
+                scope: "Top".into(),
+                name: format!("signal_{index}"),
+                offset: index,
+                width: 1,
+                is_4state: false,
+            })
+            .collect::<Vec<_>>();
+        let mut reference = VcdWriter::from_writer(Vec::new(), &descs);
+        let records = reference.prepare_header();
+        let max_record = records.iter().map(Vec::len).max().unwrap();
+        let header_size = records.iter().map(Vec::len).sum::<usize>();
+        let mut boundary = 0;
+        let mut limits = vec![1];
+        for record in &records {
+            boundary += record.len();
+            limits.extend([boundary.saturating_sub(1), boundary]);
+        }
+        for limit in limits {
+            let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+            writer.set_byte_limit(limit as u64);
+            writer.dump(0, &[0; 100]).unwrap();
+            writer.flush().unwrap();
+            let paused = String::from_utf8(writer.get_ref().clone()).unwrap();
+            assert!(
+                paused.len() <= limit + max_record + 36,
+                "{limit}/{header_size}: {paused}"
+            );
+            assert!(
+                paused.contains("VCD dump limit reached"),
+                "{limit}: {paused}"
+            );
+            assert!(!paused.contains("#0"), "{limit}: {paused}");
+            assert_eq!(writer.statistics().changes, 0);
+            writer.set_byte_limit(0);
+            writer.dump(5, &[1; 100]).unwrap();
+            let output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+            assert_eq!(output.matches("$date\n").count(), 1, "{limit}: {output}");
+            assert_eq!(
+                output.matches("$var wire ").count(),
+                100,
+                "{limit}: {output}"
+            );
+            assert_eq!(
+                output.matches("$enddefinitions $end").count(),
+                1,
+                "{limit}: {output}"
+            );
+            let (_, values) = output.split_once("#5\n").unwrap();
+            assert_eq!(
+                values.lines().filter(|line| line.starts_with('1')).count(),
+                100,
+                "{limit}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_limit_keeps_checkpoint_suspension_and_external_registration() {
+        let descs = [VcdSignalDesc {
+            scope: "Top".into(),
+            name: "state".into(),
+            offset: 0,
+            width: 1,
+            is_4state: false,
+        }];
+        let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+        writer.set_byte_limit(1);
+        writer.dump(0, &[0]).unwrap();
+        assert!(
+            writer
+                .add_external_signals(&[VcdExternalSignalDesc {
+                    scope: "Top".into(),
+                    name: "late".into(),
+                    width: 1
+                }])
+                .is_err()
+        );
+        writer.checkpoint("dumpoff", 1, &[1], &[]).unwrap();
+        writer.set_byte_limit(0);
+        writer.dump(2, &[1]).unwrap();
+        writer.checkpoint("dumpon", 3, &[1], &[]).unwrap();
+        let output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+        assert!(!output.contains("#2"), "{output}");
+        assert!(output.contains("#3\n$dumpon\n1!\n$end"), "{output}");
+    }
+
+    #[test]
+    fn byte_limit_stops_initial_changes_and_checkpoint_at_one_record() {
+        for width in [1usize, 4, 64] {
+            let bytes = width.div_ceil(8);
+            let descs = (0..100)
+                .map(|i| VcdSignalDesc {
+                    scope: "Top".into(),
+                    name: format!("s{i}"),
+                    offset: i * bytes,
+                    width,
+                    is_4state: false,
+                })
+                .collect::<Vec<_>>();
+            for command in ["initial", "changes", "dumpall", "dumpoff", "dumpon"] {
+                let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+                let mut memory = vec![0u8; bytes * descs.len()];
+                writer.write_header().unwrap();
+                if command != "initial" {
+                    writer.dump(0, &memory).unwrap();
+                }
+                let before = writer.statistics().changes;
+                writer.output.write_encoded().unwrap();
+                // Leave room for the timestamp/command and one record, but not
+                // for the complete hundred-signal snapshot or checkpoint.
+                let allowance = if command.starts_with("dump") { 22 } else { 6 };
+                let limit = writer.output.accepted_bytes + allowance;
+                writer.set_byte_limit(limit);
+                memory.fill(255);
+                if command.starts_with("dump") {
+                    writer.checkpoint(command, 1, &memory, &[]).unwrap();
+                } else {
+                    writer.dump(1, &memory).unwrap();
+                }
+                writer.flush().unwrap();
+                let records = writer.statistics().changes - before;
+                assert!(
+                    records < 10,
+                    "{command}/{width}: emitted {records} records past a small limit"
+                );
+                let output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+                assert!(
+                    output.contains("VCD dump limit reached"),
+                    "{command}/{width}: {output}"
+                );
+                let max_record = width.max(1) as u64 + 5;
+                assert!(
+                    output.len() as u64 <= limit + max_record + 5 + 36,
+                    "{command}/{width}: {} exceeds bound {limit}",
+                    output.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn system_task_checkpoints_and_limit() {
+        let descs = [VcdSignalDesc {
+            scope: "Top".into(),
+            name: "value".into(),
+            offset: 0,
+            width: 4,
+            is_4state: true,
+        }];
+        let mut writer = VcdWriter::from_writer(Vec::new(), &descs);
+        writer.dump(0, &[0b1011, 0b0011]).unwrap();
+        writer.checkpoint("dumpoff", 1, &[15, 0], &[]).unwrap();
+        writer.dump(2, &[0, 0]).unwrap();
+        writer.checkpoint("dumpon", 3, &[15, 0], &[]).unwrap();
+        writer.checkpoint("dumpall", 4, &[15, 0], &[]).unwrap();
+        writer.set_byte_limit(1);
+        writer.dump(5, &[0, 0]).unwrap();
+        let output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+        assert!(output.contains("b10xx "));
+        assert!(output.contains("$dumpoff\nbxxxx "));
+        assert!(!output.contains("#2"));
+        assert!(output.contains("$dumpon\nb1111 "));
+        assert!(output.contains("$dumpall\nb1111 "));
+        assert!(!output.contains("#5"));
+        assert!(output.contains("VCD dump limit reached"));
+    }
 
     #[test]
     fn headers_encode_supported_time_precisions() {

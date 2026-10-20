@@ -931,7 +931,8 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         | SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Printtimescale
-        | SystemTask::Exit => return None,
+        | SystemTask::Exit
+        | SystemTask::Vcd(_) => return None,
     })
 }
 
