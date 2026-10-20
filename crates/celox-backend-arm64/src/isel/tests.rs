@@ -1,4 +1,5 @@
 mod partial_load;
+mod reductions;
 mod shifts;
 mod slice;
 mod strided;
