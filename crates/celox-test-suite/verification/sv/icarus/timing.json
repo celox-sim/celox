@@ -541,6 +541,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 shares an unpacked local array across overlapping calls of an automatic task, including with an explicit automatic declaration. IEEE 1800-2023 13.3.1 and 13.3.2 require separate storage for each activation. The first call returns 31 instead of 11 after the second call overwrites its array; scalar task locals remain independent.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_timed_task_arrays_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_automatic_task_arrays",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 shares an unpacked local array across overlapping calls of an automatic task, including with an explicit automatic declaration. IEEE 1800-2023 13.3.1 and 13.3.2 require separate storage for each activation. The first call returns 31 instead of 11 after the second call overwrites its array; scalar task locals remain independent.",
+        "upstream": []
+      },
+      "name": "timing::timed_task_automatic_calls_keep_separate_storage",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::unknown_delays_and_conditions_count_as_zero_and_false",

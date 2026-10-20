@@ -990,6 +990,11 @@ impl Renamer<'_> {
     pub fn subroutine(&self, subroutine: Subroutine) -> Subroutine {
         Subroutine {
             name: self.name(&subroutine.name),
+            automatic_locals: subroutine
+                .automatic_locals
+                .into_iter()
+                .map(|name| self.name(&name))
+                .collect(),
             params: subroutine
                 .params
                 .into_iter()

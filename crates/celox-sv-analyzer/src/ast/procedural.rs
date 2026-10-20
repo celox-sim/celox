@@ -10,6 +10,7 @@ use super::*;
 mod assertions;
 mod control;
 mod foreach;
+pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
     CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
@@ -60,6 +61,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    task_timing: bool,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
@@ -119,6 +121,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let automatic = state.automatic;
         Self {
             automatic,
+            task_timing: false,
             sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
@@ -567,8 +570,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     /// Timing controls suspend the process that executes them: an
     /// `initial` or `always` process. An `always_comb` or `always_ff` body
-    /// and a function may not suspend; subroutines with timing controls are
-    /// not lowered yet.
+    /// and a function may not suspend. A task suspends its caller.
     fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
         match self.body {
             system_functions::Body::Initial => Ok(()),
@@ -576,6 +578,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 construct,
                 context: "an always_comb or always_ff body",
             }),
+            system_functions::Body::Subroutine if self.task_timing => Ok(()),
             system_functions::Body::Subroutine => {
                 Err(unsupported(format!("{construct} in a subroutine")))
             }
@@ -1318,6 +1321,8 @@ pub(super) fn lower_subroutine(
         state,
         system_functions::Body::Subroutine,
     );
+    builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
+    let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
         Some("automatic") => true,
         Some("static") => false,
@@ -1364,6 +1369,7 @@ pub(super) fn lower_subroutine(
     let return_var = return_type
         .as_ref()
         .map(|r#type| builder.declare(&name, r#type.clone()));
+    let parameter_locals_end = builder.state.locals.len();
     let body = builder.native_body(&native.items, &native.authored_statements)?;
     builder.pop_scope();
     let statics: HashSet<String> = builder
@@ -1385,6 +1391,18 @@ pub(super) fn lower_subroutine(
     let mut subroutine = Subroutine {
         name: item.name(&name),
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
+        automatic_locals: builder.state.locals[first_local..]
+            .iter()
+            .enumerate()
+            .filter(|(index, local)| {
+                if first_local + index < parameter_locals_end {
+                    builder.automatic
+                } else {
+                    !statics.contains(&local.name)
+                }
+            })
+            .map(|(_, local)| local.name.clone())
+            .collect(),
         return_type: return_type.map(|r#type| {
             crate::ir::Type::from_ast(
                 scoped_type(r#type, declaration_env),

@@ -40,7 +40,26 @@ synthesis and is tested at the design level.
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
-| Functions | `function` and `task` (without timing) with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
+| Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
+
+### Timed task calls
+
+An `initial` or ordinary `always` process can call tasks containing `#delay`,
+`@(event)` and `wait (condition)`, including through nested tasks. Calls are
+inlined into the caller's resumable state machine. A normal edge-sensitive
+`always` that calls a timed task waits for that task to return before rearming
+its event control. Functions, `always_comb`, `always @*` and `always_ff` cannot
+call a timed task.
+
+Automatic task arguments and locals have separate storage for each activation
+and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
+are copied in at entry; outputs and inouts are copied back when the task returns
+(IEEE 1800-2023 13.3–13.3.2). Timed tasks with static local declarations remain
+unsupported; use automatic locals. Package and `$unit` timed tasks with static
+arguments, and `wait` conditions reading static task arguments, are rejected
+until shared argument storage and its change notifications are supported.
+Event expressions have the same restrictions
+as waits written directly in a process.
 
 ### Built-in functions and tasks
 
@@ -62,13 +81,11 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Classes, and tasks with timing controls.
-- Behavioral and verification constructs: `initial` blocks that use timing,
-  nonblocking assignments in an `initial` block that runs as a process, `final`, delays and delayed continuous assignments
-  ([#444](https://github.com/celox-sim/celox/issues/444)), event controls other than clock edges, concurrent assertions,
-  `force` / `release`.
-- `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)), level-sensitive sensitivity lists other than `@*`,
-  and incomplete combinational assignments that would infer a latch.
+- Classes. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Behavioral and verification constructs: `final`, intra-assignment timing controls,
+  delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
+  named events, `fork` / `join`, concurrent assertions, `force` / `release`.
+- `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)) and incomplete combinational assignments that would infer a latch.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
