@@ -1,0 +1,9 @@
+Revision history for #1628:
+
+rev 3 (content) 2026-10-20 21:57 UTC — Follow the rebased and reviewed latch implementation while preserving common diagnostic policy bindings.  Follow the reviewed latch core, document the verified sensitivity distinctions and record fresh native/WASI validation.
+rev 2 (rebase) 2026-10-20 16:46 UTC
+rev 1 (initial) 2026-10-20 16:46 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1628,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7fb0c211f37570d585ee1241854bc8293ce3ce26","timestamp_iso":"2026-10-20T16:46:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"7fb0c211f37570d585ee1241854bc8293ce3ce26","new_sha":"1d108d2f6d4badd6dcb60e7a71e3ffd5a83690bd","timestamp_iso":"2026-10-20T16:46:58Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7fb0c211f37570d585ee1241854bc8293ce3ce26...1d108d2f6d4badd6dcb60e7a71e3ffd5a83690bd"},{"number":3,"change_type":"content","old_sha":"1d108d2f6d4badd6dcb60e7a71e3ffd5a83690bd","new_sha":"691ec1a35b483f3eba49d5854df2ac5dc6d67cd3","timestamp_iso":"2026-10-20T21:57:54Z","reason":"Follow the rebased and reviewed latch implementation while preserving common diagnostic policy bindings.\n\nFollow the reviewed latch core, document the verified sensitivity distinctions and record fresh native/WASI validation.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1d108d2f6d4badd6dcb60e7a71e3ffd5a83690bd...691ec1a35b483f3eba49d5854df2ac5dc6d67cd3"}]} -->
+
+Rebase bindings on the latch implementation after the latest master conflict resolution.
