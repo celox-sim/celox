@@ -103,9 +103,41 @@ impl ParsedSource {
             .map(|source| (source.tree.as_ref(), source.path.as_path()))
             .collect();
         let mut warnings = Vec::new();
+        for source in sources {
+            ast::warnings::append(&mut warnings, ast::warnings::packages(&source.tree));
+        }
         let packages = (|| {
+            // Module and interface names share a namespace regardless of
+            // whether interface ports require a full binding plan. Inspect
+            // declarations only, so unrelated interface bodies stay selective.
+            let mut design_units = HashMap::default();
+            for source in sources {
+                for handle in source.tree.root_scopes()? {
+                    let Some(unit) = handle.unit(source.tree.declarations()) else {
+                        continue;
+                    };
+                    if !matches!(
+                        unit.kind,
+                        celox_sv_syntax::UnitKind::Module | celox_sv_syntax::UnitKind::Interface
+                    ) {
+                        continue;
+                    }
+                    let name = ast::normalize_identifier(&unit.name.spelling);
+                    if let Some(previous) = design_units.insert(name.clone(), unit.kind)
+                        && previous != unit.kind
+                    {
+                        return Err(AnalyzerError::DuplicateModule { name });
+                    }
+                }
+            }
             let mut packages =
                 Packages::analyze_with_options(&trees, roots, options.allow_mixed_timescales)?;
+            packages.interface_names = design_units
+                .into_iter()
+                .filter_map(|(name, kind)| {
+                    (kind == celox_sv_syntax::UnitKind::Interface).then_some(name)
+                })
+                .collect();
             ast::warnings::append(&mut warnings, packages.warnings().iter().cloned());
             for source in sources {
                 for handle in source.tree.root_scopes()? {
@@ -185,6 +217,7 @@ impl ParsedSource {
         overrides: &HashMap<String, ir::ConstExpr>,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
+        self.validate_module_namespace(module_name, packages)?;
         let overrides = overrides
             .iter()
             .map(|(name, value)| (name.clone(), value.clone().into()))
@@ -218,6 +251,26 @@ impl ParsedSource {
         self.analyze_module_with_packages(module_name, overrides, &[], &[], interfaces, &packages)
     }
 
+    fn validate_module_namespace(
+        &self,
+        module_name: &str,
+        packages: &Packages,
+    ) -> Result<(), AnalyzerError> {
+        let name = ast::normalize_identifier(module_name);
+        if packages.interface_names.contains(&name)
+            && self
+                .index
+                .names()
+                .iter()
+                .any(|module| ast::normalize_identifier(module) == name)
+        {
+            return Err(
+                AnalyzerError::DuplicateModule { name }.with_warnings(packages.warnings().to_vec())
+            );
+        }
+        Ok(())
+    }
+
     fn analyze_module_with_packages(
         &self,
         module_name: &str,
@@ -238,6 +291,7 @@ impl ParsedSource {
             .map_or(module_name, |plan| plan.original.as_str());
         let warnings = self.warnings.get(original).cloned().unwrap_or_default();
         let ir = (|| {
+            self.validate_module_namespace(original, packages)?;
             let source = ast::Source::from_indexed_syntax_module(
                 &self.tree,
                 &self.path,
@@ -1202,5 +1256,109 @@ mod declaration_tests {
             Some(8)
         );
         assert!(module.initial_processes().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shared_namespace_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_module_interface_name_collisions_without_interface_ports() {
+        for (first, second) in [
+            ("interface I; endinterface", "module I; endmodule"),
+            ("module I; endmodule", "interface I; endinterface"),
+            (
+                "interface I; endinterface",
+                "module I(y); output y; endmodule",
+            ),
+        ] {
+            for split in [false, true] {
+                let text = format!(
+                    "{first} {} module Top; I i(); endmodule",
+                    if split { "" } else { second }
+                );
+                let a = ParsedSource::parse(&text, Path::new("namespace-a.sv")).unwrap();
+                let b = ParsedSource::parse(second, Path::new("namespace-b.sv")).unwrap();
+                let sources = if split { vec![&a, &b] } else { vec![&a] };
+                assert!(
+                    matches!(ParsedSource::analyze_packages(&sources),
+                    Err(AnalyzerError::DuplicateModule { name }) if name == "I"),
+                    "accepted conflicting design-unit names: {first}; {second}; split={split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn namespace_collision_preserves_package_warnings() {
+        for function in [
+            "package P; function int f(); $exit; return 0; endfunction endpackage",
+            "function int f(); $exit; return 0; endfunction",
+        ] {
+            let source = ParsedSource::parse(
+                &format!("{function} interface I; endinterface module I; endmodule"),
+                Path::new("namespace-warnings.sv"),
+            )
+            .unwrap();
+            let error = ParsedSource::analyze_packages(&[&source]).unwrap_err();
+            assert!(error.to_string().contains("I"));
+            assert_eq!(error.warnings().len(), 1, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_module_collision_with_prebuilt_interface_packages() {
+        for interface in [
+            "interface I; endinterface",
+            "interface I(a); input a; endinterface",
+        ] {
+            let source = ParsedSource::parse(interface, Path::new("interface.sv")).unwrap();
+            let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+            for module in ["module I; endmodule", "module I(y); output y; endmodule"] {
+                let error = crate::analyze_source_module_with_packages(
+                    module,
+                    Path::new("module.sv"),
+                    "I",
+                    &HashMap::default(),
+                    &packages,
+                )
+                .unwrap_err();
+                assert!(matches!(error, AnalyzerError::DuplicateModule { name } if name == "I"));
+                let parsed = ParsedSource::parse(module, Path::new("module.sv")).unwrap();
+                assert!(
+                    matches!(parsed.analyze_module_declarations("I", &HashMap::default(), &packages),
+                Err(AnalyzerError::DuplicateModule { name }) if name == "I")
+                );
+            }
+            // Namespace metadata must not eagerly analyze the non-ANSI body.
+            crate::analyze_source_module_with_packages(
+                "module Top; endmodule",
+                Path::new("top.sv"),
+                "Top",
+                &HashMap::default(),
+                &packages,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn namespace_validation_does_not_analyze_unused_interface_semantics() {
+        let source = ParsedSource::parse(
+            "interface Unused; real unsupported_value; endinterface module Top(output logic y); assign y = 1; endmodule",
+            Path::new("unused-interface.sv"),
+        ).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&source]).unwrap();
+        source
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap();
     }
 }
