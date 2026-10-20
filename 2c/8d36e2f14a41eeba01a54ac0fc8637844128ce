@@ -1,1 +1,1 @@
-Keep stdout runtime events deferred and bounded, and register converted FF waiters before time-zero host edges
+Document deferred bounded output, time-zero startup, and public ProcessRefs field
