@@ -25,7 +25,21 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         let mut top_level_ports = Vec::new();
 
         for (var_path, var_id) in &module.ports {
-            if let Some((r#type, _clock)) = module.port_types.get(var_path) {
+            if let Some(r#type) = module
+                .port_types
+                .get(var_path)
+                .map(|(ty, _)| ty)
+                .or_else(|| {
+                    // Member types live on the flattened variable; port_types
+                    // retains the authored modport at the root path.
+                    (var_path.0.len() == 2
+                        && module
+                            .port_types
+                            .contains_key(&VarPath(vec![var_path.0[0]])))
+                    .then(|| module.variables.get(var_id).map(|var| &var.r#type))
+                    .flatten()
+                })
+            {
                 if var_path.0.len() > 1 {
                     let interface_name = var_path.0[0].to_string();
                     interface_map
@@ -96,17 +110,16 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
             let getter_name = format_ident!("get_{}", name);
 
             if array_dims > 0 {
+                let update =
+                    array_element_update(quote! { self.#port_ident }, element_width, total_array);
+                let io_update = array_element_update(
+                    quote! { self.ids.#port_ident },
+                    element_width,
+                    total_array,
+                );
                 methods.extend(quote! {
                     pub fn #setter_name(&self, sim: &mut celox::Simulator, index: usize, val: #rust_type) {
-                        let mut val_full = sim.get(self.#port_ident);
-                        let element_width = #element_width;
-                        let bit_offset = index * element_width;
-
-                        let mask = ((celox::BigUint::from(1u32) << element_width) - 1u32) << bit_offset;
-
-                        val_full = (val_full.clone() ^ (val_full & &mask)) | (celox::BigUint::from(val) << bit_offset);
-
-                        sim.modify(|io| io.set_wide(self.#port_ident, val_full)).unwrap();
+                        sim.modify(|io| { #update }).unwrap();
                     }
                     pub fn #getter_name(&self, sim: &mut celox::Simulator, index: usize) -> #rust_type {
                         let val_full = sim.get(self.#port_ident);
@@ -122,8 +135,9 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                     pub fn #getter_name(&mut self, index: usize) -> #rust_type { self.ids.#getter_name(self.sim, index) }
                 });
                 io_methods.extend(quote! {
-                    pub fn #setter_name(&mut self, _index: usize, _val: #rust_type) {
-                        // TODO: IO setter for arrays
+                    pub fn #setter_name(&mut self, index: usize, val: #rust_type) {
+                        let io = &mut *self.io;
+                        #io_update
                     }
                 });
             } else {
@@ -195,7 +209,8 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
 
         for (if_name, mut if_ports) in interfaces {
             if_ports.sort_by_key(|(_, var_id, _)| *var_id);
-            let if_struct_name = format_ident!("{}", if_name);
+            // Several modules in one project can use the same modport name.
+            let if_struct_name = format_ident!("{}Interface{}", struct_name, if_name);
             let if_bound_name = format_ident!("{}Bound", if_struct_name);
             let if_io_name = format_ident!("{}IO", if_struct_name);
 
@@ -214,7 +229,13 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                 }
 
                 if_fields.extend(quote! { pub #member_ident: celox::SignalRef, });
-                if_init.extend(quote! { #member_ident: sim.signal(#member_name), });
+                let signal_name = format!("{if_name}.{member_name}");
+                if_init.extend(quote! {
+                    #member_ident: sim.named_signals().into_iter()
+                        .find(|signal| signal.name == #signal_name)
+                        .unwrap_or_else(|| panic!("cannot resolve interface signal: {}", #signal_name))
+                        .signal,
+                });
 
                 let element_width = r#type.total_width().unwrap_or(1);
                 let array_dims = r#type.array.dims();
@@ -240,14 +261,19 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                 let getter_name = format_ident!("get_{}", member_name);
 
                 if array_dims > 0 {
+                    let update = array_element_update(
+                        quote! { self.#member_ident },
+                        element_width,
+                        total_array,
+                    );
+                    let io_update = array_element_update(
+                        quote! { self.ids.#member_ident },
+                        element_width,
+                        total_array,
+                    );
                     if_methods.extend(quote! {
                         pub fn #setter_name(&self, sim: &mut celox::Simulator, index: usize, val: #rust_type) {
-                            let mut val_full = sim.get(self.#member_ident);
-                            let element_width = #element_width;
-                            let bit_offset = index * element_width;
-                            let mask = ((celox::BigUint::from(1u32) << element_width) - 1u32) << bit_offset;
-                            val_full = (val_full & !mask) | (celox::BigUint::from(val) << bit_offset);
-                            sim.modify(|io| io.set_wide(self.#member_ident, val_full)).unwrap();
+                            sim.modify(|io| { #update }).unwrap();
                         }
                         pub fn #getter_name(&self, sim: &mut celox::Simulator, index: usize) -> #rust_type {
                             let val_full = sim.get(self.#member_ident);
@@ -263,7 +289,10 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                         pub fn #getter_name(&mut self, index: usize) -> #rust_type { self.ids.#getter_name(self.sim, index) }
                     });
                     if_io_methods.extend(quote! {
-                        pub fn #setter_name(&mut self, _index: usize, _val: #rust_type) { }
+                        pub fn #setter_name(&mut self, index: usize, val: #rust_type) {
+                            let io = &mut *self.io;
+                            #io_update
+                        }
                     });
                 } else {
                     let setter_body = if width <= 128 {
@@ -329,6 +358,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
             }
 
             extra_structs.extend(quote! {
+                #[derive(Clone)]
                 pub struct #if_struct_name { #if_fields }
                 impl #if_struct_name { #if_methods }
                 pub struct #if_bound_name<'a> { sim: &'a mut celox::Simulator, ids: &'a #if_struct_name }
@@ -344,7 +374,7 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
                 quote! { pub fn #if_ident(&self) -> #if_struct_name { self.#if_ident.clone() } },
             );
             bound_methods.extend(quote! { pub fn #if_ident<'b>(&'b mut self) -> #if_bound_name<'b> { #if_bound_name { sim: self.sim, ids: &self.ids.#if_ident } } });
-            io_methods.extend(quote! { pub fn #if_ident<'c>(&'c mut self) -> #if_io_name<'c, '_> { #if_io_name { io: self.io, ids: &self.ids.#if_ident } } });
+            io_methods.extend(quote! { pub fn #if_ident<'c>(&'c mut self) -> #if_io_name<'c, 'b> { #if_io_name { io: self.io, ids: &self.ids.#if_ident } } });
         }
 
         let tick_body_main = if let Some(clk) = &clk_ident {
@@ -414,6 +444,27 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
     }
 
     all_expanded
+}
+
+/// Update just the selected element in the current, possibly already modified,
+/// backing image. Bits and unknown masks of neighboring elements stay intact.
+fn array_element_update(
+    signal: proc_macro2::TokenStream,
+    element_width: usize,
+    total_array: usize,
+) -> proc_macro2::TokenStream {
+    quote! {
+        assert!(index < #total_array, "array index {} out of bounds for {} elements", index, #total_array);
+        let signal = #signal;
+        let (payload, xmask) = io.get_four_state(signal);
+        let bit_offset = index * #element_width;
+        let element_mask = (celox::BigUint::from(1u32) << #element_width) - 1u32;
+        let mask = &element_mask << bit_offset;
+        let payload = (&payload ^ (&payload & &mask))
+            | ((celox::BigUint::from(val) & element_mask) << bit_offset);
+        let xmask = &xmask ^ (&xmask & &mask);
+        io.set_four_state(signal, payload, xmask);
+    }
 }
 
 #[cfg(test)]
