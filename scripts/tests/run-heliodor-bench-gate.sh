@@ -24,6 +24,11 @@ assert_eq() {
         || fail "$context: expected <$expected>, got <$actual>"
 }
 
+# Many-core hosts must stay within the CLI range, including the fixed gate.
+assert_eq "$(nproc() { echo 192; }; default_celox_threads)" 64 "cap derived thread count"
+assert_eq "$(nproc() { echo 8; }; default_celox_threads)" 8 "preserve ordinary host parallelism"
+assert_eq "$(nproc() { echo 1; }; default_celox_threads)" 2 "gate keeps parallel execution"
+
 write_valid_gate_logs() {
     local directory="$1"
     local veryl_compile="${2:-30}"
@@ -339,7 +344,7 @@ chmod +x "$mock_cargo_dir/cargo"
     export PATH="$mock_cargo_dir:$PATH"
     export CARGO_ARGS_LOG="$TMP/cargo-args"
     export CARGO_ENV_LOG="$TMP/cargo-env"
-    export MOCK_CARGO_RUNNER="$TMP/fixed-gate-target/release/celox-heliodor"
+    export MOCK_CARGO_RUNNER="$TMP/fixed-gate-target/release/celox"
     export CARGO_TARGET_DIR="$TMP/hostile-cargo-target"
     export CARGO_BUILD_TARGET=hostile-target-triple
     HELIODOR_RESULTS_DIR="$TMP/mock-build-results"
@@ -347,7 +352,7 @@ chmod +x "$mock_cargo_dir/cargo"
     export HELIODOR_CELOX_CARGO_FEATURES=
     HELIODOR_CELOX_TARGET_DIR="$TMP/fixed-gate-target"
     HELIODOR_CELOX_CARGO_PROFILE=release
-    CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/celox-heliodor"
+    CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/celox"
     build_celox_runner >/dev/null
 )
 target_arg_line="$(grep -n -x -- '--target-dir' "$TMP/cargo-args" | cut -d: -f1)"
@@ -358,8 +363,8 @@ grep -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
 if grep -qx -- '--features' "$TMP/cargo-args"; then
     fail "default Celox build unexpectedly passed --features"
 fi
-grep -qx -- 'celox-bench' "$TMP/cargo-args" || fail "Celox build did not select celox-bench"
-grep -qx -- 'celox-heliodor' "$TMP/cargo-args" || fail "Celox build did not select celox-heliodor"
+grep -qx -- 'celox-vpi' "$TMP/cargo-args" || fail "Celox build did not select celox-vpi"
+grep -qx -- 'celox' "$TMP/cargo-args" || fail "Celox build did not select celox"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"
 assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutralization"
 
@@ -518,11 +523,11 @@ build_celox_runner() {
         "$HELIODOR_RESULTS_DIR/celox-target" \
         "fresh invocation-owned gate Cargo target directory"
     assert_eq "$CELOX_RUNNER_BIN" \
-        "$HELIODOR_CELOX_TARGET_DIR/release/celox-heliodor" \
+        "$HELIODOR_CELOX_TARGET_DIR/release/celox" \
         "gate executes the just-built target-dir artifact"
     [[ ! -e "$HELIODOR_CELOX_TARGET_DIR" ]] \
         || fail "gate Cargo target directory was not fresh"
-    [[ "$CELOX_RUNNER_BIN" != "$CELOX_ROOT/target/release/celox-heliodor" ]] \
+    [[ "$CELOX_RUNNER_BIN" != "$CELOX_ROOT/target/release/celox" ]] \
         || fail "gate selected a stale default-target runner"
     mkdir -p "$(dirname "$CELOX_RUNNER_BIN")"
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$CELOX_RUNNER_BIN"
@@ -660,8 +665,8 @@ run_gate_fixture() {
     mkdir -p "$CELOX_ROOT"
     mkdir -p "$CELOX_ROOT/target/release"
     printf '%s\n' '#!/bin/sh' 'echo stale runner; exit 9' \
-        >"$CELOX_ROOT/target/release/celox-heliodor"
-    chmod +x "$CELOX_ROOT/target/release/celox-heliodor"
+        >"$CELOX_ROOT/target/release/celox"
+    chmod +x "$CELOX_ROOT/target/release/celox"
     HELIODOR_DIR="$TMP/hostile-heliodor"
     HELIODOR_RESULTS_DIR="$TMP/hostile-results"
     HELIODOR_TOOLS_DIR="$TMP/hostile-tools"
@@ -688,7 +693,10 @@ run_gate_fixture() {
     assert_eq "$MOCK_RUNNERS" "veryl-cc-sync celox celox-tiered veryl-cc-tiered" "$name runner order"
 }
 
+# The fixed gate must ignore an inherited sequential override.
+HELIODOR_CELOX_THREADS=1
 run_gate_fixture success 1
+assert_eq "$HELIODOR_CELOX_THREADS" "$(default_celox_threads)" "gate resets inherited threads"
 assert_eq "$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv | wc -l)" 1 \
     "one isolated result file"
 success_results="$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv)"

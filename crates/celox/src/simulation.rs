@@ -58,7 +58,7 @@ impl<B: SimBackend> std::fmt::Debug for SimulationCheckpoint<B> {
 ///
 /// The default type parameter uses the host's [`crate::DefaultBackend`].
 /// The builder also offers `build_native`, `build_cranelift`, `build_wasm`,
-/// and `build_interpreter`; thread and partition options apply to timed builds.
+/// `build_interpreter`, and `build_tiered`; thread and partition options apply to timed builds.
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,
@@ -770,10 +770,7 @@ mod process_tests {
                 .unwrap(),
             steps as u64,
         );
-        check(
-            Simulation::new(builder(four_state, steps).build_tiered().unwrap()),
-            steps as u64,
-        );
+        check(timed().build_tiered().unwrap(), steps as u64);
         #[cfg(any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -805,6 +802,62 @@ mod process_tests {
                 ),
                 steps as u64,
             );
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn timed_tiered_promotion_preserves_suspended_processes_and_nba() {
+        let source = r#"
+            `timescale 1fs/1fs
+            module Top(output logic [7:0] count);
+                logic clk = 0;
+                initial count = 0;
+                always #5 clk = ~clk;
+                always @(posedge clk) count <= count + 1;
+                initial begin #36; $finish; end
+            endmodule
+        "#;
+        for four_state in [false, true] {
+            for threads in [1, 4] {
+                let mut sim = Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("tiered.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .threads(threads)
+                .parallel_partition(crate::ParallelPartition::Always)
+                .tier_promotion(crate::TierPromotion::AfterSteps(1000))
+                .build_tiered()
+                .unwrap();
+                let count = sim.signal("count");
+                sim.run_until(10).unwrap();
+                assert!(!sim.simulator.is_compiled());
+                assert_eq!(sim.get(count), 1u8.into());
+                // Poll at the same simulation time while future delayed processes
+                // remain suspended. The tier transition must retain their resume
+                // positions and subsequent Active/NBA ordering (IEEE 1800-2023 4.5).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !sim.simulator.is_compiled() {
+                    sim.eval_comb().unwrap();
+                    assert!(
+                        sim.simulator.promotion_error().is_none(),
+                        "{:?}",
+                        sim.simulator.promotion_error()
+                    );
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "tiered compilation timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                assert_eq!(sim.time(), 10);
+                assert_eq!(sim.get_four_state(count), (1u8.into(), 0u8.into()));
+                sim.run_until(40).unwrap();
+                assert!(sim.is_finished());
+                assert_eq!(sim.get_four_state(count), (4u8.into(), 0u8.into()));
+                assert!(sim.simulator.tiered_execution_stats().compiled_evaluations > 0);
+            }
         }
     }
 

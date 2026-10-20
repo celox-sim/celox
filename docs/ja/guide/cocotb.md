@@ -30,10 +30,10 @@ target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
 target/release/celox run test/Top.veryl --top Top
 ```
 
-SVは`.sv`または`.v`をコンパイル順に指定します。4値シミュレーションを使い、
+SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い（`--four-state`でX/Zを扱う4値に切り替え）、
 `$finish`または実行待ちイベントがなくなるまで実行します。
 Verylはプロジェクト内の1ファイルを指定すると、`Veryl.toml`から
-ソースと依存関係を収集します。単独のVerylファイルも使用できます。
+ソースと依存関係を収集します。単独のVerylファイルも使用でき、Verylも既定は2値です。
 `--top`にはnative testbenchのモジュール名を指定します。
 既存のnative testbench実行器を使うため、initialブロックの末尾への到達でも完了します。
 
@@ -52,6 +52,32 @@ SVではスケジューラのステップ数、Verylではtestbenchのtick数で
 Verylでは完了前にtick上限に達すると失敗します。
 コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
 外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
+
+両言語とも`--backend native|tiered|interpreter|cranelift|wasm`で実行方式を選べます（既定native）。
+tieredはインタープリターで開始し、待機中のイベントを保ちながら生成コードへ移行します。
+両言語とも`--threads N`（1〜64、既定1）で並列度を指定できます。
+`--unlimited`で実行ステップ・tick数の上限を解除します。
+
+```sh
+celox run test/Top.sv --top Top --backend tiered --threads 4
+celox run --project /path/to/veryl-project --top smoke --backend tiered --threads 4
+celox run test/Top.veryl --top Top --four-state
+celox run --project /path/to/veryl-project --top smoke --report --unlimited
+```
+
+Veryl用の`--report`は設定・コンパイル時間・実行時間・tiered昇格統計・結果を
+機械可読な`CELOX_*`レコードとして標準出力に出します。通常実行では出しません。
+Heliodorベンチも専用Celoxバイナリではなく、このCLIを呼びます。
+`--report --backend tiered --require-compiled`では生成コードの実行を必須にできます。
+通常の短いtiered実行はインタープリターのまま終了しても成功です。
+
+`--project`は`celox.toml`のほか、Verylプロジェクトディレクトリや`Veryl.toml`を受け取ります。
+`--source-file PATH`はプロジェクトからの相対パスでVerylソースを選択します（複数指定可）。
+native用の`--build-cache-dir DIR`はVeryl.tomlプロジェクトのコンパイルをキャッシュし、
+`--compile-only --native-image-output FILE`でイメージを書き出し、
+`--native-image-input FILE`でHDLソースなしに実行できます。
+`--dump-ir-dir DIR`でIRを保存し、`--dump-ir-and-run`でそのまま実行できます。
+
 
 ## 複数ファイルのプロジェクトを管理する
 
