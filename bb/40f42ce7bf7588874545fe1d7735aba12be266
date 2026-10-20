@@ -1,6 +1,1 @@
-Revision history for #1592:
-
-rev 2 (content) 2026-10-20 09:42 UTC — Address review r4323518563: reject automatic-variable NBAs in untimed task callees as well as tasks that suspend; add nested, concatenation, array and legal module-storage regressions.
-rev 1 (initial) 2026-10-20 09:42 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1592,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"003888c215c4649f90c204c8f17a2acb278c846a","timestamp_iso":"2026-10-20T09:42:35Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"003888c215c4649f90c204c8f17a2acb278c846a","new_sha":"bb40f42ce7bf7588874545fe1d7735aba12be266","timestamp_iso":"2026-10-20T09:42:35Z","reason":"Address review r4323518563: reject automatic-variable NBAs in untimed task callees as well as tasks that suspend; add nested, concatenation, array and legal module-storage regressions.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/003888c215c4649f90c204c8f17a2acb278c846a...bb40f42ce7bf7588874545fe1d7735aba12be266"}]} -->
+Fix the CI retained-report contract: retain the missing ignored row for the reviewed Icarus automatic-task-array exclusion, and validate the entire test-suite package including retained_reports integration tests.
