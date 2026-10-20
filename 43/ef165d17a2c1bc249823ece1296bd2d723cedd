@@ -1,7 +1,1 @@
-Revision history for #1622:
-
-rev 3 (content) 2026-10-20 20:52 UTC — Fix CI retained-report contract: register five reviewed interface exclusions and synchronize changed issue evidence metadata
-rev 2 (content) 2026-10-20 15:49 UTC — Resolve PR #1622 conflicts with current master while preserving interface array distribution and mixed-contract regressions
-rev 1 (initial) 2026-10-20 15:49 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1622,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c8bfe0f7b7f35018d96758e8a809be70c22647e3","timestamp_iso":"2026-10-20T15:49:21Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c8bfe0f7b7f35018d96758e8a809be70c22647e3","new_sha":"5021b01211d8d9a89777eb74095a2161927657cc","timestamp_iso":"2026-10-20T15:49:21Z","reason":"Resolve PR #1622 conflicts with current master while preserving interface array distribution and mixed-contract regressions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c8bfe0f7b7f35018d96758e8a809be70c22647e3...5021b01211d8d9a89777eb74095a2161927657cc"},{"number":3,"change_type":"content","old_sha":"5021b01211d8d9a89777eb74095a2161927657cc","new_sha":"43ef165d17a2c1bc249823ece1296bd2d723cedd","timestamp_iso":"2026-10-20T20:52:47Z","reason":"Fix CI retained-report contract: register five reviewed interface exclusions and synchronize changed issue evidence metadata","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5021b01211d8d9a89777eb74095a2161927657cc...43ef165d17a2c1bc249823ece1296bd2d723cedd"}]} -->
+Resolve renewed PR #1622 conflicts with current master, preserving reviewed exclusions and interface regression coverage
