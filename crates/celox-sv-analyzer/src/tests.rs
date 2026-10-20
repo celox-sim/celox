@@ -6175,3 +6175,29 @@ fn scoped_timed_task_static_formals_require_shared_storage() {
         }
     }
 }
+
+#[test]
+fn unpacked_constant_function_bounds_survive_analysis_without_losing_the_contract() {
+    let ir = analyze_source(
+        r#"
+        module Top #(parameter int N = 3);
+          function automatic int extent(input int n); return n * 2; endfunction
+          logic [7:0] memory [extent(N)];
+        endmodule
+        "#,
+        Path::new("unpacked-constant-function-bounds.sv"),
+    )
+    .unwrap();
+    let ty = ir.modules()[0]
+        .signals()
+        .iter()
+        .find(|signal| signal.name() == "memory")
+        .unwrap()
+        .r#type();
+    let range = &ty.unpacked_ranges()[0];
+    assert_eq!(range.resolved_bounds(), Some((0, 5)));
+    assert_eq!(ty.resolved_width(), Some(48));
+    // Call expressions must remain symbolic for interface declaration
+    // contracts, even though lowering no longer owns their function bodies.
+    assert!(typecheck::eval_const_expr(range.right(), &HashMap::default()).is_none());
+}

@@ -1,4 +1,12 @@
 sv_backends! {
+    fn constant_functions_in_unpacked_port_dimensions(sim) {
+        @case "types::constant_functions_in_unpacked_port_dimensions";
+    }
+
+    fn constant_functions_in_unpacked_dimensions(sim) {
+        @case "types::constant_functions_in_unpacked_dimensions";
+    }
+
     fn passes_unpacked_arrays_of_equivalent_element_types(sim) {
         @case "types::passes_unpacked_arrays_of_equivalent_element_types";
     }

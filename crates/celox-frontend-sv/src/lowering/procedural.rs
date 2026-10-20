@@ -109,20 +109,7 @@ impl<'a> ProcModule<'a> {
             let bounds: Option<Vec<_>> = r#type
                 .unpacked_ranges()
                 .iter()
-                .map(|range| {
-                    Some((
-                        sv::typecheck::eval_const_expr_with_types(
-                            range.left(),
-                            constants,
-                            parameter_types,
-                        )?,
-                        sv::typecheck::eval_const_expr_with_types(
-                            range.right(),
-                            constants,
-                            parameter_types,
-                        )?,
-                    ))
-                })
+                .map(|range| super::unpacked_range_bounds(range, constants, parameter_types))
                 .collect();
             if let Some(bounds) = bounds.filter(|bounds| !bounds.is_empty()) {
                 unpacked_bounds.insert(id, bounds);
