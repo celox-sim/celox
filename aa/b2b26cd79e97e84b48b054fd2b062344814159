@@ -1,1 +1,1 @@
-Rebase the dependent CLI/cocotb stack onto current origin/master at user request; preserve merged clock fixes and O2 defaults.
+Rebase onto current master and latest #1566, preserve O2 run defaults and precedence tests; verify Taxi and all cocotb integrations without extra patches.
