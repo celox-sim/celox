@@ -479,11 +479,13 @@ pub struct LocalVariableBase<T> {
     pub r#type: T,
 }
 
-/// A function or task without timing control.
+/// A function or task; tasks may suspend their calling process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubroutineBase<E, L, T> {
     pub name: String,
     pub is_task: bool,
+    /// Automatic storage that needs a private activation when a task suspends.
+    pub automatic_locals: Vec<String>,
     /// `None` for a task or a `void` function.
     pub return_type: Option<T>,
     pub params: Vec<SubroutineParamBase<E, T>>,
@@ -515,6 +517,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
         SubroutineBase {
             name: self.name,
             is_task: self.is_task,
+            automatic_locals: self.automatic_locals,
             return_type: self.return_type.map(&mut *ft),
             params: self
                 .params

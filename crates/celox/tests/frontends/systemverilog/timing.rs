@@ -49,6 +49,12 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn timed_task_automatic_scalar_calls_keep_separate_storage = "timing::timed_task_automatic_scalar_calls_keep_separate_storage";
+    fn timed_task_four_state_storage_survives_suspension = "timing::timed_task_four_state_storage_survives_suspension";
+    fn timed_task_automatic_calls_keep_separate_storage = "timing::timed_task_automatic_calls_keep_separate_storage";
+    fn timed_task_nested_copyback_wait_and_return = "timing::timed_task_nested_copyback_wait_and_return";
+    fn timed_task_static_formals_remain_shared = "timing::timed_task_static_formals_remain_shared";
+    fn timed_task_in_edge_always_rearms_after_return = "timing::timed_task_in_edge_always_rearms_after_return";
     fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
     fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
@@ -58,7 +64,6 @@ timed_cases! {
     fn wait_statements_block_until_their_condition_holds = "timing::wait_statements_block_until_their_condition_holds";
     fn level_sensitive_always_runs_as_a_process = "timing::level_sensitive_always_runs_as_a_process";
     fn processes_wake_each_other_at_the_same_time = "timing::processes_wake_each_other_at_the_same_time";
-    #[ignore = "the SV frontend does not lower tasks with timing controls yet (#1123)"]
     fn tasks_with_timing_controls_run_in_processes = "timing::tasks_with_timing_controls_run_in_processes";
     fn edge_waits_see_the_signals_the_script_drives = "timing::edge_waits_see_the_signals_the_script_drives";
     fn time_functions_report_the_time_in_the_caller_unit = "timing::time_functions_report_the_time_in_the_caller_unit";
@@ -111,7 +116,6 @@ timed_cases! {
     fn repeated_active_edges_share_one_nba_batch = "timing::repeated_active_edges_share_one_nba_batch";
     #[ignore = "the SV frontend lowers only variables as event expressions (#1123)"]
     fn false_wait_preserves_separate_hierarchical_write_times = "timing::false_wait_preserves_separate_hierarchical_write_times";
-    #[ignore = "the SV frontend does not lower tasks with timing controls yet (#1123)"]
     fn always_timed_task_without_inline_timing_executes = "timing::always_timed_task_without_inline_timing_executes";
     fn constant_comb_if_discards_unreachable_pulse_branch = "timing::constant_comb_if_discards_unreachable_pulse_branch";
     fn constant_child_ff_case_discards_unreachable_pulse_arm = "timing::constant_child_ff_case_discards_unreachable_pulse_arm";
@@ -128,4 +132,57 @@ timed_cases! {
     fn long_process_loops_finish_within_one_time_slot = "timing::long_process_loops_finish_within_one_time_slot";
     fn initial_blocks_run_at_time_zero = "timing::initial_blocks_run_at_time_zero";
     fn host_edges_after_time_zero_clock_flip_flops = "timing::host_edges_after_time_zero_clock_flip_flops";
+}
+
+#[test]
+fn timed_task_activations_survive_each_optimization_level() {
+    let source = r#"
+        module Top(output int a, b);
+            timeunit 1ps / 1ps;
+            task automatic pulse(input int d, input int v, output int r);
+                int saved[2];
+                saved[0] = v;
+                saved[1] = v + 1;
+                #d;
+                r = saved[0] + saved[1];
+            endtask
+            initial begin a = 0; pulse(5, 10, a); end
+            initial begin b = 0; #1; pulse(2, 20, b); end
+        endmodule
+    "#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut simulation = celox::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("optimized_task.sv"))],
+                "Top",
+            )
+            .opt_level(level)
+            .four_state(four_state)
+            .build()
+            .unwrap();
+            let a = simulation.signal("a");
+            let b = simulation.signal("b");
+            simulation.run_until(3).unwrap();
+            assert_eq!(
+                simulation.get(a),
+                0u32.into(),
+                "{level:?} four_state={four_state}"
+            );
+            assert_eq!(
+                simulation.get(b),
+                41u32.into(),
+                "{level:?} four_state={four_state}"
+            );
+            simulation.run_until(5).unwrap();
+            assert_eq!(
+                simulation.get(a),
+                21u32.into(),
+                "{level:?} four_state={four_state}"
+            );
+        }
+    }
 }
