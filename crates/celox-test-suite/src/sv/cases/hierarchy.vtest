@@ -512,3 +512,49 @@
   (top Top)
   (assert_eq added 256)
   (assert_eq negated 65535))
+
+(case bits_query_parameter_overrides
+  ; IEEE 1800-2023 20.6.2: fixed-size type and variable queries are constants.
+  (source "bits_parameter_overrides.sv" #"
+    module Sub #(parameter int W = 1)(output int y); assign y = W; endmodule
+    module Top(output int type_bits, variable_bits, combined_bits);
+      typedef logic [3:0] nibble_t;
+      logic [11:0] value;
+      Sub #(.W($bits(nibble_t))) type_instance(.y(type_bits));
+      Sub #($bits(value)) variable_instance(.y(variable_bits));
+      Sub #(.W($bits(nibble_t) + $bits(value))) combined_instance(.y(combined_bits));
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq type_bits 4)
+  (assert_eq variable_bits 12)
+  (assert_eq combined_bits 16))
+
+(case bits_query_parameter_overrides_follow_caller_specialization
+  (source "specialized_bits_parameter_overrides.sv" #"
+    package Types; typedef logic [8:0] word_t; endpackage
+    module Sub #(parameter int W = 1)(output int y); assign y = W; endmodule
+    module Caller #(parameter int N = 2)(output int variable_bits, type_bits, array_bits);
+      import Types::*;
+      logic [N-1:0] value;
+      logic [N-1:0] memory [3];
+      typedef logic [N:0] local_t;
+      Sub #(.W($bits(value))) variable_instance(.y(variable_bits));
+      Sub #(.W($bits(local_t) + $bits(word_t))) type_instance(.y(type_bits));
+      Sub #(.W($bits(memory))) array_instance(.y(array_bits));
+    endmodule
+    module Top(output int default_var, default_type, default_array,
+               output int override_var, override_type, override_array);
+      Caller default_instance(default_var, default_type, default_array);
+      Caller #(.N(5)) override_instance(override_var, override_type, override_array);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq default_var 2)
+  (assert_eq default_type 12)
+  (assert_eq default_array 6)
+  (assert_eq override_var 5)
+  (assert_eq override_type 15)
+  (assert_eq override_array 15))
