@@ -73,6 +73,51 @@ pub struct Module {
 }
 
 impl Module {
+    /// Represent selected edge procedures as scheduled processes. A host
+    /// request must finish synchronously before the following statement runs.
+    pub fn schedule_edge_processes(mut self, mut select: impl FnMut(&FfProcess) -> bool) -> Self {
+        let mut retained = Vec::new();
+        for process in std::mem::take(&mut self.ff_processes) {
+            if !select(&process) {
+                retained.push(process);
+                continue;
+            }
+            let mut body = vec![Stmt::WaitEvent(
+                process
+                    .events
+                    .iter()
+                    .map(|event| EventItem {
+                        edge: match event.edge {
+                            FfEdge::Pos => EventEdge::Pos,
+                            FfEdge::Neg => EventEdge::Neg,
+                        },
+                        expr: Expr::Ident(event.signal.clone()),
+                    })
+                    .collect(),
+            )];
+            body.extend(process.body);
+            self.initial_processes.push(InitialProcess {
+                creation_order: process.creation_order,
+                scheduled_edge: true,
+                condition: None,
+                body: vec![Stmt::Loop {
+                    kind: LoopKind::Forever,
+                    init: Vec::new(),
+                    condition: None,
+                    step: Vec::new(),
+                    body,
+                }],
+                initializer: false,
+                synthetic: false,
+                repeats: true,
+            });
+        }
+        self.ff_processes = retained;
+        self.initial_processes
+            .sort_by_key(|process| (!process.initializer, process.creation_order));
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: ModuleId,
@@ -921,6 +966,7 @@ impl FfProcess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialProcess {
     creation_order: usize,
+    scheduled_edge: bool,
     condition: Option<ConstExpr>,
     body: Vec<Stmt>,
     initializer: bool,
@@ -930,6 +976,11 @@ pub struct InitialProcess {
 }
 
 impl InitialProcess {
+    /// This process represents an edge procedure requiring host services.
+    pub fn is_scheduled_edge(&self) -> bool {
+        self.scheduled_edge
+    }
+
     /// Position among elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -938,6 +989,7 @@ impl InitialProcess {
     pub(crate) fn new(condition: Option<ConstExpr>, body: Vec<Stmt>, initializer: bool) -> Self {
         Self {
             creation_order: 0,
+            scheduled_edge: false,
             condition,
             body,
             initializer,

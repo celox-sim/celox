@@ -390,6 +390,8 @@ impl<A: Copy> HostRequestSite<A> {
 /// checkpoints capture a suspended process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
+    /// This kernel originated from an edge procedure and must execute in Simulation.
+    pub requires_timed_simulation: bool,
     pub resume: A,
     pub status: A,
     pub delay: A,
@@ -398,6 +400,7 @@ pub struct ProcessSlots<A> {
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
+            requires_timed_simulation: self.requires_timed_simulation,
             resume: map(self.resume),
             status: map(self.status),
             delay: map(self.delay),

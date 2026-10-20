@@ -1188,7 +1188,9 @@ fn initial_driver_ranges(
     };
     let mut drivers = Vec::new();
     for (driver_id, process) in module.initial_processes().iter().enumerate() {
-        if condition_is_active(process.condition(), constants, parameter_types) {
+        if !process.is_scheduled_edge()
+            && condition_is_active(process.condition(), constants, parameter_types)
+        {
             body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         }
     }
@@ -2162,6 +2164,61 @@ fn lower_module(
     )
 }
 
+fn needs_host_request(
+    module: &sv::ir::Module,
+    body: &[sv::ir::Stmt],
+    visited: &mut HashSet<String>,
+) -> bool {
+    let mut found = false;
+    let mut calls = Vec::new();
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let sv::ir::Stmt::SystemTask { task, .. } = stmt {
+                found |= task.is_host_request();
+            }
+            procedural::stmt_calls(stmt, &mut calls);
+        });
+    }
+    if found {
+        return true;
+    }
+    while let Some((callee, args)) = calls.pop() {
+        match callee {
+            sv::ir::Callee::System(function) if function.is_host_request() => return true,
+            sv::ir::Callee::Subroutine(name) => {
+                let Some(subroutine) = module.subroutines().iter().find(|sub| sub.name == name)
+                else {
+                    continue;
+                };
+                // Different calls can select different defaults, even when the
+                // subroutine body has already been inspected.
+                let omitted: Vec<_> = (0..subroutine.params.len())
+                    .map(|position| matches!(args.get(position), None | Some(None)))
+                    .collect();
+                if visited.insert(format!("defaults:{name}:{omitted:?}")) {
+                    procedural::default_calls(subroutine, &args, &mut calls);
+                }
+                if visited.insert(format!("body:{name}"))
+                    && needs_host_request(module, &subroutine.body, visited)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// An edge signal's role and the clock of the declaring process. Keep these
+/// together when host requests move a process out of the retained FF list.
+struct FfEventRole {
+    signal: String,
+    kind: DomainKind,
+    clock: String,
+    clock_kind: DomainKind,
+}
+
 /// `ff_parts` additionally keeps every `always_ff` process as an
 /// independently evaluated part, for lane-partitioned builds.
 fn lower_module_with_overrides(
@@ -2173,6 +2230,38 @@ fn lower_module_with_overrides(
     warnings: &mut Vec<crate::warning::PendingWarning>,
     force_signals: &[String],
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    let mut ff_event_roles = Vec::new();
+    for process in module.ff_processes() {
+        let clock = clock_event_from_ff_process(process)
+            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".into()))?;
+        for event in process.events() {
+            let kind = match (event.signal() == clock.signal(), event.edge()) {
+                (true, sv::ir::FfEdge::Pos) => DomainKind::ClockPosedge,
+                (true, sv::ir::FfEdge::Neg) => DomainKind::ClockNegedge,
+                (false, sv::ir::FfEdge::Pos) => DomainKind::ResetAsyncHigh,
+                (false, sv::ir::FfEdge::Neg) => DomainKind::ResetAsyncLow,
+            };
+            ff_event_roles.push(FfEventRole {
+                signal: event.signal().to_string(),
+                kind,
+                clock: clock.signal().to_string(),
+                clock_kind: match clock.edge() {
+                    sv::ir::FfEdge::Pos => DomainKind::ClockPosedge,
+                    sv::ir::FfEdge::Neg => DomainKind::ClockNegedge,
+                },
+            });
+        }
+    }
+    let scheduled = module
+        .ff_processes()
+        .iter()
+        .any(|process| needs_host_request(module, process.body(), &mut HashSet::default()))
+        .then(|| {
+            module.clone().schedule_edge_processes(|process| {
+                needs_host_request(module, process.body(), &mut HashSet::default())
+            })
+        });
+    let module = scheduled.as_ref().unwrap_or(module);
     let mut package_variables = Vec::new();
     let name = module.name().to_string();
     let mut next_id = SourceVarId::default();
@@ -2372,7 +2461,7 @@ fn lower_module_with_overrides(
             four_state,
             warnings,
         );
-        let blocks = lower_ff_processes(module, &mut pm, ff_parts)?;
+        let blocks = lower_ff_processes(module, &mut pm, ff_parts, &ff_event_roles)?;
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -2381,6 +2470,7 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
+
     let (initial_values, processes, wait_sites, nba_sites, host_request_sites) =
         lower_initial_processes(
             module,
@@ -3297,8 +3387,10 @@ fn lower_initial_processes(
             .max()
             .unwrap_or_default(),
     );
-    let slots: Vec<_> = (0..runtime.len())
-        .map(|index| {
+    let slots: Vec<_> = runtime
+        .iter()
+        .enumerate()
+        .map(|(index, (process, _))| {
             let mut declare = |slot: &str, width: usize| {
                 let id = next_var_id(&mut next_id);
                 variables.insert(
@@ -3322,6 +3414,7 @@ fn lower_initial_processes(
                 id
             };
             ProcessSlots {
+                requires_timed_simulation: process.is_scheduled_edge(),
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
                 delay: declare("delay", PROCESS_DELAY_WIDTH),
@@ -3360,6 +3453,10 @@ fn lower_initial_processes(
             nba_sites.extend(kernel.nba_sites);
             host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
                 site.process = index;
+                // Repeating ordinary always processes also execute only in
+                // the timed scheduler. Keep this site requirement separate
+                // from the converted-FF startup marker on ProcessSlots.
+                site.requires_timed_simulation = process.repeats();
                 site
             }));
             Ok(SymbolicProcess {
@@ -5219,6 +5316,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::ValuePlusargs
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
+        | SystemFunction::Fopen
         | SystemFunction::Timeunit
         | SystemFunction::Timeprecision
         | SystemFunction::Isunbounded
@@ -6885,6 +6983,7 @@ fn lower_ff_processes(
     module: &sv::ir::Module,
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
+    ff_event_roles: &[FfEventRole],
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
@@ -6933,7 +7032,43 @@ fn lower_ff_processes(
         }
         process_events.push(events);
     }
-    let mut event_vars = FfEventVars::new(process_events.iter().flatten().copied());
+    // Select primary roles globally before creating copies for retained FFs.
+    // Scheduled processes still contribute clock/reset roles and must satisfy
+    // the same one-bit event restriction, even though they use wait sites.
+    let global_events = ff_event_roles
+        .iter()
+        .map(|role| {
+            let id = pm
+                .id(&role.signal)
+                .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".into()))?;
+            if pm
+                .variables
+                .get(&id)
+                .is_some_and(|variable| variable.width != 1)
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "multi-bit always_ff event signal".into(),
+                ));
+            }
+            Ok((id, role.kind))
+        })
+        .collect::<Result<Vec<_>, sv::AnalyzerError>>()?;
+    let mut event_vars = FfEventVars::new(global_events.into_iter());
+    // Reflection must retain associations from scheduled host processes too.
+    // Resolve sensed roles just as retained FF trigger sets do, including aliases
+    // when one authored signal has more than one clock/reset role.
+    for role in ff_event_roles {
+        if matches!(
+            role.kind,
+            DomainKind::ResetAsyncHigh | DomainKind::ResetAsyncLow
+        ) {
+            let reset = pm.id(&role.signal).expect("validated FF event signal");
+            let clock = pm.id(&role.clock).expect("validated FF clock signal");
+            let reset = event_vars.sensed(pm, reset, role.kind);
+            let clock = event_vars.sensed(pm, clock, role.clock_kind);
+            reset_clock_map.entry(reset).or_insert(clock);
+        }
+    }
 
     let random_seeds = process_random_seeds(module);
     for ((index, process), events) in module.ff_processes().iter().enumerate().zip(process_events) {

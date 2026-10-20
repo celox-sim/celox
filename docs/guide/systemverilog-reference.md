@@ -69,7 +69,7 @@ as waits written directly in a process.
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
-| Command-line arguments | `$test$plusargs` and `$value$plusargs` in timed `initial` blocks and their subroutines |
+| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb` in timed processes |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -105,7 +105,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$realtime` in an expression or `$fopen`, is
+  `$realtime` in an expression or `$fgetc`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -321,6 +321,30 @@ is an error. Without directives, a word-count mismatch is a compilation
 warning (`Simulator::warnings()`): excess words are ignored, and missing words
 leave memory unchanged.
 
+### Runtime file output
+
+`$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and their `b` / `o` / `h`
+forms execute in a timed `Simulation` (IEEE 1800-2023 21.3). A one-argument
+`$fopen` returns a multichannel descriptor; OR descriptors to write to multiple
+files, including standard output through bit zero. Supplying an open mode returns
+a file descriptor, with the standard streams at `32'h8000_0000` through
+`32'h8000_0002`. Closed channels are reused. Open failures return zero.
+Invalid descriptors and write failures produce a runtime error. File names and
+modes accept string literals or integral packed strings containing UTF-8 paths.
+Dynamic `string` values and non-UTF-8 paths are unsupported. Relative paths use
+the host process's working directory.
+
+`$writememh` / `$writememb` snapshot static unpacked arrays when called,
+overwriting the destination (21.5). Optional runtime start and finish addresses
+select either traversal direction; out-of-range addresses are runtime errors.
+The output retains X/Z bits, contains no address directives, and is readable by
+`$readmemh` / `$readmemb`. Those existing tasks still read at compile time.
+Dynamic and associative memory arrays are unsupported.
+
+Edge procedures that call these operations, directly or through subroutines,
+run as scheduled kernels. Build them with `Simulation`; a `Simulator` builder
+rejects them. Calls from combinational processes are unsupported.
+
 ### Constant parameters of aggregate type
 
 Constant parameters of aggregate type (unpacked arrays, packed structs
@@ -328,17 +352,23 @@ given by a pattern) are variables that hold their value from the start of
 the simulation; they cannot be used where an elaboration-time constant is
 required.
 
-### Command-line arguments
+### Runtime I/O and plusargs
 
-Use `Simulation::from_sv_sources` for plusargs queries in `initial` blocks
-and their subroutines. Queries from combinational and edge-triggered processes
-are currently unsupported.
+Use `Simulation::from_sv_sources` for host I/O in `initial` blocks and
+edge-triggered `always` / `always_ff` processes, including their subroutines.
+These calls are unsupported in combinational procedures. A bare `Simulator`
+rejects edge procedures that need this timed execution.
 
-Supply ordered arguments with `.plusargs(["+COUNT=12", "+TRACE"])`.
+Supply ordered command-line arguments with `.plusargs(["+COUNT=12", "+TRACE"])`.
 `$test$plusargs` matches a prefix; `$value$plusargs` supports integer conversions
 and `%s` into packed integral variables. The first matching argument wins, and
 an unmatched value query preserves its destination. Real conversions and dynamic
 strings are unsupported.
+
+See [runtime file output](#runtime-file-output) for file descriptors and memory snapshots.
+
+Checkpoints and state files reject designs with file I/O, whose host state they
+cannot capture.
 
 ## Time and precision {#time-and-precision}
 
