@@ -423,7 +423,10 @@ fn collect_parent_output_address_sources(
                     | SystemFunctionKind::Finish => Ok(()),
                 }
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
             collect_parent_output_address_sources(module, store, inner, arena, out)
@@ -912,6 +915,7 @@ impl<'a> ModuleParser<'a> {
             arena: {
                 let mut arena = SLTNodeArena::new();
                 arena.file_dependencies = config.file_dependencies.clone();
+                arena.reset_type = config.reset_type;
                 arena
             },
             reset_clock_map: HashMap::default(),

@@ -281,7 +281,7 @@ fn collect_expression_variables(expression: &Expression, out: &mut Vec<VarId>) -
                 collect_index_variables(index, out) && collect_select_variables(select, out)
             }
             Factor::HierVariable(_) => false,
-            Factor::Value(_) => true,
+            Factor::Value(_) | Factor::ResetValue(..) => true,
             Factor::FunctionCall(call) if call.outputs.is_empty() => call
                 .inputs
                 .values()
@@ -1587,6 +1587,10 @@ fn parameterize_factor(
             )
         }
         Factor::HierVariable(_) => None,
+        Factor::ResetValue(kind, polarity, _) => variants
+            .iter()
+            .all(|factor| matches!(factor, Factor::ResetValue(other_kind, other_polarity, _) if kind == other_kind && polarity == other_polarity))
+            .then_some(false),
         Factor::Value(template_comptime) => {
             let values = variants
                 .iter()
@@ -3993,7 +3997,7 @@ fn rewrite_expression(
                 self_depends || index_depends || select_depends
             }
             Factor::HierVariable(_) => return None,
-            Factor::Value(_) => false,
+            Factor::Value(_) | Factor::ResetValue(..) => false,
             Factor::FunctionCall(call) if call.outputs.is_empty() => {
                 let mut depends = false;
                 for input in call.inputs.values_mut() {
