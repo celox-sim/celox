@@ -693,3 +693,147 @@
     (modify (set x value))
     (assert_eq y (^ value (trunc 8 (+ value 1))))
     (assert_eq z (^ (trunc 8 (~ value)) (trunc 8 (+ (trunc 8 (~ value)) 1))))))
+
+(case distributes_packed_connections_to_interface_arrays
+  ; IEEE 1800-2023 23.3.3.5: declaration-order leftmost instances
+  ; receive the most significant packed slices; scalar values broadcast.
+  (source "interface_array_distribution.sv" #"
+    interface Wire(input logic value, output wire result);
+      assign result = value;
+    endinterface
+    interface Pair #(parameter int W = 2)(input logic [W-1:0] value, output wire [W-1:0] result);
+      assign result = value;
+    endinterface
+    module Top(input logic [1:0] bits_in, input logic [3:0] words_in, input logic shared,
+               output wire [1:0] descending, ascending, broadcast_bits,
+               output wire [3:0] words,
+               output wire [1:0] desc_members, asc_members,
+               output wire [3:0] selected_words, broadcast_words, generated_bits, ascending_members);
+      Wire down [3:2](.value(bits_in), .result(descending));
+      Wire up [5:6](bits_in, ascending);
+      Wire same [1:0](.value(shared), .result(broadcast_bits));
+      Pair #(.W(2)) pairs [1:0](.value(words_in), .result(words));
+      wire [7:0] selected_bus;
+      logic [0:3] ascending_input;
+      assign ascending_input = words_in;
+      Pair selected_pairs [0:1](.value(ascending_input), .result(selected_bus[5:2]));
+      assign selected_words = selected_bus[5:2];
+      assign ascending_members = {selected_pairs[0].value, selected_pairs[1].value};
+      Pair shared_pairs [1:0](.value(words_in[1:0]), .result(broadcast_words));
+      for (genvar k = 0; k < 2; k++) begin:g
+        Wire local_wires [0:1](.value(bits_in), .result(generated_bits[k*2 +: 2]));
+      end
+      assign desc_members = {down[3].value, down[2].value};
+      assign asc_members = {up[5].value, up[6].value};
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 2 3)
+    (modify (set bits_in value) (set words_in (+ (* value 4) (- 3 value))) (set shared (% value 2)))
+    (assert_eq descending value)
+    (assert_eq ascending value)
+    (assert_eq desc_members value)
+    (assert_eq asc_members value)
+    (assert_eq broadcast_bits (* (% value 2) 3))
+    (assert_eq words (+ (* value 4) (- 3 value)))
+    (assert_eq selected_words (+ (* value 4) (- 3 value)))
+    (assert_eq ascending_members (+ (* value 4) (- 3 value)))
+    (assert_eq broadcast_words (* (- 3 value) 5))
+    (assert_eq generated_bits (* value 5))))
+
+(case distributes_unpacked_connections_to_interface_arrays
+  (source "interface_unpacked_distribution.sv" #"
+    interface Pair(input logic [1:0] value, output wire [1:0] result);
+      assign result = value;
+    endinterface
+    module Top(input logic [3:0] data, output logic [3:0] y, members);
+      logic [1:0] inputs [7:6];
+      wire [1:0] results [2:3];
+      assign inputs[7] = data[3:2];
+      assign inputs[6] = data[1:0];
+      Pair pairs [4:5](.value(inputs), .result(results));
+      assign y = {results[2], results[3]};
+      assign members = {pairs[4].value, pairs[5].value};
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 6 9 14 15)
+    (modify (set data value))
+    (assert_eq y value)
+    (assert_eq members value)))
+
+(case distributes_array_port_connections_to_interface_arrays
+  (source "interface_array_port_distribution.sv" #"
+    interface Block(input logic [1:0] value [2], output wire [1:0] result [2]);
+      assign result = value;
+    endinterface
+    module Top(input logic [7:0] data, output logic [7:0] y, members,
+               output logic [3:0] broadcast_values);
+      logic [1:0] inputs [2][2];
+      wire [1:0] results [2][2];
+      assign inputs[0][0] = data[7:6];
+      assign inputs[0][1] = data[5:4];
+      assign inputs[1][0] = data[3:2];
+      assign inputs[1][1] = data[1:0];
+      Block blocks [1:0](.value(inputs), .result(results));
+      Block shared_blocks [1:0](.value(inputs[0]));
+      assign y = {results[0][0], results[0][1], results[1][0], results[1][1]};
+      assign members = {blocks[1].value[0], blocks[1].value[1], blocks[0].value[0], blocks[0].value[1]};
+      assign broadcast_values = {shared_blocks[1].value[0], shared_blocks[0].value[1]};
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0x1b 0xe4 0xa5 0xff)
+    (modify (set data value))
+    (assert_eq y value)
+    (assert_eq members value)
+    (assert_eq broadcast_values (slice value 7 4))))
+
+(case distributes_multidimensional_connections_to_interface_arrays
+  ; IEEE 1800-2023 23.3.3.5: the rightmost dimension varies first.
+  (source "interface_multidimensional_distribution.sv" #"
+    interface Wire(input logic value, output wire result);
+      assign result = value;
+    endinterface
+    module Top(input logic [3:0] data, output wire [3:0] y, output logic [3:0] members);
+      Wire grid [2:1][4:3](.value(data), .result(y));
+      assign members = {grid[2][4].value, grid[2][3].value, grid[1][4].value, grid[1][3].value};
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 3 5 10 15)
+    (modify (set data value))
+    (assert_eq y value)
+    (assert_eq members value)))
+
+(case mixes_module_contracts_with_local_interface_connections
+  (source "mixed_interface_connections.sv" #"
+    interface Bus;
+      logic [1:0] data;
+    endinterface
+    interface Wire(input logic value, output wire result);
+      assign result = value;
+    endinterface
+    module Child(Bus b, output wire [1:0] y);
+      assign y = b.data;
+    endmodule
+    module GenericChild(interface b, output wire [1:0] y);
+      assign y = b.data;
+    endmodule
+    module Top(input logic [1:0] data, output wire [1:0] named_value, generic_value, array_value,
+               output wire single_value);
+      Bus bus();
+      assign bus.data = data;
+      Child child(bus, named_value);
+      GenericChild generic_child(bus, generic_value);
+      Wire wires[1:0](data, array_value);
+      Wire single_wire(data[0], single_value);
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 1 2 3)
+    (modify (set data value))
+    (assert_eq named_value value)
+    (assert_eq generic_value value)
+    (assert_eq array_value value)
+    (assert_eq single_value (% value 2))))
