@@ -1,0 +1,1 @@
+Address PR 1627 review: preserve change-return sensitivity events, validate disputed diagnostics, fix strict-policy regressions and complete-write inference, and retain reviewed external exclusions. Full CI-equivalent Rust and host integration checks pass.
