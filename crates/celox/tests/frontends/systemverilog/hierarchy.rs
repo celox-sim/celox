@@ -1,6 +1,14 @@
 use super::*;
 
 sv_backends! {
+    fn bits_query_parameter_overrides_follow_caller_specialization(sim) {
+        @case "hierarchy::bits_query_parameter_overrides_follow_caller_specialization";
+    }
+
+    fn bits_query_parameter_overrides(sim) {
+        @case "hierarchy::bits_query_parameter_overrides";
+    }
+
     fn parameter_patterns_keep_original_declarations_and_isolated_bindings(sim) { @case "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings"; }
     fn parameter_patterns_preserve_enclosing_expressions(sim) { @case "hierarchy::parameter_patterns_preserve_enclosing_expressions"; }
     fn widens_small_parameters_preserving_four_state_bits(sim) {
