@@ -14,7 +14,7 @@ const virtualTbStep: Plugin = {
 };
 
 export default defineConfig({
-	root: import.meta.dirname,
+	root: process.env.CELOX_TEST_EXTERNAL_VITE_ROOT || import.meta.dirname,
 	resolve: {
 		alias: {
 			"@fixture/tb-helper": resolve(
@@ -26,8 +26,9 @@ export default defineConfig({
 	plugins: [
 		virtualTbStep,
 		celox({
+			projectRoot: import.meta.dirname,
 			testbenchComponents: "./tb-components.ts",
 		}),
 	],
-	test: { include: ["entry.test.ts"] },
+	test: { include: [resolve(import.meta.dirname, "entry.test.ts")] },
 });
