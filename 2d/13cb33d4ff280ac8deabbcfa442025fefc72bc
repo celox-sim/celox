@@ -1,0 +1,6 @@
+Revision history for #1633:
+
+rev 2 (content) 2026-10-20 16:25 UTC — Address PR review findings and enable SystemVerilog backend selection with timed tiered execution.
+rev 1 (initial) 2026-10-20 16:25 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1633,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3e315ef7844576abc59548bcf0da497a95804746","timestamp_iso":"2026-10-20T16:25:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3e315ef7844576abc59548bcf0da497a95804746","new_sha":"b4072788d475209d41e1cfba97133674b33c3dbc","timestamp_iso":"2026-10-20T16:25:58Z","reason":"Address PR review findings and enable SystemVerilog backend selection with timed tiered execution.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3e315ef7844576abc59548bcf0da497a95804746...b4072788d475209d41e1cfba97133674b33c3dbc"}]} -->
