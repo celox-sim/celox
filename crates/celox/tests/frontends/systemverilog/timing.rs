@@ -57,6 +57,7 @@ timed_cases! {
     fn timed_task_in_edge_always_rearms_after_return = "timing::timed_task_in_edge_always_rearms_after_return";
     fn time_calls_in_child_port_subroutines = "timing::time_calls_in_child_port_subroutines";
     fn time_calls_in_child_port_actuals = "timing::time_calls_in_child_port_actuals";
+    fn time_literal_delays_accept_all_units = "timing::time_literal_delays_accept_all_units";
     fn delays_resume_initial_blocks_at_later_times = "timing::delays_resume_initial_blocks_at_later_times";
     fn always_with_a_delay_generates_a_clock = "timing::always_with_a_delay_generates_a_clock";
     fn edge_waits_resume_before_the_registers_of_that_edge_update = "timing::edge_waits_resume_before_the_registers_of_that_edge_update";
@@ -185,4 +186,40 @@ fn timed_task_activations_survive_each_optimization_level() {
             );
         }
     }
+}
+
+#[test]
+fn time_literal_delays_round_at_scope_precision() {
+    let source = r#"
+        module Fine(output bit done);
+            timeunit 1ns / 1ps;
+            initial begin #2.75ns; done = 1; end
+        endmodule
+        module Coarse(output bit done);
+            timeunit 1ns / 100ps;
+            initial begin #(2.75ns); done = 1; end
+        endmodule
+        module Top(output bit fine, coarse);
+            timeunit 1ns / 1ps;
+            Fine f(fine); Coarse c(coarse);
+        endmodule
+    "#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("scope_precision.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let fine = sim.signal("fine");
+    let coarse = sim.signal("coarse");
+    sim.run_until(2749).unwrap();
+    assert_eq!(sim.get(fine), 0u8.into());
+    assert_eq!(sim.get(coarse), 0u8.into());
+    sim.run_until(2750).unwrap();
+    assert_eq!(sim.get(fine), 1u8.into());
+    assert_eq!(sim.get(coarse), 0u8.into());
+    sim.run_until(2799).unwrap();
+    assert_eq!(sim.get(coarse), 0u8.into());
+    sim.run_until(2800).unwrap();
+    assert_eq!(sim.get(coarse), 1u8.into());
 }
