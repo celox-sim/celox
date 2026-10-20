@@ -1,6 +1,1 @@
-Revision history for #1640:
-
-rev 2 (rebase) 2026-10-20 16:49 UTC
-rev 1 (initial) 2026-10-20 16:49 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1640,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"020842b4bef4afdcdd36d27f71d4b4eb806e404d","timestamp_iso":"2026-10-20T16:49:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"020842b4bef4afdcdd36d27f71d4b4eb806e404d","new_sha":"e984458bd9ffb7eb71c74f86cde4eef3d4f29e55","timestamp_iso":"2026-10-20T16:49:56Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/020842b4bef4afdcdd36d27f71d4b4eb806e404d...e984458bd9ffb7eb71c74f86cde4eef3d4f29e55"}]} -->
+Resolve scope-randomization overlaps with the SV host-request, file-output and plusargs changes now on master.
