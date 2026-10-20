@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::aggregate_and_selected_returns: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::aggregate_and_selected_returns",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::four_state_values",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::operations: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::operations",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
+      "detail": "compile tb_queue::shared_processes: internal error: entered unreachable code",
+      "expectation": "Simulation",
+      "name": "tb_queue::shared_processes",
+      "phase": "emission",
+      "status": "emission_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 4,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "incremental": true,
+  "run_counts": {
+    "fresh": 4,
+    "reused": 0
+  },
+  "schema_version": 3,
+  "suite": "veryl",
+  "suite_version": "0.11.0",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)"
+}

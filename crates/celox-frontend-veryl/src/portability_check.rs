@@ -608,6 +608,11 @@ impl Checker<'_, '_> {
                                 self.expression(&arg.0);
                             }
                         }
+                        TbMethod::Queue { value, .. } => {
+                            if let Some(value) = value {
+                                self.expression(value);
+                            }
+                        }
                         TbMethod::RandomSeed { value } => self.expression(value),
                         TbMethod::RandomGetRange { min, max, .. } => {
                             self.expression(min);

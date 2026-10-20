@@ -322,3 +322,18 @@ while the original bytes remain in the event or assertion result.
 
 This replaces the earlier string message API; update string comparisons to
 byte comparisons or explicit decoding.
+
+### Veryl HEAD queues
+
+The `develop` lane supports Veryl HEAD's `$tb::queue::<T, N>` in native
+`#[test]` modules. `N = 0` (the default) is unbounded. Bounded queues discard
+pushes when full. The supported methods are `push_back`, `push_front`,
+`pop_back`, `pop_front`, `drop_back`, `drop_front`, `back`, `front`, `clear`,
+`size`, `is_empty`, and `is_full`. Handles are shared by the test's initial
+blocks and reset for each execution.
+
+Elements can be signed, wide, or packed structs. Direct four-state values and
+selections retain X/Z; empty four-state reads return X. The native expression
+VM does not support compound runtime four-state arguments to queue pushes;
+these produce an explicit diagnostic. Two-state expressions are supported.
+These native components cannot currently be emitted for Verilator or Icarus.
