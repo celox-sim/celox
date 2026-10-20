@@ -1,1 +1,3 @@
 Rebase PR 1627 onto current master to resolve conflicts, then independently review latch semantics and validate the integrated changes.
+
+Independent rereview corrected wildcard sensitivity and startup, task sensitivity, runtime static declaration ordering and wide latch proofs; all required local checks passed after rebasing the conflicting PR.
