@@ -184,6 +184,7 @@ class Backend:
     def __init__(self,compiled,four_state,out):
         if four_state:raise Unsupported('four-state encoding not implemented in this scalar vertical slice')
         compiled=normalize_compiled(compiled)
+        self.four_state=False
         self.code=compiled;self.state={};self.meta={};self.sparse={};self.dirty=True;self.operations=0;self.event_log=[];self.div_cache={};self.div_events=[]
         self.signals={}
         for signal in compiled['signals']:
@@ -200,6 +201,11 @@ class Backend:
         self.proof=Proof(out)
         self.events={address(x['event']):x['units'] for x in compiled['sir']['eval_apply_ffs']}
         self.aliases={address(a):address(b) for a,b in compiled['design']['event_aliases']}
+        self.event_kinds={address(a):kind for a,kind in compiled['design'].get('event_kinds',[])}
+        self.derived={address(a):[address(b) for b in targets] for a,targets in compiled['design'].get('derived_events',[])}
+        self.combinational={address(a):[address(b) for b in targets] for a,targets in compiled['design'].get('combinational_derived',[])}
+        self.eval_only={address(x['event']):x['units'] for x in compiled['sir']['eval_only_ffs']}
+        self.apply={address(x['event']):x['units'] for x in compiled['sir']['apply_ffs']}
     def close(self):
         self.proof.close();(self.proof.out/'nonfatal-events.json').write_text(json.dumps(self.event_log,indent=2)+'\n')
         (self.proof.out/'division-reuse.json').write_text(json.dumps(self.div_events,indent=2)+'\n')
@@ -222,8 +228,57 @@ class Backend:
         if self.dirty:self.eval_comb()
         key=address(self.signal(name)['address']);key=self.aliases.get(key,key)
         if key not in self.events:raise Unsupported('event has no eval/apply SIR '+name)
-        for unit in self.events[key]:self.execute(unit)
-        self.eval_comb()
+        if self.derived.get(key) or self.combinational.get(key):
+            self.tick_derived(key)
+        else:
+            for unit in self.events[key]:self.execute(unit)
+            self.eval_comb()
+    def event_level(self,key):
+        payload=self.proof.unique(self.load(key,0,1),'clock payload')
+        mask=self.proof.unique(self.load_mask(key,0,1),'clock mask') if self.four_state else 0
+        return payload|(mask<<1)
+    def event_edge(self,key,before,after):
+        kind=self.event_kinds[key]
+        if kind in ('ClockPosedge','ResetAsyncHigh'):
+            return before!=after and (before==0 or after==1)
+        if kind in ('ClockNegedge','ResetAsyncLow'):
+            return before!=after and (before==1 or after==0)
+        raise Unsupported('derived clock has no edge kind: '+str(kind))
+    def tick_derived(self,key):
+        # IEEE 1800-2023 4.5: evaluate coincident edges before publishing
+        # their NBA updates; publication may create another wave of edges.
+        watched={key};pending=[key]
+        while pending:
+            source=pending.pop()
+            for target in self.derived.get(source,[])+self.combinational.get(source,[]):
+                if target not in watched:watched.add(target);pending.append(target)
+        ordered=[address(a) for a in self.code['design']['ordered_events'] if address(a) in watched]
+        if set(ordered)!=watched:
+            raise Unsupported('derived clock missing from ordered events')
+        if any(event not in self.event_kinds for event in watched):
+            raise Unsupported('derived clock lacks typed edge metadata')
+        def levels():return {event:self.event_level(event) for event in ordered}
+        def settle(before):
+            self.eval_comb();after=levels()
+            return [event for event in ordered if self.event_edge(event,before[event],after[event])]
+        def drain(events):
+            for _ in range(10000):
+                if not events:return
+                before=levels()
+                for event in events:
+                    if event not in self.eval_only or event not in self.apply:
+                        raise Unsupported('derived clock lacks split eval/apply SIR')
+                    for unit in self.eval_only[event]:self.execute(unit)
+                for event in events:
+                    for unit in self.apply[event]:self.execute(unit)
+                events=settle(before)
+            raise Unsupported('derived-clock settling budget exceeded')
+        def drive(value):
+            before=levels();self.store(key,0,1,self.proof.bind(const(1,value)))
+            if self.four_state:self.store_mask(key,0,1,const(1,0))
+            drain(settle(before))
+        active=0 if self.event_kinds[key] in ('ClockNegedge','ResetAsyncLow') else 1
+        drive(1-active);drive(active);drive(1-active)
     def load(self,key,offset,width):
         if key[2]==2:raise Unsupported('sparse next-state region cannot be loaded')
         if key not in self.state:

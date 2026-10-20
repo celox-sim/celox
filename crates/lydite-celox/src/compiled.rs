@@ -2,8 +2,8 @@
 //! lifter and the Python conformance tools. Celox's own serde types carry the
 //! design and SIR; only the envelope around them is defined here.
 use celox_design::{
-    ElaboratedDesign, InitialStateValue, RegionedStateAddr, RuntimeEventSite, StateAddr,
-    VariableMetadata,
+    DomainKind, ElaboratedDesign, InitialStateValue, RegionedStateAddr, RuntimeEventSite,
+    StateAddr, VariableMetadata,
 };
 use celox_frontend_core::VariableKind;
 use celox_sir::{ExecutionUnit, SirProgram};
@@ -44,6 +44,13 @@ pub struct Design {
     pub state_objects: Vec<StateObject>,
     pub initial_state: Vec<InitialStateValue<StateAddr>>,
     pub ordered_events: Vec<StateAddr>,
+    /// Canonical edge kinds, including kinds carried by aliases of registers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_kinds: Vec<(StateAddr, DomainKind)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derived_events: Vec<(StateAddr, Vec<StateAddr>)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub combinational_derived: Vec<(StateAddr, Vec<StateAddr>)>,
     pub cascaded_events: BTreeSet<StateAddr>,
     pub event_aliases: Vec<(StateAddr, StateAddr)>,
     pub reset_clocks: Vec<(StateAddr, StateAddr)>,
@@ -70,8 +77,22 @@ impl Compiled {
 }
 impl From<ElaboratedDesign<StateAddr>> for Design {
     fn from(design: ElaboratedDesign<StateAddr>) -> Self {
+        let mut event_kinds: Vec<_> = design.event_kinds().into_iter().collect();
+        event_kinds.sort_by_key(|(address, _)| *address);
         let events = design.events;
         Self {
+            event_kinds,
+            derived_events: events.derived_events.into_iter().collect(),
+            combinational_derived: events
+                .combinational_derived
+                .into_iter()
+                .map(|(source, clocks)| {
+                    (
+                        source,
+                        clocks.into_iter().map(|clock| clock.clock).collect(),
+                    )
+                })
+                .collect(),
             state_objects: design
                 .state_objects
                 .into_iter()

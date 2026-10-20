@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**722 actual passes / 746** and 24 recorded exceptions. The raw test executable
+**741 actual passes / 772** and 31 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 722 passes comprise 711 observation-checked cases, three smoke-only cases and
+The 741 passes comprise 730 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.
@@ -68,6 +68,11 @@ run-status artifact.
 5. Named `tick(event)` and lazy combinational evaluation implement the upstream
    Backend contract. Two-state storage starts at zero plus explicit initial
    writes; four-state logic starts unknown plus typed explicit initialization.
+   Derived event graphs and edge kinds come from typed elaboration. A clock
+   cycle settles both levels, evaluates coincident domains before publishing
+   their NBA updates, and follows further edges caused by those updates.
+   Clock payloads and masks are proved unique before selecting an edge;
+   four-state edges follow IEEE 1800-2023 Table 9-2, including async resets.
    General waveform timing outside the Backend's named-event API is not claimed.
    Display/Write/AssertContinue arguments are proved and logged; console delivery
    is outside this Backend API. Activated fatal events fail closed.
@@ -109,11 +114,12 @@ and exact failure message:
   negative constant loop bounds (`InvalidForRange::NegativeBound`), and four call
   runtime `$clog2`/`$onehot` outside a function, which Veryl rejects as
   unsynthesizable (veryl-lang/veryl#2604).
-- `unsupported_by_proof_backend`: twelve cases drive their design from a native
+- `unsupported_by_proof_backend`: seventeen cases drive their design from a native
   Veryl testbench (`Backend::run_testbench`), which this backend does not run.
-- `known_celox_failure`: five cases that the Celox frontend gets wrong today and
-  that Celox's own tests also ignore on every backend. Four of them depend on
-  logic declared inside an interface, which the Veryl analyzer IR drops.
+- `known_celox_failure`: seven cases that Celox's own tests also ignore on its
+  native backends. Five depend on interface logic or nested instances that the
+  Veryl analyzer IR drops; the others cover instance arrays and direct function
+  calls on selected interface array elements.
 - `celox_unsupported`: one case whose design the Celox frontend refuses with a
   typed `Unsupported` error (generic interface ports, #1088). The bridge reports
   it as `frontend_unsupported`, which is neither a source rejection nor a

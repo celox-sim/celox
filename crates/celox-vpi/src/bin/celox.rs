@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "celox",
     version = env!("CELOX_VERSION"),
-    about = "Compile and run Veryl designs with Celox"
+    about = "Compile and run Veryl and SystemVerilog designs with Celox"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,10 +27,239 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
+    /// Run a SystemVerilog or Veryl native testbench.
+    Run(RunArgs),
     /// Build native executables for VPI testbenches.
     Vpi(VpiArgs),
     /// Inspect saved simulation state files.
     State(StateArgs),
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// SystemVerilog sources in compilation order, or one Veryl project entry file.
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
+
+    /// Top-level testbench module name.
+    #[arg(long)]
+    top: String,
+
+    /// Compiler optimization level: O0, O1, O2.
+    #[arg(short = 'O', long, default_value = "O2", value_parser = parse_opt_level)]
+    opt_level: celox::OptLevel,
+
+    /// Maximum SV scheduler steps or Veryl testbench ticks before failing.
+    /// Does not bound compilation or work within a single step/tick.
+    #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u64).range(1..))]
+    max_steps: u64,
+}
+
+fn parse_opt_level(value: &str) -> Result<celox::OptLevel, String> {
+    celox::OptLevel::parse(value).ok_or_else(|| "expected O0, O1, or O2".to_string())
+}
+
+fn run_testbench(arguments: RunArgs) -> Result<(), String> {
+    let all_sv = arguments.sources.iter().all(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "sv" || extension == "v")
+    });
+    if all_sv {
+        #[cfg(feature = "systemverilog")]
+        return run_sv(arguments);
+        #[cfg(not(feature = "systemverilog"))]
+        return Err(
+            "SystemVerilog support requires building celox-vpi with --features systemverilog"
+                .to_string(),
+        );
+    }
+    if arguments.sources.len() != 1
+        || !arguments.sources[0]
+            .extension()
+            .is_some_and(|extension| extension == "veryl")
+    {
+        return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
+    }
+    let source = &arguments.sources[0];
+    let mut metadata = veryl_metadata::Metadata::search_from(source)
+        .ok()
+        .map(|path| {
+            veryl_metadata::Metadata::load(&path)
+                .map_err(|error| format!("failed to load {}: {error}", path.display()))
+        })
+        .transpose()?;
+    let mut paths: Vec<PathBuf> = if let Some(metadata) = &mut metadata {
+        metadata
+            .paths::<&Path>(&[], false, true)
+            .map_err(|error| format!("failed to discover project sources: {error}"))?
+            .into_iter()
+            .map(|path| path.src)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let entry = source
+        .canonicalize()
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    if !paths.iter().any(|path| path == &entry) {
+        paths.push(entry);
+    }
+    let sources = paths
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map(|text| (text, path.as_path()))
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut builder = celox::Simulator::from_sources(
+        sources
+            .iter()
+            .map(|(text, path)| (text.as_str(), *path))
+            .collect(),
+        &arguments.top,
+    )
+    .four_state(true)
+    .opt_level(arguments.opt_level);
+    if let Some(metadata) = metadata {
+        builder = builder.with_metadata(metadata);
+    }
+    let mut simulator = builder
+        .build()
+        .map_err(|error| format!("compilation failed:\n{error}"))?;
+    let program = celox::testbench::compile_initial_testbench(&simulator).ok_or_else(|| {
+        "selected module has no native testbench; select a #[test] module with --top".to_string()
+    })?;
+    let result = celox::testbench::run_compiled_testbench_with_tick_limit(
+        &mut simulator,
+        &program,
+        arguments.max_steps,
+    );
+    if result.tick_limit_reached {
+        return Err(format!(
+            "simulation reached --max-steps {} testbench ticks before completion",
+            arguments.max_steps
+        ));
+    }
+    match result.result {
+        celox::TestResult::Pass => Ok(()),
+        celox::TestResult::Fail(message) => Err(message),
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+fn run_sv(arguments: RunArgs) -> Result<(), String> {
+    let contents = arguments
+        .sources
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sources = contents
+        .iter()
+        .zip(&arguments.sources)
+        .map(|(text, path)| (text.as_str(), path.as_path()))
+        .collect();
+    let simulation = celox::Simulation::from_sv_sources(sources, &arguments.top)
+        .four_state(true)
+        .opt_level(arguments.opt_level)
+        .build()
+        .map_err(|error| format!("compilation failed:\n{error}"))?;
+    simulate_sv(
+        simulation,
+        arguments.max_steps,
+        &mut std::io::stdout().lock(),
+    )
+}
+
+#[cfg(feature = "systemverilog")]
+fn simulate_sv(
+    mut simulation: celox::Simulation,
+    max_steps: u64,
+    output: &mut impl Write,
+) -> Result<(), String> {
+    let mut failed = false;
+    let initial = simulation.eval_comb();
+    drain_sv_output(&mut simulation, output, &mut failed)?;
+    initial.map_err(|error| error.to_string())?;
+    let mut steps = 0;
+    while !simulation.is_finished() && simulation.next_event_time().is_some() {
+        if steps == max_steps {
+            return Err(format!("simulation exceeded --max-steps {}", max_steps));
+        }
+        let step = simulation.step();
+        drain_sv_output(&mut simulation, output, &mut failed)?;
+        if step.map_err(|error| error.to_string())?.is_none() {
+            break;
+        }
+        steps += 1;
+    }
+    if failed {
+        return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "systemverilog")]
+fn drain_sv_output(
+    simulation: &mut celox::Simulation,
+    output: &mut impl Write,
+    failed: &mut bool,
+) -> Result<(), String> {
+    let mut fatal = false;
+    let mut stopped = false;
+    let mut missed = 0;
+    for event in simulation.drain_runtime_events() {
+        let (message, newline) = match event {
+            celox::RuntimeEvent::Display { message } => (message, true),
+            celox::RuntimeEvent::Write { message } => (message, false),
+            celox::RuntimeEvent::AssertContinue { message } => {
+                *failed = true;
+                (message, true)
+            }
+            celox::RuntimeEvent::AssertFatal { message } => {
+                fatal = true;
+                (message, true)
+            }
+            celox::RuntimeEvent::Finish => continue,
+            celox::RuntimeEvent::Stop => {
+                stopped = true;
+                continue;
+            }
+            celox::RuntimeEvent::Missed { count } => {
+                missed += count;
+                continue;
+            }
+        };
+        output
+            .write_all(&message)
+            .and_then(|()| {
+                if newline {
+                    output.write_all(b"\n")
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|error| format!("failed to write simulation output: {error}"))?;
+    }
+    output
+        .flush()
+        .map_err(|error| format!("failed to flush simulation output: {error}"))?;
+    if missed != 0 {
+        return Err(format!("{missed} runtime events were lost"));
+    }
+    if fatal {
+        return Err("SystemVerilog testbench reported $fatal".to_string());
+    }
+    if stopped || simulation.is_stopped() {
+        return Err(
+            "SystemVerilog testbench requested $stop; interactive simulation is unavailable"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Args)]
@@ -76,16 +305,17 @@ struct VpiArgs {
 
 #[derive(Subcommand)]
 enum VpiCommand {
-    /// Compile a Veryl design into a self-contained native simulation executable.
+    /// Compile a Veryl or SystemVerilog design into a native simulation executable.
     Build(BuildArgs),
 }
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Veryl source file belonging to the design project.
-    source: PathBuf,
+    /// One Veryl project entry file, or one or more SystemVerilog (.sv) files.
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
 
-    /// Top-level Veryl module name.
+    /// Top-level module name.
     #[arg(long)]
     top: String,
 
@@ -149,7 +379,12 @@ fn build(arguments: BuildArgs) -> Result<(), String> {
         })?;
     }
 
-    celox_vpi::driver::compile_native_image(&arguments.source, &arguments.top)?
+    let sources = arguments
+        .sources
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    celox_vpi::driver::compile_native_sources(&sources, &arguments.top)?
         .write_attached_runtime(runtime, &arguments.output)
         .map_err(|error| format!("failed to write {}: {error}", arguments.output.display()))?;
     println!("Created {}", arguments.output.display());
@@ -497,6 +732,7 @@ fn run() -> Result<ExitCode, String> {
             run_simulation(attached.image, SimulationArgs::parse()).map(|()| ExitCode::SUCCESS)
         }
         None => match Cli::parse().command {
+            CliCommand::Run(arguments) => run_testbench(arguments).map(|()| ExitCode::SUCCESS),
             CliCommand::Vpi(arguments) => match arguments.command {
                 VpiCommand::Build(arguments) => build(arguments).map(|()| ExitCode::SUCCESS),
             },
@@ -518,6 +754,49 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_defaults_to_o2_for_both_languages_and_allows_overrides() {
+        for (source, default) in [
+            ("top.sv", celox::OptLevel::O2),
+            ("top.v", celox::OptLevel::O2),
+            ("top.veryl", celox::OptLevel::O2),
+        ] {
+            for (extra, expected) in [
+                (Vec::new(), default),
+                (vec!["-O", "O0"], celox::OptLevel::O0),
+                (vec!["-O", "O1"], celox::OptLevel::O1),
+                (vec!["--opt-level", "O2"], celox::OptLevel::O2),
+            ] {
+                let cli = Cli::try_parse_from(
+                    ["celox", "run", source, "--top", "Top"]
+                        .into_iter()
+                        .chain(extra),
+                )
+                .unwrap();
+                let CliCommand::Run(arguments) = cli.command else {
+                    panic!("expected the run command");
+                };
+                assert_eq!(arguments.opt_level, expected, "{source}");
+            }
+        }
+    }
+
+    #[cfg(feature = "systemverilog")]
+    #[test]
+    fn sv_scheduler_limit_fails_and_preserves_scheduled_output() {
+        let source =
+            "module Top(input bit clk); always @(posedge clk) $display(\"tick\"); endmodule";
+        let mut simulation =
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                .build()
+                .unwrap();
+        simulation.add_clock("clk", 2, 1);
+        let mut output = Vec::new();
+        let error = simulate_sv(simulation, 3, &mut output).unwrap_err();
+        assert!(error.contains("exceeded --max-steps 3"));
+        assert!(String::from_utf8(output).unwrap().contains("tick"));
+    }
 
     fn state_file(count: u8, stale: u8) -> StateFile {
         let object = |path: &str, role, value: u8, mask: u8| StateObject {

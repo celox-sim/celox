@@ -1,5 +1,4 @@
-#![allow(clippy::disallowed_macros)] // CLI errors intentionally use stderr
-
+use std::io::Write as _;
 use std::{fs, path::PathBuf, time::Instant};
 
 use clap::Parser as ClapParser;
@@ -52,7 +51,7 @@ enum VerylHeliodorError {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error}");
+        let _ = writeln!(std::io::stderr().lock(), "error: {error}");
         std::process::exit(1);
     }
 }

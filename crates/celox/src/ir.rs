@@ -940,6 +940,7 @@ impl RuntimeProgram {
             scopes[parent.0 as usize].children.push(child);
         }
 
+        let event_kinds = self.design.event_kinds();
         let mut signals = Vec::new();
         for scope in &scope_sources {
             let instance = self.design.instance(scope.instance_id).unwrap();
@@ -984,7 +985,20 @@ impl RuntimeProgram {
                         array_layout,
                     },
                     direction,
-                    domain_kind: metadata.kind,
+                    // Infer an edge only for the source of a canonical domain.
+                    // Downstream ordinary copies are separate writable objects;
+                    // treating them as event aliases would let VPI deposits and
+                    // forces drive their upstream clock/reset.
+                    domain_kind: if metadata.kind == celox_design::DomainKind::Other
+                        && self.design.events.canonical(*state_address) == *state_address
+                    {
+                        event_kinds
+                            .get(state_address)
+                            .copied()
+                            .unwrap_or(metadata.kind)
+                    } else {
+                        metadata.kind
+                    },
                     signed: variable.signed,
                     packed_dims: variable.packed_dims.clone(),
                     unpacked_dims: metadata.array_dims.clone(),

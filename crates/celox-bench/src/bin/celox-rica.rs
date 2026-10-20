@@ -1,5 +1,3 @@
-#![allow(clippy::disallowed_macros)] // CLI errors and progress intentionally use stderr
-
 //! Run a Rica ELF on the `HardwareCoreTestTop` board-memory model with Celox
 //! and report split benchmark timing.
 //!
@@ -10,6 +8,7 @@
 //! mirrors `--timed-clocks`, which evaluates coincident edges atomically with
 //! the timed scheduler.
 
+use std::io::Write as _;
 use std::{
     collections::BTreeMap,
     fs,
@@ -795,7 +794,7 @@ fn report(
 
 fn main() {
     if let Err(error) = run(Cli::parse()) {
-        eprintln!("error: {error}");
+        let _ = writeln!(std::io::stderr().lock(), "error: {error}");
         std::process::exit(1);
     }
 }
@@ -888,7 +887,12 @@ fn run(cli: Cli) -> Result<(), RicaError> {
             let text = text.ok_or_else(|| message(format!("{name} was not captured")))?;
             let path = output_dir.join(name);
             fs::write(&path, &text)?;
-            eprintln!("wrote {name} ({} bytes) to {}", text.len(), path.display());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "wrote {name} ({} bytes) to {}",
+                text.len(),
+                path.display()
+            );
         }
         compiled.into_program_image()
     } else {
