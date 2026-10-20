@@ -59,6 +59,19 @@ mod host {
     };
     use num_bigint::BigUint;
 
+    #[derive(Default)]
+    pub(crate) struct SvVcdControl {
+        pub path: Option<std::path::PathBuf>,
+        pub started: Option<u64>,
+        pub pending: bool,
+        pub selections: Vec<crate::VcdSignalDesc>,
+        pub external_selections: Vec<(usize, celox_runtime::VcdExternalSignalDesc)>,
+        pub source_writer: bool,
+        pub active_external_indices: Vec<usize>,
+        pub limit: u64,
+        pub suspended: bool,
+    }
+
     /// Hierarchical instance tree with resolved signals.
     #[derive(Debug, Clone)]
     pub struct InstanceHierarchy {
@@ -109,6 +122,7 @@ mod host {
         /// The program's scheduling facts.
         pub(crate) schedule: celox_design::schedule::ScheduleModel<crate::AbsoluteAddr>,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
+        pub(crate) sv_vcd: SvVcdControl,
         pub(crate) dirty: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
@@ -788,6 +802,7 @@ mod host {
                 program,
                 schedule,
                 vcd_writer: None,
+                sv_vcd: SvVcdControl::default(),
                 dirty: false,
                 warnings,
                 testbench_strings: Default::default(),
@@ -1266,7 +1281,7 @@ mod host {
                 self.eval_comb_checked().map_err(DumpError::Runtime)?;
                 self.dirty = false;
             }
-            let component_traces = self.components.trace_values();
+            let component_traces = self.vcd_external_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 writer
                     .dump_backend(timestamp, &mut self.backend, &component_traces)
@@ -1285,6 +1300,19 @@ mod host {
                 .is_some_and(|last| timestamp < last);
             if !rewound {
                 self.dump(timestamp);
+            }
+        }
+
+        pub(crate) fn try_dump_unless_rewound(&mut self, timestamp: u64) -> Result<(), DumpError> {
+            let rewound = self
+                .vcd_writer
+                .as_ref()
+                .and_then(|writer| writer.last_timestamp())
+                .is_some_and(|last| timestamp < last);
+            if rewound {
+                Ok(())
+            } else {
+                self.try_dump(timestamp)
             }
         }
 

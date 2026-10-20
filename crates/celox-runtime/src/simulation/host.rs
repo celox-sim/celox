@@ -56,6 +56,18 @@ pub trait HostBoundary: UnitExecutor {
     /// change its state.
     fn freeze(&mut self) {}
 
+    /// Publish buffered diagnostic output without ending or freezing execution.
+    fn flush_output(&mut self) -> Result<(), SimulatorErrorCode> {
+        Ok(())
+    }
+
+    /// Freeze after a design-requested finish, reporting output failures.
+    fn try_freeze(&mut self) -> Result<(), SimulatorErrorCode> {
+        let output = self.flush_output();
+        self.freeze();
+        output
+    }
+
     /// Snapshot external-component inputs immediately before an event domain
     /// evaluates its sequential logic.
     fn stage_external_event(
@@ -78,6 +90,13 @@ pub trait HostBoundary: UnitExecutor {
 
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
+
+    /// Fallible timestamp boundary. The default preserves the original
+    /// infallible hook for existing executor implementations.
+    fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
+        self.finish_timed_step(timestamp);
+        Ok(())
+    }
 }
 
 /// Backend execution hooks needed by the timed simulation engine: its

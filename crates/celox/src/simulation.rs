@@ -11,6 +11,8 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod vcd_tasks;
+
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
 /// the design state together with simulation time, clocks and pending events.
 pub struct SimulationCheckpoint<B: SimBackend = crate::DefaultBackend> {
@@ -124,9 +126,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
                 self.run_plusargs_request(request, timestamp)
             }
             celox_design::HostRequestKind::FileIo => self.run_file_io_request(request, timestamp),
-            celox_design::HostRequestKind::Vcd => {
-                Err(celox_runtime::SimulatorErrorCode::InternalError.into())
-            }
+            celox_design::HostRequestKind::Vcd => self.run_vcd_request(request, timestamp),
         }
     }
 }
@@ -146,6 +146,23 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn freeze(&mut self) {
         self.frozen = true;
+    }
+
+    fn flush_output(&mut self) -> Result<(), RuntimeErrorCode> {
+        if self.sv_vcd.started.is_some() {
+            self.flush_vcd()
+                .map_err(|error| RuntimeErrorCode::Runtime {
+                    message: format!("VCD flush at finish failed: {error}"),
+                    signals: Vec::new(),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn try_freeze(&mut self) -> Result<(), RuntimeErrorCode> {
+        let output = self.flush_output();
+        self.freeze();
+        output
     }
 
     fn stage_external_event(
@@ -179,6 +196,28 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump_unless_rewound(timestamp);
+    }
+
+    fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
+        self.start_sv_vcd(timestamp).map_err(|error| {
+            Halt::Error(RuntimeErrorCode::Runtime {
+                message: format!("VCD setup failed: {error}"),
+                signals: Vec::new(),
+            })
+        })?;
+        self.dirty = false;
+        self.try_dump_unless_rewound(timestamp)
+            .map_err(|error| Halt::Error(vcd_dump_runtime_error(error)))
+    }
+}
+
+fn vcd_dump_runtime_error(error: crate::simulator::DumpError) -> RuntimeErrorCode {
+    match error {
+        crate::simulator::DumpError::Runtime(error) => error,
+        crate::simulator::DumpError::Io(error) => RuntimeErrorCode::Runtime {
+            message: format!("VCD dump failed: {error}"),
+            signals: Vec::new(),
+        },
     }
 }
 
@@ -278,7 +317,7 @@ impl<B: SimBackend> Simulation<B> {
         }
         let mut file = self.simulator.save_state()?;
         // Settling for the file may have executed a `$finish`.
-        self.sync_finish();
+        self.sync_finish_checked().map_err(StateError::Runtime)?;
         let parts = self.state.export_schedule(&self.simulator.backend);
         let mut record = self.simulator.name_schedule(parts);
         record.processes.host_writes = self.simulator.name_host_writes();
@@ -333,10 +372,23 @@ impl<B: SimBackend> Simulation<B> {
 
     /// A `$finish` that flip-flop or combinational code executed outside a
     /// step, during a direct settle, read or dump, ends the simulation too.
-    fn sync_finish(&mut self) {
+    fn sync_finish_checked(&mut self) -> Result<(), RuntimeErrorCode> {
         if !self.state.is_finished() && self.simulator.take_runtime_finish() {
-            self.state.finish(&mut self.simulator);
+            self.state.finalize_terminal(&mut self.simulator)?;
         }
+        Ok(())
+    }
+
+    /// Publish diagnostic state without replacing a primary evaluation error
+    /// or freezing a simulation whose caller may recover.
+    fn flush_error_output(&mut self) {
+        let _ = self.simulator.try_finish_timed_step(self.state.time());
+        let _ = self.simulator.flush_output();
+    }
+
+    fn sync_finish(&mut self) {
+        self.sync_finish_checked()
+            .unwrap_or_else(|error| panic!("simulation finish failed: {error}"));
     }
 
     /// Captures the current state of all signals and writes them to the VCD file.
@@ -348,8 +400,12 @@ impl<B: SimBackend> Simulation<B> {
     /// See [`Simulator::try_dump`].
     pub fn try_dump(&mut self, timestamp: u64) -> Result<(), crate::simulator::DumpError> {
         let result = self.simulator.try_dump(timestamp);
-        self.sync_finish();
-        result
+        let finished = self.sync_finish_checked();
+        if matches!(&result, Err(crate::simulator::DumpError::Runtime(_))) {
+            self.flush_error_output();
+        }
+        result?;
+        finished.map_err(crate::simulator::DumpError::Runtime)
     }
 
     /// See [`Simulator::switch_vcd`].
@@ -396,8 +452,9 @@ impl<B: SimBackend> Simulation<B> {
         F: FnOnce(&mut crate::IOContext<B>),
     {
         let result = self.simulator.modify(f);
-        self.sync_finish();
+        let finished = self.sync_finish_checked();
         result?;
+        finished?;
         let logged = self.simulator.host_watch.has_log();
         self.state.note_host_writes(&self.simulator.backend, logged);
         Ok(())
@@ -470,7 +527,12 @@ impl<B: SimBackend> Simulation<B> {
         }
         self.state
             .advance_time(&mut self.simulator.backend, end_time);
-        self.simulator.dump_unless_rewound(end_time);
+        if let Err(error) = self.simulator.try_dump_unless_rewound(end_time) {
+            if matches!(&error, crate::simulator::DumpError::Runtime(_)) {
+                self.flush_error_output();
+            }
+            return Err(vcd_dump_runtime_error(error));
+        }
         Ok(())
     }
 
@@ -545,8 +607,12 @@ impl<B: SimBackend> Simulation<B> {
     /// Directly execute combinational logic evaluation.
     pub fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
         let result = self.simulator.eval_comb();
-        self.sync_finish();
-        result
+        let finished = self.sync_finish_checked();
+        if result.is_err() {
+            self.flush_error_output();
+        }
+        result?;
+        finished
     }
 
     /// Returns a raw pointer to the backend memory and its total size in bytes.

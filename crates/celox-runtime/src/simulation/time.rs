@@ -183,7 +183,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.charge_pass()?;
             self.step_round(executor, current_time, Vec::new(), ready, false)?;
         }
-        executor.finish_timed_step(current_time);
+        executor.try_finish_timed_step(current_time)?;
         Ok(())
     }
 

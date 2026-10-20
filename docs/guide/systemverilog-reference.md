@@ -69,7 +69,7 @@ as waits written directly in a process.
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
-| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb` in timed processes |
+| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -367,8 +367,9 @@ strings are unsupported.
 
 See [runtime file output](#runtime-file-output) for file descriptors and memory snapshots.
 
-Checkpoints and state files reject designs with file I/O, whose host state they
-cannot capture.
+[Source VCD controls](./vcd#systemverilog-source-controls) start recording after
+the current timestamp settles. Checkpoints and state files reject designs with
+file I/O or source VCD controls, whose host state they cannot capture.
 
 ## Time and precision {#time-and-precision}
 

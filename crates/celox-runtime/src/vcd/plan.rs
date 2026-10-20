@@ -184,6 +184,9 @@ impl TracePlan {
             // Sparse indices can break a long typed run into many short ones.
             // Visit each entry once instead of first rebuilding those runs.
             for &index in selected {
+                if output.limit_reached() {
+                    break;
+                }
                 let entry = self.entries[index];
                 let run = Run {
                     kind: entry.kind,
@@ -199,6 +202,9 @@ impl TracePlan {
             // Alternating types form many tiny runs. Visit their entries
             // directly so each specialized loop has a known length of one.
             for index in 0..self.entries.len() {
+                if output.limit_reached() {
+                    break;
+                }
                 let entry = self.entries[index];
                 let run = Run {
                     kind: entry.kind,
@@ -212,6 +218,9 @@ impl TracePlan {
             }
         } else {
             for index in 0..self.runs.len() {
+                if output.limit_reached() {
+                    break;
+                }
                 // SAFETY: the complete memory range was validated above.
                 unsafe {
                     self.write_run::<INITIAL, W>(self.runs[index], memory, external, output)?;
@@ -248,6 +257,10 @@ impl TracePlan {
             Kind::Generic => {
                 let signals = &self.generic[run.start..run.end];
                 for (index, signal) in signals.iter().enumerate() {
+                    if output.limit_reached() {
+                        output.stats.comparisons += index as u64;
+                        return Ok(());
+                    }
                     let size = signal.width.div_ceil(8);
                     let external_bytes;
                     let (value, mask, track_mask): (&[u8], &[u8], bool) = match signal.source {
@@ -306,6 +319,10 @@ unsafe fn write_fixed<const INITIAL: bool, const BIT: bool, W: Write>(
     output: &mut VcdOutput<W>,
 ) -> std::io::Result<()> {
     for (index, signal) in signals.iter_mut().enumerate() {
+        if output.limit_reached() {
+            output.stats.comparisons += index as u64;
+            return Ok(());
+        }
         let value = if BIT {
             // SAFETY: the plan validated this one-byte range for this dump.
             u64::from(unsafe { *memory.as_ptr().add(signal.offset) } & 1)

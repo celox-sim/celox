@@ -207,6 +207,12 @@ impl RuntimeDesign {
         self.instances.values()
     }
 
+    /// Package state has its own scope and is not a child of the top module.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) fn is_package_instance(&self, id: InstanceId) -> bool {
+        self.package_instances.contains(&id)
+    }
+
     pub fn instance(&self, id: InstanceId) -> Option<&RuntimeInstance> {
         self.instances.get(&id)
     }
