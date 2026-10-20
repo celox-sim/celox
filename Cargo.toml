@@ -84,13 +84,13 @@ lydite-solver         = { path = "crates/lydite-solver" }
 lydite-syntax         = { path = "crates/lydite-syntax" }
 lydite-verify         = { path = "crates/lydite-verify" }
 
-veryl-analyzer = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
-veryl-emitter = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
-veryl-metadata = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
-veryl-parser = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706", default-features = false }
-veryl-path = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
-veryl-simulator = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
-veryl-std = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "b18d98bb1789e76988ac6eb86199d5a7a2ec4706" }
+veryl-analyzer = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
+veryl-emitter = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
+veryl-metadata = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
+veryl-parser = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2", default-features = false }
+veryl-path = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
+veryl-simulator = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
+veryl-std = { version = "0.22.0", git = "https://github.com/veryl-lang/veryl.git", rev = "058bfc5a2dae8a88a74556b1d8cbc07fdbae2cd2" }
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
