@@ -6,6 +6,16 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CraneliftError {
+    #[error(
+        "generated stack frame for {label} is {bytes} bytes ({translated_values} translated CLIF values), exceeding the {limit}-byte limit; enable tail-call splitting or reduce the execution unit"
+    )]
+    StackFrameTooLarge {
+        label: String,
+        bytes: u32,
+        limit: u32,
+        translated_values: usize,
+    },
+
     #[error("failed to set Cranelift option `{option}`: {source}")]
     Setting {
         option: &'static str,

@@ -24,6 +24,8 @@ pub struct WatchCode<A> {
     /// The signal's stable state.
     pub signal: A,
     pub width: usize,
+    /// Bit offset of the observed range within the signal.
+    pub offset: SIROffset,
     /// Whether the signal is held in four-state form.
     pub four_state: bool,
     pub counters: Vec<(CounterKind, A)>,
@@ -36,6 +38,7 @@ impl<A> WatchCode<A> {
         Self {
             signal: address(watch.signal),
             width: watch.width,
+            offset: SIROffset::Static(0),
             four_state: four_state && watch.four_state,
             counters: watch
                 .counters()
@@ -62,6 +65,16 @@ fn load_bits<A: Clone>(
     width: usize,
     four_state: bool,
 ) -> RegisterId {
+    load_range(b, address, SIROffset::Static(lsb), width, four_state)
+}
+
+fn load_range<A: Clone>(
+    b: &mut SIRBuilder<A>,
+    address: &A,
+    offset: SIROffset,
+    width: usize,
+    four_state: bool,
+) -> RegisterId {
     let register = if four_state {
         b.alloc_logic(width)
     } else {
@@ -70,7 +83,7 @@ fn load_bits<A: Clone>(
     b.emit(SIRInstruction::Load(
         register,
         address.clone(),
-        SIROffset::Static(lsb),
+        offset,
         width,
     ));
     register
@@ -96,12 +109,19 @@ pub fn emit_watched<A: Clone>(
     write: SIRInstruction<A>,
     value_type: Option<&celox_sir::RegisterType>,
 ) {
-    let old = load(b, &watch.signal, watch.width, watch.four_state);
+    let old = load_range(
+        b,
+        &watch.signal,
+        watch.offset.clone(),
+        watch.width,
+        watch.four_state,
+    );
     // A store of the whole signal stores the new value itself; any other
     // write is read back.
     let stored = match &write {
         SIRInstruction::Store(_, SIROffset::Static(0), width, value, ..)
-            if *width == watch.width
+            if watch.offset == SIROffset::Static(0)
+                && *width == watch.width
                 && value_type
                     == Some(&if watch.four_state {
                         celox_sir::RegisterType::Logic { width: *width }
@@ -125,7 +145,13 @@ pub fn emit_watched<A: Clone>(
     }
     let new = match stored {
         Some(value) => value,
-        None => load(b, &watch.signal, watch.width, watch.four_state),
+        None => load_range(
+            b,
+            &watch.signal,
+            watch.offset.clone(),
+            watch.width,
+            watch.four_state,
+        ),
     };
     let new_lsb = lsb(b, new, watch.width, watch.four_state);
     for &(kind, ref counter) in &watch.counters {

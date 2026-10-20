@@ -398,6 +398,8 @@ impl<A: Copy> HostRequestSite<A> {
 /// checkpoints capture a suspended process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessSlots<A> {
+    /// A static declaration initializer, executed before all HDL procedures.
+    pub is_initializer: bool,
     /// This kernel originated from an edge procedure and must execute in Simulation.
     pub requires_timed_simulation: bool,
     pub resume: A,
@@ -408,6 +410,7 @@ pub struct ProcessSlots<A> {
 impl<A> ProcessSlots<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessSlots<B> {
         ProcessSlots {
+            is_initializer: self.is_initializer,
             requires_timed_simulation: self.requires_timed_simulation,
             resume: map(self.resume),
             status: map(self.status),
@@ -672,6 +675,63 @@ impl From<TimePrecision> for i32 {
     }
 }
 
+/// Timed-only preparation for runtime static declarations. Ordinary folded
+/// initial writes remain in the plain simulator's image; a timed simulation
+/// resets their targets, executes declarations, then replays these writes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeclarationStartup<A> {
+    pub reset: Vec<InitialStateValue<A>>,
+    pub ordinary: Vec<InitialStateValue<A>>,
+    pub snapshots: Vec<(VarAtomBase<A>, A)>,
+    pub counter_snapshots: Vec<(A, A)>,
+    pub probes: Vec<(VarAtomBase<A>, A)>,
+}
+
+impl<A: Copy> DeclarationStartup<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> DeclarationStartup<B> {
+        let mut values = |values: &[InitialStateValue<A>]| {
+            values
+                .iter()
+                .map(|value| InitialStateValue {
+                    address: map(value.address),
+                    data: value.data.clone(),
+                })
+                .collect()
+        };
+        let reset = values(&self.reset);
+        let ordinary = values(&self.ordinary);
+        DeclarationStartup {
+            reset,
+            ordinary,
+            snapshots: self
+                .snapshots
+                .iter()
+                .map(|(source, saved)| {
+                    (
+                        VarAtomBase::new(map(source.id), source.access.lsb, source.access.msb),
+                        map(*saved),
+                    )
+                })
+                .collect(),
+            counter_snapshots: self
+                .counter_snapshots
+                .iter()
+                .map(|(counter, saved)| (map(*counter), map(*saved)))
+                .collect(),
+            probes: self
+                .probes
+                .iter()
+                .map(|(source, counter)| {
+                    (
+                        VarAtomBase::new(map(source.id), source.access.lsb, source.access.msb),
+                        map(*counter),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Source-independent runtime diagnostics and observable event descriptions.
 #[derive(Clone, Debug)]
 pub struct RuntimeSchema<A> {
@@ -693,6 +753,7 @@ pub struct RuntimeSchema<A> {
     /// Stateful combinational process writes, excluded from derived-value
     /// classification when the optimizer builds `comb_writes`.
     pub persistent_comb_state: HashSet<A>,
+    pub declaration_startup: Option<DeclarationStartup<A>>,
     /// Dead store elimination policy the program was compiled with. Together
     /// with `live_signals` and the design it decides which combinationally
     /// written state the host may observe.
@@ -735,6 +796,7 @@ impl<A> Default for RuntimeSchema<A> {
             rtl_writes: HashSet::default(),
             comb_writes: HashSet::default(),
             persistent_comb_state: HashSet::default(),
+            declaration_startup: None,
             dead_store_policy: DeadStorePolicy::Off,
             live_signals: HashSet::default(),
             processes: Vec::new(),

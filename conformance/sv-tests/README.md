@@ -103,6 +103,15 @@ cases retain their verdicts. The pinned `real_bit_select_idx` input is rejected
 earlier for its undriven net, so a separate analyzer regression uses a driven
 input to check that real-valued indices themselves are rejected.
 
+Blocking latch support changes ten expectation rows: `12.4--if`,
+`12.4.1--if_else_if`, and the three `12.4.2` priority/unique conditional probes
+now pass elaboration in both state modes. These sources use ordinary
+`always @*`, whose retained assignments are accepted by default. The unmodified
+runner and default driver require no inference option; `always_comb` remains
+strict by default. The `9.2.2.3--always_latch` probe still fails because it uses
+an unsupported nonblocking latch assignment (`<=`). The full pinned run reviewed
+all 2054 case/mode rows; no other expectation rows changed.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

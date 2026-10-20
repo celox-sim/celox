@@ -9,6 +9,98 @@ use super::round::Round;
 use crate::{SimulatorErrorCode, backend::SimBackend, timing::Halt};
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Execute static declaration initializers before any ordinary process,
+    /// combinational evaluation, or externally scheduled time-zero event.
+    pub fn initialize_declarations<E>(&mut self, executor: &mut E) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        match self.initialize_declarations_inner(executor) {
+            Ok(()) => Ok(()),
+            Err(Halt::Finish) => self.finalize_terminal(executor),
+            Err(Halt::Stop) => {
+                self.stopped = true;
+                Ok(())
+            }
+            Err(Halt::Error(error)) => Err(error),
+        }
+    }
+
+    pub(super) fn initialize_declarations_inner<E>(&mut self, executor: &mut E) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        if self.finished || !self.declarations_pending {
+            return Ok(());
+        }
+        let declarations = self.declaration_processes.clone();
+        let status = |executor: &E, process: usize| -> u8 {
+            executor
+                .backend()
+                .get_as(self.model.processes[process].status)
+        };
+        if declarations
+            .iter()
+            .all(|&index| status(executor, index) == ProcessStatus::Done.code())
+        {
+            self.declarations_pending = false;
+            return Ok(());
+        }
+        let started = declarations.iter().any(|&index| {
+            status(executor, index) != 0
+                || executor
+                    .backend()
+                    .get_as::<u32>(self.model.processes[index].resume)
+                    != 0
+        });
+        if !started {
+            executor.reset_declaration_startup()?;
+        }
+        let mut returns = 0;
+        for &index in &declarations {
+            loop {
+                let status: u8 = executor
+                    .backend()
+                    .get_as(self.model.processes[index].status);
+                if status == ProcessStatus::Done.code() {
+                    break;
+                }
+                if !self.run_process(executor, 0, index, &mut returns)? {
+                    let status: u8 = executor
+                        .backend()
+                        .get_as(self.model.processes[index].status);
+                    if status != ProcessStatus::Done.code() {
+                        return Err(SimulatorErrorCode::Runtime {
+                            message: "static declaration initializer cannot suspend for HDL timing"
+                                .into(),
+                            signals: Vec::new(),
+                        }
+                        .into());
+                    }
+                }
+            }
+        }
+        executor.prime_declaration_startup()?;
+        self.synchronize_event_values(executor.backend());
+        for (saved, counted) in self
+            .process_state
+            .domain_counters
+            .iter_mut()
+            .zip(&self.model.counted)
+        {
+            *saved = celox_design::CounterKind::ALL
+                .map(|kind| executor.backend().get_as::<u32>(counted.refs.counter(kind)));
+        }
+        self.process_wakeups
+            .retain(|std::cmp::Reverse((_, index))| !declarations.contains(index));
+        for index in declarations {
+            self.process_state.ready.remove(&index);
+        }
+        executor.apply_declaration_startup()?;
+        self.declarations_pending = false;
+        Ok(())
+    }
+
     /// Run process `process` once and file it where it resumes. Returns
     /// whether it resumes at once (a queued nonblocking assignment or a
     /// yield), in which case the caller checks the state before running it

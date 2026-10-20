@@ -1,0 +1,62 @@
+{
+  "schema_version": 3,
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "observation_method": "Adapter-free exact shared sources; no external adapter or stimulus translation.",
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "[1] %Fatal: pr1627-second-review-star_complete_declaration_startup.sv:6: Assertion failed in Top: complete wildcard process waits after declaration initialization\n%Error: /home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-star_complete_declaration_startup.sv:6: Verilog $stop\nAborting...\n",
+      "expectation": "Simulation",
+      "name": "latch::star_complete_declaration_startup",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "[2] %Fatal: pr1627-second-review-task_call_sensitivity.sv:16: Assertion failed in Top: task body globals do not add sensitivity\n%Error: /home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-task_call_sensitivity.sv:16: Verilog $stop\nAborting...\n",
+      "expectation": "Simulation",
+      "name": "latch::task_call_sensitivity",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "standard": "IEEE 1800-2023 6.8 and 9.2.2.2.2 require static declarations before procedures and always @* to wait for a sensitivity event. Clause 9.2.2.2.1 adds task arguments, but not task contents, to always_comb sensitivity; 9.2.2.3 applies the same sensitivity rules to always_latch.",
+  "adapter_free": [
+    {
+      "name": "latch::star_complete_declaration_startup",
+      "source": "verification/repros/star_complete_declaration_startup.sv",
+      "source_sha256": "5da7fc738883cf70bfe498caefa5bd1b6a4ac31912a48dacdc7f2f58cdb02c6c",
+      "verilator_command": "verilator --binary --timing -j 2 -Wno-fatal --top-module Top --Mdir <build-dir> star_complete_declaration_startup.sv; <build-dir>/VTop",
+      "verilator_build_exit_code": 0,
+      "verilator_exit_code": 1,
+      "verilator_output": "[1] %Fatal: pr1627-second-review-star_complete_declaration_startup.sv:6: Assertion failed in Top: complete wildcard process waits after declaration initialization\n%Error: /home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-star_complete_declaration_startup.sv:6: Verilog $stop\nAborting...\n",
+      "icarus_command": "iverilog -g2012 -s Top -o <output> star_complete_declaration_startup.sv; vvp <output>",
+      "icarus_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "icarus_build_exit_code": 0,
+      "icarus_exit_code": 0,
+      "icarus_output": "/home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-star_complete_declaration_startup.sv:10: $finish called at 3 (1s)\n"
+    },
+    {
+      "name": "latch::task_call_sensitivity",
+      "source": "verification/repros/task_call_sensitivity.sv",
+      "source_sha256": "4fbad5d00bfcbf1ac8a423c460735831dcf8c791ca6922085fcb4dfc74a7fb26",
+      "verilator_command": "verilator --binary --timing -j 2 -Wno-fatal --top-module Top --Mdir <build-dir> task_call_sensitivity.sv; <build-dir>/VTop",
+      "verilator_build_exit_code": 0,
+      "verilator_exit_code": 1,
+      "verilator_output": "[2] %Fatal: pr1627-second-review-task_call_sensitivity.sv:16: Assertion failed in Top: task body globals do not add sensitivity\n%Error: /home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-task_call_sensitivity.sv:16: Verilog $stop\nAborting...\n",
+      "icarus_command": "iverilog -g2012 -s Top -o <output> task_call_sensitivity.sv; vvp <output>",
+      "icarus_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "icarus_build_exit_code": 0,
+      "icarus_exit_code": 0,
+      "icarus_output": "/home/tsukasa/develop/celox/.worktrees/feature-latch-support/work/pr1627-second-review-task_call_sensitivity.sv:20: $finish called at 3 (1s)\n"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+use num_bigint::BigUint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::symbolic::artifact::{
@@ -10,10 +11,11 @@ use crate::{
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
-    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateValue,
-    InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr,
-    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema,
-    STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
+    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateData,
+    InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase,
+    RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
+    RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
+    VariableMetadata, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -679,6 +681,18 @@ pub fn schedule_symbolic_rtl(
         )
     )?;
     let timing = relocate_timing(bindings, &instance_modules, &modules, &processes);
+    let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
+        .iter()
+        .flat_map(|(&instance, module)| {
+            modules[module].variables.iter().map(move |(&var_id, var)| {
+                (
+                    bindings.locate(instance, var_id),
+                    (var.metadata.width, var.metadata.is_4state),
+                )
+            })
+        })
+        .collect();
+    let declaration_probes;
     let counted = {
         // Flip-flop event domains and the aliases that resolve to them.
         let event_addresses: HashSet<AbsoluteAddr> = eval_apply_ffs
@@ -691,17 +705,129 @@ pub fn schedule_symbolic_rtl(
                     .map(|(alias, _)| *alias),
             )
             .collect();
-        let variables: HashMap<AbsoluteAddr, (usize, bool)> = instance_modules
-            .iter()
-            .flat_map(|(&instance, module)| {
-                modules[module].variables.iter().map(move |(&var_id, var)| {
-                    (
-                        bindings.locate(instance, var_id),
-                        (var.metadata.width, var.metadata.is_4state),
-                    )
-                })
-            })
-            .collect();
+        // Count sensitivity occurrences before any optimizer can coalesce
+        // consecutive writes whose final value is unchanged.
+        let mut probes = Vec::new();
+        for path in &comb_blocks {
+            if let LogicPathTarget::Process {
+                sensitivity_counters,
+                ..
+            } = &path.target
+            {
+                for &(source, counter) in sensitivity_counters {
+                    if !probes.contains(&(source, counter)) {
+                        probes.push((source, counter));
+                    }
+                }
+            }
+        }
+        // A direct wire/port connection carries occurrences as well as its
+        // settled value. Preserve them when a kernel writes the upstream
+        // object twice before the copy path is evaluated. Only equal-width,
+        // unindexed copies are transparent here; expressions remain scheduled
+        // combinational evaluations.
+        let mut next_probe = 0;
+        while next_probe < probes.len() {
+            let (source, counter) = probes[next_probe];
+            next_probe += 1;
+            for path in &comb_blocks {
+                let LogicPathTarget::Var(target) = &path.target else {
+                    continue;
+                };
+                if !path.transparent_copy
+                    || target.id != source.id
+                    || !target.access.overlaps(&source.access)
+                {
+                    continue;
+                }
+                let celox_slt::SLTNode::Input {
+                    variable,
+                    access,
+                    index,
+                    ..
+                } = global_arena.get(path.expr)
+                else {
+                    continue;
+                };
+                if !index.is_empty()
+                    || (four_state && variables[variable].1 != variables[&target.id].1)
+                    || access.msb - access.lsb != target.access.msb - target.access.lsb
+                {
+                    continue;
+                }
+                let lsb = source.access.lsb.max(target.access.lsb);
+                let msb = source.access.msb.min(target.access.msb);
+                let upstream = VarAtomBase::new(
+                    *variable,
+                    access.lsb + lsb - target.access.lsb,
+                    access.lsb + msb - target.access.lsb,
+                );
+                if !probes.contains(&(upstream, counter)) {
+                    probes.push((upstream, counter));
+                }
+            }
+        }
+        declaration_probes = probes.clone();
+        for (source, counter) in probes {
+            let width = source.access.msb - source.access.lsb + 1;
+            let four_state = four_state && variables[&source.id].1;
+            let offset = match unpacked_element_widths.get(&source.id) {
+                Some(&element_width)
+                    if width > element_width
+                        && source.access.lsb.is_multiple_of(element_width)
+                        && width.is_multiple_of(element_width) =>
+                {
+                    celox_sir::SIROffset::PackedElements {
+                        bit_offset: source.access.lsb,
+                        element_width,
+                    }
+                }
+                _ => celox_sir::SIROffset::Static(source.access.lsb),
+            };
+            let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
+            let code = |address: &RegionedAbsoluteAddr| {
+                (address.region == STABLE_REGION && address.absolute_addr() == source.id).then(
+                    || crate::watch::WatchCode {
+                        signal: stable(source.id),
+                        width,
+                        offset: offset.clone(),
+                        four_state,
+                        counters: vec![(CounterKind::Changes, stable(counter))],
+                    },
+                )
+            };
+            for process in &mut processes {
+                crate::watch::instrument_unit(&mut process.kernel, code);
+            }
+            for units in eval_apply_ffs
+                .values_mut()
+                .chain(eval_only_ffs.values_mut())
+                .chain(apply_ffs.values_mut())
+            {
+                for unit in units {
+                    crate::watch::instrument_unit(unit, code);
+                }
+            }
+            for parts in parallel_ff_units.values_mut() {
+                for (_, part) in parts {
+                    crate::watch::instrument_unit(&mut part.evaluate, code);
+                    crate::watch::instrument_unit(&mut part.apply, code);
+                }
+            }
+            for path in &mut comb_blocks {
+                if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+                    crate::watch::instrument_unit(unit, |address| {
+                        (*address == source.id).then(|| crate::watch::WatchCode {
+                            signal: source.id,
+                            width,
+                            offset: offset.clone(),
+                            four_state,
+                            counters: vec![(CounterKind::Changes, counter)],
+                        })
+                    });
+                }
+            }
+        }
         instrument_counted_signals(
             &timing,
             &event_addresses,
@@ -929,8 +1055,66 @@ pub fn schedule_symbolic_rtl(
             .collect::<HashSet<_>>()
     });
     let mut persistent_comb_state = HashSet::default();
+    let mut comb_startups = BTreeMap::new();
     for path in &comb_blocks {
-        if let LogicPathTarget::Process { unit, .. } = &path.target {
+        if let LogicPathTarget::Process { unit, startup, .. } = &path.target {
+            if let Some(startup) = startup {
+                comb_startups.entry(startup.initialized).or_insert_with(|| {
+                    let mut startup = startup.clone();
+                    // Transparent ports/wires already have their upstream
+                    // declaration value before wildcard processes begin
+                    // waiting. Their unconnected net default (Z) is not a
+                    // startup event. Resolve only direct equal-type copies;
+                    // constant/expression continuous drivers still run at
+                    // time zero and can wake the process.
+                    for (source, _) in &mut startup.inputs {
+                        let mut seen = HashSet::default();
+                        while seen.insert(*source) {
+                            let upstream = comb_blocks.iter().find_map(|path| {
+                                if !path.transparent_copy {
+                                    return None;
+                                }
+                                let LogicPathTarget::Var(target) = &path.target else {
+                                    return None;
+                                };
+                                if target.id != source.id
+                                    || target.access.lsb > source.access.lsb
+                                    || target.access.msb < source.access.msb
+                                {
+                                    return None;
+                                }
+                                let celox_slt::SLTNode::Input {
+                                    variable,
+                                    access,
+                                    index,
+                                    ..
+                                } = global_arena.get(path.expr)
+                                else {
+                                    return None;
+                                };
+                                if !index.is_empty()
+                                    || access.msb - access.lsb
+                                        != target.access.msb - target.access.lsb
+                                    || (four_state
+                                        && variables[variable].1 != variables[&target.id].1)
+                                {
+                                    return None;
+                                }
+                                Some(VarAtomBase::new(
+                                    *variable,
+                                    access.lsb + source.access.lsb - target.access.lsb,
+                                    access.lsb + source.access.msb - target.access.lsb,
+                                ))
+                            });
+                            let Some(upstream) = upstream else {
+                                break;
+                            };
+                            *source = upstream;
+                        }
+                    }
+                    startup
+                });
+            }
             for block in unit.blocks.values() {
                 for inst in &block.instructions {
                     if let SIRInstruction::Store(address, ..) = inst {
@@ -1276,7 +1460,37 @@ pub fn schedule_symbolic_rtl(
     initial_instances.sort_unstable_by_key(|(instance, module)| {
         (!package_instances.contains_key(*module), instance.0)
     });
-    let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+    let declaration_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+        .iter()
+        .flat_map(|&(&instance_id, module_id)| {
+            modules[module_id]
+                .declaration_initial_memory_values
+                .iter()
+                .filter(move |init| {
+                    !bindings.is_bound(&AbsoluteAddr {
+                        instance_id,
+                        var_id: init.address,
+                    })
+                })
+                .map(move |init| InitialStateValue {
+                    address: bindings.locate(instance_id, init.address),
+                    data: init.data.clone(),
+                })
+        })
+        .collect();
+    let folded_initials: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
+        .iter()
+        .flat_map(|&(&instance_id, module_id)| {
+            modules[module_id]
+                .folded_initial_memory_values
+                .iter()
+                .map(move |init| InitialStateValue {
+                    address: bindings.locate(instance_id, init.address),
+                    data: init.data.clone(),
+                })
+        })
+        .collect();
+    let mut initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = initial_instances
         .into_iter()
         .flat_map(|(&instance_id, module_id)| {
             modules[module_id]
@@ -1306,6 +1520,52 @@ pub fn schedule_symbolic_rtl(
         })
         .filter(|(address, _)| !bindings.is_bound(address))
         .collect();
+    let declaration_startup = processes
+        .iter()
+        .any(|process| process.slots.is_initializer)
+        .then(|| {
+            let targets: BTreeSet<_> = folded_initials.iter().map(|init| init.address).collect();
+            let mut reset = targets
+                .iter()
+                .map(|&address| InitialStateValue {
+                    address,
+                    data: InitialStateData::Packed {
+                        value: BigUint::default(),
+                        mask: BigUint::default(),
+                        written_mask: (BigUint::from(1u8) << state_objects[&address].width) - 1u8,
+                    },
+                })
+                .collect::<Vec<_>>();
+            reset.extend(
+                declaration_values
+                    .iter()
+                    .filter(|init| targets.contains(&init.address))
+                    .cloned(),
+            );
+            celox_design::DeclarationStartup {
+                reset,
+                ordinary: folded_initials,
+                snapshots: comb_startups
+                    .values()
+                    .flat_map(|startup| startup.inputs.iter().copied())
+                    .collect(),
+                counter_snapshots: comb_startups
+                    .values()
+                    .flat_map(|startup| startup.counters.iter().copied())
+                    .collect(),
+                probes: declaration_probes,
+            }
+        });
+    // Arm wildcard processes against declaration-time state, before continuous
+    // drivers, folded initial statements, or the first host write can change
+    // their inputs. The resulting constants use the ordinary initialization
+    // path on every backend, including native images.
+    initial_memory_values.extend(super::comb_startup::initial_values(
+        comb_startups.values(),
+        &declaration_values,
+        &state_objects,
+        four_state,
+    ));
     let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
         .iter()
         .map(|observer| RuntimeCombObserver {
@@ -1566,7 +1826,7 @@ pub fn schedule_symbolic_rtl(
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     // The runtime reads counters, the signals waits watch and staged
     // nonblocking values directly; no unit loads a wait's signal.
-    let timing_read_roots = watches
+    let mut timing_read_roots: HashSet<StateAddr> = watches
         .iter()
         .flat_map(|watch| {
             watch
@@ -1587,6 +1847,34 @@ pub fn schedule_symbolic_rtl(
         )
         .chain(host_request_sites.iter().flat_map(|site| site.slots()))
         .collect();
+    let declaration_startup = declaration_startup.map(|startup| startup.map(project));
+    if let Some(startup) = &declaration_startup {
+        timing_read_roots.extend(
+            startup
+                .reset
+                .iter()
+                .chain(&startup.ordinary)
+                .map(|value| value.address),
+        );
+        timing_read_roots.extend(
+            startup
+                .snapshots
+                .iter()
+                .flat_map(|(source, saved)| [source.id, *saved]),
+        );
+        timing_read_roots.extend(
+            startup
+                .counter_snapshots
+                .iter()
+                .flat_map(|&(counter, saved)| [counter, saved]),
+        );
+        timing_read_roots.extend(
+            startup
+                .probes
+                .iter()
+                .flat_map(|(source, counter)| [source.id, *counter]),
+        );
+    }
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -1626,6 +1914,7 @@ pub fn schedule_symbolic_rtl(
             rtl_writes,
             comb_writes: Default::default(),
             persistent_comb_state,
+            declaration_startup,
             dead_store_policy: Default::default(),
             live_signals: Default::default(),
             processes: process_slots,
@@ -3049,6 +3338,7 @@ fn instrument_counted_signals(
                 |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
             Some(crate::watch::WatchCode {
                 signal: stable(slots.signal),
+                offset: celox_sir::SIROffset::Static(0),
                 width,
                 four_state,
                 counters: CounterKind::ALL
@@ -3064,6 +3354,7 @@ fn instrument_counted_signals(
                 let (slots, width, four_state) = code(*address)?;
                 Some(crate::watch::WatchCode {
                     signal: slots.signal,
+                    offset: celox_sir::SIROffset::Static(0),
                     width,
                     four_state,
                     counters: CounterKind::ALL
@@ -3130,6 +3421,7 @@ fn build_comb_observer_capture_paths(
                 comb_blocks[idx.0].order_before.insert(path_id);
             }
             comb_blocks.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
                     guard: None,
@@ -3162,6 +3454,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    transparent_copy: false,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: observer.site_id,
                         guard: None,
@@ -3246,6 +3539,7 @@ fn build_comb_observer_capture_paths(
             comb_blocks[idx.0].order_before.insert(path_id);
         }
         comb_blocks.push(LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::CombCaptureEvent {
                 site_id: observer.site_id,
                 guard: observer.guard,
@@ -3307,6 +3601,7 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
+                    transparent_copy: false,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: member.site_id,
                         guard: member.guard,

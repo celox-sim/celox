@@ -233,6 +233,7 @@ impl script::ScriptCase {
                 .collect(),
             top: self.top.clone(),
             four_state: self.four_state,
+            allow_inferred_latches: self.allow_inferred_latches,
             parameters: self.parameters.clone(),
             timed: self.is_timed(),
         }

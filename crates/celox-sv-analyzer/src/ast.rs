@@ -2147,6 +2147,7 @@ impl LValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
     creation_order: usize,
+    site: Option<crate::procedural::SourceSpan>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -2155,6 +2156,10 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    pub fn site(&self) -> Option<&crate::procedural::SourceSpan> {
+        self.site.as_ref()
+    }
+
     /// Reads removed from executable branches still affect implicit sensitivity.
     pub fn sensitivity_body(&self) -> &[Stmt] {
         &self.sensitivity_body
@@ -2180,6 +2185,7 @@ impl CombProcess {
             .collect();
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2191,6 +2197,7 @@ impl CombProcess {
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -2220,6 +2227,7 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysLatch,
     AlwaysStar,
 }
 

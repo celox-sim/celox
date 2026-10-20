@@ -38,6 +38,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 
 mod comb;
+mod comb_retention;
 mod ff;
 mod floating;
 mod procedural;
@@ -1376,6 +1377,64 @@ pub fn prepare_external_hierarchy_with_foreign_resolver_with_options(
     warnings: &mut Vec<crate::FrontendWarning>,
     analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver_with_options_and_latch_policy(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        false,
+        warnings,
+        analysis_options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver_and_latch_policy(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    allow_inferred_latches: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ExternalHierarchy, FrontendError> {
+    prepare_external_hierarchy_with_foreign_resolver_with_options_and_latch_policy(
+        sources,
+        root_names,
+        foreign,
+        declarations,
+        four_state,
+        resolver,
+        top_parameters,
+        requests,
+        allow_inferred_latches,
+        warnings,
+        sv::AnalysisOptions::default(),
+    )
+}
+
+/// Prepare a mixed hierarchy with both compatibility and latch options.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_external_hierarchy_with_foreign_resolver_with_options_and_latch_policy(
+    sources: &[(&str, &Path)],
+    root_names: &HashSet<String>,
+    foreign: &ExternalHierarchy,
+    declarations: &[(&str, &Path)],
+    four_state: bool,
+    resolver: Option<&mut ForeignModuleResolver<'_>>,
+    top_parameters: Option<(&str, &[(String, u64)])>,
+    requests: &[SvModuleRequest],
+    allow_inferred_latches: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+) -> Result<ExternalHierarchy, FrontendError> {
     let mut found = Vec::new();
     let hierarchy = prepare_external_hierarchy_collecting(
         sources,
@@ -1386,6 +1445,7 @@ pub fn prepare_external_hierarchy_with_foreign_resolver_with_options(
         resolver,
         top_parameters,
         requests,
+        allow_inferred_latches,
         &mut found,
         analysis_options,
     );
@@ -1404,6 +1464,7 @@ fn prepare_external_hierarchy_collecting(
     mut resolver: Option<&mut ForeignModuleResolver<'_>>,
     top_parameters: Option<(&str, &[(String, u64)])>,
     requests: &[SvModuleRequest],
+    allow_inferred_latches: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     analysis_options: sv::AnalysisOptions,
 ) -> Result<ExternalHierarchy, FrontendError> {
@@ -1678,6 +1739,7 @@ fn prepare_external_hierarchy_collecting(
             &module_ids,
             &lowered_modules,
             four_state,
+            allow_inferred_latches,
             warnings,
         )?;
         modules.insert(
@@ -1861,11 +1923,90 @@ pub fn schedule_sources_with_force_signals(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_force_signals_and_latch_policy(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        false,
+        warnings,
+        analysis_options,
+        force_signals,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_latch_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    allow_inferred_latches: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
+) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_force_signals_and_latch_policy(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        allow_inferred_latches,
+        warnings,
+        sv::AnalysisOptions::default(),
+        &[],
+    )
+}
+
+/// Schedule with compatibility options, signal overrides, and latch inference.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_force_signals_and_latch_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    allow_inferred_latches: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
     let parameters = parameter_overrides
         .iter()
         .map(|(name, value)| (name.clone(), sv::ir::ConstExpr::Literal(value.to_string())))
         .collect::<Vec<_>>();
-    schedule_sources_with_parameter_expressions(
+    schedule_sources_with_parameter_expressions_and_latch_policy(
         sources,
         top,
         &parameters,
@@ -1875,13 +2016,14 @@ pub fn schedule_sources_with_force_signals(
         parallel,
         trace_options,
         trace,
+        allow_inferred_latches,
         warnings,
         analysis_options,
         force_signals,
     )
 }
 
-/// Schedule a design with typed SV constant expressions as top parameters.
+/// Schedule with typed SV constant expressions and strict latch inference.
 #[allow(clippy::too_many_arguments)]
 pub fn schedule_sources_with_parameter_expressions(
     sources: &[(&str, &Path)],
@@ -1904,6 +2046,46 @@ pub fn schedule_sources_with_parameter_expressions(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
+    schedule_sources_with_parameter_expressions_and_latch_policy(
+        sources,
+        top,
+        parameter_overrides,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        false,
+        warnings,
+        analysis_options,
+        force_signals,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_parameter_expressions_and_latch_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, sv::ir::ConstExpr)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    allow_inferred_latches: bool,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
     let mut found = Vec::new();
     let scheduled = schedule_sources_collecting(
         sources,
@@ -1915,6 +2097,7 @@ pub fn schedule_sources_with_parameter_expressions(
         parallel,
         trace_options,
         trace,
+        allow_inferred_latches,
         &mut found,
         analysis_options,
         force_signals,
@@ -1942,6 +2125,7 @@ fn schedule_sources_collecting(
     parallel: &celox_frontend_core::ParallelScheduleOptions,
     trace_options: &FrontendTraceOptions,
     trace: Option<&mut FrontendTrace>,
+    allow_inferred_latches: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
@@ -2045,6 +2229,7 @@ fn schedule_sources_collecting(
             &module_ids,
             &lowered_modules,
             four_state,
+            allow_inferred_latches,
             warnings,
         )?;
         module_names.insert(module_id, key.name.clone());
@@ -2687,20 +2872,28 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
-
-    let (initial_values, processes, wait_sites, nba_sites, host_request_sites) =
-        lower_initial_processes(
-            module,
-            &mut variables,
-            &mut name_to_id,
-            &constants,
-            &parameter_types,
-            four_state,
-            &mut runtime_event_sites,
-            &mut runtime_errors,
-            &mut extern_functions,
-            warnings,
-        )?;
+    let (
+        initial_values,
+        declaration_values,
+        folded_initial_memory_values,
+        processes,
+        wait_sites,
+        nba_sites,
+        host_request_sites,
+    ) = lower_initial_processes(
+        module,
+        &mut variables,
+        &mut name_to_id,
+        &constants,
+        &parameter_types,
+        four_state,
+        &mut runtime_event_sites,
+        &mut runtime_errors,
+        &mut extern_functions,
+        warnings,
+    )?;
+    let mut declaration_initial_memory_values = initial_memory_values.clone();
+    declaration_initial_memory_values.extend(declaration_values);
     initial_memory_values.extend(initial_values);
 
     let shared_variables = variables
@@ -2793,6 +2986,8 @@ fn lower_module_with_overrides(
             runtime_event_sites,
             extern_functions,
             initial_memory_values,
+            declaration_initial_memory_values,
+            folded_initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
             reset_clock_map,
@@ -3075,6 +3270,7 @@ pub(crate) fn attach_instance_glue(
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     four_state: bool,
+    allow_inferred_latches: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
@@ -3201,6 +3397,7 @@ pub(crate) fn attach_instance_glue(
         &lowered.constants,
         &lowered.parameter_types,
         four_state,
+        allow_inferred_latches,
         &mut module.runtime_errors,
         &mut module.extern_functions,
         warnings,
@@ -3531,6 +3728,8 @@ fn lower_initial_processes(
 ) -> Result<
     (
         Vec<InitialStateValue<SourceVarId>>,
+        Vec<InitialStateValue<SourceVarId>>,
+        Vec<InitialStateValue<SourceVarId>>,
         Vec<SymbolicProcess>,
         Vec<WaitSite<SourceVarId>>,
         Vec<NbaSite<SourceVarId>>,
@@ -3539,9 +3738,19 @@ fn lower_initial_processes(
     sv::AnalyzerError,
 > {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
     let mut values = Vec::new();
+    let mut declaration_values = Vec::new();
+    let mut folded_values = Vec::new();
     let mut runtime = Vec::new();
     let mut pm = procedural::ProcModule::new(
         module,
@@ -3579,10 +3788,13 @@ fn lower_initial_processes(
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         match comb.lower_initial(process.body(), process.is_initializer(), &seed) {
             Ok((written, store)) => {
-                values.extend(written);
                 if process.is_initializer() {
+                    declaration_values.extend(written.iter().cloned());
                     seed = store;
+                } else {
+                    folded_values.extend(written.iter().cloned());
                 }
+                values.extend(written);
             }
             Err(_) => runtime.push((process, random_seed)),
         }
@@ -3594,7 +3806,15 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            values,
+            declaration_values,
+            folded_values,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 
     let mut next_id = SourceVarId(
@@ -3633,6 +3853,7 @@ fn lower_initial_processes(
                 id
             };
             ProcessSlots {
+                is_initializer: process.is_initializer(),
                 requires_timed_simulation: process.is_scheduled_edge(),
                 resume: declare("resume", PROCESS_RESUME_WIDTH),
                 status: declare("status", PROCESS_STATUS_WIDTH),
@@ -3689,6 +3910,8 @@ fn lower_initial_processes(
     *extern_functions = std::mem::take(&mut pm.extern_functions);
     Ok((
         values,
+        declaration_values,
+        folded_values,
         processes?,
         wait_sites,
         nba_sites,
@@ -3704,6 +3927,7 @@ fn lower_comb_processes(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
+    allow_inferred_latches: bool,
     runtime_errors: &mut HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
     extern_functions: &mut Vec<ExternFunction>,
     warnings: &mut Vec<crate::warning::PendingWarning>,
@@ -3746,13 +3970,22 @@ fn lower_comb_processes(
                 continue;
             }
         }
-        if pm.reads_simulation_state(process.body()) {
+        // A wildcard control waits for its first source event even when
+        // every output is assigned. A symbolic combinational definition
+        // would instead execute during the initial fixed-point evaluation.
+        if process.kind() == sv::ir::CombProcessKind::AlwaysStar
+            || pm.reads_simulation_state(process.body())
+            || (process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                && pm.calls_task(process.body()))
+        {
             pm.runtime_event_sites = std::mem::take(&mut sites);
             comb_blocks.extend(
                 ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
                     process.body(),
                     process.sensitivity_body(),
                     process.kind(),
+                    allow_inferred_latches,
+                    process.site(),
                     &[],
                     &mut arena,
                 )?,
@@ -3763,7 +3996,39 @@ fn lower_comb_processes(
         let mut comb = comb::Comb::new(&mut pm, &mut arena);
         comb.site_base = sites.len() as u32;
         comb.continuous = process.kind() == sv::ir::CombProcessKind::ContinuousAssign;
-        comb_blocks.extend(comb.lower_process(process.body())?);
+        match comb.lower_process(process.body()) {
+            Ok(paths) => comb_blocks.extend(paths),
+            Err(sv::AnalyzerError::Unsupported(reason))
+                if reason.starts_with("latch inference inside always_comb")
+                    && process.kind() != sv::ir::CombProcessKind::ContinuousAssign
+                    && (allow_inferred_latches
+                        || matches!(
+                            process.kind(),
+                            sv::ir::CombProcessKind::AlwaysLatch
+                                | sv::ir::CombProcessKind::AlwaysStar
+                        )) =>
+            {
+                // A retained output is procedural state. The guarded unit
+                // executes once per implicit-sensitivity change, without
+                // interpreting held values as a combinational feedback loop.
+                drop(comb);
+                pm.runtime_event_sites = std::mem::take(&mut sites);
+                comb_blocks.extend(
+                    ff::Ff::new(&mut pm, random_seeds[&(2, index)]).lower_comb_process(
+                        process.body(),
+                        process.sensitivity_body(),
+                        process.kind(),
+                        allow_inferred_latches,
+                        process.site(),
+                        &[],
+                        &mut arena,
+                    )?,
+                );
+                sites = std::mem::take(&mut pm.runtime_event_sites);
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         if comb.observers.iter().any(|observer| {
             observer
                 .sensitivity
@@ -3820,6 +4085,8 @@ fn lower_comb_processes(
             body,
             &[],
             sv::ir::CombProcessKind::ContinuousAssign,
+            false,
+            None,
             &[*target],
             &mut arena,
         )?);
@@ -3856,6 +4123,7 @@ fn push_event_copies(
                 )
             })?;
         comb_blocks.push(LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(copy, 0, 0)),
             sources: std::iter::once(VarAtomBase::new(signal, 0, 0)).collect(),
             previous_sources: HashSet::default(),
@@ -4222,6 +4490,7 @@ fn build_instance_glue(
                 input_ports.push((
                     source_ids,
                     LogicPath {
+                        transparent_copy: false,
                         target: LogicPathTarget::Var(VarAtomBase::new(
                             GlueAddr::Child(*child_port_id),
                             0,
@@ -4365,6 +4634,7 @@ fn build_instance_glue(
                     output_ports.push((
                         vec![parent_signal_id],
                         LogicPath {
+                            transparent_copy: false,
                             target: LogicPathTarget::Var(VarAtomBase::new(
                                 GlueAddr::Parent(parent_signal_id),
                                 access.lsb,

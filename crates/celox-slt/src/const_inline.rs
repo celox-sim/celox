@@ -15,8 +15,8 @@ use num_traits::Zero;
 use celox_design::{BinaryOp, BitAccess, UnaryOp};
 
 use crate::{
-    HashMap, HashSet, LogicPath, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena,
-    SLTNodeFactsError, get_width,
+    HashMap, HashSet, LogicPath, LogicPathTarget, NodeId, SLTForFoldGroupState, SLTNode,
+    SLTNodeArena, SLTNodeFactsError, get_width,
 };
 
 /// Check if an SLT expression tree is purely constant (no Input references).
@@ -318,6 +318,12 @@ pub fn inline_constant_variables<A: Clone + Eq + Hash + Debug + Display>(
     //    with shared nodes, so in-place mutation would corrupt unrelated paths).
     let mut rewrite_cache: HashMap<NodeId, NodeId> = HashMap::default();
     for path in paths.iter_mut() {
+        // Imperative units load their inputs directly from memory. Rewriting
+        // the output projection does not replace those loads, so their
+        // producer dependencies must survive constant inlining.
+        if matches!(path.target, LogicPathTarget::Process { .. }) {
+            continue;
+        }
         if path.sources.iter().any(|s| const_vars.contains_key(&s.id)) {
             // Legacy folds have scoped bindings and are not rewritten below.
             // Keep their source edges until their input references are actually
@@ -708,6 +714,7 @@ mod tests {
             })
             .unwrap();
         let make_path = |variable, expr, sources| LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(variable, 0, 31)),
             sources,
             previous_sources: Default::default(),

@@ -30,6 +30,7 @@ pub fn schedule_symbolic_rtl(
         symbolic,
         module_ir,
         source_id_maps,
+        inferred_latch_diagnostics,
     } = source;
     let root_id = symbolic.root_id;
     let root = module_ir.get(&root_id).copied();
@@ -216,7 +217,7 @@ pub fn schedule_symbolic_rtl(
     };
     // Use the exact elaborated module, including parameter specialization, for
     // each process owner. Resolving by root/module name loses child scopes.
-    let mut dynamic_for_diagnostics = Vec::new();
+    let mut dynamic_for_diagnostics = inferred_latch_diagnostics;
     for source in testbench_source.sources() {
         let instance = source.base_instance(lookup);
         let Some(&module) = module_ir.get(&lookup.instance_module[&instance]) else {

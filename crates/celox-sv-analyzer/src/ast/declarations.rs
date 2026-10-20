@@ -18,6 +18,17 @@ pub(super) fn ports_from_scope(
             .map(type_binding::port_direction)
             .unwrap_or(inherited_direction);
         let explicit = matches!(native.kind, celox_sv_syntax::PortKind::Explicit { .. });
+        // An output with an explicit data type defaults to a variable;
+        // input/inout and implicitly typed outputs default to nets unless
+        // `var` is present (IEEE 1800-2023 23.2.2.3).
+        let typed_output = direction == PortDirection::Output
+            && native.net_type.is_none()
+            && native.data_type.is_some_and(|id| {
+                !matches!(
+                    syntax_tree.declarations().data_type(id).kind,
+                    celox_sv_syntax::DataTypeKind::Implicit
+                )
+            });
         let base = match type_binding::port_type(native, syntax_tree, const_env, type_aliases)? {
             Some(ty) => ty,
             None if native.data_type.is_none() => inherited_type.clone(),
@@ -71,22 +82,18 @@ pub(super) fn ports_from_scope(
             })
             .transpose()?;
         let variable = native.variable
+            || typed_output
             || (direction == PortDirection::Output
                 && native.net_type.is_none()
-                && (native.data_type.is_some_and(|id| {
-                    !matches!(
-                        syntax_tree.declarations().data_type(id).kind,
-                        celox_sv_syntax::DataTypeKind::Implicit
-                    )
-                }) || (native.direction.is_none()
-                    && native.data_type.is_none()
-                    && inherited_variable)));
+                && native.direction.is_none()
+                && native.data_type.is_none()
+                && inherited_variable);
         inherited_variable = variable;
         let mut port = Port::new(
             native_port_name(native)?,
             direction,
             ty,
-            !explicit && !native.variable,
+            !explicit && !variable,
         )
         .with_default(default);
         port.randomizable = variable && direction != PortDirection::Input;

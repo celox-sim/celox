@@ -1639,9 +1639,12 @@ fn lower_comb_processes(
                 access: target.access,
             })?;
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Process {
                     process: ran,
                     after_initials: true,
+                    sensitivity_counters: Vec::new(),
+                    startup: None,
                     target,
                     unit: Box::new(unit.clone()),
                 },
@@ -1707,6 +1710,7 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
+            is_initializer: false,
             requires_timed_simulation: false,
             resume: lowering
                 .hidden
@@ -1850,6 +1854,7 @@ pub fn lower_frontend_artifact(
         let mut visited = HashSet::default();
         expression_sources(artifact, assignment.value(), &mut sources, &mut visited)?;
         comb_blocks.push(LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(signal_atom(assignment.target())),
             sources,
             previous_sources: HashSet::default(),
@@ -1882,7 +1887,7 @@ pub fn lower_frontend_artifact(
         &mut reset_clock_map,
     )?;
 
-    let initial_memory_values = artifact
+    let initial_memory_values: Vec<_> = artifact
         .signals()
         .iter()
         .filter_map(|signal| {
@@ -1918,6 +1923,8 @@ pub fn lower_frontend_artifact(
         runtime_errors: HashMap::default(),
         runtime_event_sites: Vec::new(),
         extern_functions: Vec::new(),
+        folded_initial_memory_values: Vec::new(),
+        declaration_initial_memory_values: initial_memory_values.clone(),
         initial_memory_values,
         comb_boundaries: HashMap::default(),
         arena,

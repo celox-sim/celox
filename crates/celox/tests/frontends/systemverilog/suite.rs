@@ -242,7 +242,9 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         .collect::<Vec<_>>();
     if design.timed {
         let builder = design.parameters.iter().fold(
-            Simulation::from_sv_sources(sources, &design.top).four_state(design.four_state),
+            Simulation::from_sv_sources(sources, &design.top)
+                .four_state(design.four_state)
+                .allow_inferred_latches(design.allow_inferred_latches),
             |builder, (name, value)| builder.param(name, *value),
         );
         return Ok(match backend {
@@ -265,7 +267,9 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         });
     }
     let builder = design.parameters.iter().fold(
-        Simulator::from_sv_sources(sources, &design.top).four_state(design.four_state),
+        Simulator::from_sv_sources(sources, &design.top)
+            .four_state(design.four_state)
+            .allow_inferred_latches(design.allow_inferred_latches),
         |builder, (name, value)| builder.param(name, *value),
     );
     // Only language errors satisfy a rejection case; an unsupported construct
