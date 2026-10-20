@@ -1,1 +1,7 @@
-Resolve scope-randomization overlaps with the SV host-request, file-output and plusargs changes now on master.
+Revision history for #1640:
+
+rev 3 (content) 2026-10-20 21:56 UTC — Resolve scope-randomization overlaps with the SV host-request, file-output and plusargs changes now on master.
+rev 2 (rebase) 2026-10-20 16:49 UTC
+rev 1 (initial) 2026-10-20 16:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1640,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"020842b4bef4afdcdd36d27f71d4b4eb806e404d","timestamp_iso":"2026-10-20T16:49:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"020842b4bef4afdcdd36d27f71d4b4eb806e404d","new_sha":"e984458bd9ffb7eb71c74f86cde4eef3d4f29e55","timestamp_iso":"2026-10-20T16:49:56Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/020842b4bef4afdcdd36d27f71d4b4eb806e404d...e984458bd9ffb7eb71c74f86cde4eef3d4f29e55"},{"number":3,"change_type":"content","old_sha":"e984458bd9ffb7eb71c74f86cde4eef3d4f29e55","new_sha":"2203fa4ac57d7289b195cdf9f16f41baa9b17c71","timestamp_iso":"2026-10-20T21:56:18Z","reason":"Resolve scope-randomization overlaps with the SV host-request, file-output and plusargs changes now on master.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e984458bd9ffb7eb71c74f86cde4eef3d4f29e55...2203fa4ac57d7289b195cdf9f16f41baa9b17c71"}]} -->
