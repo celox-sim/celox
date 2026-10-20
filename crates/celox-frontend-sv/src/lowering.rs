@@ -68,6 +68,7 @@ struct SvVariable {
     is_4state: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
+    unpacked_ranges: Vec<(i128, i128)>,
     domain_kind: DomainKind,
     kind: VariableKind,
     type_kind: PortTypeKind,
@@ -91,6 +92,7 @@ impl SvVariable {
                 type_kind: self.type_kind,
                 array_dims: self.array_dims.clone(),
             },
+            unpacked_ranges: self.unpacked_ranges.clone(),
             packed_dims: self
                 .packed_ranges
                 .iter()
@@ -1443,6 +1445,7 @@ fn prepare_external_hierarchy_collecting(
                             .map(|&width| ((width - 1) as i128, 0))
                             .collect(),
                         array_dims: variable.metadata.array_dims.clone(),
+                        unpacked_ranges: variable.unpacked_ranges.clone(),
                         domain_kind: variable.metadata.kind,
                         kind: variable.kind,
                         type_kind: variable.metadata.type_kind,
@@ -2420,6 +2423,7 @@ fn lower_module_with_overrides(
             is_4state: type_info.is_4state,
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
+            unpacked_ranges: type_info.unpacked_ranges,
             domain_kind: DomainKind::Other,
             kind,
             type_kind: type_info.type_kind,
@@ -2500,6 +2504,7 @@ fn lower_module_with_overrides(
             is_4state: type_info.is_4state,
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
+            unpacked_ranges: type_info.unpacked_ranges,
             domain_kind: DomainKind::Other,
             kind: VariableKind::Variable,
             type_kind: type_info.type_kind,
@@ -2572,6 +2577,7 @@ fn lower_module_with_overrides(
                 is_4state: true,
                 packed_ranges: vec![(width as i128 - 1, 0)],
                 array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
                 domain_kind: DomainKind::Other,
                 kind: VariableKind::Parameter,
                 type_kind: PortTypeKind::Logic,
@@ -3607,6 +3613,7 @@ fn lower_initial_processes(
                         is_4state: false,
                         packed_ranges: vec![(width as i128 - 1, 0)],
                         array_dims: Vec::new(),
+                        unpacked_ranges: Vec::new(),
                         domain_kind: DomainKind::Other,
                         kind: VariableKind::Variable,
                         type_kind: PortTypeKind::Bit,
@@ -3956,6 +3963,7 @@ fn ensure_parent_output_signals(
             is_4state: true,
             packed_ranges: Vec::new(),
             array_dims: Vec::new(),
+            unpacked_ranges: Vec::new(),
             domain_kind: DomainKind::Other,
             kind: VariableKind::Variable,
             type_kind: PortTypeKind::Logic,
@@ -5151,6 +5159,7 @@ struct SvSignalType {
     is_4state: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
+    unpacked_ranges: Vec<(i128, i128)>,
     type_kind: PortTypeKind,
 }
 
@@ -5214,6 +5223,11 @@ fn signal_type_from_sv(
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported("unresolved unpacked array dimension".to_string())
         })?;
+    let unpacked_ranges = typ
+        .unpacked_ranges()
+        .iter()
+        .filter_map(|range| unpacked_range_bounds(range, constants, parameter_types))
+        .collect();
     let element_count = array_dims
         .iter()
         .copied()
@@ -5253,6 +5267,7 @@ fn signal_type_from_sv(
         is_4state,
         packed_ranges,
         array_dims,
+        unpacked_ranges,
         type_kind,
     })
 }

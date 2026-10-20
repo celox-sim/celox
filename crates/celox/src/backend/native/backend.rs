@@ -2897,7 +2897,7 @@ impl NativeBackend {
         let element_bytes = get_byte_size(array.element_width);
         let element_mask = (BigUint::from(1u8) << array.element_width) - BigUint::from(1u8);
         let bytes = self.mem_bytes_mut();
-        bytes[plane_offset..plane_offset + array.plane_size].fill(0);
+        bytes[plane_offset..plane_offset + array.element_count * array.element_stride].fill(0);
         for element in 0..array.element_count {
             let element_value = (value >> (element * array.element_width)) & &element_mask;
             let value_bytes = element_value.to_bytes_le();

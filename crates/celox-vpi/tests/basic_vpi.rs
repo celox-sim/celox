@@ -3154,3 +3154,123 @@ fn two_state_image_converts_unknown_logic_deposits_and_forces() {
     }
     clear_runtime();
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn unpacked_array_handles_preserve_declared_indices_and_neighbor_values() {
+    let _serial = lock_vpi();
+    let source = r#"module Top(
+        input logic [7:0] words [3:2][-1:1],
+        output logic [7:0] first, middle, last
+    );
+        assign first=words[3][-1];
+        assign middle=words[2][0];
+        assign last=words[2][1];
+    endmodule"#;
+    for (four_state, width) in [false, true]
+        .into_iter()
+        .flat_map(|four| [1, 8, 9, 65].map(|width| (four, width)))
+    {
+        let source = source.replace("[7:0]", &format!("[{}:0]", width - 1));
+        let simulator = Simulator::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("arrays.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .opt_level(celox::OptLevel::O1)
+        .build()
+        .unwrap();
+        let bytes = simulator
+            .shared_code()
+            .program_image()
+            .to_container_bytes()
+            .unwrap();
+        let runtime = unsafe { NativeProgramInstance::from_attached_bytes(&bytes) }.unwrap();
+        let metadata = runtime.signal("Top.words").unwrap();
+        assert_eq!(metadata.unpacked_ranges, [(3, 2), (-1, 1)]);
+        assert_eq!(runtime.reflection().signals().len(), 4);
+        let _session = install_runtime(runtime).unwrap();
+        unsafe {
+            let array = vpi_handle_by_name(c"Top.words".as_ptr(), ptr::null_mut());
+            assert_eq!(vpi_get(VPI_TYPE, array), VPI_REG_ARRAY);
+            assert_eq!(vpi_get(VPI_SIZE, array), 2);
+            assert!(vpi_handle_by_index(array, 1).is_null());
+            for (kind, expected) in [(VPI_LEFT_RANGE, 3), (VPI_RIGHT_RANGE, 2)] {
+                let bound = vpi_handle(kind, array);
+                let mut value = VpiValue {
+                    format: VPI_INT_VAL,
+                    value: VpiValueData { integer: 0 },
+                };
+                vpi_get_value(bound, &mut value);
+                assert_eq!(value.value.integer, expected);
+                vpi_free_object(bound);
+            }
+            let row = vpi_handle_by_index(array, 2);
+            assert_eq!(vpi_get(VPI_SIZE, row), 3);
+            assert!(vpi_handle_by_index(row, -2).is_null());
+            let middle = vpi_handle_by_index(row, 0);
+            let last = vpi_handle_by_index(row, 1);
+            let first = vpi_handle_by_name(c"Top.words[3][-1]".as_ptr(), ptr::null_mut());
+            assert!(!first.is_null());
+            assert_eq!(vpi_get(VPI_TYPE, middle), VPI_REG);
+            assert_eq!(vpi_get(VPI_SIZE, middle), width as i32);
+            assert_eq!(
+                CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, middle)),
+                c"Top.words[2][0]"
+            );
+            let parent = vpi_handle(VPI_PARENT, middle);
+            assert_eq!(
+                CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, parent)),
+                c"Top.words"
+            );
+            assert!(vpi_handle(VPI_PARENT, array).is_null());
+            let val = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 0xa5 },
+            };
+            assert!(!vpi_put_value(first, &val, ptr::null(), VPI_NO_DELAY).is_null());
+            assert!(!vpi_put_value(last, &val, ptr::null(), VPI_NO_DELAY).is_null());
+            let xz = VpiValue {
+                format: VPI_BIN_STR_VAL,
+                value: VpiValueData {
+                    str_: if width == 1 { c"x" } else { c"10xz0101" }
+                        .as_ptr()
+                        .cast_mut(),
+                },
+            };
+            assert!(!vpi_put_value(middle, &xz, ptr::null(), VPI_NO_DELAY).is_null());
+            assert!(vpi_put_value(array, &val, ptr::null(), VPI_NO_DELAY).is_null());
+            assert!(vpi_put_value(middle, &val, ptr::null(), VPI_FORCE_FLAG).is_null());
+            for (name, expected) in [
+                (c"Top.first", if width == 1 { "1" } else { "10100101" }),
+                (c"Top.last", if width == 1 { "1" } else { "10100101" }),
+                (
+                    c"Top.middle",
+                    match (four_state, width) {
+                        (true, 1) => "x",
+                        (false, 1) => "0",
+                        (true, _) => "10xz0101",
+                        (false, _) => "10000101",
+                    },
+                ),
+            ] {
+                let output = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+                let mut value = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData { integer: 0 },
+                };
+                vpi_get_value(output, &mut value);
+                assert_eq!(
+                    CStr::from_ptr(value.value.str_).to_str().unwrap(),
+                    format!("{expected:0>width$}"),
+                    "{name:?}, width={width}"
+                );
+                vpi_free_object(output);
+            }
+            for handle in [array, row, middle, last, first, parent] {
+                vpi_free_object(handle);
+            }
+        }
+        clear_runtime();
+    }
+}

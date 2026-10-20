@@ -446,6 +446,7 @@ pub(crate) fn project_module_with_ids(
                             .collect(),
                     },
                     packed_dims,
+                    unpacked_ranges: Vec::new(),
                     source: Some(celox_frontend_core::SourceLocation {
                         path: variable.token.beg.source.to_string(),
                         text: source_texts
