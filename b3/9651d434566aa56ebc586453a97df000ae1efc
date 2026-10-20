@@ -1,0 +1,1 @@
+Accept established exclude, test, and simulation manifest fields when explicit Veryl sources are passed to the CLI; add regression coverage for run and vpi build.
