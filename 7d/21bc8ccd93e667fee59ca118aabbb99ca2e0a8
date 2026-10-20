@@ -1,1 +1,6 @@
-Address PR 1627 review: preserve change-return sensitivity events, validate disputed diagnostics, fix strict-policy regressions and complete-write inference, and retain reviewed external exclusions. Full CI-equivalent Rust and host integration checks pass.
+Revision history for #1627:
+
+rev 2 (content) 2026-10-20 16:46 UTC — Address PR 1627 review: preserve change-return sensitivity events, validate disputed diagnostics, fix strict-policy regressions and complete-write inference, and retain reviewed external exclusions. Full CI-equivalent Rust and host integration checks pass.
+rev 1 (initial) 2026-10-20 16:46 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1627,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e4d94f679c8e1f182fa9ae6ac92bb3aa16468bc5","timestamp_iso":"2026-10-20T16:46:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e4d94f679c8e1f182fa9ae6ac92bb3aa16468bc5","new_sha":"7d21bc8ccd93e667fee59ca118aabbb99ca2e0a8","timestamp_iso":"2026-10-20T16:46:58Z","reason":"Address PR 1627 review: preserve change-return sensitivity events, validate disputed diagnostics, fix strict-policy regressions and complete-write inference, and retain reviewed external exclusions. Full CI-equivalent Rust and host integration checks pass.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e4d94f679c8e1f182fa9ae6ac92bb3aa16468bc5...7d21bc8ccd93e667fee59ca118aabbb99ca2e0a8"}]} -->
