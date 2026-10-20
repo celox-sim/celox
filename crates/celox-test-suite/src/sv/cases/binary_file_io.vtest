@@ -1,0 +1,21 @@
+(group binary_file_io (category sequential))
+
+(case zero_count_preserves_memory
+  (source "binary_zero_count.sv" #"
+    module Top(output bit ok);
+      logic [8:0] memory [3:1];
+      int count;
+      initial begin
+        memory[1] = 9'h123;
+        memory[2] = 9'h045;
+        memory[3] = 9'h067;
+        count = $fread(memory, 32'h8000ffff, 1, 0);
+        ok = count == 0 && memory[1] == 9'h123
+          && memory[2] == 9'h045 && memory[3] == 9'h067
+          && $bits(count) == 32;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

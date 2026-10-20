@@ -112,6 +112,11 @@ strict by default. The `9.2.2.3--always_latch` probe still fails because it uses
 an unsupported nonblocking latch assignment (`<=`). The full pinned run reviewed
 all 2054 case/mode rows; no other expectation rows changed.
 
+The integral file-input extension updates six expectation rows: `21.3--feof`,
+`21.3--fflush` and `21.3--fpos` now pass simulation in both state modes. The
+remaining file-input probes retain their measured verdicts; several still use
+unsupported `final` constructs.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

@@ -16,6 +16,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("floating_point.vtest"),
     },
     Group {
+        file: "src/sv/cases/binary_file_io.vtest",
+        text: include_str!("binary_file_io.vtest"),
+    },
+    Group {
         file: "src/sv/cases/random_plusargs.vtest",
         text: include_str!("random_plusargs.vtest"),
     },
@@ -70,6 +74,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/synthesizable.vtest",
         text: include_str!("synthesizable.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/file_core.vtest",
+        text: include_str!("file_core.vtest"),
     },
     Group {
         file: "src/sv/cases/file_io.vtest",

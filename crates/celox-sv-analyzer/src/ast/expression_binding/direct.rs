@@ -812,7 +812,43 @@ pub(in crate::ast) fn bind_value(
                         system,
                     } => {
                         if let Some(function) = system {
-                            if matches!(
+                            if function == SystemFunction::Fread {
+                                let mut operands = operands.into_iter();
+                                let mut values = Vec::new();
+                                for (position, id) in args.into_iter().enumerate() {
+                                    let value = if id.is_some() {
+                                        Some(operands.next().ok_or_else(disagreement)?)
+                                    } else {
+                                        None
+                                    };
+                                    if position < 2 && value.is_none() {
+                                        return Err(unsupported(
+                                            "omitted $fread destination or descriptor",
+                                        ));
+                                    }
+                                    if let Some(value) = &value {
+                                        if position == 0 {
+                                            if !expressions::query_actual_is_writable(
+                                                value, dimensions,
+                                            ) {
+                                                return Err(unsupported(
+                                                    "writable $fread destination",
+                                                ));
+                                            }
+                                        } else if expr_static_width(&tree.state, value, dimensions)
+                                            .is_none()
+                                        {
+                                            return Err(unsupported("integral $fread argument"));
+                                        }
+                                    }
+                                    values.push(value);
+                                }
+                                Expr::Call {
+                                    callee: Callee::System(function),
+                                    args: values,
+                                    arg_order: Vec::new(),
+                                }
+                            } else if matches!(
                                 function,
                                 SystemFunction::Urandom
                                     | SystemFunction::Random
@@ -820,6 +856,12 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
                                     | SystemFunction::Fopen
+                                    | SystemFunction::Ftell
+                                    | SystemFunction::Fseek
+                                    | SystemFunction::Rewind
+                                    | SystemFunction::Fgetc
+                                    | SystemFunction::Ungetc
+                                    | SystemFunction::Feof
                                     | SystemFunction::UrandomRange
                                     | SystemFunction::ScopeRandomize
                             ) {

@@ -1,0 +1,23 @@
+(group file_core (category sequential))
+
+(case flush_preserves_stdout_order_and_integral_return_types
+  (source "file_core_types.sv" #"
+    module Top(output bit ok);
+      initial begin
+        ok = $bits($fgetc(32'h80000000)) == 32
+          && $bits($ungetc(65, 32'h80000000)) == 32
+          && $bits($ftell(32'h80000001)) == 32
+          && $bits($fseek(32'h80000001, 0, 0)) == 32
+          && $bits($rewind(32'h80000001)) == 32
+          && $bits($feof(32'h80000000)) == 32;
+        $display("before");
+        $fflush();
+        $fwrite(1, "after");
+        $fflush(1);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1)
+  (expect_output "before\nafter"))
