@@ -30,6 +30,16 @@ impl std::fmt::Display for FrontendUnsupported {
     }
 }
 impl std::error::Error for FrontendUnsupported {}
+/// An explicit proof-model boundary, never an unexpected runtime/transport error.
+#[derive(Debug)]
+struct ProofBackendUnsupported(String);
+impl std::fmt::Display for ProofBackendUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ProofBackendUnsupported {}
+
 fn path(p: &SignalPath) -> Value {
     json!({"name":p.name,"instances":p.instances.iter().map(|i|json!({"name":i.name,"index":i.index})).collect::<Vec<_>>()})
 }
@@ -39,6 +49,7 @@ impl ProofBackend {
         if let Err(error) = &result {
             if error.downcast_ref::<CompilationRejected>().is_none()
                 && error.downcast_ref::<FrontendUnsupported>().is_none()
+                && error.downcast_ref::<ProofBackendUnsupported>().is_none()
             {
                 self.sticky.lock().unwrap().push(error.to_string());
             }
@@ -68,6 +79,11 @@ impl ProofBackend {
                 self.rejected = true;
                 self.rejection_message = Some(error.to_string());
                 return Err(FrontendUnsupported(error.to_string()).into());
+            }
+            if command == "compile" && reply["proof_backend_unsupported"] == true {
+                self.rejected = true;
+                self.rejection_message = Some(error.to_string());
+                return Err(ProofBackendUnsupported(error.to_string()).into());
             }
             self.sticky.lock().unwrap().push(error.to_string());
             return Err(error.to_string().into());

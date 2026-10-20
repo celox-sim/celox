@@ -650,6 +650,8 @@ impl Type {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
+    Real,
+    Shortreal,
     Bit,
     Logic,
     Reg,
@@ -711,6 +713,8 @@ fn convert_type(
 impl From<ast::TypeKind> for TypeKind {
     fn from(kind: ast::TypeKind) -> Self {
         match kind {
+            ast::TypeKind::Real => TypeKind::Real,
+            ast::TypeKind::Shortreal => TypeKind::Shortreal,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,

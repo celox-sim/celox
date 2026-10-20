@@ -1,11 +1,4 @@
-//! Rejects uses of `string` and floating-point values that Celox cannot
-//! represent yet.
-//!
-//! Runtime strings exist only in the testbench VM: in RTL a non-constant
-//! string occupies a one-bit slot. Floating-point values are stored as their
-//! IEEE 754 bit patterns, so copies are exact, but every operation on them
-//! would run as integer arithmetic. Constant expressions are folded by the
-//! analyzer and stay accepted.
+//! Validates unsupported string and floating-point contexts.
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignDestination, CasePattern, Component, Declaration, Expression, Factor,
     ForBound, ForRange, FunctionCall, Module, Op, Statement, SystemFunctionCall,
@@ -65,6 +58,12 @@ pub(crate) fn check_module(module: &Module) -> Result<(), ParserError> {
                     let port = child.and_then(|child| child.variables.get(&output.id));
                     for destination in &output.dst {
                         if let Some(port) = port {
+                            if output.dst.len() != 1
+                                && float_kind(&port.r#type)
+                                    != float_kind(&destination.comptime.r#type)
+                            {
+                                return Err(float_operation("floating-point conversion", "concatenated floating-point output conversions are not supported".to_string(), &destination.token));
+                            }
                             checker.port_output(&port.r#type, destination)?;
                         }
                     }
@@ -107,14 +106,13 @@ impl Checker<'_> {
         }
         match expression {
             Expression::Term(factor) => self.factor(factor),
-            Expression::Unary(_, inner, comptime) => {
-                if float_kind(&inner.comptime().r#type).is_some()
-                    || float_kind(&comptime.r#type).is_some()
+            Expression::Unary(op, inner, comptime) => {
+                if float_kind(crate::float::type_of(inner)).is_some()
+                    && !matches!(op, Op::Add | Op::Sub)
                 {
                     return Err(float_operation(
                         "floating-point operation",
-                        "operations on non-constant f32/f64 values run as integer arithmetic"
-                            .to_string(),
+                        format!("operator `{op}` is not supported on floating-point values"),
                         &comptime.token,
                     ));
                 }
@@ -122,43 +120,31 @@ impl Checker<'_> {
             }
             Expression::Binary(left, op, right, comptime) => {
                 if *op == Op::As {
-                    let source = float_kind(&left.comptime().r#type);
-                    let target = float_kind(&comptime.r#type);
-                    if source != target {
-                        return Err(float_operation(
-                            "floating-point conversion",
-                            "casts between f32, f64 and integer types do not convert non-constant values"
-                                .to_string(),
-                            &comptime.token,
-                        ));
-                    }
+                    self.conversion(&comptime.r#type, left)?;
                     return self.expression(left);
                 }
-                if float_kind(&left.comptime().r#type).is_some()
-                    || float_kind(&right.comptime().r#type).is_some()
-                    || float_kind(&comptime.r#type).is_some()
+                if (float_kind(crate::float::type_of(left)).is_some()
+                    || float_kind(crate::float::type_of(right)).is_some())
+                    && crate::float::binary(*op).is_none()
                 {
                     return Err(float_operation(
                         "floating-point operation",
-                        format!(
-                            "operator `{op}` on non-constant f32/f64 values runs as integer arithmetic"
-                        ),
+                        format!("operator `{op}` is not supported on floating-point values"),
                         &comptime.token,
                     ));
+                }
+                if float_kind(crate::float::type_of(left)).is_some() {
+                    self.conversion(crate::float::type_of(left), right)?;
+                } else if float_kind(crate::float::type_of(right)).is_some() {
+                    self.conversion(crate::float::type_of(right), left)?;
                 }
                 self.expression(left)?;
                 self.expression(right)
             }
-            Expression::Ternary(cond, left, right, comptime) => {
+            Expression::Ternary(cond, left, right, _) => {
                 self.condition(cond)?;
-                if float_kind(&left.comptime().r#type) != float_kind(&right.comptime().r#type) {
-                    return Err(float_operation(
-                        "floating-point conversion",
-                        "conditional arms of different f32/f64/integer types are not converted"
-                            .to_string(),
-                        &comptime.token,
-                    ));
-                }
+                self.conversion(crate::float::type_of(expression), left)?;
+                self.conversion(crate::float::type_of(expression), right)?;
                 self.expression(cond)?;
                 self.expression(left)?;
                 self.expression(right)
@@ -221,7 +207,7 @@ impl Checker<'_> {
     /// Rejects a non-constant float where an integral value is required.
     fn integral(&self, expression: &Expression, role: &str) -> Result<(), ParserError> {
         let comptime = expression.comptime();
-        if !comptime.is_const && float_kind(&comptime.r#type).is_some() {
+        if !comptime.is_const && float_kind(crate::float::type_of(expression)).is_some() {
             return Err(float_operation(
                 "floating-point operation",
                 format!("non-constant f32/f64 values cannot be used as a {role}"),
@@ -235,33 +221,53 @@ impl Checker<'_> {
         self.integral(expression, "condition")
     }
 
-    /// Rejects an implicit conversion between float and integer types.
-    /// Even constant values are stored without conversion.
     fn conversion(&self, target: &Type, expression: &Expression) -> Result<(), ParserError> {
-        let comptime = expression.comptime();
-        if float_kind(target) != float_kind(&comptime.r#type) {
-            return Err(float_operation(
-                "floating-point conversion",
-                format!(
-                    "assigning a {} value to a {} target is not converted",
-                    comptime.r#type.kind, target.kind
-                ),
-                &comptime.token,
-            ));
+        let source = crate::float::type_of(expression);
+        if float_kind(target) != float_kind(source)
+            && (float_kind(target).is_some() || float_kind(source).is_some())
+        {
+            if !target.array.is_empty() || !source.array.is_empty() {
+                return Err(float_operation(
+                    "floating-point conversion",
+                    "array floating-point conversions are not supported".to_string(),
+                    &expression.comptime().token,
+                ));
+            }
+            let integer = if float_kind(target).is_none() {
+                target
+            } else {
+                source
+            };
+            if float_kind(integer).is_none() && integer.total_width().unwrap_or(0) > 64 {
+                return Err(float_operation(
+                    "floating-point conversion",
+                    "integer conversions wider than 64 bits are not supported".to_string(),
+                    &expression.comptime().token,
+                ));
+            }
         }
         Ok(())
     }
 
     fn port_output(&self, port: &Type, destination: &AssignDestination) -> Result<(), ParserError> {
-        if float_kind(port) != float_kind(&destination.comptime.r#type) {
-            return Err(float_operation(
-                "floating-point conversion",
-                format!(
-                    "connecting a {} port to a {} destination is not converted",
-                    port.kind, destination.comptime.r#type.kind
-                ),
-                &destination.token,
-            ));
+        let target = &destination.comptime.r#type;
+        if float_kind(port) != float_kind(target) {
+            let integer = if float_kind(port).is_none() {
+                port
+            } else {
+                target
+            };
+            if !port.array.is_empty()
+                || !target.array.is_empty()
+                || (float_kind(integer).is_none() && integer.total_width().unwrap_or(0) > 64)
+            {
+                return Err(float_operation(
+                    "floating-point conversion",
+                    "output conversions require scalar float or integer types up to 64 bits"
+                        .to_string(),
+                    &destination.token,
+                ));
+            }
         }
         Ok(())
     }
@@ -271,14 +277,6 @@ impl Checker<'_> {
         args: impl IntoIterator<Item = &'e Expression>,
     ) -> Result<(), ParserError> {
         for arg in args {
-            let comptime = arg.comptime();
-            if float_kind(&comptime.r#type).is_some() {
-                return Err(float_operation(
-                    "floating-point formatting",
-                    "f32/f64 values cannot be formatted yet".to_string(),
-                    &comptime.token,
-                ));
-            }
             self.expression(arg)?;
         }
         Ok(())
@@ -305,6 +303,16 @@ impl Checker<'_> {
         for (path, destinations) in &call.outputs {
             for destination in destinations {
                 if let Some(formal) = formal(path) {
+                    if destinations.len() != 1
+                        && float_kind(formal) != float_kind(&destination.comptime.r#type)
+                    {
+                        return Err(float_operation(
+                            "floating-point conversion",
+                            "concatenated floating-point function outputs are not supported"
+                                .to_string(),
+                            &destination.token,
+                        ));
+                    }
                     self.port_output(formal, destination)?;
                 }
             }

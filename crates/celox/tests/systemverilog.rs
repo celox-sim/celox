@@ -217,3 +217,6 @@ fn simulates_systemverilog_always_ff() {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 1u8.into());
 }
+
+#[path = "frontends/systemverilog/floating_point.rs"]
+mod floating_point;

@@ -135,6 +135,14 @@ pub(in crate::ast) fn cast_target_native(
     dimensions: &PackedDimensions,
 ) -> Converted<casts::RuntimeCastTarget> {
     let target = ungroup(target, native);
+    if let ExprKind::Type(id) = native.expression(target).kind
+        && let Some(ty) = type_binding::binding::bind_in(id, native, tree, dimensions)?
+        && matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
+    {
+        return Ok(casts::RuntimeCastTarget::Real {
+            short: ty.kind() == TypeKind::Shortreal,
+        });
+    }
     if let ExprKind::Name(name) = &native.expression(target).kind
         && matches!(name.spelling.as_str(), "signed" | "unsigned")
     {
@@ -299,7 +307,10 @@ pub(in crate::ast) fn bind_value(
                         if let Some(packed) = packed_string_literal(text) {
                             values.push(Expr::Literal(packed));
                         } else {
-                            if typecheck::integral_literal_type_metadata(text).is_none() {
+                            if typecheck::integral_literal_type_metadata(text).is_none()
+                                && !(text.contains(['.', 'e', 'E'])
+                                    && text.replace('_', "").parse::<f64>().is_ok())
+                            {
                                 return Err(unsupported("primary literal"));
                             }
                             values.push(Expr::Literal(text.clone()));
@@ -665,14 +676,38 @@ pub(in crate::ast) fn bind_value(
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut operands = values.split_off(start);
                 let value = match finish {
-                    Finish::Unary(op) => constants::unary_expr_from_text(
-                        &op,
-                        operands.pop().ok_or_else(disagreement)?,
-                    )
-                    .ok_or_else(|| unsupported(format!("unary operator `{op}`")))?,
+                    Finish::Unary(op) => {
+                        let operand = operands.pop().ok_or_else(disagreement)?;
+                        if real_value(&operand, dimensions)
+                            && !matches!(op.as_str(), "+" | "-" | "!")
+                        {
+                            return Err(unsupported("operator on a real operand"));
+                        }
+                        constants::unary_expr_from_text(&op, operand)
+                            .ok_or_else(|| unsupported(format!("unary operator `{op}`")))?
+                    }
                     Finish::Binary(op) => {
                         let right = operands.pop().ok_or_else(disagreement)?;
                         let left = operands.pop().ok_or_else(disagreement)?;
+                        if (real_value(&left, dimensions) || real_value(&right, dimensions))
+                            && !matches!(
+                                op.as_str(),
+                                "+" | "-"
+                                    | "*"
+                                    | "/"
+                                    | "**"
+                                    | "=="
+                                    | "!="
+                                    | "<"
+                                    | "<="
+                                    | ">"
+                                    | ">="
+                                    | "&&"
+                                    | "||"
+                            )
+                        {
+                            return Err(unsupported("operator on a real operand"));
+                        }
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
@@ -711,9 +746,12 @@ pub(in crate::ast) fn bind_value(
                     }
                     Finish::Concat => Expr::Concat(operands),
                     Finish::Cast(target) => {
-                        let operand = guard_zero_divisions(
-                            &tree.state,
-                            operands.pop().ok_or_else(disagreement)?,
+                        let operand = remove_real_division_guards(
+                            guard_zero_divisions(
+                                &tree.state,
+                                operands.pop().ok_or_else(disagreement)?,
+                            ),
+                            dimensions,
                         );
                         if dimensions.constant_indexed_base {
                             let operand =
@@ -857,7 +895,10 @@ pub(in crate::ast) fn bind_value(
     if values.len() != 1 {
         return Err(disagreement());
     }
-    Ok(guard_zero_divisions(&tree.state, values.pop().unwrap()))
+    Ok(remove_real_division_guards(
+        guard_zero_divisions(&tree.state, values.pop().unwrap()),
+        dimensions,
+    ))
 }
 
 fn index_value(
@@ -867,6 +908,9 @@ fn index_value(
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
     let value = bind_value(id, native, tree, dimensions, None)?;
+    if real_value(&value, dimensions) {
+        return Err(unsupported("real-valued select index"));
+    }
     let value = expand_expr_calls(
         value,
         &dimensions.functions,
@@ -878,6 +922,10 @@ fn index_value(
         && (matches!(folded, ConstExpr::Literal(_))
             || eval_ast_const_expr(&tree.state, &folded, &dimensions.const_env).is_some())
     {
+        if matches!(&folded, ConstExpr::Literal(text) if real_value(&Expr::Literal(text.clone()), dimensions))
+        {
+            return Err(unsupported("real-valued select index"));
+        }
         return Ok(folded);
     }
     (if dimensions.constant_indexed_base {
@@ -985,6 +1033,13 @@ fn selected_value(
         base = *expression;
     }
     suffix.reverse();
+    if let ExprKind::Name(name) = &native.expression(base).kind
+        && dimensions
+            .get(&instances::normalize_identifier(&name.spelling))
+            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+    {
+        return Err(unsupported("bit-select or part-select of a real variable"));
+    }
     if let ExprKind::Concatenation(_) | ExprKind::Replication { .. } = native.expression(base).kind
     {
         let expr = bind_value(base, native, tree, dimensions, None)?;
@@ -1095,6 +1150,12 @@ pub(in crate::ast) fn selected_lvalue(
         return packed_structs::whole_member(&tree.state, parts, qualified, dimensions);
     }
     let finish = |name: String, context: &PackedDimensions, strict: bool| -> Converted<LValue> {
+        if context
+            .get(&name)
+            .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
+        {
+            return Err(unsupported("bit-select or part-select of a real variable"));
+        }
         let mut indices = Vec::new();
         let mut range = None;
         let mut ranged = false;
@@ -1249,6 +1310,104 @@ fn packed_string_literal(text: &str) -> Option<String> {
         width,
         num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
     ))
+}
+
+pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
+    match expr {
+        Expr::Ident(name) => {
+            dimensions.get(name).is_some_and(|ty| ty.real)
+                || dimensions.parameter_values.get(name).is_some_and(|value| {
+                    matches!(value, Expr::Literal(text) if text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok())
+                })
+        }
+        Expr::Literal(text) => {
+            text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok()
+        }
+        Expr::Call {
+            callee:
+                Callee::System(
+                    SystemFunction::Bitstoreal
+                    | SystemFunction::Bitstoshortreal
+                    | SystemFunction::Itor,
+                ),
+            ..
+        } => true,
+        Expr::Call {
+            callee: Callee::Subroutine(name),
+            ..
+        } => dimensions
+            .functions
+            .get(name)
+            .is_some_and(|function| function.return_real),
+        Expr::Unary {
+            op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::ToTwoState,
+            expr,
+        } => real_value(expr, dimensions),
+        Expr::Binary {
+            left,
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow,
+            right,
+        } => real_value(left, dimensions) || real_value(right, dimensions),
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => real_value(then_expr, dimensions) || real_value(else_expr, dimensions),
+        _ => false,
+    }
+}
+
+// Integer zero-divisor guards must not change real arithmetic or its type.
+pub(in crate::ast) fn remove_real_division_guards(expr: Expr, dims: &PackedDimensions) -> Expr {
+    match expr {
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            if matches!(&*then_expr, Expr::Literal(text) if text == crate::DIV_ZERO_UNKNOWN_LITERAL)
+                && matches!(&*else_expr, Expr::Binary { left, op: BinaryOp::Div, right } if real_value(left, dims) || real_value(right, dims))
+            {
+                return remove_real_division_guards(*else_expr, dims);
+            }
+            Expr::Mux {
+                condition: Box::new(remove_real_division_guards(*condition, dims)),
+                then_expr: Box::new(remove_real_division_guards(*then_expr, dims)),
+                else_expr: Box::new(remove_real_division_guards(*else_expr, dims)),
+            }
+        }
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(remove_real_division_guards(*expr, dims)),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(remove_real_division_guards(*left, dims)),
+            op,
+            right: Box::new(remove_real_division_guards(*right, dims)),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(remove_real_division_guards(*expr, dims)),
+            width,
+            signed,
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee,
+            args: args
+                .into_iter()
+                .map(|arg| arg.map(|arg| remove_real_division_guards(arg, dims)))
+                .collect(),
+            arg_order,
+        },
+        expr => expr,
+    }
 }
 
 #[cfg(test)]

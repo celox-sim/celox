@@ -1992,6 +1992,17 @@ pub(super) fn lower_instruction(
         }
 
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
+            if let BinaryOp::Float { op, precision } = op {
+                extern_call::lower_float(
+                    ctx,
+                    block,
+                    *dst,
+                    *lhs,
+                    Some(*rhs),
+                    celox_sir::float::binary_code(*op, *precision),
+                );
+                return;
+            }
             let d_width = ctx.sir_width(dst);
             let lhs_width = ctx.sir_width(lhs);
             let rhs_width = ctx.sir_width(rhs);
@@ -2070,6 +2081,9 @@ pub(super) fn lower_instruction(
             let rhs_vreg = ctx.reg_map.get(*rhs);
 
             match op {
+                BinaryOp::Float { .. } => {
+                    unreachable!("float operations are lowered before integer operations")
+                }
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     // 64-bit arithmetic may produce upper bits; mask to output width.
                     let raw = if d_width < 64 {
@@ -2778,6 +2792,17 @@ pub(super) fn lower_instruction(
         }
 
         SIRInstruction::Unary(dst, op, src) => {
+            if let UnaryOp::Float { op, precision } = op {
+                extern_call::lower_float(
+                    ctx,
+                    block,
+                    *dst,
+                    *src,
+                    None,
+                    celox_sir::float::unary_code(*op, *precision),
+                );
+                return;
+            }
             let d_width = ctx.sir_width(dst);
             let src_width = ctx.sir_width(src);
             debug_assert!(src_width > 64 || !ctx.wide_regs.contains_key(src));
@@ -2798,6 +2823,9 @@ pub(super) fn lower_instruction(
             let src_vreg = ctx.reg_map.get(*src);
 
             match op {
+                UnaryOp::Float { .. } => {
+                    unreachable!("float operations are lowered before integer operations")
+                }
                 UnaryOp::Ident | UnaryOp::ToTwoState => {
                     ctx.emit_mov(block, dst_vreg, src_vreg);
                 }

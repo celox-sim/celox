@@ -331,6 +331,7 @@ mod tests {
             width: 8,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         FileIo::write_memory(&path, true, [word()]).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "xzxz0101\n");

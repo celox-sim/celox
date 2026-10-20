@@ -74,7 +74,10 @@ fn extern_argument(ctx: &mut ISelContext, block: &mut MBlock, arg: RegisterId) -
 /// Define `dst` from the C integer `result` of an extern call.
 fn define_extern_result(ctx: &mut ISelContext, block: &mut MBlock, dst: RegisterId, result: VReg) {
     let value = ctx.reg_map.get(dst);
-    let ty = ExternValue::of_verified(&ctx.register_types[&dst]);
+    let ty = ExternValue::of(&ctx.register_types[&dst]).unwrap_or(ExternValue::Integer {
+        width: ctx.sir_width(&dst),
+        signed: false,
+    });
     match ty.result_value_mask() {
         u64::MAX => block.push(MInst::Mov {
             dst: value,
@@ -115,4 +118,52 @@ fn define_extern_result(ctx: &mut ISelContext, block: &mut MBlock, dst: Register
         }
     };
     ctx.set_mask(dst, mask);
+}
+
+pub(super) fn lower_float(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    lhs: RegisterId,
+    rhs: Option<RegisterId>,
+    code: u64,
+) {
+    let a = ctx.reg_map.get(lhs);
+    let a = if ctx.four_state && matches!(code & 255, 34 | 35) {
+        let mask = ctx.get_mask(lhs, block);
+        let known = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::BitNot {
+            dst: known,
+            src: mask,
+        });
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::And {
+            dst: value,
+            lhs: a,
+            rhs: known,
+        });
+        value
+    } else {
+        a
+    };
+
+    let b = if let Some(rhs) = rhs {
+        ctx.reg_map.get(rhs)
+    } else {
+        let v = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm { dst: v, value: 0 });
+        v
+    };
+    let c = ctx.alloc_vreg(SpillDesc::remat(code));
+    block.push(MInst::LoadImm {
+        dst: c,
+        value: code,
+    });
+    let result = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::CallExtern {
+        dst: Some(result),
+        func: celox_sir::float::FLOAT_HELPER_ID,
+        args: vec![a, b, c],
+    });
+    define_extern_result(ctx, block, dst, result);
 }

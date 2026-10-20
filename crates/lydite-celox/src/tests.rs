@@ -3,6 +3,40 @@ use celox_design::{DomainKind, PortTypeKind};
 use lydite_solver::finite::{Limits, SearchHint, Verdict, solve_with_hint};
 use serde::de::DeserializeOwned;
 
+#[test]
+fn floating_point_operations_are_rejected_by_symbolic_bitvector_model() {
+    use celox_design::{FloatBinaryOp, FloatPrecision, FloatUnaryOp};
+    let precision = FloatPrecision::F64;
+    assert!(
+        unary(
+            UnaryOp::Float {
+                op: FloatUnaryOp::Neg,
+                precision,
+            },
+            var("value", 64),
+            64,
+            false,
+        )
+        .unwrap_err()
+        .contains("unsupported symbolic unary")
+    );
+    assert!(
+        binary(
+            BinaryOp::Float {
+                op: FloatBinaryOp::Add,
+                precision,
+            },
+            var("left", 64),
+            var("right", 64),
+            64,
+            false,
+            false,
+        )
+        .unwrap_err()
+        .contains("unsupported symbolic binary")
+    );
+}
+
 fn var(name: &str, w: u32) -> Term {
     ir::var(name.into(), Sort::Bv(w))
 }

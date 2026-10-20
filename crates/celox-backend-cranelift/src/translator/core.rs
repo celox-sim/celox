@@ -512,6 +512,61 @@ impl SIRTranslator {
         }
     }
 
+    pub(super) fn translate_float(
+        &self,
+        state: &mut TranslationState,
+        dst: RegisterId,
+        lhs: RegisterId,
+        rhs: Option<RegisterId>,
+        code: u64,
+    ) {
+        let a = state.regs[&lhs].first_value(state.builder);
+        let a = if matches!(code & 255, 34 | 35) {
+            if let Some(mask) = state.regs[&lhs].first_mask(state.builder) {
+                let known = state.builder.ins().bnot(mask);
+                state.builder.ins().band(a, known)
+            } else {
+                a
+            }
+        } else {
+            a
+        };
+
+        let a = if state.builder.func.dfg.value_type(a) == types::I64 {
+            a
+        } else {
+            state.builder.ins().uextend(types::I64, a)
+        };
+        let b = if let Some(rhs) = rhs {
+            let b = state.regs[&rhs].first_value(state.builder);
+            if state.builder.func.dfg.value_type(b) == types::I64 {
+                b
+            } else {
+                state.builder.ins().uextend(types::I64, b)
+            }
+        } else {
+            state.builder.ins().iconst(types::I64, 0)
+        };
+        let c = state.builder.ins().iconst(types::I64, code as i64);
+        let address = state.builder.ins().iconst(
+            types::I64,
+            celox_sir::float::evaluate as *const () as usize as i64,
+        );
+        let mut signature = Signature::new(self.target_config.default_call_conv);
+        signature
+            .params
+            .extend((0..3).map(|_| AbiParam::new(types::I64)));
+        signature.returns.push(AbiParam::new(types::I64));
+        let signature = state.builder.import_signature(signature);
+        let call = state
+            .builder
+            .ins()
+            .call_indirect(signature, address, &[a, b, c]);
+        let result = state.builder.inst_results(call)[0];
+        let value = self.extern_call_result(state, dst, result);
+        state.regs.insert(dst, value);
+    }
+
     /// The 64-bit C integer passed for an extern call argument.
     fn extern_call_argument(&self, state: &mut TranslationState, arg: RegisterId) -> Value {
         let ty = ExternValue::of_verified(&state.register_map[&arg]);
@@ -555,12 +610,15 @@ impl SIRTranslator {
                 builder.ins().ireduce(cl_type, raw)
             }
         };
-        let ty = ExternValue::of_verified(&state.register_map[&dst]);
+        let ty = ExternValue::of(&state.register_map[&dst]).unwrap_or(ExternValue::Integer {
+            width: state.register_map[&dst].width(),
+            signed: false,
+        });
         // Narrowing truncates a result to the register's type, which is wider
         // than a one-bit register.
         let value = match ty.result_value_mask() {
-            1 => state.builder.ins().band_imm_u(result, 1),
-            _ => result,
+            u64::MAX => result,
+            mask => state.builder.ins().band_imm_u(result, mask as i64),
         };
         let value = narrow(state.builder, value);
         let mask = match ty {

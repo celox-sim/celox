@@ -1930,6 +1930,7 @@ fn evaluate_instruction(
     match instruction {
         SIRInstruction::Imm(_, value) => LatticeValue::Constant(value.clone()),
         SIRInstruction::Unary(dst, op, source) => match op {
+            UnaryOp::Float { .. } => LatticeValue::Overdefined,
             UnaryOp::Ident => state(*source),
             UnaryOp::ToTwoState => unary(*source, |value, ty| {
                 let width_mask = width_mask(ty.width());
@@ -2276,6 +2277,70 @@ mod tests {
     use super::*;
     use crate::ir::InstanceId;
     use celox_design::StateObjectId as VarId;
+
+    #[test]
+    fn float_operations_do_not_inherit_integer_algebraic_identities() {
+        use celox_design::{FloatBinaryOp as F, FloatPrecision as P};
+        let source = RegisterId(0);
+        let zero = RegisterId(1);
+        let dst = RegisterId(2);
+        let mut values = LatticeValues::default();
+        values.insert(
+            source,
+            LatticeValue::Constant(SIRValue::new((-0.0f64).to_bits())),
+        );
+        values.insert(zero, LatticeValue::Constant(SIRValue::new(0u8)));
+        let analysis = Analysis {
+            executable: HashSet::default(),
+            values,
+        };
+        for four_state in [false, true] {
+            for (op, rhs, width) in [
+                (F::Add, zero, 64),
+                (F::Sub, source, 64),
+                (F::Eq, source, 1),
+                (F::Ne, source, 1),
+            ] {
+                let types = [
+                    (
+                        source,
+                        RegisterType::Bit {
+                            width: 64,
+                            signed: false,
+                        },
+                    ),
+                    (
+                        zero,
+                        RegisterType::Bit {
+                            width: 64,
+                            signed: false,
+                        },
+                    ),
+                    (
+                        dst,
+                        RegisterType::Bit {
+                            width,
+                            signed: false,
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect();
+                let instruction = SIRInstruction::Binary(
+                    dst,
+                    source,
+                    BinaryOp::Float {
+                        op,
+                        precision: P::F64,
+                    },
+                    rhs,
+                );
+                assert!(
+                    algebraic_replacement(&instruction, &analysis, &types, four_state).is_none()
+                );
+            }
+        }
+    }
 
     #[test]
     fn sccp_tracks_backedge_parameters_without_retaining_local_use_sets() {

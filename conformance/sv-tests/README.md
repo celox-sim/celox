@@ -92,6 +92,17 @@ assigning a specparam to a value parameter is rejected, as required by 6.20.5;
 an unreferenced specparam declaration remains accepted. No other expectation rows
 are changed for these repairs.
 
+The scalar floating-point implementation updates twenty reviewed expectation
+rows: both state modes for `5.7.2-real-constants`, `5.7.2-real-token`,
+`6.12--real`, `6.12--realtime`, `6.12--shortreal`, `6.24.1--cast_op`,
+`20.5--itor`, `20.5--rtoi`, `20.5--real-bits-conv`, and
+`20.5--shortreal-bits-conv` change from fail to pass. Full official runs at the
+pinned revision report 472 passing cases in 2state and 474 in 4state, ten more
+in each mode. No passing case regresses. The negative real-select and real-edge
+cases retain their verdicts. The pinned `real_bit_select_idx` input is rejected
+earlier for its undriven net, so a separate analyzer regression uses a driven
+input to check that real-valued indices themselves are rejected.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

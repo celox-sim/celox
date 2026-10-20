@@ -33,6 +33,7 @@ pub fn emit_wide_binary(
     operation_width: usize,
 ) -> Vec<Value> {
     match op {
+        BinaryOp::Float { .. } => unreachable!("float operations are lowered separately"),
         // 1. Bitwise operations ─────────────────────────────
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
             emit_wide_bitwise(builder, op, l_chunks, r_chunks, num_chunks)
@@ -152,6 +153,7 @@ pub fn emit_wide_unary(
     common_logical_width: usize,
 ) -> Vec<Value> {
     match op {
+        UnaryOp::Float { .. } => unreachable!("float operations are lowered separately"),
         UnaryOp::Minus => emit_wide_negate(builder, r_chunks, num_chunks),
         UnaryOp::Ident | UnaryOp::ToTwoState => emit_wide_ident(builder, r_chunks, num_chunks),
         UnaryOp::BitNot => emit_wide_bitnot(builder, r_chunks, num_chunks),

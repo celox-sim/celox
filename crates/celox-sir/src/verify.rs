@@ -382,6 +382,24 @@ fn verify_instruction_types<A>(
             }
         }
         SIRInstruction::Binary(dst, lhs, op, rhs) => match op {
+            BinaryOp::Float { op, precision } => {
+                exact_width(*lhs, precision.width(), "TYPE.FLOAT_OPERAND_WIDTH")?;
+                exact_width(*rhs, precision.width(), "TYPE.FLOAT_OPERAND_WIDTH")?;
+                let comparison = matches!(
+                    op,
+                    crate::FloatBinaryOp::Eq
+                        | crate::FloatBinaryOp::Ne
+                        | crate::FloatBinaryOp::Lt
+                        | crate::FloatBinaryOp::Le
+                        | crate::FloatBinaryOp::Gt
+                        | crate::FloatBinaryOp::Ge
+                );
+                exact_width(
+                    *dst,
+                    if comparison { 1 } else { precision.width() },
+                    "TYPE.FLOAT_RESULT_WIDTH",
+                )?;
+            }
             BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::EqCase
@@ -422,6 +440,30 @@ fn verify_instruction_types<A>(
             }
         },
         SIRInstruction::Unary(dst, op, src) => match op {
+            UnaryOp::Float {
+                op: float_op,
+                precision,
+            } => {
+                let input_width = match float_op {
+                    crate::FloatUnaryOp::FromSigned { width }
+                    | crate::FloatUnaryOp::FromUnsigned { width } => *width,
+                    _ => precision.width(),
+                };
+                exact_width(*src, input_width, "TYPE.FLOAT_OPERAND_WIDTH")?;
+                exact_width(
+                    *dst,
+                    op.result_width(input_width),
+                    "TYPE.FLOAT_RESULT_WIDTH",
+                )?;
+                if input_width == 0 || input_width > 64 || ty(*dst)?.width() > 64 {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.FLOAT_CONVERSION_WIDTH",
+                        block,
+                        index,
+                        "floating conversions require integer widths in 1..=64",
+                    ));
+                }
+            }
             UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => {
                 exact_width(*dst, 1, "TYPE.REDUCTION_RESULT_WIDTH")?;
                 unsigned_if_bit(*dst, "TYPE.BOOLEAN_RESULT_UNSIGNED")?;

@@ -105,6 +105,7 @@ fn select<'a>(
     if let Some((dim, rest)) = shape.unpacked.split_first() {
         let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
+            real: false,
             unpacked: rest.to_vec(),
             ..(*shape).clone()
         }));
@@ -204,6 +205,7 @@ fn select<'a>(
         let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             randomizable: true,
+            real: false,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -238,6 +240,7 @@ fn select<'a>(
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         randomizable: true,
+        real: false,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,
@@ -378,6 +381,7 @@ pub(in crate::ast) fn bind_native(
                 {
                     let (_, _, count) = dimension_bounds(&tree.state, &dim.left, &dim.right, dims)?;
                     let sub = Shape::Owned(Rc::new(VariableDimensions {
+                        real: false,
                         unpacked: rest.to_vec(),
                         ..(*shape).clone()
                     }));

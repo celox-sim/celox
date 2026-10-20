@@ -507,6 +507,9 @@ impl<'p, 'a> Comb<'p, 'a> {
                 continue;
             };
             let var = self.m.var(id);
+            if var.float.is_some() {
+                continue;
+            }
             let (width, signed) = (var.width, var.signed);
             let Ok(parts) = range.get_parts(full(width)) else {
                 continue;
@@ -946,7 +949,12 @@ impl<'p, 'a> Comb<'p, 'a> {
         op: sv::ir::BinaryOp,
         left: &sv::ir::Expr,
     ) -> Result<Value, sv::AnalyzerError> {
-        let left_value = self.eval(store, frames, left, None)?;
+        let left_value = self.eval(
+            store,
+            frames,
+            &floating::condition(left, self.m.variables, self.m.name_to_id),
+            None,
+        )?;
         let guard = if op == sv::ir::BinaryOp::LogicAnd {
             slt_not_false(self.arena, left_value.0)?
         } else {
@@ -965,7 +973,12 @@ impl<'p, 'a> Comb<'p, 'a> {
         frames: &[Frame],
         condition: &sv::ir::Expr,
     ) -> Result<(Value, Value), sv::AnalyzerError> {
-        let condition_value = self.eval(store, frames, condition, None)?;
+        let condition_value = self.eval(
+            store,
+            frames,
+            &floating::condition(condition, self.m.variables, self.m.name_to_id),
+            None,
+        )?;
         let truth = slt_truth(self.arena, condition_value.0)?;
         let unknown = if self.m.four_state {
             Some(slt_truth_unknown(
@@ -1368,6 +1381,14 @@ impl<'p, 'a> Comb<'p, 'a> {
                     None => (1, false, false),
                 };
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
+                self.m.variables.get_mut(&temp).unwrap().float = subroutine
+                    .return_type
+                    .as_ref()
+                    .and_then(|ty| match ty.kind() {
+                        sv::ir::TypeKind::Real => Some(celox_sir::FloatPrecision::F64),
+                        sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
+                        _ => None,
+                    });
                 let node =
                     coerce_node_width(self.arena, node, Some(width), signed).map_err(slt_error)?;
                 self.write(store, temp, full(width), (node, sources))?;
@@ -1608,6 +1629,12 @@ impl<'p, 'a> Comb<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        let owned_rhs = if self.m.calls(rhs) {
+            self.hoist(store, frames, rhs)?
+        } else {
+            rhs.clone()
+        };
+        let rhs = &owned_rhs;
         let lhs = &self.hoist_lvalue(store, frames, lhs)?;
         let target = self.lvalue_target(store, lhs)?;
         let width = match &target {
@@ -1623,8 +1650,21 @@ impl<'p, 'a> Comb<'p, 'a> {
             )));
         }
         let signed = self.expr_signed(rhs);
-        let value = self
-            .eval(store, frames, rhs, Some((width, signed)))
+        let from = floating::precision(rhs, self.m.variables, self.m.name_to_id);
+        let target_var = self.m.id(lhs.name()).map(|id| self.m.var(id));
+        let to = target_var.and_then(|v| v.float);
+        let target_signed = target_var.is_some_and(|v| v.signed);
+        let (mut node, sources) = self
+            .eval(
+                store,
+                frames,
+                rhs,
+                if from.is_some() || to.is_some() {
+                    None
+                } else {
+                    Some((width, signed))
+                },
+            )
             .map_err(|error| match error {
                 sv::AnalyzerError::Unsupported(construct)
                     if construct == "combinational expression" =>
@@ -1636,7 +1676,21 @@ impl<'p, 'a> Comb<'p, 'a> {
                 }
                 error => error,
             })?;
-        self.store_value(store, frames, target, value, signed, rhs)
+        node = floating::convert(
+            self.arena,
+            node,
+            from,
+            to,
+            width,
+            if from.is_none() {
+                signed
+            } else {
+                target_signed
+            },
+            true,
+        )
+        .ok_or_else(|| unsupported("real assignment conversion"))?;
+        self.store_value(store, frames, target, (node, sources), signed, rhs)
     }
 
     fn store_value(
@@ -2001,7 +2055,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                 then_body,
                 else_body,
             } => {
-                let (node, sources) = self.eval(&mut store, frames, condition, None)?;
+                let (node, sources) = self.eval(
+                    &mut store,
+                    frames,
+                    &floating::condition(condition, self.m.variables, self.m.name_to_id),
+                    None,
+                )?;
                 let truth = slt_truth(self.arena, node)?;
                 match slt_bool(self.arena, &mut self.consts, truth).or_else(|| self.known(truth)) {
                     Some(true) => self.exec_block(store, frames, then_body),
@@ -2642,7 +2701,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                 }
                 (sv::ir::LoopKind::Forever, _) => None,
                 (_, Some(condition)) => {
-                    let (node, sources) = self.eval(&mut store, frames, condition, None)?;
+                    let (node, sources) = self.eval(
+                        &mut store,
+                        frames,
+                        &floating::condition(condition, self.m.variables, self.m.name_to_id),
+                        None,
+                    )?;
                     let truth = slt_truth(self.arena, node)?;
                     match slt_bool(self.arena, &mut self.consts, truth) {
                         Some(false) => break,
@@ -3153,8 +3217,38 @@ impl<'p, 'a> Comb<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let actual = if self.m.calls(&actual) {
+                    self.hoist(store, frames, &actual)?
+                } else {
+                    actual
+                };
                 let signed = self.expr_signed(&actual);
-                let (node, sources) = self.eval(store, frames, &actual, Some((width, signed)))?;
+                let from = floating::precision(&actual, self.m.variables, self.m.name_to_id);
+                let to = self.m.var(id).float;
+                let (node, sources) = self.eval(
+                    store,
+                    frames,
+                    &actual,
+                    if from.is_some() || to.is_some() {
+                        None
+                    } else {
+                        Some((width, signed))
+                    },
+                )?;
+                let node = floating::convert(
+                    self.arena,
+                    node,
+                    from,
+                    to,
+                    width,
+                    if from.is_none() {
+                        signed
+                    } else {
+                        self.m.var(id).signed
+                    },
+                    true,
+                )
+                .ok_or_else(|| unsupported("real argument conversion"))?;
                 let node =
                     coerce_node_width(self.arena, node, Some(width), signed).map_err(slt_error)?;
                 let node = if self.m.var(id).is_4state {
@@ -3200,8 +3294,28 @@ impl<'p, 'a> Comb<'p, 'a> {
         for (id, lvalues) in outputs {
             let width = self.m.var(id).width;
             let signed = self.m.var(id).signed;
-            let value = self.read(store, id, full(width))?;
-            self.write_back(store, frames, &lvalues, value, signed)?;
+            let (mut node, sources) = self.read(store, id, full(width))?;
+            let from = self.m.var(id).float;
+            if let [target] = lvalues.as_slice() {
+                let target_id = self
+                    .m
+                    .id(target.name())
+                    .ok_or_else(|| unsupported("output argument target"))?;
+                let target_var = self.m.var(target_id);
+                node = floating::convert(
+                    self.arena,
+                    node,
+                    from,
+                    target_var.float,
+                    target_var.width,
+                    target_var.signed,
+                    true,
+                )
+                .ok_or_else(|| unsupported("real output argument conversion"))?;
+            } else if from.is_some() {
+                return Err(unsupported("real output argument concatenation"));
+            }
+            self.write_back(store, frames, &lvalues, (node, sources), signed)?;
         }
         match return_var {
             Some(id) => {
@@ -3314,23 +3428,39 @@ impl<'p, 'a> Comb<'p, 'a> {
             let Some(sv::ir::SystemTaskArg::Expr(condition)) = args.first() else {
                 return Err(unsupported(format!("condition of `{task}`")));
             };
-            let (node, sources) = self.eval(store, frames, condition, None)?;
+            let (node, sources) = self.eval(
+                store,
+                frames,
+                &floating::condition(condition, self.m.variables, self.m.name_to_id),
+                None,
+            )?;
             observed.extend(sources);
             let truth = slt_truth(self.arena, node)?;
             Some(self.capture(truth)?)
         } else {
             None
         };
-        let (template, values) = system_task_template(&kind, args);
+        let (template, values) = system_task_template(self.m, &kind, args);
         let mut captured = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
         let mut arg_is_string = Vec::with_capacity(values.len());
+        let mut arg_float_precision = Vec::with_capacity(values.len());
         for value in &values {
             let node = match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
-                    let signed = self.expr_signed(expr);
-                    let (node, sources) = self.eval(store, frames, expr, None)?;
+                    let expr = if self.m.calls(expr) {
+                        self.hoist(store, frames, expr)?
+                    } else {
+                        expr.clone()
+                    };
+                    let signed = self.expr_signed(&expr);
+                    arg_float_precision.push(floating::precision(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
+                    let (node, sources) = self.eval(store, frames, &expr, None)?;
                     arg_signed.push(signed);
                     arg_is_string.push(false);
                     observed.extend(sources);
@@ -3344,6 +3474,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     });
                     arg_signed.push(false);
                     arg_is_string.push(true);
+                    arg_float_precision.push(None);
                     slt_constant(self.arena, value, width, false)?
                 }
                 sv::ir::SystemTaskArg::Empty => {
@@ -3421,6 +3552,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_widths,
             arg_signed,
             arg_is_string,
+            arg_float_precision,
         });
         let mut preceding_writes = Vec::new();
         for (id, range) in store.iter() {

@@ -239,7 +239,7 @@ fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
 fn rejects_non_integral_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
-        module Top(input real value, output logic y);
+        module Top(input string value, output logic y);
             assign y = 1'b0;
         endmodule
         "#,
@@ -5722,7 +5722,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported function formal data type",
+            "operator on a real operand",
             r#"
             module Top(input logic [1:0] a, output logic [1:0] y);
                 function automatic logic [1:0] shift(input real value);
@@ -5736,8 +5736,8 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "void function `f` used as a value",
             r#"
             module Top(output logic y);
-                function automatic real f();
-                    return 1'b1;
+                function automatic void f();
+                    return;
                 endfunction
                 assign y = f();
             endmodule
@@ -5758,7 +5758,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "unsupported parameter data type",
             r#"
-            module Top #(parameter real P = 1) (output logic y);
+            module Top #(parameter chandle P = null) (output logic y);
                 assign y = P;
             endmodule
         "#,
@@ -6416,7 +6416,7 @@ fn rejects_unsupported_internal_data_types() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic y);
-            real value;
+            string value;
             assign y = 1'b0;
         endmodule
         "#,

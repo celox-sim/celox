@@ -255,6 +255,7 @@ mod host {
         width: usize,
         signed: bool,
         is_string: bool,
+        float_precision: Option<celox_design::FloatPrecision>,
     }
 
     #[derive(Clone)]
@@ -422,6 +423,7 @@ mod host {
             width: arg.width,
             signed: arg.signed,
             is_string: arg.is_string,
+            float_precision: arg.float_precision,
         };
         match sizing {
             DisplaySizing::Veryl => format_veryl_display_arg(&arg, spec, field),
@@ -459,7 +461,16 @@ mod host {
             return args
                 .iter()
                 .map(|arg| {
-                    runtime_event_format_arg(arg, default_spec, site.sizing, FieldSpec::default())
+                    runtime_event_format_arg(
+                        arg,
+                        if arg.float_precision.is_some() {
+                            'g'
+                        } else {
+                            default_spec
+                        },
+                        site.sizing,
+                        FieldSpec::default(),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(&b' ');
@@ -488,7 +499,7 @@ mod host {
                     out.extend_from_slice(&runtime_event_format_arg(arg, spec, site.sizing, field));
                     arg_idx += 1;
                 }
-                'd' | 'D' | 'i' | 'I' => {
+                'd' | 'D' | 'i' | 'I' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
                     let Some(arg) = args.get(arg_idx) else {
                         arg_idx += 1;
                         continue;
@@ -633,6 +644,9 @@ mod host {
                         ));
                     }
                     args.push(RuntimeEventArgValue {
+                        float_precision: site
+                            .and_then(|site| site.arg_float_precision.get(idx).copied())
+                            .flatten(),
                         values,
                         masks,
                         width: site
