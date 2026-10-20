@@ -448,6 +448,7 @@ pub(super) fn analyze_module(
                         name: port.name.clone(),
                         r#type: port.r#type.clone(),
                         is_net: port.is_net,
+                        is_const: false,
                         package_variable: None,
                     };
                     module.symbols.as_mut().unwrap().signals.push(signal);

@@ -203,6 +203,7 @@ fn select<'a>(
     {
         let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
+            randomizable: true,
             packed: rest.to_vec(),
             unpacked: Vec::new(),
             signed: shape.signed_element_depth == Some(1),
@@ -236,6 +237,7 @@ fn select<'a>(
     let width = shape_width(state, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions {
+        randomizable: true,
         packed: Vec::new(),
         unpacked: Vec::new(),
         signed: false,

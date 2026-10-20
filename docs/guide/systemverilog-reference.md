@@ -61,6 +61,19 @@ until shared argument storage and its change notifications are supported.
 Event expressions have the same restrictions
 as waits written directly in a process.
 
+### Scope randomization
+
+`randomize(a, b)` and `std::randomize(a, b)` support unconstrained whole packed
+variables, including signed vectors and packed structures, at any supported
+width. Each call fills every word with random zero/one bits and returns the
+signed `int` success value `1`. An empty argument list succeeds without writing a
+variable or advancing the random stream. Calls follow procedural statement order
+and short-circuit evaluation, and use the calling process's persistent random
+stream (IEEE 1800-2023 18.12).
+
+Constraints (`with`), class methods, enum variables, unpacked arrays, nets,
+constants, selects and concatenation arguments are unsupported and rejected.
+
 ### Time literal delays
 
 Standalone delay controls accept time literals such as `#5ns`, `#(2.75ns)` and

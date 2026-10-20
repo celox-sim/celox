@@ -2743,3 +2743,85 @@ endmodule
   (assert_eq ok 1)
   (assert_eq covered 1)
   (assert_eq width 32))
+
+(case scope_randomize_fills_arbitrary_packed_widths
+  (source "scope_randomize.sv" #"
+    module Top(input bit clk, output bit passed, output bit [7:0] coverage);
+      int count = 0;
+      bit success;
+      logic [0:0] v1, ones1 = '0, zeros1 = '1;
+      logic [4:0] v5, ones5 = '0, zeros5 = '1;
+      logic [15:0] v16, ones16 = '0, zeros16 = '1;
+      logic [31:0] v32, ones32 = '0, zeros32 = '1;
+      logic [63:0] v64, ones64 = '0, zeros64 = '1;
+      logic [980:0] v981, ones981 = '0, zeros981 = '1;
+      logic [1023:0] v1024, ones1024 = '0, zeros1024 = '1;
+      logic [2050:0] v2051, ones2051 = '0, zeros2051 = '1;
+      always @(posedge clk) begin
+        success = std::randomize(v1, v5, v16, v32, v64, v981, v1024, v2051);
+        if (!success) $fatal(1, "scope randomization failed");
+        if ($isunknown(v1)) $fatal(1, "unknown randomized bits");
+        ones1 |= v1; zeros1 &= v1;
+        if ($isunknown(v5)) $fatal(1, "unknown randomized bits");
+        ones5 |= v5; zeros5 &= v5;
+        if ($isunknown(v16)) $fatal(1, "unknown randomized bits");
+        ones16 |= v16; zeros16 &= v16;
+        if ($isunknown(v32)) $fatal(1, "unknown randomized bits");
+        ones32 |= v32; zeros32 &= v32;
+        if ($isunknown(v64)) $fatal(1, "unknown randomized bits");
+        ones64 |= v64; zeros64 &= v64;
+        if ($isunknown(v981)) $fatal(1, "unknown randomized bits");
+        ones981 |= v981; zeros981 &= v981;
+        if ($isunknown(v1024)) $fatal(1, "unknown randomized bits");
+        ones1024 |= v1024; zeros1024 &= v1024;
+        if ($isunknown(v2051)) $fatal(1, "unknown randomized bits");
+        ones2051 |= v2051; zeros2051 &= v2051;
+        count++;
+        if (count == 64) begin
+          coverage[0] = (&ones1) && !(|zeros1);
+          coverage[1] = (&ones5) && !(|zeros5);
+          coverage[2] = (&ones16) && !(|zeros16);
+          coverage[3] = (&ones32) && !(|zeros32);
+          coverage[4] = (&ones64) && !(|zeros64);
+          coverage[5] = (&ones981) && !(|zeros981);
+          coverage[6] = (&ones1024) && !(|zeros1024);
+          coverage[7] = (&ones2051) && !(|zeros2051);
+          passed = &coverage;
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for draw (range 0 64) (tick clk))
+  (assert_eq coverage 255 "coverage by width: 1,5,16,32,64,981,1024,2051")
+  (assert_eq passed 1 "every bit, including high bits and partial words, varied"))
+
+(case scope_randomize_obeys_control_flow_and_statement_order
+  (source "scope_randomize_order.sv" #"
+    module Top(output int status);
+      bit a = 0, b = 1;
+      bit ok;
+      function automatic bit draw;
+        bit local_value;
+        return std::randomize(local_value);
+      endfunction
+      initial begin
+        if (0 && randomize(a)) $fatal(1, "short circuit");
+        if (1 || randomize(b)) status = 1;
+        if (a !== 0 || b !== 1) $fatal(1, "short circuited randomize wrote its argument");
+        if ($bits(std::randomize(a)) != 32) $fatal(1, "randomize return width");
+        ok = randomize();
+        if (!ok || !draw()) $fatal(1, "empty or function call failed");
+        void'(std::randomize(a, b));
+        std::randomize(a);
+        randomize(b);
+        if ($isunknown({a, b})) $fatal(1, "unknown results");
+        status = 2;
+        #1;
+        $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_to_finish)
+  (assert_eq status 2))
