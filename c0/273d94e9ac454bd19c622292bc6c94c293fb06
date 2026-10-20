@@ -1,0 +1,1 @@
+Fix Windows queue failure: normalize the fixture absolute test include path before passing it to Vitest.
