@@ -1,0 +1,1 @@
+Address review r4323518563: reject automatic-variable NBAs in untimed task callees as well as tasks that suspend; add nested, concatenation, array and legal module-storage regressions.
