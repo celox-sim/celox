@@ -71,6 +71,7 @@ fn lifter(values: &[(u64, u32, usize, &str)]) -> Lifter {
             regs: BTreeMap::new(),
         },
         stats: Statistics::default(),
+        events: None,
     }
 }
 #[test]
@@ -635,5 +636,95 @@ fn unbound_cross_lane_fragments_require_complete_individual_lanes() {
     prove(
         storage.read(0, 16).unwrap(),
         cat(high, cat(middle, low).unwrap()).unwrap(),
+    );
+}
+
+/// Evaluate a closed term with the solver's independent evaluator.
+fn value(t: Term) -> u64 {
+    let env = Env::from([("r".to_string(), t)]);
+    let values =
+        lydite_solver::finite::evaluate_scalar_terms(&env, &Default::default(), Limits::default())
+            .unwrap();
+    values["r"].to_u64().unwrap()
+}
+fn signed(v: u64, w: u32) -> i128 {
+    let v = v & ((1u64 << w) - 1);
+    if v >> (w - 1) & 1 == 1 {
+        i128::from(v) - (1i128 << w)
+    } else {
+        i128::from(v)
+    }
+}
+// Celox's two-state ALU (interpreter.rs `alu_binary_u64`/`alu_unary_u64`).
+fn reference_division(name: BinaryOp, x: u64, y: u64, wx: u32, wy: u32, w: u32) -> u64 {
+    let raw = match name {
+        BinaryOp::DivU => x.checked_div(y).unwrap_or(0),
+        BinaryOp::RemU => x.checked_rem(y).unwrap_or(0),
+        _ => {
+            let (x, y) = (signed(x, wx), signed(y, wy));
+            if y == 0 {
+                0
+            } else if name == BinaryOp::DivS {
+                (x / y) as u64
+            } else {
+                (x % y) as u64
+            }
+        }
+    };
+    raw & ((1u64 << w) - 1)
+}
+#[test]
+fn division_matches_celox_two_state_semantics() {
+    use BinaryOp::*;
+    for (wx, wy, w) in [(3, 3, 3), (4, 2, 4), (2, 4, 4), (3, 3, 5), (4, 4, 2)] {
+        for name in [DivU, RemU, DivS, RemS] {
+            for x in 0..1u64 << wx {
+                for y in 0..1u64 << wy {
+                    let actual = value(division(name, bv(wx, x), bv(wy, y), w));
+                    let expected = reference_division(name, x, y, wx, wy, w);
+                    assert_eq!(actual, expected, "{name:?} {x}/{y} widths {wx},{wy}->{w}");
+                }
+            }
+        }
+    }
+}
+#[test]
+fn bit_counts_match_celox_semantics() {
+    for (n, w) in [(1, 2), (4, 3), (5, 4), (6, 2)] {
+        for x in 0..1u64 << n {
+            let mask = (1u64 << w) - 1;
+            let count = |op| value(unary(op, bv(n, x), w, false).unwrap());
+            assert_eq!(count(UnaryOp::PopCount), u64::from(x.count_ones()) & mask);
+            let clz = u64::from(n) - (64 - u64::from(x.leading_zeros()));
+            assert_eq!(count(UnaryOp::CountLeadingZeros), clz & mask, "clz {x}");
+            let ctz = if x == 0 {
+                u64::from(n)
+            } else {
+                u64::from(x.trailing_zeros())
+            };
+            assert_eq!(count(UnaryOp::CountTrailingZeros), ctz & mask, "ctz {x}");
+        }
+    }
+}
+#[test]
+fn wide_constants_fold_modulo_their_width() {
+    let w = 100;
+    let big = (BigUint::from(1u8) << 99u32) + 5u8;
+    let x = bvb(w, &big);
+    assert_eq!(
+        constant(&op("bvadd", w, x.clone(), x.clone())),
+        Some(BigUint::from(10u8))
+    );
+    assert_eq!(
+        constant(&op("bvshl", w, bv(w, 1), bv(w, 99))),
+        Some(BigUint::from(1u8) << 99u32)
+    );
+    assert_eq!(
+        constant(&op("bvshl", w, bv(w, 1), bv(w, 100))),
+        Some(BigUint::default())
+    );
+    assert_eq!(
+        constant(&resize(bv(4, 0b1000), w, true)),
+        Some(ones(w) ^ BigUint::from(7u8))
     );
 }

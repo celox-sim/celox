@@ -4,8 +4,10 @@
 use lydite_ir::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Constant value of a bit-vector literal of width at most 64. Wider literals
+/// are deliberately opaque: this simplifier folds with u64 arithmetic.
 pub fn literal(t: &Term) -> Option<u64> {
-    if !matches!(t.0.sort, Sort::Bv(_)) || !t.0.args.is_empty() {
+    if !matches!(t.0.sort, Sort::Bv(1..=64)) || !t.0.args.is_empty() {
         return None;
     }
     t.0.op
@@ -260,7 +262,7 @@ impl Context {
                 }
                 if result.is_none() {
                     match op {
-                        "bvadd" | "bvmul" => {
+                        "bvadd" | "bvmul" if w <= 64 => {
                             let mut terms = vec![];
                             flatten(&t, op, &mut terms);
                             let mut c = if op == "bvadd" { 0u64 } else { 1u64 };

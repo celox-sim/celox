@@ -213,7 +213,7 @@ fn fold(
     {
         result = match evaluate(&result, &BTreeMap::new(), &mut HashMap::new(), b, 0)? {
             Scalar::Bool(v) => boolv(v),
-            Scalar::Bv { width, value } => bv(width, value),
+            Scalar::Bv { width, value } => lydite_ir::bv_big(width, &value),
         };
     }
     memo.insert(t.clone(), result.clone());
@@ -596,10 +596,7 @@ pub(super) fn route(
                             .entry(name.clone())
                             .or_insert_with(|| match sort {
                                 Sort::Bool => Scalar::Bool(false),
-                                Sort::Bv(w) => Scalar::Bv {
-                                    width: *w,
-                                    value: 0,
-                                },
+                                Sort::Bv(w) => Scalar::bv(*w, 0),
                                 _ => unreachable!(),
                             });
                     }
@@ -1026,7 +1023,7 @@ mod tests {
                 assert_eq!(out.verdict, if sat { Verdict::Sat } else { Verdict::Unsat });
                 assert_eq!(out.original_formula_validated, sat);
                 if sat {
-                    assert_eq!(out.context_values["mux"], Scalar::Bv { width: 8, value: 7 });
+                    assert_eq!(out.context_values["mux"], Scalar::bv(8, 7));
                     for i in 0..count {
                         assert_eq!(out.assignments[&format!("select{i}")], Scalar::Bool(true));
                     }
@@ -1165,10 +1162,7 @@ mod tests {
                 assert_eq!(out.original_formula_validated, !unsat);
                 if !unsat {
                     assert_eq!(out.context_values["unselected"], Scalar::Bool(true));
-                    assert_eq!(
-                        out.context_values["dead_context"],
-                        Scalar::Bv { width: 8, value: 9 }
-                    );
+                    assert_eq!(out.context_values["dead_context"], Scalar::bv(8, 9));
                     assert!(out.assignments.contains_key("dead_formula"));
                     assert!(out.assignments.contains_key("context_only"));
                     for i in 0..count {

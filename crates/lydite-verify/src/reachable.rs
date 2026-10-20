@@ -50,11 +50,10 @@ fn input_values(v: &Value, types: &Env) -> Res<BTreeMap<String, Scalar>> {
             let value = match t.0.sort {
                 Sort::Bool => Scalar::Bool(map[k].as_bool().ok_or("boolean input required")?),
                 Sort::Bv(w @ 1..=64) => {
-                    let n = map[k].as_u64().ok_or("unsigned input required")?;
-                    if w < 64 && n >= (1u64 << w) {
-                        return Err("input out of range".into());
+                    if !map[k].is_u64() {
+                        return Err("unsigned input required".into());
                     }
-                    Scalar::Bv { width: w, value: n }
+                    Scalar::bv_from_json(w, &map[k]).map_err(|_| "input out of range")?
                 }
                 _ => return Err("unsupported input sort".into()),
             };
@@ -65,13 +64,7 @@ fn input_values(v: &Value, types: &Env) -> Res<BTreeMap<String, Scalar>> {
 fn raw_inputs(v: &BTreeMap<String, Scalar>) -> Value {
     json!(
         v.iter()
-            .map(|(k, v)| (
-                k,
-                match v {
-                    Scalar::Bool(b) => json!(b),
-                    Scalar::Bv { value, .. } => json!(value),
-                }
-            ))
+            .map(|(k, v)| (k, v.json_value()))
             .collect::<BTreeMap<_, _>>()
     )
 }

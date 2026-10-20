@@ -10,6 +10,7 @@ lydite-ir.workspace = true
 num-bigint.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+lydite-solver.workspace = true
 # The bridge binaries compile, simulate and test Veryl designs with the
 # in-tree Celox.
 celox                  = { workspace = true, features = ["host-runtime"] }
@@ -22,9 +23,6 @@ celox-test-suite.workspace = true
 veryl-analyzer.workspace = true
 veryl-metadata.workspace = true
 veryl-parser.workspace = true
-
-[dev-dependencies]
-lydite-solver.workspace = true
 
 [[bin]]
 name = "lydite-celox-lift"

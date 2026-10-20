@@ -282,10 +282,8 @@ mod tests {
                     if v["sort"] == "Bool" {
                         Scalar::Bool(v["value"].as_bool().unwrap())
                     } else {
-                        Scalar::Bv {
-                            width: v["width"].as_u64().unwrap() as u32,
-                            value: v["value"].as_u64().unwrap(),
-                        }
+                        Scalar::bv_from_json(v["width"].as_u64().unwrap() as u32, &v["value"])
+                            .unwrap()
                     },
                 )
             })
