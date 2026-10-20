@@ -156,7 +156,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .map(|(text, path)| (text.as_str(), path.as_path()))
         .collect();
     let builder = celox::Simulation::from_sv_sources(source_refs, &arguments.design.top)
-        .four_state(arguments.execution.four_state)
+        .four_state(arguments.design.four_state.unwrap_or(false))
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
@@ -403,7 +403,7 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
             let builder = celox::Simulator::from_sv_sources(refs, &design.top)
-                .four_state(true)
+                .four_state(design.four_state.unwrap_or(false))
                 .diagnostic_policy(design.diagnostics.clone())
                 .signal_access(design.signal_access.clone())
                 .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
@@ -427,13 +427,14 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
     {
         return Err("pass .sv/.v sources, or one .veryl project entry file".to_string());
     }
-    let (image, warnings) = celox_vpi::driver::compile_native_image_with_parameters(
+    let (image, warnings) = celox_vpi::driver::compile_native_image_with_state(
         &design.sources[0],
         &design.top,
         design.diagnostics.clone(),
         design.opt_level.unwrap_or(celox::OptLevel::O1),
         design.signal_access.clone(),
         &design.parameters,
+        design.four_state.unwrap_or(false),
     )?;
     report_warnings(&warnings)?;
     Ok(image)

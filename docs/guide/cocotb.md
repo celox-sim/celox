@@ -33,8 +33,9 @@ target/release/celox run test/Top.veryl --top Top
 ```
 
 For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
-uses two-state simulation by default (`--four-state` enables X/Z tracking) and runs until `$finish` or no scheduled events
-remain. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
+uses two-state simulation by default and runs until `$finish` or no scheduled
+events remain. Use `--four-state` or `four_state = true` in `celox.toml` to retain
+X/Z values. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
 and collects the project's sources and dependencies. A standalone
 Veryl file also works. Both languages default to two-state simulation. Select the native testbench module with `--top`.
 Veryl uses the existing native testbench executor; a test may also complete by

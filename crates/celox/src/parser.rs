@@ -573,7 +573,7 @@ pub fn parse(
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
-    parameter_overrides: &[(String, u64)],
+    parameter_overrides: &[(String, celox_frontend_sv::analyzer_ir::ConstExpr)],
     _config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -599,7 +599,7 @@ pub fn parse_sv(
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
-    let scheduled = celox_frontend_sv::schedule_sources_with_force_signals(
+    let scheduled = celox_frontend_sv::schedule_sources_with_parameter_expressions(
         sources,
         top,
         parameter_overrides,
