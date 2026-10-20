@@ -78,6 +78,8 @@ pub struct NapiOptimizeOptions {
 #[napi(object)]
 pub struct NapiOptions {
     pub four_state: Option<bool>,
+    /// Ordered SystemVerilog command-line arguments (leading `+` optional).
+    pub plusargs: Option<Vec<String>>,
     pub vcd: Option<String>,
     /// Optimization level preset: "O0", "O1", or "O2".
     /// Takes precedence over `optimize` and `optimize_options`.
@@ -119,6 +121,7 @@ pub struct NapiOptions {
 struct ParsedOptionsCommon {
     diagnostic_policy: celox::DiagnosticPolicy,
     four_state: bool,
+    plusargs: Vec<String>,
     optimize_options: celox::OptimizeOptions,
     vcd: Option<String>,
     false_loops: Vec<(
@@ -381,6 +384,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
             Ok(ParsedOptionsCommon {
                 diagnostic_policy: Default::default(),
                 four_state: o.four_state.unwrap_or(false),
+                plusargs: o.plusargs.clone().unwrap_or_default(),
                 optimize_options,
                 vcd: o.vcd.clone(),
                 false_loops,
@@ -394,6 +398,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
         None => Ok(ParsedOptionsCommon {
             diagnostic_policy: Default::default(),
             four_state: false,
+            plusargs: Vec::new(),
             optimize_options: celox::OptimizeOptions::all(),
             vcd: None,
             false_loops: Vec::new(),
@@ -635,8 +640,10 @@ fn apply_options<'a, T>(
     mut builder: celox::SimulatorBuilder<'a, T>,
     opts: &ParsedOptions,
 ) -> celox::SimulatorBuilder<'a, T> {
-    builder = builder.diagnostic_policy(opts.diagnostic_policy.clone());
-    builder = builder.four_state(opts.four_state);
+    builder = builder
+        .diagnostic_policy(opts.diagnostic_policy.clone())
+        .four_state(opts.four_state)
+        .plusargs(opts.plusargs.clone());
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.threads(opts.optimize_options.parallel_lanes() as usize);
     builder = builder.cranelift_options(opts.cranelift_options);
@@ -3789,6 +3796,7 @@ mod tests {
             common: ParsedOptionsCommon {
                 diagnostic_policy: Default::default(),
                 four_state: false,
+                plusargs: Vec::new(),
                 optimize_options: celox::OptimizeOptions::all(),
                 vcd: None,
                 false_loops: vec![],
@@ -3929,6 +3937,7 @@ mod tests {
             let options = Some(NapiOptions {
                 vcd: Some(path.to_str().unwrap().to_owned()),
                 four_state: None,
+                plusargs: None,
                 opt_level: None,
                 pass_overrides: None,
                 optimize: None,

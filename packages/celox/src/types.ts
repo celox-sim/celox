@@ -320,6 +320,8 @@ export interface OptimizeOptions {
 export interface SimulatorOptions {
 	/** Enable 4-state (X) simulation. Default: false. */
 	fourState?: boolean;
+	/** Ordered SystemVerilog plusargs; the leading + is optional. */
+	plusargs?: string[];
 	/** Path to write VCD waveform output. */
 	vcd?: string;
 	/**

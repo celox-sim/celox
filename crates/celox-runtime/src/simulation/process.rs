@@ -1,7 +1,7 @@
 //! The process phase of a round: running ready kernels and filing them
 //! where they resume.
 
-use celox_design::ProcessStatus;
+use celox_design::{HostRequestKind, ProcessStatus};
 
 use super::SimulationState;
 use super::host::SimulationExecutor;
@@ -55,6 +55,20 @@ impl<B: SimBackend> SimulationState<B> {
                 Some(ProcessStatus::Nba) => {
                     let site = delay() as usize;
                     self.queue_nba(executor.backend_mut(), process, site)?;
+                    *returns += 1;
+                    self.charge(*returns, Some(process))?;
+                    return Ok(true);
+                }
+                Some(ProcessStatus::HostRequest) => {
+                    let (kind, index) = HostRequestKind::decode(delay())
+                        .ok_or(SimulatorErrorCode::InternalError)?;
+                    let request = self.model.processes[process]
+                        .host_requests
+                        .iter()
+                        .filter(|site| site.kind == kind)
+                        .nth(index as usize)
+                        .ok_or(SimulatorErrorCode::InternalError)?;
+                    executor.host_request(request, current_time)?;
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
                     return Ok(true);

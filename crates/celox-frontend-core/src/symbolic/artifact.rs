@@ -117,6 +117,8 @@ pub struct SimModule {
     /// Nonblocking sites of the module's processes; `process` indexes
     /// [`Self::processes`].
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
+    /// Synchronous host operations of the module processes.
+    pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     /// The variable through which the module's code reads the simulation
     /// time; see `RuntimeSchema::time_slots`.
     pub time_slot: Option<SourceVarId>,

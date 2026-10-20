@@ -119,6 +119,7 @@ mod host {
         /// State objects as state files name them, built on first use.
         pub(super) state_schema: std::sync::OnceLock<Arc<state_file::StateSchema>>,
         pub(crate) diagnostics: crate::RuntimeDiagnostics,
+        pub(crate) plusargs: celox_runtime::plusargs::Plusargs,
         tick_timing_ticks: u64,
         tick_timing_eval_apply_ns: u64,
         tick_timing_eval_comb_ns: u64,
@@ -735,6 +736,7 @@ mod host {
                 checkpoint_fingerprint: std::sync::OnceLock::new(),
                 state_schema: std::sync::OnceLock::new(),
                 diagnostics: crate::RuntimeDiagnostics::default(),
+                plusargs: celox_runtime::plusargs::Plusargs::default(),
                 tick_timing_ticks: 0,
                 tick_timing_eval_apply_ns: 0,
                 tick_timing_eval_comb_ns: 0,
@@ -813,6 +815,58 @@ mod host {
             self.program
                 .design
                 .restore_initial_state(initial_memory_values);
+        }
+
+        pub(crate) fn run_plusargs_request(
+            &mut self,
+            site: &celox_design::HostRequestSite<SignalRef>,
+            _timestamp: u64,
+        ) -> Result<(), celox_runtime::Halt> {
+            let query_signal = site.args[0].id;
+            let (query_value, query_mask) = self.backend.get_four_state(query_signal);
+            if query_mask != BigUint::default() {
+                return Err(celox_runtime::Halt::Error(
+                    crate::RuntimeErrorCode::Runtime {
+                        message: "plusargs query contains X or Z bits".into(),
+                        signals: Vec::new(),
+                    },
+                ));
+            }
+            let query = query_value.to_bytes_be();
+            let query = query
+                .iter()
+                .position(|byte| *byte != 0)
+                .map_or(&[][..], |start| &query[start..]);
+            let matched = if site.operation == 0 {
+                self.plusargs.test(query)
+            } else {
+                let target = site.results[1].id;
+                match self
+                    .plusargs
+                    .value(query, target.width)
+                    .map_err(|message| {
+                        celox_runtime::Halt::Error(crate::RuntimeErrorCode::Runtime {
+                            message,
+                            signals: Vec::new(),
+                        })
+                    })? {
+                    Some((value, mask)) => {
+                        if self.backend.layout().four_state && target.is_4state {
+                            self.backend.set_four_state(target, value, mask);
+                        } else {
+                            let width_mask =
+                                (BigUint::from(1u8) << target.width) - BigUint::from(1u8);
+                            self.backend
+                                .set_wide(target, value & (&width_mask ^ (mask & &width_mask)));
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
+            self.backend
+                .set_wide(site.results[0].id, BigUint::from(u8::from(matched)));
+            Ok(())
         }
 
         pub(crate) fn apply_testbench_memory_writes(

@@ -10,7 +10,7 @@ pub(crate) fn project_observability(
     let (sites, read_variables) =
         celox_frontend_veryl::collect_testbench_observability(lookup, source)?;
     runtime_schema.runtime_event_sites.extend(sites);
-    runtime_schema.testbench_read_roots = read_variables;
+    runtime_schema.testbench_read_roots.extend(read_variables);
     Ok(())
 }
 

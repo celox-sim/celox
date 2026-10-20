@@ -23,6 +23,24 @@ pub trait UnitExecutor {
     fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         Ok(self.backend_mut().run_process(index)?)
     }
+
+    /// Perform a synchronous request after a kernel has stored its
+    /// arguments and before that kernel resumes. The timestamp is the
+    /// current scheduler time in the design's precision units.
+    fn host_request(
+        &mut self,
+        request: &celox_design::HostRequestSite<SignalRef>,
+        _timestamp: u64,
+    ) -> Result<(), Halt> {
+        Err(SimulatorErrorCode::Runtime {
+            message: format!(
+                "host does not support {:?} request {}",
+                request.kind, request.operation
+            ),
+            signals: Vec::new(),
+        }
+        .into())
+    }
 }
 
 /// What a timed step tells the host around the units it executes. Every

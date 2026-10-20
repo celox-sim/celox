@@ -61,9 +61,10 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 | 領域 | サポート内容 |
 | --- | --- |
 | システム関数 | `$timeunit`、`$timeprecision`、`$bits`、`$size`、`$clog2`、`$countbits`、`$countones`、`$onehot`、`$onehot0`、`$isunknown`、`$isunbounded` は式・定数式の中と文として。`$signed`、`$unsigned` は式の中と文として |
-| 乱数 | `$urandom`、`$urandom_range`、`$random` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
+| 乱数 | `$urandom`、`$urandom_range`、`$random`、`$dist_uniform` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | シミュレーション時刻 | `$time` と `$stime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
+| コマンドライン引数 | `$test$plusargs` と `$value$plusargs` は時間付き `initial` とそこから呼ぶサブルーチンで使用可能 |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -232,6 +233,19 @@ static なローカル変数は未対応です。`automatic` と宣言してく�
 Celox は program ブロックを持たず、それ以外からの呼び出しは 24.7 の規定どおり無視し、
 その呼び出し位置でコンパイル警告（`Simulator::warnings()`）を出します。定数関数内の呼び出しも同様です。
 関数宣言内の呼び出しは、その関数を使わなくても警告します。定数評価が実行したかどうかには依存しません。
+
+### コマンドライン引数
+
+`initial` とそのサブルーチンからの plusargs 検索には `Simulation::from_sv_sources`
+を使います。組合せプロセスとエッジで起動するプロセスからの検索は未対応です。
+
+引数は `.plusargs(["+COUNT=12", "+TRACE"])` で順序を保って渡します。
+`$test$plusargs` は前方一致で検索し、`$value$plusargs` は整数変換と packed 整数変数への
+`%s` を扱います。最初に一致した引数を使い、未一致の場合は書き込み先の値を保持します。
+real 変換と動的 string は未対応です。
+
+`$dist_uniform(seed, start, end)` は Annex N の一様分布を使い、整数の seed 変数を更新します。
+両端を含み、境界が同じ値か逆順なら seed を進めず `start` を返します。
 
 ## 時刻と精度 {#time-and-precision}
 

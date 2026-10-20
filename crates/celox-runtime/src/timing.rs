@@ -136,6 +136,7 @@ pub struct ProcessRefs {
     pub wait_sites: Vec<Vec<TermRefs>>,
     /// Nonblocking sites by local index.
     pub nba_sites: Vec<NbaSiteRefs>,
+    pub host_requests: Vec<celox_design::HostRequestSite<SignalRef>>,
 }
 
 impl ProcessRefs {
@@ -146,6 +147,7 @@ impl ProcessRefs {
             delay,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_requests: Vec::new(),
         }
     }
 }

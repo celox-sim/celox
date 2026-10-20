@@ -6,6 +6,7 @@ mod edge;
 mod error;
 mod event_buffer;
 pub mod parallel;
+pub mod plusargs;
 mod reflection;
 mod schedule;
 pub mod scheduler;
