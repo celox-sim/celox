@@ -1,1 +1,6 @@
-Split independent fixes at reviewer request: retain only Vite cache resolution in #1596, move one-bit aggregate lowering to an independent master-based PR, and address /@fs/ cached external-project imports.
+Revision history for #1596:
+
+rev 2 (content) 2026-10-20 10:15 UTC — Split independent fixes at reviewer request: retain only Vite cache resolution in #1596, move one-bit aggregate lowering to an independent master-based PR, and address /@fs/ cached external-project imports.
+rev 1 (initial) 2026-10-20 10:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1596,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"134292d54da35056239e6048cdc150038ca6810b","timestamp_iso":"2026-10-20T10:15:38Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"134292d54da35056239e6048cdc150038ca6810b","new_sha":"f383c07cccc3714dbbe314859f6ea9797403c116","timestamp_iso":"2026-10-20T10:15:38Z","reason":"Split independent fixes at reviewer request: retain only Vite cache resolution in #1596, move one-bit aggregate lowering to an independent master-based PR, and address /@fs/ cached external-project imports.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/134292d54da35056239e6048cdc150038ca6810b...f383c07cccc3714dbbe314859f6ea9797403c116"}]} -->
