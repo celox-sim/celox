@@ -6201,3 +6201,28 @@ fn unpacked_constant_function_bounds_survive_analysis_without_losing_the_contrac
     // contracts, even though lowering no longer owns their function bodies.
     assert!(typecheck::eval_const_expr(range.right(), &HashMap::default()).is_none());
 }
+
+#[test]
+fn time_literal_delays_reject_scheduler_overflow() {
+    let error = analyze_source(
+        "module Top; timeunit 1s / 1fs; initial #18446744073709551616s; endmodule",
+        Path::new("overflow_delay.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("scheduler range"), "{error}");
+}
+
+#[test]
+fn time_literal_delays_accept_numeric_separators() {
+    let source = "module Top; timeunit 1ns / 1ps; initial #1_000ps; endmodule";
+    let ir = analyze_source(source, Path::new("separated_time.sv")).unwrap();
+    let ir::Stmt::Delay {
+        amount,
+        ticks_per_unit,
+    } = &ir.modules()[0].initial_processes()[0].body()[0]
+    else {
+        panic!("delay");
+    };
+    assert_eq!(*ticks_per_unit, 1);
+    assert!(matches!(amount, ir::Expr::Literal(value) if value == "64'd1000"));
+}
