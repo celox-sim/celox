@@ -128,3 +128,139 @@ The Vite plugin picks up `test_veryl/` automatically and generates type definiti
 - All test source directories are merged with the project sources at simulation time. Modules from both are available in the same namespace.
 - The Vite plugin regenerates types for test sources on hot reload, just like for production sources.
 - `[simulation]` settings apply to every `Simulation.fromProject` / `Simulation.create` call within the project. A per-call `{ maxSteps }` option always takes precedence over the `celox.toml` value.
+
+### `[diagnostics]`
+
+Override individual compilation diagnostics by their displayed code:
+
+```toml
+[diagnostics]
+mixed_timescale = "warn"
+exit_outside_program = "allow"
+memory_file_word_count = "error"
+```
+
+`allow` suppresses the diagnostic, `warn` retains it without failing compilation,
+and `error` rejects the design. Unlisted codes keep their default severity.
+Existing Veryl and SystemVerilog warnings can be suppressed or promoted this way.
+Use the exact code printed in the diagnostic; entries for codes not encountered
+by a compilation have no effect.
+
+Recoverable errors support relaxation only when the compiler defines a fallback.
+Currently `mixed_timescale` is the supported error: IEEE 1800-2023 §3.14.2.3 requires
+consistent explicit time units and precisions. Its default is `error`. With `warn`
+or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
+explicit settings remain effective, and the global precision includes default
+scopes. Syntax errors, unsupported constructs and invalid precision declarations
+remain errors.
+
+Project simulator constructors load this table alongside `Veryl.toml`. Native
+compilation also supports standalone SystemVerilog projects:
+
+```sh
+celox run bus.sv top.sv --top Top --diagnostic mixed_timescale=warn
+celox vpi build --project ./celox.toml --target compat --diagnostic exit_outside_program=allow
+```
+
+Both commands use the project discovery and path rules in the
+[CLI guide](./cocotb.md). With explicit sources, use `--project FILE` to load
+configuration. With no inputs, or with `--target NAME`, they discover `celox.toml`
+from the current directory and its ancestors. A selected target can override
+individual codes without replacing the entire policy:
+
+```toml
+sources = ["bus.sv", "top.sv"]
+top = "Top"
+
+[diagnostics]
+mixed_timescale = "error"
+
+[targets.compat.diagnostics]
+mixed_timescale = "warn"
+```
+
+The order is common diagnostics → selected target → CLI overrides. Repeat
+`--diagnostic CODE=LEVEL` to override multiple codes; the last assignment to a
+code wins. `celox run` and `celox vpi build` print retained compilation warnings.
+Diagnostic severity does not change optimizer settings or runtime error handling.
+
+## CLI optimization and signal access
+
+`celox run` and `celox vpi build` accept these project/target settings:
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+opt_level = "O2"
+live_signals = ["Top.uut.debug_count"]
+force_signals = ["Top.uut.state"]
+
+[targets.observe]
+opt_level = "O1"
+force_signals = []
+```
+
+The default optimization level is `O2` for `celox run` and `O1` for `celox vpi build`. Signal lists default to empty. `O2` may remove internal
+computations that do not affect design outputs; `live_signals` retains the
+listed objects for external observation. `force_signals` also implies liveness
+and emits external override controls before symbolic evaluation and SIR
+optimization, so blocking assignments and downstream expressions observe the
+forced value. It does not switch the whole design to `O0`. Force permission is
+retained in the standalone native image; undeclared force requests fail.
+
+Use exact hierarchy paths including the top module, as reported by VPI (for
+example `Top.uut.s_axis.tdata`). Missing or ambiguous paths fail compilation;
+wildcards are not expanded. Explicit force currently supports whole packed
+SystemVerilog variables, including owned interface members. For an interface member, select its owning
+variable rather than a child modport alias; structured port alias targets are
+rejected. Unpacked arrays, clock
+and reset event signals, and Veryl/mixed-language force targets are rejected.
+Observation roots support both source languages.
+
+```sh
+celox vpi build --project celox.toml -O O2 \
+  --live-signal Top.uut.debug_count --force-signal Top.uut.state -o dut-sim
+celox run --project celox.toml --target observe --no-force-signals
+```
+
+Priority is common settings → selected target → CLI. Each signal list replaces
+the preceding list as a whole; an omitted target list inherits the common list,
+and `[]` clears it. Repeat `--live-signal` or `--force-signal` for multiple paths.
+`--no-live-signals` and `--no-force-signals` clear inherited lists and conflict
+with the corresponding path options. These settings apply to the two CLI
+compilation commands; JavaScript simulator options are configured separately.
+
+## CLI top parameter overrides
+
+Both `run` and `vpi build` accept repeatable `-G NAME=VALUE` or
+`--parameter NAME=VALUE` (`--param` is an alias). These override numeric
+parameters of the selected top module in SystemVerilog or Veryl, before
+elaboration, without modifying source files.
+
+```sh
+celox vpi build --project celox.toml -G ID_EN=1 -G DEST_EN=1 -o dut-sim
+```
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+
+[parameters]
+ID_EN = 1
+DEST_EN = 1
+DATA_W = 8
+
+[targets.wide.parameters]
+DATA_W = 64
+```
+
+Common parameters are merged with the selected target's parameters, followed
+by CLI assignments. The last assignment to each name wins; unrelated entries
+are inherited. Values are unsigned 64-bit integers: decimal, `0x` hexadecimal,
+`0o` octal, or `0b` binary. Digit separators such as `0x12_34` are accepted.
+TOML values can be integers or strings (`DATA_W = "0x40"`); use strings for
+values above TOML's signed 64-bit integer range. Negative numbers, HDL
+expressions/literals, strings as HDL values, and type parameters are not
+supported by this interface. Declared HDL parameter types still determine
+conversion and truncation. Invalid assignments and unknown parameter names
+produce errors.

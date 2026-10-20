@@ -1096,6 +1096,11 @@ mod host {
             &self.warnings
         }
 
+        /// Consume the simulator and return its compilation diagnostics.
+        pub fn into_warnings(self) -> Vec<CompilationWarning> {
+            self.warnings
+        }
+
         /// Captures the current state of all signals and writes them to the VCD file.
         ///
         /// # Panics

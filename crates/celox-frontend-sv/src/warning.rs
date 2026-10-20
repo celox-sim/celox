@@ -35,6 +35,9 @@ impl Eq for FrontendWarning {}
 /// What a [`FrontendWarning`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
 pub enum FrontendWarningKind {
+    /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
+    #[error("mixed explicit and default time units or precisions across design elements")]
+    MixedTimescale,
     /// A memory file without address directives holds a different number of
     /// words than the address range of `$readmemh`/`$readmemb`
     /// (IEEE 1800-2023 21.4).
@@ -85,6 +88,9 @@ pub(crate) fn analyzer_warnings(
     found: &[celox_sv_analyzer::ir::AnalyzerWarning],
 ) -> impl Iterator<Item = PendingWarning> + '_ {
     found.iter().map(|warning| match warning {
+        celox_sv_analyzer::ir::AnalyzerWarning::MixedTimescale => {
+            (FrontendWarningKind::MixedTimescale, None)
+        }
         celox_sv_analyzer::ir::AnalyzerWarning::ExitOutsideProgram { site } => {
             (FrontendWarningKind::ExitOutsideProgram, site.clone())
         }
@@ -134,6 +140,7 @@ pub(crate) fn append_unique_warnings(
 impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
+            FrontendWarningKind::MixedTimescale => "mixed_timescale",
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
         }))
@@ -145,6 +152,9 @@ impl miette::Diagnostic for FrontendWarning {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
+            FrontendWarningKind::MixedTimescale => {
+                "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
+            }
             FrontendWarningKind::MemoryFileWordCount { .. } => {
                 "give one word per address of the range, or place the words with `@address` directives"
             }

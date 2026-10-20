@@ -117,6 +117,7 @@ pub struct NapiOptions {
 /// Parsed builder options from NapiOptions (common fields available on all targets).
 #[allow(dead_code)]
 struct ParsedOptionsCommon {
+    diagnostic_policy: celox::DiagnosticPolicy,
     four_state: bool,
     optimize_options: celox::OptimizeOptions,
     vcd: Option<String>,
@@ -378,6 +379,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
                 celox::OptimizeOptions::all()
             };
             Ok(ParsedOptionsCommon {
+                diagnostic_policy: Default::default(),
                 four_state: o.four_state.unwrap_or(false),
                 optimize_options,
                 vcd: o.vcd.clone(),
@@ -390,6 +392,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
             })
         }
         None => Ok(ParsedOptionsCommon {
+            diagnostic_policy: Default::default(),
             four_state: false,
             optimize_options: celox::OptimizeOptions::all(),
             vcd: None,
@@ -470,6 +473,8 @@ fn append_extra_source(sources: &mut Vec<(String, std::path::PathBuf)>, extra: &
 #[derive(serde::Deserialize, Default)]
 #[allow(dead_code)]
 struct CeloxConfig {
+    #[serde(default)]
+    diagnostics: celox::DiagnosticPolicy,
     /// Glob patterns (relative to project root) for `.veryl` files to exclude
     /// from compilation and type generation.
     #[serde(default)]
@@ -630,6 +635,7 @@ fn apply_options<'a, T>(
     mut builder: celox::SimulatorBuilder<'a, T>,
     opts: &ParsedOptions,
 ) -> celox::SimulatorBuilder<'a, T> {
+    builder = builder.diagnostic_policy(opts.diagnostic_policy.clone());
     builder = builder.four_state(opts.four_state);
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.threads(opts.optimize_options.parallel_lanes() as usize);
@@ -699,6 +705,7 @@ struct CachedBuild {
 /// produce identical compiled code.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
+    diagnostic_policy: celox::DiagnosticPolicy,
     /// (path, content) sorted by path for determinism.
     sources: Vec<(String, String)>,
     top: String,
@@ -778,6 +785,7 @@ fn build_cache_key(
     sorted_sources.sort_by(|a, b| a.0.cmp(&b.0));
 
     CacheKey {
+        diagnostic_policy: opts.diagnostic_policy.clone(),
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
@@ -1374,8 +1382,9 @@ impl NativeSimulatorHandle {
         top: String,
         options: Option<NapiOptions>,
     ) -> Result<Self> {
-        let opts = parse_options(&options)?;
-        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        let mut opts = parse_options(&options)?;
+        let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -1416,8 +1425,9 @@ impl NativeSimulatorHandle {
         top: String,
         options: Option<NapiOptions>,
     ) -> Result<Self> {
-        let opts = parse_options(&options)?;
-        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        let mut opts = parse_options(&options)?;
+        let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let cache_key = build_cache_key(&sources, &top, &opts, Some(&metadata));
@@ -1915,8 +1925,9 @@ impl NativeSimulationHandle {
         top: String,
         options: Option<NapiOptions>,
     ) -> Result<Self> {
-        let opts = parse_options(&options)?;
+        let mut opts = parse_options(&options)?;
         let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+        opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
         append_extra_source(&mut sources, &opts.extra_source);
         let source_refs: Vec<(&str, &std::path::Path)> = sources
             .iter()
@@ -2408,8 +2419,9 @@ impl NativeSimulatorHandle {
         top: String,
         options: Option<NapiOptions>,
     ) -> Result<Self> {
-        let opts = parse_options_common(&options)?;
-        let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+        let mut opts = parse_options_common(&options)?;
+        let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+        opts.diagnostic_policy = celox_cfg.diagnostics.clone();
         append_extra_source(&mut sources, &opts.extra_source);
 
         let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -2418,7 +2430,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, warnings) = celox::compile_to_sir(
+        let (program, mut warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
             &opts
@@ -2440,8 +2452,17 @@ impl NativeSimulatorHandle {
             &opts.parameters,
             &opts.optimize_options,
         )
-        .map_err(|e| Error::from_reason(format!("{}", e)))?;
+        .map_err(|error| {
+            Error::from_reason(
+                error
+                    .apply_diagnostic_policy(&opts.diagnostic_policy)
+                    .to_string(),
+            )
+        })?;
 
+        opts.diagnostic_policy
+            .apply(&mut warnings)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
         let laid_out = program.into_laid_out(opts.four_state);
         let layout = laid_out.layout();
 
@@ -3358,8 +3379,9 @@ pub fn run_test_from_project(
     options: Option<NapiOptions>,
     components: Option<Vec<NapiInjectedComponent>>,
 ) -> Result<NapiTestResult> {
-    let opts = parse_options(&options)?;
-    let (mut sources, metadata, _celox_cfg) = load_project_sources(&project_path)?;
+    let mut opts = parse_options(&options)?;
+    let (mut sources, metadata, celox_cfg) = load_project_sources(&project_path)?;
+    opts.common.diagnostic_policy = celox_cfg.diagnostics.clone();
     append_extra_source(&mut sources, &opts.extra_source);
 
     let source_refs: Vec<(&str, &std::path::Path)> = sources
@@ -3765,6 +3787,7 @@ mod tests {
     fn default_opts() -> ParsedOptions {
         ParsedOptions {
             common: ParsedOptionsCommon {
+                diagnostic_policy: Default::default(),
                 four_state: false,
                 optimize_options: celox::OptimizeOptions::all(),
                 vcd: None,
@@ -4128,6 +4151,47 @@ mod tests {
             let layout: serde_json::Value = serde_json::from_str(&handle.layout_json()).unwrap();
 
             assert_eq!(layout["a"]["is_4state"].as_bool(), Some(four_state));
+        }
+    }
+
+    #[test]
+    fn project_diagnostic_policy_changes_invalidate_cached_compilation() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::write(
+            project.path().join("Veryl.toml"),
+            "[project]\nname = \"diagnostic_policy\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let source = r#"module Top (tmp: output logic<8>, out: output logic) {
+            function f(a: output logic<8>, b: output logic<8>) -> logic {
+                a = 1; b = 2; return 1'b1;
+            }
+            always_comb { tmp = 0; out = f(b: tmp, a: tmp) & 1'b1; }
+        }"#;
+        std::fs::write(project.path().join("src/top.veryl"), source).unwrap();
+        let path = project.path().to_str().unwrap().to_string();
+        let config = project.path().join("celox.toml");
+        for level in ["allow", "warn", "error"] {
+            std::fs::write(
+                &config,
+                format!("[diagnostics]\nunspecified_output_copy_order = '{level}'\n"),
+            )
+            .unwrap();
+            let result = NativeSimulatorHandle::from_project(path.clone(), "Top".into(), None);
+            if level == "error" {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .reason
+                        .contains("unspecified_output_copy_order")
+                );
+            } else {
+                let handle = result.unwrap();
+                let warnings: Vec<String> = serde_json::from_str(&handle.warnings_json()).unwrap();
+                assert_eq!(warnings.len(), usize::from(level == "warn"));
+            }
         }
     }
 
