@@ -9,7 +9,6 @@
 //! ```
 
 #![allow(clippy::disallowed_methods)] // This binary is the process environment boundary.
-#![allow(clippy::disallowed_macros)] // Driver diagnostics intentionally use stderr.
 
 use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode};
 
@@ -227,6 +226,7 @@ fn simulate(mut sim: celox::Simulation) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::disallowed_macros)] // CLI diagnostics intentionally use stderr.
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.as_slice() == ["--version"] {

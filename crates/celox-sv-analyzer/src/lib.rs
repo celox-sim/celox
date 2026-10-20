@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local counters exist only in unit tests; non-test library builds enforce the ban"
+    )
+)]
 //! SystemVerilog analyzer for Celox.
 //!
 //! Native syntax and source storage belong to [`celox_sv_syntax`]. This crate

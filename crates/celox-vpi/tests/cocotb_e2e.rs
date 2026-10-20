@@ -21,6 +21,16 @@ fn python_output(python: &str, arguments: &[&str]) -> String {
 
 #[test]
 fn celox_cli_builds_a_self_running_native_image() {
+    for source in [
+        &["counter.veryl"][..],
+        &["counter.sv"],
+        &["split/types.sv", "split/child.sv", "split/top.sv"],
+    ] {
+        check_cli_native_image(source);
+    }
+}
+
+fn check_cli_native_image(source: &[&str]) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb");
     let temporary = tempfile::tempdir().unwrap();
     let executable = temporary.path().join("counter-sim");
@@ -28,7 +38,7 @@ fn celox_cli_builds_a_self_running_native_image() {
     let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
         .arg("vpi")
         .arg("build")
-        .arg(fixture.join("counter.veryl"))
+        .args(source.iter().map(|path| fixture.join(path)))
         .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
@@ -43,6 +53,19 @@ fn celox_cli_builds_a_self_running_native_image() {
         celox::NativeProgramImage::discover_appended(&fs::read(&executable).unwrap())
             .unwrap()
             .is_some()
+    );
+
+    let bytes = fs::read(&executable).unwrap();
+    let runtime = trusted_attached_instance(&bytes);
+    assert_eq!(
+        runtime.signal("Top.i_clk").unwrap().domain_kind,
+        DomainKind::ClockPosedge,
+        "{source:?}"
+    );
+    assert_eq!(
+        runtime.signal("Top.i_rst").unwrap().domain_kind,
+        DomainKind::ResetAsyncLow,
+        "{source:?}"
     );
 
     let help = Command::new(&executable).arg("--help").output().unwrap();
@@ -60,6 +83,26 @@ fn celox_cli_builds_a_self_running_native_image() {
 #[test]
 #[ignore = "requires a cocotb installation; CI runs this test explicitly"]
 fn cocotb_drives_an_attached_native_flip_flop() {
+    for source in [
+        &["counter.veryl"][..],
+        &["counter.sv"],
+        &["split/types.sv", "split/child.sv", "split/top.sv"],
+    ] {
+        check_cocotb_native_flip_flop(source);
+    }
+}
+
+fn check_cocotb_native_flip_flop(source: &[&str]) {
+    check_cocotb_native_design(source, "test_counter", "drives_native_flip_flop");
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_observes_edges_before_nonblocking_updates() {
+    check_cocotb_native_design(&["edge_phase.sv"], "test_edge_phase", "edge_precedes_nba");
+}
+
+fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
     let python = env::var_os("CELOX_COCOTB_PYTHON")
         .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
@@ -71,7 +114,7 @@ fn cocotb_drives_an_attached_native_flip_flop() {
     let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
         .arg("vpi")
         .arg("build")
-        .arg(fixture.join("counter.veryl"))
+        .args(source.iter().map(|path| fixture.join(path)))
         .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
@@ -90,9 +133,9 @@ fn cocotb_drives_an_attached_native_flip_flop() {
     let runtime = Command::new(&executable)
         .args([
             "--test-module",
-            "test_counter",
+            module,
             "--test-filter",
-            "drives_native_flip_flop",
+            filter,
             "--python",
             &python,
         ])
@@ -105,7 +148,7 @@ fn cocotb_drives_an_attached_native_flip_flop() {
         .unwrap();
     assert!(
         runtime.status.success(),
-        "cocotb runtime failed:\n{}\n{}",
+        "cocotb runtime failed for {source:?}:\n{}\n{}",
         String::from_utf8_lossy(&runtime.stdout),
         String::from_utf8_lossy(&runtime.stderr)
     );
@@ -383,4 +426,66 @@ module Top (
     let runtime = trusted_attached_instance(&bytes);
     let output = runtime.signal_ref("Top.y").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 42);
+}
+
+#[test]
+fn legacy_compiler_accepts_split_systemverilog_sources() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb/split");
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("split-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+        .args(["types.sv", "child.sv", "top.sv"].map(|file| fixture.join(file)))
+        .args(["--top", "Top", "--runtime"])
+        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let bytes = fs::read(executable).unwrap();
+    let runtime = trusted_attached_instance(&bytes);
+    assert_eq!(runtime.signal("Top.child.q").unwrap().signal.width, 8);
+    assert_eq!(
+        runtime.signal("Top.i_clk").unwrap().domain_kind,
+        DomainKind::ClockPosedge
+    );
+}
+
+#[test]
+fn compile_rejects_empty_or_mixed_source_lists() {
+    let error = celox_vpi::driver::compile_native_sources(&[], "Top")
+        .err()
+        .unwrap();
+    assert!(error.contains("missing source path"), "{error}");
+    for paths in [
+        [Path::new("top.sv"), Path::new("child.veryl")],
+        [Path::new("top.veryl"), Path::new("child.sv")],
+        [Path::new("top.veryl"), Path::new("child.veryl")],
+    ] {
+        let error = celox_vpi::driver::compile_native_sources(&paths, "Top")
+            .err()
+            .unwrap();
+        assert!(
+            error.contains("multiple source paths require only .sv files"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn compile_reports_a_missing_additional_source() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb/counter.sv");
+    let temporary = tempfile::tempdir().unwrap();
+    let missing = temporary.path().join("missing.sv");
+    let error = celox_vpi::driver::compile_native_sources(&[&fixture, &missing], "Top")
+        .err()
+        .unwrap();
+    assert!(
+        error.contains(&format!("failed to read {}:", missing.display())),
+        "{error}"
+    );
 }

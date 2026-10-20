@@ -6,9 +6,39 @@ use celox::{NativeProgramImage, NativeProgramInstance, Simulator};
 use libloading::{Library, Symbol};
 use veryl_metadata::Metadata;
 
-/// Compile a Veryl source file and its project dependencies into a native image.
+/// Compile a standalone SystemVerilog file or a Veryl file and its project dependencies.
 pub fn compile_native_image(source: &Path, top: &str) -> Result<NativeProgramImage, String> {
-    let simulator = if let Ok(metadata_path) = Metadata::search_from(source) {
+    compile_native_sources(&[source], top)
+}
+
+/// Compile explicit SystemVerilog sources, or one Veryl project entry file.
+pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProgramImage, String> {
+    let source = *sources.first().ok_or("missing source path")?;
+    let all_sv = sources
+        .iter()
+        .all(|path| path.extension().is_some_and(|extension| extension == "sv"));
+    if sources.len() > 1 && !all_sv {
+        return Err("multiple source paths require only .sv files; pass one Veryl project entry file for Veryl designs".to_string());
+    }
+    let simulator = if all_sv {
+        let contents = sources
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .map_err(|error| format!("failed to read {}: {error}", path.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let source_refs = contents
+            .iter()
+            .zip(sources)
+            .map(|(code, path)| (code.as_str(), *path))
+            .collect();
+        Simulator::from_sv_sources(source_refs, top)
+            .four_state(true)
+            .native_force_support(true)
+            .opt_level(celox::OptLevel::O0)
+            .build()
+    } else if let Ok(metadata_path) = Metadata::search_from(source) {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata

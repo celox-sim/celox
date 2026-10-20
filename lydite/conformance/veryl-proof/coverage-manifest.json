@@ -3454,6 +3454,26 @@
       ]
     },
     {
+      "case": "flip_flop::test_ff_divider_of_a_divider",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "ef04c26afe2980b73d986b6d86bb0fe5f3245e05bbebf083f22b6edbc4e0d25c"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "e0a8670509f6e02d4397e42811df31f2217771daf8cd809081527a821881d649",
+          "protocol_sha256": "c483944c7eaad31e6a876218ac267c02868d41baaba214d3f6e37d1998cc25b1",
+          "reads": 12,
+          "commands": 31,
+          "operations": 63,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "flip_flop::test_ff_dynamic_nonlocal_store_follows_pending_whole_write",
       "expectation": "Simulation",
       "category": "Sequential",
@@ -4594,6 +4614,46 @@
       ]
     },
     {
+      "case": "flip_flop::test_ff_gated_clock_follows_its_enable",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "3e166ed29e74cec524823dc59b0a35e74b44c90083b33e50305022bc9fdeb5bc"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "0b95552042af7880fbad5f55fa3c80c35e11ab79930094f3e171402fb696c42c",
+          "protocol_sha256": "fde4d0822d550b396b1838b97e14c5289fe291f79a0412aa0246c8e312435c20",
+          "reads": 16,
+          "commands": 48,
+          "operations": 46,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_gated_clock_samples_pre_edge_state",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "14e5b42fa830b415e90c6d93043d57e999f58773947dfcba03d746405dd3a825"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "77b093f21df8fb7bb2d40821f8771e3e512696131a25717998e6cdd58d9e5a3d",
+          "protocol_sha256": "f7872a75641b9bebc801a510bac39ab141f91c40dc82f12f1d57674b7b3c1649",
+          "reads": 12,
+          "commands": 38,
+          "operations": 36,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "flip_flop::test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width",
       "expectation": "Simulation",
       "category": "Sequential",
@@ -4669,6 +4729,26 @@
           "reads": 2,
           "commands": 11,
           "operations": 4,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_inverted_clock_samples_after_the_rising_edge",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "00050d57a4f71d753f475fe9252aa6d75fffb28d6a5467e279df10c1143325f3"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "de948d37952bf67e11a4faaa6c93f1655b11355d1ba48fa4a059aaa502094fa3",
+          "protocol_sha256": "f316626b86f156f30060fb3c7134c95cc16cf47f3eaf54985c7afe3c848d40bc",
+          "reads": 10,
+          "commands": 22,
+          "operations": 32,
           "diagnostic": null
         }
       ]
@@ -4869,6 +4949,86 @@
           "reads": 2,
           "commands": 7,
           "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_register_bit_clock_follows_the_selected_bit",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "cafd48f2992292dca19764407bb22fb0c18cbddc845d50fc7db8d1649be85b21"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "cc054e9e02085a59ae3f6e85607c43a0267acff643bbff031ecd374fbc564be2",
+          "protocol_sha256": "1233385b5d72ff181356f530415630860949c07e32d5bf3842035cec5c130292",
+          "reads": 36,
+          "commands": 55,
+          "operations": 63,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_register_bit_clock_ignores_other_bits",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "88a67b1bb53ca90d0da6d93019ee29057a1b4aefbf3a3e3a3d112fef13517eef"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "94499a66b9f41125ec17a9b3b45999cd3c5c21acc7c71407da915f3cdef699aa",
+          "protocol_sha256": "f609d4dd396f84344d91a0b87a9b361e421e480f6e5ec5c9266de58a36764253",
+          "reads": 12,
+          "commands": 25,
+          "operations": 30,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_register_gated_clock_rises_after_the_commit",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "f6e02bc42c6eaa4a900627121073ea44ac04f5026150f1c00087e97cdec0c1f9"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "664d38b99327916aaa7da681b8a4fbc4b09321b08fe1f657cb951c86d1ce2065",
+          "protocol_sha256": "e88a5cf1b2fd864d56058a9490f49e10c8e228f54f96149b0558f115855021bf",
+          "reads": 24,
+          "commands": 56,
+          "operations": 49,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "flip_flop::test_ff_register_gated_clock_uses_the_pre_edge_enable",
+      "expectation": "Simulation",
+      "category": "Sequential",
+      "source": {
+        "file": "src/veryl/cases/flip_flop.vtest",
+        "script_sha256": "e77f0851345122d123a387a16a6e0f04e31fed66fa24e8a41ba64bf92d43b924"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "664d38b99327916aaa7da681b8a4fbc4b09321b08fe1f657cb951c86d1ce2065",
+          "protocol_sha256": "7d4a742a24aff49431d9fea22846f40601d088122e9cca43eb9cfe9c7e1bbd58",
+          "reads": 15,
+          "commands": 38,
+          "operations": 32,
           "diagnostic": null
         }
       ]
@@ -5654,6 +5814,26 @@
       ]
     },
     {
+      "case": "four_state::test_four_state_comb_clock_edges_follow_table_9_2",
+      "expectation": "Simulation",
+      "category": "FourState",
+      "source": {
+        "file": "src/veryl/cases/four_state.vtest",
+        "script_sha256": "036c53b50126e8837ad30daeab9d4eb78a3d3417e68aaf40f72db3c733ebe658"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "44598e96391cea70f4927c037ddeecf524be1fc9b6fb329bfd494a7a22f50320",
+          "protocol_sha256": "d150b1333004b7141be5accd2d05e95a21bfa23c60aac67ccf9cbfc2f0e2b7f3",
+          "reads": 26,
+          "commands": 58,
+          "operations": 78,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "four_state::test_four_state_comparison_with_x",
       "expectation": "Simulation",
       "category": "FourState",
@@ -5949,6 +6129,26 @@
           "reads": 10,
           "commands": 18,
           "operations": 4,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "four_state::test_four_state_internal_async_reset_edges_follow_table_9_2",
+      "expectation": "Simulation",
+      "category": "FourState",
+      "source": {
+        "file": "src/veryl/cases/four_state.vtest",
+        "script_sha256": "7e926976720d0f3329d973c1230fa57f05684c6f17f88753772fd44867e214e4"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "6788223509cf0cf16fe9ad30241dbf343490814fd0fd44ce820cf9773fbde40f",
+          "protocol_sha256": "91ab055bbde7b8f1dcf8232c330758104d715efb38e23572c303f71610deb2fa",
+          "reads": 26,
+          "commands": 72,
+          "operations": 73,
           "diagnostic": null
         }
       ]
@@ -6329,6 +6529,26 @@
           "reads": 3,
           "commands": 9,
           "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "four_state::test_four_state_register_clock_edges_follow_table_9_2",
+      "expectation": "Simulation",
+      "category": "FourState",
+      "source": {
+        "file": "src/veryl/cases/four_state.vtest",
+        "script_sha256": "4ac195c74ecbbcbcbc098c9d9ad01df53e60506d3c3229abfd9538b97d6bf798"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "f302c7c7b7cedd69f36be239c09c05e50572b4f6c79515c4b737003dbfab0803",
+          "protocol_sha256": "36c2e6af2f98e801da84675898e840f31cb2aad14babe0609798017ea10cfb23",
+          "reads": 28,
+          "commands": 60,
+          "operations": 79,
           "diagnostic": null
         }
       ]
@@ -8464,6 +8684,26 @@
       ]
     },
     {
+      "case": "interface::test_interface_array_direct_function_calls",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "script_sha256": "fda075fc1370158f96c09289bb18198c72019e40f6da9e9662fabde57bcc4e1d"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "cc399b9a0c2bcef8c84110da907dfbdb4c99139575cbfe1df3c551f1340fc1aa",
+          "protocol_sha256": "8a94a565a601c63c429cb7ee8feb63aebcd06b430abeb4ca0f4eb5a4f20af515",
+          "reads": 4,
+          "commands": 10,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "interface::test_interface_connect_modport_to_constant",
       "expectation": "Simulation",
       "category": "Hierarchy",
@@ -8704,6 +8944,26 @@
       ]
     },
     {
+      "case": "interface::test_interface_type_parameter",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "script_sha256": "0d741f926f097f552b68283001d622459f449e1b415fabfca1eff0d6ebf1f2d1"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "9e81a1646225e14aa5009ef8fcddb57eb4ccfc18512c65eeb7fa9ffdd9d848b0",
+          "protocol_sha256": "34b6c497793dee08d9730e4300521b69cad55f3c556dd75c2110f0ec61855686",
+          "reads": 2,
+          "commands": 6,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "interface::test_interface_valid_ready_handshake",
       "expectation": "Simulation",
       "category": "Hierarchy",
@@ -8904,6 +9164,46 @@
       ]
     },
     {
+      "case": "interface::test_nested_interface_instance",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "script_sha256": "1f0a520f9b8c25a135c2ac49000a79a97429d33a5377a02e1872454e96cc8395"
+      },
+      "disposition": "known_celox_failure",
+      "designs": [
+        {
+          "design_sha256": "99b1f819ac093ba31afbfdca8f6fcaa5152c4eef434bd35c2280e414c1c28083",
+          "protocol_sha256": "79d32898c4015e0d5d093658fb84b8d41583804d72fca943bd741c5ae96d79f4",
+          "reads": 3,
+          "commands": 9,
+          "operations": 2,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "interface::test_parameterized_interface_header_imports",
+      "expectation": "Simulation",
+      "category": "Hierarchy",
+      "source": {
+        "file": "src/veryl/cases/interface.vtest",
+        "script_sha256": "78f7e73e906c67561bbe0b9bcb1da89aab3df3fde0b3eec9d6d08c68090d8024"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "de03d433e136149732b3d7c31e0be5527fe2528ab1887e5742dac8328b51d850",
+          "protocol_sha256": "745e63e856404dcbc219347daaa80b57b41e38aee6fdcfcc222b6fb076debf18",
+          "reads": 6,
+          "commands": 14,
+          "operations": 3,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "interface::test_proto_interface_generic_module",
       "expectation": "Simulation",
       "category": "Hierarchy",
@@ -9019,6 +9319,86 @@
           "reads": 4,
           "commands": 35,
           "operations": 14,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "logical_shift_count::four_state_dynamic_counts",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/logical_shift_count.vtest",
+        "script_sha256": "14ca654d4c7a1a1fad017b70ece072f44c1998eb7ac50374d7c1168301d4f09b"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "4e0bba213129272bd1462b3456909b91c443a9ec354deb414809b9cdca198bb8",
+          "protocol_sha256": "0ae824b89084c41fcfc6aae0bb901f678a6df9a5dead08fb9eb11bad9bf84450",
+          "reads": 104,
+          "commands": 137,
+          "operations": 14,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "logical_shift_count::two_state_dynamic_counts",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/logical_shift_count.vtest",
+        "script_sha256": "14335d3d95f81cc574b4c5c3b3331e2125778655cb417e1d8891c56568520109"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "b562bd1a193a931c2b109a4768cabb0e2662994aff5eae30a23c8544aed27362",
+          "protocol_sha256": "752c04e204b368563af65a548fca5cc9eeb3fee2d1c89c297b9b858bf7c66415",
+          "reads": 112,
+          "commands": 147,
+          "operations": 15,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "logical_shift_count::two_state_single_bit_wrap",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/logical_shift_count.vtest",
+        "script_sha256": "e9b6993aec6663f3dee9b03ee47285f2d6904b4884d64f2e21c987b472d5a790"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "332938613ba68caf86ccc02cf61114e0ca00afca46ba1ab1d9dec22c6c69fbae",
+          "protocol_sha256": "f914cc18bd97f18912ca4cde043ebd7677b694b7ffaf7aea6e17c5601e579ff4",
+          "reads": 40,
+          "commands": 61,
+          "operations": 6,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "logical_shift_count::two_state_wide_count",
+      "expectation": "Simulation",
+      "category": "Operators",
+      "source": {
+        "file": "src/veryl/cases/logical_shift_count.vtest",
+        "script_sha256": "4601a97de98c5aec35905a0cab91d0fbf796e796d19fcffab32cdda5a5671d3e"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "3c29476f29f1c8cd3a66ce69b95100da225232833f116968ace5611fd2a9dbac",
+          "protocol_sha256": "57539e492802c217895e1d5af2fe079d94926c9148c434c382e635d3ff5f9a41",
+          "reads": 20,
+          "commands": 35,
+          "operations": 6,
           "diagnostic": null
         }
       ]
@@ -10344,6 +10724,26 @@
       ]
     },
     {
+      "case": "param_override::test_four_state_integral_instance_override",
+      "expectation": "Simulation",
+      "category": "Types",
+      "source": {
+        "file": "src/veryl/cases/param_override.vtest",
+        "script_sha256": "baac6579e54d7343d86951993da8fc5af074f7b88baeb9e3869f0213399ee744"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "627f78d3ba13ca8042f441278a632b0553d8d8ccfc24937829068e0b0d000c3c",
+          "protocol_sha256": "3edbe615eef3984f57d0e32e7212333522f28572b9c4656fa7200492a2af848e",
+          "reads": 1,
+          "commands": 3,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
       "case": "param_override::test_param_const_fold_if",
       "expectation": "Simulation",
       "category": "Types",
@@ -10498,6 +10898,26 @@
           "protocol_sha256": "4d5f468d0c292c132b3842c94a06768bd287881e39941a6b2700eedaa579b98f",
           "reads": 1,
           "commands": 3,
+          "operations": 1,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "param_override::test_wide_integral_instance_override",
+      "expectation": "Simulation",
+      "category": "Types",
+      "source": {
+        "file": "src/veryl/cases/param_override.vtest",
+        "script_sha256": "0a02ded531384245c1dbf6d8bd7528a70d2de75c42112dbab798356120bfbb71"
+      },
+      "disposition": "observation_verified",
+      "designs": [
+        {
+          "design_sha256": "728b89d760fc214be05eae45219b26dcf5aaffe76e4f867b571308e54724f238",
+          "protocol_sha256": "2148359c9b04b8bc14699b672b561c1ab9b473629afa0c59cd22335fc3888afe",
+          "reads": 2,
+          "commands": 4,
           "operations": 1,
           "diagnostic": null
         }
@@ -13159,6 +13579,106 @@
           "reads": 256,
           "commands": 1026,
           "operations": 512,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "tb_string::array_elements",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/tb_string.vtest",
+        "script_sha256": "cf2743004c5ad7ee0f4161aebe321048f39b19db8075956384eb86d27e60fff3"
+      },
+      "disposition": "unsupported_by_proof_backend",
+      "designs": [
+        {
+          "design_sha256": "7109bbb56d6c5e1516568da6e5dad7c468dd13dd83c6e739f541159fdce129a8",
+          "protocol_sha256": "68552b988f6de856544b57423adb8fcc513805948b917e71fb9a172e11bd9e84",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "tb_string::assignment",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/tb_string.vtest",
+        "script_sha256": "a9d0e554ded364580419bb3daaf1582f956071a7f3c59e6f4c50efea2009fab7"
+      },
+      "disposition": "unsupported_by_proof_backend",
+      "designs": [
+        {
+          "design_sha256": "4e385c769101533ac23f7a18316102cc60a5584fde4b6c6b8be2929ee0f74828",
+          "protocol_sha256": "ea385b15d2e7003c6c792cf15831dbe6ae8adfabf33ae16c894e67c675326771",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "tb_string::comparison",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/tb_string.vtest",
+        "script_sha256": "a1cde08f77956687495843855803ba3421fbaf36fe01d34617c64c6b0f9ab40d"
+      },
+      "disposition": "unsupported_by_proof_backend",
+      "designs": [
+        {
+          "design_sha256": "338374b857c99f6d0a9e5751ee8de1b2d9fd1fe89ac3498e8b225b3d3b391a76",
+          "protocol_sha256": "680aa3d4a0798f3a0514bca3ddcee9a5ecf2b31160d7cdecbd5587900e8cb10f",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "tb_string::control_flow",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/tb_string.vtest",
+        "script_sha256": "e8f482a505ee2079289a1ca6903bd94c2b3352cd4036c904918b6ee0da6f4d0e"
+      },
+      "disposition": "unsupported_by_proof_backend",
+      "designs": [
+        {
+          "design_sha256": "c2a01298c8e1451c375315cad86334afb1b0dccafa15fac9c1b17adb934fc58a",
+          "protocol_sha256": "1028b966bb10a115a10699d10dea071cdf9e3fc01c52023d700444c294e3c215",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
+          "diagnostic": null
+        }
+      ]
+    },
+    {
+      "case": "tb_string::function_argument",
+      "expectation": "Simulation",
+      "category": "ControlFlow",
+      "source": {
+        "file": "src/veryl/cases/tb_string.vtest",
+        "script_sha256": "7c10db76d6e762db57b0396049e7a513f1ec1c65c4a4909ac71049c426fce2c9"
+      },
+      "disposition": "unsupported_by_proof_backend",
+      "designs": [
+        {
+          "design_sha256": "0e06850d0cc0a99493cd7207f749f5747e931e029f088fcf919438f2591bf033",
+          "protocol_sha256": "ab8bd6fa9ac482e734a5dae6118c9293ec8181d8736dc10968a6e3238d65dfd9",
+          "reads": 0,
+          "commands": 2,
+          "operations": 0,
           "diagnostic": null
         }
       ]

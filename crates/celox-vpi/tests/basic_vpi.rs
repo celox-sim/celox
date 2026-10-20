@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
 };
 
-use celox::{NativeProgramInstance, Simulator};
+use celox::{NativeProgramInstance, SimBackend, Simulator};
 use celox_vpi::*;
 
 static VPI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1125,6 +1125,161 @@ fn force_state_is_shared_by_reflected_clock_aliases() {
     clear_runtime();
 }
 
+// These regressions exercise native reflection and VPI writes, rather than
+// portable HDL behavior, so they belong with the VPI API tests.
+#[test]
+fn sv_mixed_clock_reset_aliases_dispatch_both_consumers() {
+    let _serial = lock_vpi();
+    for falling in [false, true] {
+        let source = r#"
+            module ClockChild(input logic clk, input logic [7:0] d, output logic [7:0] q);
+                always_ff @(CLOCK_EDGE clk) q <= d;
+            endmodule
+            module ResetChild(input logic clk, input logic rst, input logic [7:0] d,
+                              output logic [7:0] q);
+                always_ff @(posedge clk or RESET_EDGE rst)
+                    if (RESET_ACTIVE) q <= 0;
+                    else q <= d;
+            endmodule
+            module Top(input logic event_in, input logic other_clk, input logic [7:0] d,
+                       output logic [7:0] clock_q, output logic [7:0] reset_q);
+                ClockChild clock_child(.clk(event_in), .d(d), .q(clock_q));
+                ResetChild reset_child(.clk(other_clk), .rst(event_in), .d(d), .q(reset_q));
+            endmodule
+        "#
+        .replace("CLOCK_EDGE", if falling { "negedge" } else { "posedge" })
+        .replace("RESET_EDGE", if falling { "negedge" } else { "posedge" })
+        .replace("RESET_ACTIVE", if falling { "!rst" } else { "rst" });
+        let simulator = Simulator::from_sv_sources(
+            vec![(source.as_str(), std::path::Path::new("mixed_roles.sv"))],
+            "Top",
+        )
+        .opt_level(celox::OptLevel::O0)
+        .four_state(true)
+        .build()
+        .unwrap();
+        let runtime = trusted_instance(simulator.shared_code().program_image().clone());
+        assert_eq!(
+            runtime.signal("Top.event_in").unwrap().domain_kind,
+            if falling {
+                celox::DomainKind::ClockNegedge
+            } else {
+                celox::DomainKind::ClockPosedge
+            }
+        );
+        let _session = install_runtime(runtime).unwrap();
+        unsafe {
+            let event = vpi_handle_by_name(c"Top.event_in".as_ptr(), ptr::null_mut());
+            let other = vpi_handle_by_name(c"Top.other_clk".as_ptr(), ptr::null_mut());
+            let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+            let clock_q = vpi_handle_by_name(c"Top.clock_q".as_ptr(), ptr::null_mut());
+            let reset_q = vpi_handle_by_name(c"Top.reset_q".as_ptr(), ptr::null_mut());
+            put_int(event, i32::from(falling));
+            put_int(other, 0);
+            put_int(d, 9);
+            put_int(other, 1);
+            let mut value = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -1 },
+            };
+            vpi_get_value(reset_q, &mut value);
+            assert_eq!(value.value.integer, 9);
+            put_int(d, 7);
+            put_int(event, i32::from(!falling));
+            vpi_get_value(clock_q, &mut value);
+            assert_eq!(value.value.integer, 7, "clock consumer, falling={falling}");
+            vpi_get_value(reset_q, &mut value);
+            assert_eq!(value.value.integer, 0, "reset consumer, falling={falling}");
+            for handle in [event, other, d, clock_q, reset_q] {
+                assert_eq!(vpi_free_object(handle), 1);
+            }
+        }
+        clear_runtime();
+    }
+}
+
+#[test]
+fn sv_downstream_clock_copies_do_not_drive_upstream_events() {
+    let _serial = lock_vpi();
+    let source = r#"
+        module Child(input logic clk, input logic [7:0] d, output logic [7:0] q);
+            always_ff @(posedge clk) q <= d;
+        endmodule
+        module Top(input logic clk, input logic [7:0] d, output logic [7:0] q,
+                   output logic monitor);
+            logic internal_monitor;
+            assign monitor = clk;
+            assign internal_monitor = clk;
+            Child child(.clk(clk), .d(d), .q(q));
+        endmodule
+    "#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("clock_copies.sv"))],
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O0)
+    .four_state(true)
+    .native_force_support(true)
+    .build()
+    .unwrap();
+    let runtime = trusted_instance(simulator.shared_code().program_image().clone());
+    for name in ["Top.monitor", "Top.internal_monitor"] {
+        assert_eq!(
+            runtime.signal(name).unwrap().domain_kind,
+            celox::DomainKind::Other
+        );
+    }
+    let _session = install_runtime(runtime).unwrap();
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(d, 3);
+        put_int(clk, 1);
+        put_int(clk, 0);
+        put_int(d, 7);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        for name in [c"Top.monitor", c"Top.internal_monitor"] {
+            let monitor = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!monitor.is_null());
+            put_int(monitor, 1);
+            vpi_get_value(q, &mut value);
+            assert_eq!(value.value.integer, 3, "deposit must not clock the child");
+            let high = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: 1 },
+            };
+            assert_eq!(
+                vpi_put_value(monitor, &high, ptr::null(), VPI_FORCE_FLAG),
+                monitor
+            );
+            vpi_get_value(clk, &mut value);
+            assert_eq!(
+                value.value.integer, 0,
+                "force must not reach upstream clock"
+            );
+            vpi_get_value(q, &mut value);
+            assert_eq!(value.value.integer, 3, "force must not clock the child");
+            assert_eq!(
+                vpi_put_value(monitor, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+                monitor
+            );
+            assert_eq!(vpi_free_object(monitor), 1);
+        }
+        put_int(clk, 1);
+        vpi_get_value(q, &mut value);
+        assert_eq!(value.value.integer, 7, "the source still drives the event");
+        for handle in [clk, d, q] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
 static CALLBACK_VALUE: AtomicI32 = AtomicI32::new(-1);
 static OWNED_CALLBACK_TIME: AtomicUsize = AtomicUsize::new(usize::MAX);
 static VALUE_CHANGE_DRIVE: AtomicBool = AtomicBool::new(false);
@@ -1793,6 +1948,114 @@ unsafe extern "C" fn drive_two_four_state_posedges(data: *mut VpiCbData) -> i32 
 }
 
 static EDGE_DATA_HANDLE: AtomicUsize = AtomicUsize::new(0);
+static PRE_NBA_VALUE: AtomicI32 = AtomicI32::new(-1);
+static POST_NBA_VALUE: AtomicI32 = AtomicI32::new(-1);
+
+unsafe extern "C" fn record_after_nba(data: *mut VpiCbData) -> i32 {
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    unsafe { vpi_get_value((*data).obj, &mut value) };
+    POST_NBA_VALUE.store(unsafe { value.value.integer }, Ordering::SeqCst);
+    0
+}
+
+unsafe extern "C" fn record_before_nba(data: *mut VpiCbData) -> i32 {
+    let q = unsafe { (*data).user_data } as VpiHandle;
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    unsafe { vpi_get_value(q, &mut value) };
+    PRE_NBA_VALUE.store(unsafe { value.value.integer }, Ordering::SeqCst);
+    let read_only = VpiCbData {
+        reason: CB_READ_ONLY_SYNCH,
+        cb_rtn: Some(record_after_nba),
+        obj: q,
+        time: ptr::null_mut(),
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    assert!(!unsafe { vpi_register_cb(&read_only) }.is_null());
+    0
+}
+
+#[test]
+fn clock_callbacks_observe_pre_nba_state_with_a_fused_optimized_kernel() {
+    let _serial = lock_vpi();
+    let simulator = Simulator::builder(COUNTER, "Top")
+        .opt_level(celox::OptLevel::O2)
+        .build()
+        .unwrap();
+    let runtime = trusted_instance(simulator.shared_code().program_image().clone());
+    let clock_address = runtime.signal("Top.clk").unwrap().state_address;
+    assert!(
+        runtime
+            .backend()
+            .resolve_event_opt(&clock_address)
+            .is_some()
+    );
+    // The fix must work without retaining split FF kernels or disabling the
+    // single-clock optimization just to insert an observation point.
+    assert!(
+        runtime
+            .backend()
+            .resolve_eval_only_event(&clock_address)
+            .is_none()
+    );
+    assert!(
+        runtime
+            .backend()
+            .resolve_apply_event(&clock_address)
+            .is_none()
+    );
+    let _session = install_runtime(runtime).unwrap();
+    PRE_NBA_VALUE.store(-1, Ordering::SeqCst);
+    POST_NBA_VALUE.store(-1, Ordering::SeqCst);
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(q, 0);
+        let edge = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_before_nba),
+            obj: clk,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: q as *mut _,
+        };
+        let edge_handle = vpi_register_cb(&edge);
+        assert!(!edge_handle.is_null());
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let drive = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_callback_object_high),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&drive).is_null());
+        assert!(!run_callbacks_result().unwrap());
+        assert_eq!(PRE_NBA_VALUE.load(Ordering::SeqCst), 0);
+        assert_eq!(POST_NBA_VALUE.load(Ordering::SeqCst), 1);
+        assert_eq!(vpi_remove_cb(edge_handle), 1);
+        assert_eq!(vpi_free_object(clk), 1);
+        assert_eq!(vpi_free_object(q), 1);
+    }
+    clear_runtime();
+}
+
 static EDGE_VALUE_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_DRIVE_DATA: AtomicBool = AtomicBool::new(false);
@@ -1855,7 +2118,7 @@ unsafe extern "C" fn record_clock_value_change(data: *mut VpiCbData) -> i32 {
     0
 }
 
-unsafe extern "C" fn drive_data_after_first_clock_edge(data: *mut VpiCbData) -> i32 {
+unsafe extern "C" fn drive_data_after_first_registered_update(data: *mut VpiCbData) -> i32 {
     let mut value = VpiValue {
         format: VPI_INT_VAL,
         value: VpiValueData { integer: -1 },
@@ -1865,7 +2128,7 @@ unsafe extern "C" fn drive_data_after_first_clock_edge(data: *mut VpiCbData) -> 
         && EDGE_VALUE_CHANGE_DRIVE_DATA.swap(false, Ordering::SeqCst)
     {
         let d = EDGE_DATA_HANDLE.load(Ordering::SeqCst) as VpiHandle;
-        unsafe { put_int(d, 1) };
+        unsafe { put_int(d, 2) };
     }
     0
 }
@@ -2196,15 +2459,18 @@ fn callback_writes_override_later_queued_edge_snapshots() {
         let newest = vpi_handle_by_name(c"Top.newest".as_ptr(), ptr::null_mut());
         let previous = vpi_handle_by_name(c"Top.previous".as_ptr(), ptr::null_mut());
         put_int(clk, 0);
-        put_int(d, 0);
+        put_int(d, 1);
         put_int(newest, 0);
         put_int(previous, 0);
         EDGE_DATA_HANDLE.store(d as usize, Ordering::SeqCst);
 
         let value_change = VpiCbData {
             reason: CB_VALUE_CHANGE,
-            cb_rtn: Some(drive_data_after_first_clock_edge),
-            obj: clk,
+            cb_rtn: Some(drive_data_after_first_registered_update),
+            // Change data after the first registered update, so the first
+            // sample is unambiguously complete. A clock value-change callback
+            // runs before FF evaluation and cannot establish that ordering.
+            obj: newest,
             time: ptr::null_mut(),
             value: ptr::null_mut(),
             index: 0,
@@ -2235,9 +2501,9 @@ fn callback_writes_override_later_queued_edge_snapshots() {
             value: VpiValueData { integer: -1 },
         };
         vpi_get_value(newest, &mut value);
-        assert_eq!(value.value.integer, 1);
+        assert_eq!(value.value.integer, 2);
         vpi_get_value(previous, &mut value);
-        assert_eq!(value.value.integer, 0);
+        assert_eq!(value.value.integer, 1);
 
         assert_eq!(vpi_remove_cb(value_change_handle), 1);
         for handle in [clk, d, newest, previous] {

@@ -1,25 +1,57 @@
 # celox CLIでcocotbを使う
 
-CeloxはVerylの設計を、VPI経由で通常の
+CeloxはVerylまたはSystemVerilogの設計を、VPI経由で通常の
 [cocotb](https://www.cocotb.org/) テストを実行できるネイティブ実行ファイルへ
 コンパイルできます。生成物にはコンパイル済み設計とCeloxランタイムが含まれるため、
-実行時にVerylソースは不要です。
+実行時にHDLソースは不要です。
 
 ## CLIをビルドする
 
 現在、CLIはCeloxのソースツリーからビルドします。
 
 ```sh
-cargo build --release -p celox-vpi --bin celox
+cargo build --release -p celox-vpi --features systemverilog --bin celox
 ```
 
-利用するPython環境へcocotbをインストールします。
+後述の`run`コマンドにはPythonは不要です。VPIテストを使う場合は、利用するPython環境へcocotbをインストールします。
 
 ```sh
 python3 -m pip install cocotb
 ```
 
 リポジトリのdevcontainerにはcocotb 2.0.1とVerilatorがあらかじめ入っています。
+
+## HDLテストベンチを直接実行する
+
+SystemVerilogのテストベンチとVerylのnative `#[test]`モジュールを、同じコマンドで実行できます。
+
+```sh
+target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+target/release/celox run test/Top.veryl --top Top
+```
+
+SVは`.sv`または`.v`をコンパイル順に指定します。4値シミュレーションを使い、
+`$finish`または実行待ちイベントがなくなるまで実行します。
+Verylはプロジェクト内の1ファイルを指定すると、`Veryl.toml`から
+ソースと依存関係を収集します。単独のVerylファイルも使用できます。
+`--top`にはnative testbenchのモジュール名を指定します。
+既存のnative testbench実行器を使うため、initialブロックの末尾への到達でも完了します。
+
+実行できる構文は既存フロントエンドの対応範囲に従い、未対応構文にはコンパイル診断を返します。
+`-O O0`、`-O O1`、`-O O2`で既存コンパイラの最適化レベルを選択できます。
+両言語の既定値は不要なストアの削除を含むO2で、HDL testbenchが読む信号は自動的に保持します。
+`-O`を明示すると、その指定を優先します。
+
+正常終了は終了コード0、コンパイル・実行エラー、アサーション失敗、`$error`、
+`$fatal`、実行時イベントの欠落、実行上限による打ち切りは1、引数エラーは2です。
+SVの`$stop`も、対話デバッガーを持たないため終了コード1になります。
+SVの`$display`/`$write`は標準出力、VerylのHDL出力は既存実行器に従って標準エラー出力に送ります。
+
+`--max-steps N`で正の実行上限を指定できます（既定値1000000）。
+SVではスケジューラのステップ数、Verylではtestbenchのtick数です。
+Verylでは完了前にtick上限に達すると失敗します。
+コンパイルや1ステップ・tick内の処理時間は制限しないため、実時間の制限が必要な場合は
+外部のタイムアウト機能を使ってください。1回の実行で言語を混在させることはできません。
 
 ## 設計をコンパイルする
 
@@ -32,6 +64,18 @@ target/release/celox vpi build src/Top.veryl --top Top -o build/top-sim
 Celoxはソースの位置から`Veryl.toml`を探し、プロジェクトのソースと依存関係を
 まとめてコンパイルします。Verylプロジェクト外の単独ソースを指定した場合は、
 そのファイルだけをコンパイルします。`-o`を省略した出力先は`celox.out`です。
+
+SystemVerilogでは1つ以上の`.sv`ファイルをコンパイル順に指定します。
+
+```sh
+target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
+```
+
+Celoxが対応するSystemVerilogの範囲で、指定したファイルをコンパイルします。
+package定義は利用側より先に指定してください。`Veryl.toml`や追加のSystemVerilog
+ソースは自動探索しません。複数指定時はすべて`.sv`ファイルにする必要があります。
+Verylではプロジェクトの入口となるファイルを1つ指定します。
+`celox-vpi-compile`も同じソース一覧を受け付けます。
 
 ## cocotbを実行する
 

@@ -457,3 +457,7 @@ test("cocotb retains Celox features without enabling unrelated adapter features"
     "cocotb_drives_an_attached_native_flip_flop", "--", "--exact", "--ignored"]);
   assert.match(job("rust-tests"), /name: Run cocotb VPI end-to-end test\n        if: needs.changes.outputs.rust_vpi_e2e != 'false'/);
 });
+
+test("full Clippy validation covers every workspace crate", () => {
+  assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+});

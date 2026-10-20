@@ -1,8 +1,8 @@
 # cocotb and the Celox CLI
 
-Celox can compile a Veryl design into a native executable that runs ordinary
+Celox can compile a Veryl or SystemVerilog design into a native executable that runs ordinary
 [cocotb](https://www.cocotb.org/) tests through VPI. The generated executable
-contains the compiled design and the Celox runtime; it does not need the Veryl
+contains the compiled design and the Celox runtime; it does not need the HDL
 sources when it runs.
 
 ## Build the CLI
@@ -10,16 +10,54 @@ sources when it runs.
 The CLI is currently built from the Celox source tree:
 
 ```sh
-cargo build --release -p celox-vpi --bin celox
+cargo build --release -p celox-vpi --features systemverilog --bin celox
 ```
 
-Install cocotb into the Python environment you want to use:
+The `run` command below needs no Python installation. For VPI tests, install
+cocotb into the Python environment you want to use:
 
 ```sh
 python3 -m pip install cocotb
 ```
 
 The repository dev container already includes cocotb 2.0.1 and Verilator.
+
+## Run an HDL testbench directly
+
+Use the same command for a SystemVerilog testbench and a Veryl native
+`#[test]` module:
+
+```sh
+target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
+target/release/celox run test/Top.veryl --top Top
+```
+
+For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
+uses four-state simulation and runs until `$finish` or no scheduled events
+remain. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
+and collects the project's sources and dependencies. A standalone
+Veryl file also works. Select the native testbench module with `--top`.
+Veryl uses the existing native testbench executor; a test may also complete by
+falling through its initial blocks.
+
+The command uses the existing frontends' supported language subsets; unsupported
+constructs produce compilation diagnostics. `-O O0`, `-O O1`, and `-O O2` select
+the existing compiler optimization levels. Both languages default to O2, including
+dead store elimination; signals read by the HDL testbench are retained
+automatically. An explicit `-O` overrides the default.
+
+Successful completion returns status 0. Compilation errors, runtime errors,
+assertion failures, `$error`, `$fatal`, lost runtime events, and exhausted
+execution limits return status 1. SV `$stop` also returns status 1 because this
+command has no interactive debugger. Invalid command arguments return status 2.
+SV `$display`/`$write` output goes to stdout; the existing Veryl native
+testbench executor sends its HDL output to stderr.
+
+`--max-steps N` sets a positive execution limit (default: 1000000). It counts
+scheduler steps for SV and testbench ticks for Veryl. Reaching the Veryl tick
+limit before completion fails the command. This limit does not bound compilation
+or work within a single step/tick; use an external process timeout when a wall
+clock limit is needed. Source languages cannot be mixed in one invocation.
 
 ## Compile a design
 
@@ -33,6 +71,18 @@ Celox finds `Veryl.toml` from the source path and includes the project's source
 files and dependencies. For a standalone source outside a Veryl project, it
 compiles that file alone. The output defaults to `celox.out` when `-o` is
 omitted.
+
+For SystemVerilog, pass one or more `.sv` files in compilation order:
+
+```sh
+target/release/celox vpi build src/types.sv src/Child.sv src/Top.sv --top Top -o build/top-sim
+```
+
+This compiles the specified files using Celox's supported SystemVerilog subset.
+List package definitions before their consumers. It does not discover a
+`Veryl.toml` project or additional SystemVerilog source files. Multiple inputs
+must all be `.sv` files; for Veryl, pass one project entry file. The
+`celox-vpi-compile` binary accepts the same source list.
 
 ## Run cocotb
 
