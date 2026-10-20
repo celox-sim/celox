@@ -1130,6 +1130,82 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.random.clone().expect("a process RNG")
     }
 
+    fn vcd_task(
+        &mut self,
+        operation: sv::ir::VcdTask,
+        args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
+    ) -> Result<(), sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::VcdTask;
+        if self.kernel.is_none() {
+            return Err(unsupported("VCD tasks require a timed process"));
+        }
+        let mut values = Vec::new();
+        let mut strings = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            if operation == VcdTask::Vars
+                && index == 0
+                && matches!(arg, sv::ir::SystemTaskArg::Empty)
+            {
+                continue;
+            }
+            if operation == VcdTask::Vars && index > 0 {
+                let sv::ir::SystemTaskArg::Str(name) = arg else {
+                    return Err(unsupported("$dumpvars module or variable selection"));
+                };
+                strings.push(name.clone());
+                continue;
+            }
+            let (reg, signed, is_string) = match arg {
+                sv::ir::SystemTaskArg::Expr(expr) => {
+                    (self.eval(expr, None)?, self.expr_signed(expr), false)
+                }
+                sv::ir::SystemTaskArg::Str(text) if operation == VcdTask::File => {
+                    let bytes = unescape(text).into_bytes();
+                    let width = (bytes.len() * 8).max(8);
+                    let value = bytes.iter().fold(BigUint::zero(), |value, byte| {
+                        (value << 8u32) | BigUint::from(*byte)
+                    });
+                    let reg = self.b.alloc_bit(width, false);
+                    self.b.emit(SIRInstruction::Imm(reg, SIRValue::new(value)));
+                    (reg, false, true)
+                }
+                _ => {
+                    return Err(unsupported(
+                        "VCD argument must be an integral value or filename string",
+                    ));
+                }
+            };
+            let width = self.b.register(&reg).width();
+            let is_4state = matches!(self.b.register(&reg), RegisterType::Logic { .. });
+            let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
+            self.store(id, SIROffset::Static(0), width, reg);
+            values.push(HostRequestValue {
+                id,
+                width,
+                signed,
+                is_string,
+            });
+        }
+        let local_site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Vcd)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: self.process,
+            kind: HostRequestKind::Vcd,
+            requires_timed_simulation: false,
+            operation: operation as u32,
+            args: values,
+            results: Vec::new(),
+            strings,
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Vcd, local_site))
+            .map_err(|error| unsupported(error.to_string()))?;
+        Ok(())
+    }
+
     /// The seed of this process's `$random` calls without a seed argument.
     /// It starts at 0, as the seed variable of `$random(seed)` typically
     /// does, so a design whose one process calls `$random` gets the same
@@ -2408,6 +2484,10 @@ impl<'p, 'a> Ff<'p, 'a> {
         args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
         site: Option<&sv::ir::SourceSpan>,
     ) -> Result<bool, sv::AnalyzerError> {
+        if let sv::ir::SystemTask::Vcd(operation) = task {
+            self.vcd_task(operation, args)?;
+            return Ok(true);
+        }
         if matches!(
             task,
             sv::ir::SystemTask::Fclose

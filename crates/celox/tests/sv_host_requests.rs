@@ -11,7 +11,8 @@ macro_rules! mixed_requests {
             let directory = tempfile::tempdir().unwrap();
             let first = directory.path().join("first.txt");
             let second = directory.path().join("second.txt");
-            let source = String::from(
+            let waveform = directory.path().join("trace.vcd");
+            let source = format!(
                 r#"
                 module Child #(parameter int ID = 0)
                   (output logic [7:0] value, output logic ok);
@@ -38,8 +39,14 @@ macro_rules! mixed_requests {
                   timeunit 1ps; timeprecision 1ps;
                   Child a(a_value, a_ok);
                   Child #(.ID(1)) b(b_value, b_ok);
+                  initial begin
+                    $dumpfile("{}");
+                    $dumpvars(0, Top);
+                    #2 $dumpflush;
+                  end
                 endmodule
                 "#,
+                waveform.display()
             );
             let mut simulation = celox::Simulation::from_sv_sources(
                 vec![(&source, Path::new("mixed_host_requests.sv"))],
@@ -55,12 +62,16 @@ macro_rules! mixed_requests {
             .$backend()
             .unwrap();
             simulation.run_until(2).unwrap();
+            simulation.flush_vcd().unwrap();
             assert_eq!(simulation.get(simulation.signal("a_ok")), 1u8.into());
             assert_eq!(simulation.get(simulation.signal("b_ok")), 1u8.into());
             assert_eq!(simulation.get(simulation.signal("a_value")), 12u8.into());
             assert_eq!(simulation.get(simulation.signal("b_value")), 30u8.into());
             assert_eq!(std::fs::read_to_string(first).unwrap(), "Top.a:11\n");
             assert_eq!(std::fs::read_to_string(second).unwrap(), "Top.b:29\n");
+            let trace = std::fs::read_to_string(waveform).unwrap();
+            assert!(trace.contains("$dumpvars"));
+            assert!(trace.contains("#1\n"));
         }
     };
 }
@@ -73,22 +84,25 @@ mixed_requests!(native, build_native);
 
 #[test]
 fn external_host_state_rejects_checkpoints_and_state_files() {
-    let statement = r#"$fwrite(1, "output");"#;
-    let source =
-        format!("module Top(output bit q); initial begin {statement} q = 1; end endmodule");
-    let mut simulation =
-        celox::Simulation::from_sv_sources(vec![(&source, Path::new("external_state.sv"))], "Top")
-            .build_interpreter()
-            .unwrap();
-    assert!(matches!(
-        simulation.checkpoint(),
-        Err(celox::CheckpointError::ExternalSystemTasks)
-    ));
-    assert!(
-        simulation
-            .save_state()
-            .unwrap_err()
-            .to_string()
-            .contains("SystemVerilog file I/O")
-    );
+    for statement in ["$fwrite(1, \"output\");", "$dumpvars;"] {
+        let source =
+            format!("module Top(output bit q); initial begin {statement} q = 1; end endmodule");
+        let mut simulation = celox::Simulation::from_sv_sources(
+            vec![(&source, Path::new("external_state.sv"))],
+            "Top",
+        )
+        .build_interpreter()
+        .unwrap();
+        assert!(matches!(
+            simulation.checkpoint(),
+            Err(celox::CheckpointError::ExternalSystemTasks)
+        ));
+        assert!(
+            simulation
+                .save_state()
+                .unwrap_err()
+                .to_string()
+                .contains("SystemVerilog file I/O or VCD")
+        );
+    }
 }

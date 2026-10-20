@@ -59,3 +59,30 @@ sim.dispose();
 ## Further Reading
 
 - [Writing Tests](./writing-tests.md) -- Simulator and Simulation patterns.
+
+## SystemVerilog controls {#systemverilog-source-controls}
+
+A timed SystemVerilog simulation can select and control tracing from HDL:
+
+```systemverilog
+initial begin
+    $dumpfile("waves.vcd");
+    $dumpvars(0, Top);
+end
+```
+
+`$dumpvars` starts recording after the current simulation timestamp settles.
+All calls must execute at the same simulation time. A level of `0` includes
+all descendants; `1` includes only the named module's own variables. Individual
+variables and multiple module or variable selections are supported.
+
+`$dumpoff` records unknown values and suspends tracing. `$dumpon` records current
+values and resumes it. `$dumpall` records every selected value without changing
+that state. `$dumpflush` publishes buffered output, and `$dumplimit(bytes)` stops
+recording at the size limit with a comment in the file. Complete records may
+extend past the limit. A zero limit removes the bound.
+
+`$dumpfile` accepts a string literal or an integral expression containing the
+filename and must run before `$dumpvars`. The default filename is `dump.vcd`.
+Source controls enable the necessary trace storage automatically; a host VCD
+path is optional. Host waveform methods remain available.

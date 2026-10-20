@@ -1810,8 +1810,8 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system task `$dumpvars`",
-            "module Top(output logic y); initial $dumpvars; assign y = 0; endmodule",
+            "system task `$dumpports`",
+            "module Top(output logic y); initial $dumpports; assign y = 0; endmodule",
         ),
         (
             "system task `$stacktrace`",

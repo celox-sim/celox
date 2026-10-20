@@ -819,8 +819,8 @@ chapter-21/21.6--test.sv	2state	pass
 chapter-21/21.6--test.sv	4state	pass
 chapter-21/21.6--value.sv	2state	pass
 chapter-21/21.6--value.sv	4state	pass
-chapter-21/21.7--dumpfile.sv	2state	fail
-chapter-21/21.7--dumpfile.sv	4state	fail
+chapter-21/21.7--dumpfile.sv	2state	pass
+chapter-21/21.7--dumpfile.sv	4state	pass
 chapter-21/21.7--dumpports.sv	2state	fail
 chapter-21/21.7--dumpports.sv	4state	fail
 chapter-22/22.10--celldefine-basic-1.sv	2state	skip
