@@ -1,6 +1,1 @@
-Revision history for #1621:
-
-rev 2 (content) 2026-10-20 14:22 UTC — Address review: retain declaration warnings on namespace collisions and validate module analysis with prebuilt interface packages
-rev 1 (initial) 2026-10-20 14:22 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1621,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c7b14d1e0a9640bdad2feaf7e1b5d00d36ea6360","timestamp_iso":"2026-10-20T14:22:44Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c7b14d1e0a9640bdad2feaf7e1b5d00d36ea6360","new_sha":"bfe716b1a426a6665656bfe1252866073ee81f5c","timestamp_iso":"2026-10-20T14:22:44Z","reason":"Address review: retain declaration warnings on namespace collisions and validate module analysis with prebuilt interface packages","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c7b14d1e0a9640bdad2feaf7e1b5d00d36ea6360...bfe716b1a426a6665656bfe1252866073ee81f5c"}]} -->
+Address review: preserve non-ANSI interface names separately from semantic binding sources for split-source namespace validation
