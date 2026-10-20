@@ -24,6 +24,9 @@ pub struct Packages {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
+    /// All interface declaration names, including unsupported non-ANSI bodies.
+    /// Namespace validation must not depend on sources selected for binding.
+    pub(crate) interface_names: HashSet<String>,
     /// Original syntax shared with interface instances; never generated source.
     pub(crate) interface_sources: HashMap<String, (std::rc::Rc<SyntaxTree>, PathBuf)>,
     pub(super) timescales: Arc<timescales::Timescales>,
