@@ -1,1 +1,9 @@
 Rebase the dependent CLI/cocotb stack onto current origin/master at user request; preserve merged clock fixes and O2 defaults.
+
+Revision history for #1573:
+
+rev 3 (content) 2026-10-20 10:42 UTC
+rev 2 (rebase) 2026-10-19 19:20 UTC — Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.
+rev 1 (initial) 2026-10-19 19:20 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1573,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"cf7c588c2f305cbe733d10671c8ee42f84234dc1","timestamp_iso":"2026-10-19T19:20:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"cf7c588c2f305cbe733d10671c8ee42f84234dc1","new_sha":"39dd239a862b39f716668dfbee564b8163be2f60","timestamp_iso":"2026-10-19T19:20:23Z","reason":"Preserve the dependency on the external CLI stack using the supported full-URL Depends-On form; stack push removes numbered headers when its trunk is itself a PR branch.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/cf7c588c2f305cbe733d10671c8ee42f84234dc1...39dd239a862b39f716668dfbee564b8163be2f60"},{"number":3,"change_type":"content","old_sha":"39dd239a862b39f716668dfbee564b8163be2f60","new_sha":"2eee192d7050f58ccfd3a0e5bc1b9bf2a28991d5","timestamp_iso":"2026-10-20T10:42:19Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/39dd239a862b39f716668dfbee564b8163be2f60...2eee192d7050f58ccfd3a0e5bc1b9bf2a28991d5"}]} -->
