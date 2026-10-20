@@ -11,6 +11,7 @@
 
 mod file_io;
 mod fread;
+mod scan;
 
 use super::procedural::*;
 use super::*;
@@ -854,6 +855,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args,
                 ..
             } => self.file_function(*function, args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function
+                        @ (sv::ir::SystemFunction::Sscanf | sv::ir::SystemFunction::Fscanf),
+                    ),
+                args,
+                ..
+            } => self.scan_function(*function, args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,

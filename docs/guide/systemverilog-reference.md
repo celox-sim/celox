@@ -397,6 +397,17 @@ flushes all open files. Invalid flush descriptors produce a runtime error.
 These operations run in timed `Simulation` processes and use file descriptors
 for input and positioning; multichannel descriptors support output and flush.
 
+### Formatted input
+
+`$sscanf(source, format, outputs...)` and `$fscanf(fd, format, outputs...)`
+support integral `%d`, `%h`/`%x`, `%o`, `%b`, and `%c` conversions, numeric field widths,
+assignment suppression, literal matching and whitespace (IEEE 1800-2023
+21.3.4.3). Source and format can be string literals or packed integral values.
+The result counts assigned outputs; unmatched outputs retain their values.
+Real conversions, `%s` string outputs and `%t` time scaling are unsupported.
+Both functions require timed `Simulation` execution. Pure `$sscanf` state can
+be checkpointed; `$fscanf` uses external file state and prevents checkpoints.
+
 ### Runtime file output
 
 `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and their `b` / `o` / `h`

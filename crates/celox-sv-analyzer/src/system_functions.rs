@@ -64,6 +64,7 @@ pub enum SystemFunction {
     Random,
     /// `$dist_uniform` (20.14.2).
     DistUniform,
+
     /// Command-line prefix query (21.6).
     TestPlusargs,
     /// Command-line value query (21.6).
@@ -85,6 +86,9 @@ pub enum SystemFunction {
     Fgetc,
     Ungetc,
     Feof,
+    /// Integral formatted input (21.3.4.3).
+    Sscanf,
+    Fscanf,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -110,6 +114,8 @@ impl SystemFunction {
                 | Self::Fgetc
                 | Self::Ungetc
                 | Self::Feof
+                | Self::Sscanf
+                | Self::Fscanf
                 | Self::TestPlusargs
                 | Self::ValuePlusargs
         )
@@ -148,6 +154,7 @@ impl SystemFunction {
             Self::Isunknown => "$isunknown",
             Self::Random => "$random",
             Self::DistUniform => "$dist_uniform",
+
             Self::TestPlusargs => "$test$plusargs",
             Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
@@ -161,6 +168,8 @@ impl SystemFunction {
             Self::Fgetc => "$fgetc",
             Self::Ungetc => "$ungetc",
             Self::Feof => "$feof",
+            Self::Sscanf => "$sscanf",
+            Self::Fscanf => "$fscanf",
         }
     }
 
@@ -203,6 +212,8 @@ impl SystemFunction {
                 | Self::Fgetc
                 | Self::Ungetc
                 | Self::Feof
+                | Self::Sscanf
+                | Self::Fscanf
                 | Self::UrandomRange
                 | Self::ScopeRandomize
         )
@@ -222,6 +233,7 @@ impl SystemFunction {
             || (matches!(self, Self::Random | Self::DistUniform) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
             || (self == Self::Fread && position == 0)
+            || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -247,6 +259,8 @@ impl SystemFunction {
             | Self::Rewind
             | Self::Fgetc
             | Self::Ungetc
+            | Self::Sscanf
+            | Self::Fscanf
             | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Rtoi => Some((32, true)),
@@ -735,12 +749,6 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
     function(SystemFunction::DistUniform, 3, Some(3)),
-    unsupported("$dist_normal", Function),
-    unsupported("$dist_exponential", Function),
-    unsupported("$dist_poisson", Function),
-    unsupported("$dist_chi_square", Function),
-    unsupported("$dist_t", Function),
-    unsupported("$dist_erlang", Function),
     // 20.15 Stochastic analysis tasks and functions
     unsupported("$q_initialize", Task),
     unsupported("$q_add", Task),
@@ -894,8 +902,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Fgetc, 1, Some(1)),
     function(SystemFunction::Ungetc, 2, Some(2)),
     unsupported("$fgets", Function),
-    unsupported("$fscanf", Function),
-    unsupported("$sscanf", Function),
+    function(SystemFunction::Fscanf, 2, None),
+    function(SystemFunction::Sscanf, 2, None),
     function(SystemFunction::Fread, 2, Some(4)),
     function(SystemFunction::Ftell, 1, Some(1)),
     function(SystemFunction::Fseek, 3, Some(3)),

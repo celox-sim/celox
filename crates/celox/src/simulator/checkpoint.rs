@@ -214,7 +214,7 @@ impl<B: SimBackend> Simulator<B> {
                 matches!(
                     site.kind,
                     celox_design::HostRequestKind::FileIo | celox_design::HostRequestKind::Vcd
-                )
+                ) || (site.kind == celox_design::HostRequestKind::Scan && site.operation == 1)
             })
         {
             return Err(CheckpointError::ExternalSystemTasks);
