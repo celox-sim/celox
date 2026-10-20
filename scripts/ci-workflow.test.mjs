@@ -358,7 +358,7 @@ test("PR caches cannot evict the shared default-branch Rust caches", () => {
       /      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|\n  [a-z]|$)/g,
     ),
   ];
-  assert.equal(cacheSteps.length, 8);
+  assert.equal(cacheSteps.length, 9);
   for (const [, step] of cacheSteps) {
     assert.match(
       step,
@@ -460,4 +460,16 @@ test("cocotb retains Celox features without enabling unrelated adapter features"
 
 test("full Clippy validation covers every workspace crate", () => {
   assert.match(job("lint"), /run: cargo clippy --locked --workspace --all-targets --features/);
+});
+
+test("upstream SV TB runs on full CI and feeds failure reporting", () => {
+  const upstream = job("common-cells");
+  assert.match(upstream, /github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  assert.doesNotMatch(upstream, /continue-on-error/);
+  assert.match(upstream, /conformance\/common-cells\/revision/);
+  assert.match(upstream, /cargo build --locked -p celox-vpi --features systemverilog --bin celox/);
+  assert.match(upstream, /node scripts\/run-common-cells.mjs/);
+  assert.match(upstream, /if: always\(\)/);
+  assert.match(upstream, /retention-days: 14/);
+  assert.match(job("report-full-validation"), /common-cells,/);
 });
