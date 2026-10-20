@@ -1451,5 +1451,39 @@
         "timing::timed_task_automatic_calls_keep_separate_storage"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_dist_uniform_seed_width",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "$dist_uniform with longint or shortint seed variables generates C++ that passes cast temporaries to VL_DIST_UNIFORM(IData&); compilation fails because a non-const lvalue reference cannot bind to an rvalue. IEEE 1800-2023 20.14.2 permits an integral seed variable. Celox passes the unchanged width-conversion case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_dist_uniform_seed_width.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_dist_uniform_seed_width",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus rejects the shortint seed at startup with \"$dist_uniform's seed must be an integer/time variable or a register.\" IEEE 1800-2023 20.14.2 permits an integral seed variable; shortint is integral. Celox passes the unchanged width-conversion case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_dist_uniform_seed_width.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals"
+      ]
+    }
   }
 ]

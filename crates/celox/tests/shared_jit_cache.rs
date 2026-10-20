@@ -655,6 +655,25 @@ fn native_program_image_rejects_corrupt_appended_payload() {
     );
 }
 
+/// Version 17 adds synchronous host requests to the runtime metadata.
+#[test]
+fn native_program_image_rejects_v16_before_decoding_host_request_schema() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&16u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(16))
+    ));
+}
+
 #[test]
 fn native_program_image_rejects_v3_before_decoding_changed_schema() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();

@@ -56,6 +56,12 @@ pub enum SystemFunction {
     Isunknown,
     /// `$random` (20.14.1), with the algorithm of Annex N.
     Random,
+    /// `$dist_uniform` (20.14.2).
+    DistUniform,
+    /// Command-line prefix query (21.6).
+    TestPlusargs,
+    /// Command-line value query (21.6).
+    ValuePlusargs,
     /// `$urandom` (18.13.1).
     Urandom,
     /// `$urandom_range` (18.13.2).
@@ -99,6 +105,9 @@ impl SystemFunction {
             Self::Onehot0 => "$onehot0",
             Self::Isunknown => "$isunknown",
             Self::Random => "$random",
+            Self::DistUniform => "$dist_uniform",
+            Self::TestPlusargs => "$test$plusargs",
+            Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
             Self::UrandomRange => "$urandom_range",
         }
@@ -128,7 +137,15 @@ impl SystemFunction {
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice.
     pub fn is_effectful(self) -> bool {
-        matches!(self, Self::Random | Self::Urandom | Self::UrandomRange)
+        matches!(
+            self,
+            Self::Random
+                | Self::DistUniform
+                | Self::TestPlusargs
+                | Self::ValuePlusargs
+                | Self::Urandom
+                | Self::UrandomRange
+        )
     }
 
     /// Whether a call reads the state of the simulation: it has an effect,
@@ -141,7 +158,8 @@ impl SystemFunction {
     /// Whether the call writes argument `position` back, as `$random(seed)`
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
-        self == Self::Random && position == 0
+        (matches!(self, Self::Random | Self::DistUniform) && position == 0)
+            || (self == Self::ValuePlusargs && position == 1)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -156,7 +174,9 @@ impl SystemFunction {
             | Self::Countbits
             | Self::Countones => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
-            Self::Random => Some((32, true)),
+            Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
+                Some((32, true))
+            }
             Self::Urandom | Self::UrandomRange | Self::Stime => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
@@ -586,7 +606,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$load_coverage_db", Task),
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
-    unsupported("$dist_uniform", Function),
+    function(SystemFunction::DistUniform, 3, Some(3)),
     unsupported("$dist_normal", Function),
     unsupported("$dist_exponential", Function),
     unsupported("$dist_poisson", Function),
@@ -732,8 +752,8 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$writememb", Task),
     unsupported("$writememh", Task),
     // 21.6 Command line input
-    unsupported("$test$plusargs", Function),
-    unsupported("$value$plusargs", Function),
+    function(SystemFunction::TestPlusargs, 1, Some(1)),
+    function(SystemFunction::ValuePlusargs, 2, Some(2)),
     // 21.7 Value change dump (VCD) files
     unsupported("$dumpfile", Task),
     unsupported("$dumpvars", Task),

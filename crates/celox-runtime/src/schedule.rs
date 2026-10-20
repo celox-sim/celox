@@ -144,6 +144,11 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                             .collect()
                     })
                     .collect(),
+                host_requests: process
+                    .host_requests
+                    .iter()
+                    .map(|site| site.map(|id| resolve(&id)))
+                    .collect(),
                 nba_sites: process
                     .nbas
                     .iter()

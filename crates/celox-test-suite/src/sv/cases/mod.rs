@@ -8,6 +8,10 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/sv/cases/random_plusargs.vtest",
+        text: include_str!("random_plusargs.vtest"),
+    },
+    Group {
         file: "src/sv/cases/always_comb.vtest",
         text: include_str!("always_comb.vtest"),
     },

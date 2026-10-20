@@ -10,10 +10,10 @@ use crate::{
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
-    EventTopology, EventWatch, ExternFunction, GateOp, InitialStateValue, InstanceId, ModuleId,
-    NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver,
-    RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr,
-    StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
+    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateValue,
+    InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase, RegionedStateAddr,
+    RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite, RuntimeSchema,
+    STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase, VariableMetadata, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIRTerminator,
@@ -1322,6 +1322,7 @@ pub fn schedule_symbolic_rtl(
     let TimingMetadata {
         wait_sites,
         nba_sites,
+        host_request_sites,
         time_slots,
         ..
     } = timing;
@@ -1557,6 +1558,10 @@ pub fn schedule_symbolic_rtl(
         wait_sites.iter().map(|site| site.map(project)).collect();
     let nba_sites: Vec<NbaSite<StateAddr>> =
         nba_sites.iter().map(|site| site.map(project)).collect();
+    let host_request_sites: Vec<HostRequestSite<StateAddr>> = host_request_sites
+        .iter()
+        .map(|site| site.map(project))
+        .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
     // The runtime reads counters, the signals waits watch and staged
@@ -1580,6 +1585,7 @@ pub fn schedule_symbolic_rtl(
                 .flat_map(|site| [Some(site.value), site.offset, site.pending])
                 .flatten(),
         )
+        .chain(host_request_sites.iter().flat_map(|site| site.slots()))
         .collect();
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
@@ -1626,6 +1632,7 @@ pub fn schedule_symbolic_rtl(
             watches,
             wait_sites,
             nba_sites,
+            host_request_sites,
             active_commits,
             time_slots,
         },
@@ -2805,6 +2812,7 @@ struct TimingMetadata {
     counter_slots: Vec<CounterSlots<AbsoluteAddr>>,
     wait_sites: Vec<WaitSite<AbsoluteAddr>>,
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
+    host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
 }
 
@@ -2961,6 +2969,7 @@ fn relocate_timing(
         counter_slots: Vec::new(),
         wait_sites: Vec::new(),
         nba_sites: Vec::new(),
+        host_request_sites: Vec::new(),
         time_slots: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -2981,6 +2990,17 @@ fn relocate_timing(
                 process: process_index[&(instance, site.process)],
                 ..site.map(locate)
             }));
+        metadata
+            .host_request_sites
+            .extend(
+                module
+                    .host_request_sites
+                    .iter()
+                    .map(|site| HostRequestSite {
+                        process: process_index[&(instance, site.process)],
+                        ..site.map(locate)
+                    }),
+            );
         metadata.time_slots.extend(module.time_slot.map(locate));
     }
     metadata

@@ -66,9 +66,10 @@ as waits written directly in a process.
 | Area | Supported |
 | --- | --- |
 | System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
-| Random numbers | `$urandom`, `$urandom_range` and `$random` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
+| Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time` and `$stime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
+| Command-line arguments | `$test$plusargs` and `$value$plusargs` in timed `initial` blocks and their subroutines |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -327,6 +328,18 @@ given by a pattern) are variables that hold their value from the start of
 the simulation; they cannot be used where an elaboration-time constant is
 required.
 
+### Command-line arguments
+
+Use `Simulation::from_sv_sources` for plusargs queries in `initial` blocks
+and their subroutines. Queries from combinational and edge-triggered processes
+are currently unsupported.
+
+Supply ordered arguments with `.plusargs(["+COUNT=12", "+TRACE"])`.
+`$test$plusargs` matches a prefix; `$value$plusargs` supports integer conversions
+and `%s` into packed integral variables. The first matching argument wins, and
+an unmatched value query preserves its destination. Real conversions and dynamic
+strings are unsupported.
+
 ## Time and precision {#time-and-precision}
 
 `$timeunit` and `$timeprecision` return a signed 32-bit exponent in seconds
@@ -394,6 +407,10 @@ such as Icarus Verilog. `$random(seed)` updates its seed variable. Without an
 argument, each process continues its own seed, which starts at 0, so a design
 whose one process calls `$random` matches simulators that keep one seed for
 the whole design.
+
+`$dist_uniform(seed, start, end)` uses the Annex N uniform distribution, updates
+its integral seed variable and includes both bounds. Equal or reversed bounds
+return `start` without advancing the seed.
 
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 
