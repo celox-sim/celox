@@ -1,1 +1,6 @@
-Resolve PR #1622 conflicts with current master while preserving interface array distribution and mixed-contract regressions
+Revision history for #1622:
+
+rev 2 (content) 2026-10-20 15:49 UTC — Resolve PR #1622 conflicts with current master while preserving interface array distribution and mixed-contract regressions
+rev 1 (initial) 2026-10-20 15:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1622,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c8bfe0f7b7f35018d96758e8a809be70c22647e3","timestamp_iso":"2026-10-20T15:49:21Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c8bfe0f7b7f35018d96758e8a809be70c22647e3","new_sha":"5021b01211d8d9a89777eb74095a2161927657cc","timestamp_iso":"2026-10-20T15:49:21Z","reason":"Resolve PR #1622 conflicts with current master while preserving interface array distribution and mixed-contract regressions","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c8bfe0f7b7f35018d96758e8a809be70c22647e3...5021b01211d8d9a89777eb74095a2161927657cc"}]} -->
