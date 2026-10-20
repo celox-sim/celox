@@ -1458,11 +1458,19 @@ pub(super) fn lower_subroutine(
     lifetimes::check_subroutine_statics(
         &tree.state,
         &subroutine,
+        &builder.dims.const_env,
+        builder.state.locals,
         &statics,
         builder.state.subroutine_directions,
     )?;
     if !builder.automatic {
-        lifetimes::check_static_result(&subroutine, builder.state.subroutine_directions)?;
+        lifetimes::check_static_result(
+            &tree.state,
+            &builder.dims.const_env,
+            builder.state.locals,
+            &subroutine,
+            builder.state.subroutine_directions,
+        )?;
     }
     Ok(subroutine)
 }

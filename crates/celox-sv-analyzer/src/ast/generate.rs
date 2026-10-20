@@ -60,6 +60,7 @@ pub(super) struct Item {
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
+    qualified_types: SharedMap<Type>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
@@ -189,7 +190,16 @@ impl Item {
         &self,
         aliases: &'m HashMap<String, Type>,
     ) -> Cow<'m, HashMap<String, Type>> {
-        self.block_imports().type_aliases(aliases)
+        if self.qualified_types.is_empty() {
+            return self.block_imports().type_aliases(aliases);
+        }
+        let mut all = aliases.clone();
+        all.extend(
+            self.qualified_types
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone())),
+        );
+        Cow::Owned(self.block_imports().type_aliases(&all).into_owned())
     }
 
     /// Make the constant functions this item sees the installed ones, until
@@ -503,12 +513,29 @@ struct Scope {
     literals: SharedMap<Expr>,
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
+    qualified_types: SharedMap<Type>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
 }
 
 impl Scope {
+    fn type_aliases<'m>(
+        &self,
+        aliases: &'m HashMap<String, Type>,
+    ) -> Cow<'m, HashMap<String, Type>> {
+        if self.qualified_types.is_empty() {
+            return self.block_imports().type_aliases(aliases);
+        }
+        let mut all = aliases.clone();
+        all.extend(
+            self.qualified_types
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone())),
+        );
+        Cow::Owned(self.block_imports().type_aliases(&all).into_owned())
+    }
+
     fn block_imports(&self) -> BlockImports<'_> {
         BlockImports {
             state: &self.state,
@@ -817,6 +844,7 @@ impl<'a> Elaborator<'a, '_> {
             env: scope.env.clone(),
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
+            qualified_types: scope.qualified_types.clone(),
             names: scope.names.clone(),
             imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
@@ -1147,15 +1175,106 @@ impl<'a> Elaborator<'a, '_> {
                 Expr::Literal(format_typed_parameter_literal(value, 32, true)),
             );
         }
-        // Reject unsupported local types before signal precollection tries to
-        // resolve their uses. Native membership owns the declaration class.
-        if children.iter().any(|id| {
-            matches!(
-                self.tree.declarations().body_item(*id).kind,
-                celox_sv_syntax::BodyItemKind::TypeAlias(_)
-            )
-        }) {
-            return Err(unsupported("type declaration inside generate scope"));
+        // Native declarations remain in their owning scope. Carry qualified
+        // bindings with every item rather than leaking a sibling's typedefs.
+        let type_names = children
+            .iter()
+            .filter_map(|id| {
+                if let celox_sv_syntax::BodyItemKind::TypeAlias(alias) =
+                    self.tree.declarations().body_item(*id).kind
+                {
+                    Some(instances::normalize_identifier(
+                        &self.tree.declarations().type_alias(alias).name.spelling,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !type_names.is_empty() {
+            let mut enum_names = HashSet::default();
+            for id in children {
+                if let celox_sv_syntax::BodyItemKind::TypeAlias(alias) =
+                    self.tree.declarations().body_item(*id).kind
+                    && let celox_sv_syntax::TypeAliasTarget::DataType(ty) =
+                        self.tree.declarations().type_alias(alias).target
+                    && let celox_sv_syntax::DataTypeKind::Enum { items, .. } =
+                        &self.tree.declarations().data_type(ty).kind
+                {
+                    for item in items {
+                        let name = instances::normalize_identifier(&item.name.spelling);
+                        if !enum_names.insert(name.clone()) {
+                            return Err(unsupported(format!(
+                                "duplicate generate-local declaration `{name}`"
+                            )));
+                        }
+                    }
+                }
+            }
+            let mut aliases = types::type_aliases_from_body_with_env(
+                self.tree,
+                children,
+                &scope.env,
+                &self.aliases,
+            )?;
+            let enums = parameters::enum_member_constants_from_items(
+                self.tree,
+                children,
+                &scope.env,
+                &aliases,
+                &HashMap::default(),
+            )?;
+            for name in type_names {
+                if !declared.insert(name.clone()) {
+                    return Err(unsupported(format!(
+                        "duplicate generate-local declaration `{name}`"
+                    )));
+                }
+                let ty = aliases
+                    .get(&name)
+                    .ok_or_else(|| {
+                        unsupported(format!("unresolved generate-local typedef `{name}`"))
+                    })?
+                    .clone();
+                // Freeze definition-site dimensions before a nested block or
+                // another loop iteration shadows the names in their bounds.
+                let ty = procedural::scoped_type(ty, &scope.env);
+                if ty.packed_ranges().iter().any(|range| {
+                    eval_ast_const_expr(&self.tree.state, range.left(), &scope.env).is_none()
+                        || eval_ast_const_expr(&self.tree.state, range.right(), &scope.env)
+                            .is_none()
+                }) {
+                    return Err(unsupported(format!(
+                        "unresolved generate-local typedef bounds `{name}`"
+                    )));
+                }
+                let qualified = format!("{}.{}", scope.path, scope_component(&name));
+                scope.qualified_types.insert(qualified.clone(), ty.clone());
+                scope.names.insert(name.clone(), qualified.clone());
+                scope.imports.insert(name.clone(), qualified.clone());
+                Arc::make_mut(&mut scope.shadowed).insert(name.clone());
+                aliases.insert(qualified, ty.clone());
+                aliases.insert(name, ty);
+            }
+            for (name, number) in enums.numbers {
+                if !declared.insert(name.clone()) {
+                    return Err(unsupported(format!(
+                        "duplicate generate-local declaration `{name}`"
+                    )));
+                }
+                scope.env.insert(name.clone(), number);
+                insert_parameter_type_markers(&mut scope.env, &name, enums.types[&name]);
+                scope.env.insert(enum_marker(&name), 1);
+                scope
+                    .literals
+                    .insert(name.clone(), enums.exprs[&name].clone());
+                scope.names.insert(
+                    name.clone(),
+                    format!("{}.{}", scope.path, scope_component(&name)),
+                );
+                Arc::make_mut(&mut scope.shadowed).insert(name);
+            }
+            self.aliases = Cow::Owned(aliases);
         }
         self.constants_and_signal_types(children, &mut scope, &mut declared)?;
         for id in children {
@@ -1309,6 +1428,7 @@ fn module_constant_functions(
             env: env.clone().into(),
             literals: literals.clone().into(),
             parameter_dimensions: Arc::default(),
+            qualified_types: SharedMap::default(),
             names: SharedMap::default(),
             imports: SharedMap::default(),
             shadowed: Arc::default(),
@@ -2217,8 +2337,24 @@ mod tests {
                 "duplicate case-generate default",
             ),
             (
-                "if (1) begin typedef logic T; T tmp; end",
-                "type declaration inside generate scope",
+                "if (1) begin typedef logic T; typedef bit T; end",
+                "duplicate generate-local declaration",
+            ),
+            (
+                "if (1) begin typedef enum logic { A,B } T; typedef enum logic { A,C } U; end",
+                "duplicate generate-local declaration",
+            ),
+            (
+                "if (1) begin typedef logic T; logic T; end",
+                "duplicate generate-local declaration",
+            ),
+            (
+                "if (1) begin typedef enum logic { A,B } T; localparam A=1; end",
+                "duplicate generate-local declaration",
+            ),
+            (
+                "if (1) begin parameter type T=logic; end",
+                "generate-local type parameter",
             ),
             (
                 "for (genvar i=0; i<1; i++) begin function automatic logic f(); return 0; endfunction end",
@@ -2543,7 +2679,7 @@ mod tests {
     fn subroutine_projection_preserves_generate_diagnostics() {
         for body in [
             "if (UNKNOWN) begin : g logic x; end",
-            "if (1) begin : g typedef logic T; T x; end",
+            "if (1) begin : g parameter type T=logic; end",
             "for (genvar i=0; i<1; i++) begin : g function logic f(); return 0; endfunction end",
             "if (1) begin : g localparam P=Q; localparam Q=P; end",
         ] {

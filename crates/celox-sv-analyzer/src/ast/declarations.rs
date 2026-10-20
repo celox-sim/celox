@@ -33,12 +33,51 @@ pub(super) fn ports_from_scope(
                 type_aliases,
             )?,
         );
-        ports.push(Port::new(
-            native_port_name(native)?,
-            direction,
-            ty,
-            !explicit && !native.variable,
-        ));
+        let default = native
+            .default
+            .map(|value| {
+                if direction != PortDirection::Input {
+                    return Err(unsupported("default value on a non-input port"));
+                }
+                if !ty.unpacked_ranges().is_empty() {
+                    let name = native_port_name(native)?;
+                    let mut dimensions =
+                        PackedDimensions::new(HashMap::default(), const_env, type_aliases);
+                    dimensions.insert(name.clone(), procedural::dimensions_from_type(&ty));
+                    let expression = expression_binding::expression(
+                        value,
+                        syntax_tree.declarations(),
+                        &LValue::Ident(name),
+                        syntax_tree,
+                        &dimensions,
+                    )?;
+                    let value = fold_const_integral_expr_preserving_mask(
+                        &syntax_tree.state,
+                        expression,
+                        const_env,
+                    );
+                    return expr_to_const(&syntax_tree.state, value)
+                        .ok_or_else(|| unsupported("nonconstant unpacked input port default"));
+                }
+                constant_binding::expression(
+                    value,
+                    syntax_tree.declarations(),
+                    syntax_tree,
+                    const_env,
+                    type_aliases,
+                )?
+                .ok_or_else(|| unsupported("nonconstant input port default"))
+            })
+            .transpose()?;
+        ports.push(
+            Port::new(
+                native_port_name(native)?,
+                direction,
+                ty,
+                !explicit && !native.variable,
+            )
+            .with_default(default),
+        );
     }
     Ok(ports)
 }

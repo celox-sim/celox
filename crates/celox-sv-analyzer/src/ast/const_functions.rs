@@ -7,6 +7,7 @@
 //! calls that are not system functions. Bodies are interpreted from their
 //! procedural statements.
 
+use num_bigint::BigUint;
 use std::cell::{Cell, RefCell};
 
 use super::*;
@@ -1101,7 +1102,64 @@ impl Frame<'_> {
                 }
                 ConstExpr::Literal(format!("1'b{}", u8::from(found)))
             }
-            Expr::Concat(_) | Expr::RepeatConcat { .. } => return None,
+            Expr::Concat(_) | Expr::RepeatConcat { .. } => {
+                let literal = self.concat_literal(expr)?;
+                if literal.width == 0 {
+                    return None;
+                }
+                let value = crate::typecheck::integral_literal_as_i128(&literal, false)?;
+                self.temporary(value, literal.width, false)
+            }
+        })
+    }
+
+    /// Fold concatenations with each operand's own width before the surrounding
+    /// assignment can resize the value. This interpreter stores at most 128 bits.
+    fn concat_literal(&mut self, expr: &Expr) -> Option<crate::typecheck::IntegralLiteral> {
+        self.tick()?;
+        let (parts, count) = match expr {
+            Expr::Concat(parts) => (parts, 1),
+            Expr::RepeatConcat { count, parts } => {
+                let count = usize::try_from(self.eval_lowered(&count.clone().into())?).ok()?;
+                (parts, count)
+            }
+            _ => {
+                let lowered: crate::ir::ConstExpr = self.lower(expr)?.into();
+                return crate::typecheck::eval_const_integral_literal_in_env(
+                    &lowered,
+                    self,
+                    &|name| self.type_of(name),
+                );
+            }
+        };
+        let mut width = 0usize;
+        let mut value = BigUint::default();
+        let mut mask = BigUint::default();
+        for part in parts {
+            let literal = self.concat_literal(part)?;
+            width = width.checked_add(literal.width)?;
+            if width > 128 {
+                return None;
+            }
+            value = (value << literal.width) | literal.value;
+            mask = (mask << literal.width) | literal.mask;
+        }
+        let total = width.checked_mul(count)?;
+        if total > 128 {
+            return None;
+        }
+        let mut result_value = BigUint::default();
+        let mut result_mask = BigUint::default();
+        // A zero-width group remains empty for any count, without iterating.
+        for _ in 0..if width == 0 { 0 } else { count } {
+            result_value = (result_value << width) | &value;
+            result_mask = (result_mask << width) | &mask;
+        }
+        Some(crate::typecheck::IntegralLiteral {
+            width: total,
+            signed: false,
+            value: result_value,
+            mask: result_mask,
         })
     }
 

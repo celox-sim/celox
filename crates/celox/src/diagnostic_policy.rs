@@ -18,7 +18,7 @@ pub enum DiagnosticLevel {
 
 /// Overrides keyed by the code shown in a compilation diagnostic.
 /// Unlisted diagnostics retain their default severity. Only explicitly
-/// recoverable errors (currently `mixed_timescale`) can be relaxed.
+/// recoverable errors can be relaxed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct DiagnosticPolicy(pub BTreeMap<String, DiagnosticLevel>);
@@ -70,14 +70,13 @@ impl DiagnosticPolicy {
     }
 
     pub(crate) fn level(&self, code: &str) -> DiagnosticLevel {
-        self.0
-            .get(code)
-            .copied()
-            .unwrap_or(if code == "mixed_timescale" {
+        self.0.get(code).copied().unwrap_or(
+            if matches!(code, "mixed_timescale" | "unpacked_port_default") {
                 DiagnosticLevel::Error
             } else {
                 DiagnosticLevel::Warn
-            })
+            },
+        )
     }
 
     #[cfg(feature = "systemverilog")]

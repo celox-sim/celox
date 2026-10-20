@@ -1481,6 +1481,9 @@ fn literal_as_i128(value: &str) -> Option<i128> {
 /// Static type of a syntax-validated literal, without expanding a sized value.
 /// Type queries need only the size/sign prefix, including for huge operands.
 pub(crate) fn integral_literal_type_metadata(value: &str) -> Option<(usize, bool)> {
+    if value.trim().starts_with('"') {
+        return parse_string_literal(value.trim()).map(|literal| (literal.width, false));
+    }
     let normalized = value.trim().replace('_', "");
     if let Some((size, based)) = normalized.split_once('\'')
         && !size.is_empty()
@@ -1498,6 +1501,9 @@ pub(crate) fn integral_literal_type_metadata(value: &str) -> Option<(usize, bool
 }
 
 pub fn parse_integral_literal(value: &str) -> Option<IntegralLiteral> {
+    if value.trim().starts_with('"') {
+        return parse_string_literal(value.trim());
+    }
     let normalized = value.trim().replace('_', "");
     if let Some(literal) = parse_unbased_unsized_literal(&normalized) {
         return Some(literal);
@@ -1507,6 +1513,107 @@ pub fn parse_integral_literal(value: &str) -> Option<IntegralLiteral> {
     } else {
         parse_decimal_literal(&normalized)
     }
+}
+
+/// Parse a single SV literal, optionally preceded by a unary sign.
+/// Parameter overrides use this instead of accepting arbitrary source text.
+pub fn parse_parameter_literal(text: &str) -> Option<ConstExpr> {
+    let text = text.trim();
+    let (op, literal) = if let Some(value) = text.strip_prefix('-') {
+        (Some(UnaryOp::Minus), value.trim())
+    } else if let Some(value) = text.strip_prefix('+') {
+        (Some(UnaryOp::Plus), value.trim())
+    } else {
+        (None, text)
+    };
+    let mut sources = celox_sv_syntax::SourceMap::default();
+    let file = sources.add("<parameter-literal>", literal);
+    let tokens = celox_sv_syntax::lex(&sources, file).ok()?;
+    let [token] = tokens.as_slice() else {
+        return None;
+    };
+    if !matches!(
+        token.kind,
+        celox_sv_syntax::TokenKind::Number | celox_sv_syntax::TokenKind::String
+    ) {
+        return None;
+    }
+    parse_integral_literal(literal)?;
+    let value = ConstExpr::Literal(literal.to_string());
+    Some(match op {
+        Some(op) => ConstExpr::Unary {
+            op,
+            expr: Box::new(value),
+        },
+        None => value,
+    })
+}
+
+// IEEE 1800-2023 5.9 and 5.9.1: in integral expressions a string
+// literal is an unsigned packed sequence of bytes, including decoded escapes.
+fn parse_string_literal(text: &str) -> Option<IntegralLiteral> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    let mut input = body.bytes().peekable();
+    let mut bytes = Vec::new();
+    while let Some(byte) = input.next() {
+        let byte = match byte {
+            b'\\' => match input.next()? {
+                b'\n' => continue,
+                b'\r' if input.peek() == Some(&b'\n') => {
+                    input.next();
+                    continue;
+                }
+                b'n' => b'\n',
+                b't' => b'\t',
+                b'v' => 11,
+                b'f' => 12,
+                b'a' => 7,
+                first @ b'0'..=b'7' => {
+                    let mut value = u16::from(first - b'0');
+                    for _ in 0..2 {
+                        let Some(next @ b'0'..=b'7') = input.peek().copied() else {
+                            break;
+                        };
+                        input.next();
+                        value = value * 8 + u16::from(next - b'0');
+                    }
+                    value as u8
+                }
+                b'x' => {
+                    let mut value = 0;
+                    let mut count = 0;
+                    for _ in 0..2 {
+                        let Some(next) = input
+                            .peek()
+                            .copied()
+                            .and_then(|b| char::from(b).to_digit(16))
+                        else {
+                            break;
+                        };
+                        input.next();
+                        value = value * 16 + next as u8;
+                        count += 1;
+                    }
+                    if count == 0 {
+                        return None;
+                    }
+                    value
+                }
+                escaped if escaped.is_ascii() => escaped,
+                _ => return None,
+            },
+            b'"' | b'\n' | b'\r' => return None,
+            byte if byte.is_ascii() => byte,
+            _ => return None,
+        };
+        bytes.push(byte);
+    }
+    Some(IntegralLiteral {
+        width: bytes.len().max(1).checked_mul(8)?,
+        signed: false,
+        value: BigUint::from_bytes_be(&bytes),
+        mask: BigUint::default(),
+    })
 }
 
 fn parse_unbased_unsized_literal(value: &str) -> Option<IntegralLiteral> {

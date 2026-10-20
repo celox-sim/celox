@@ -518,6 +518,12 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
     set: &mut crate::HashSet<VarAtomBase<A>>,
     visited: &mut HashMap<NodeId, Vec<BitAccess>>,
 ) {
+    // IEEE 1800-2023 11.4.12.1: a zero-count replication contributes no
+    // bits to its enclosing concatenation. There is no dependency window
+    // to visit, and constructing one would underflow its inclusive MSB.
+    if get_width(expr, arena) == 0 {
+        return;
+    }
     let requested = window.unwrap_or_else(|| BitAccess::new(0, get_width(expr, arena) - 1));
     let uncovered = claim_uncovered_window(visited.entry(expr).or_default(), requested);
 
@@ -596,6 +602,9 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                     // Walk from LSB side to map the requested window to each part.
                     let mut part_lsb = 0usize;
                     for (part, width) in parts.iter().rev() {
+                        if *width == 0 {
+                            continue;
+                        }
                         let part_msb = part_lsb + width - 1;
                         if win.overlaps(&BitAccess::new(part_lsb, part_msb)) {
                             let ov_lsb = std::cmp::max(win.lsb, part_lsb);

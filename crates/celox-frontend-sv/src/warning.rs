@@ -38,6 +38,9 @@ pub enum FrontendWarningKind {
     /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
     #[error("mixed explicit and default time units or precisions across design elements")]
     MixedTimescale,
+    /// Aggregate defaults are a compatibility extension to IEEE 1800-2023 23.2.2.4.
+    #[error("default value on unpacked input port `{module}.{port}` is a language extension")]
+    UnpackedPortDefault { module: String, port: String },
     /// A memory file without address directives holds a different number of
     /// words than the address range of `$readmemh`/`$readmemb`
     /// (IEEE 1800-2023 21.4).
@@ -141,6 +144,7 @@ impl miette::Diagnostic for FrontendWarning {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
+            FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
         }))
@@ -154,6 +158,9 @@ impl miette::Diagnostic for FrontendWarning {
         Some(Box::new(match self.kind {
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
+            }
+            FrontendWarningKind::UnpackedPortDefault { .. } => {
+                "IEEE 1800-2023 23.2.2.4 permits defaults on singular input ports; use unpacked_port_default=warn or allow to enable aggregate defaults"
             }
             FrontendWarningKind::MemoryFileWordCount { .. } => {
                 "give one word per address of the range, or place the words with `@address` directives"

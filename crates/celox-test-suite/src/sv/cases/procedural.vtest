@@ -705,3 +705,99 @@
   "#)
   (top Top)
   (assert_eq partial (fourstate 0xd 0x5)))
+
+(case static_function_result_filled_by_constant_loops
+  (source "static_result.sv" #"
+        module Top #(parameter W=5)(input logic [W-1:0] gray,
+            output logic [W-1:0] binary, reversed);
+            function [W-1:0] gray_to_binary(input logic [W-1:0] g);
+                for (integer i=0; i<W; i=i+1)
+                    gray_to_binary[i]=^(g >> i);
+            endfunction
+            function [W-1:0] reverse_bits(input logic [W-1:0] g);
+                for (integer i=W-1; i>=0; i=i-1)
+                    reverse_bits[W-1-i]=g[i];
+            endfunction
+            assign binary=gray_to_binary(gray);
+            assign reversed=reverse_bits(gray);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set gray 0x00))
+  (assert_eq binary 0x00)
+  (assert_eq reversed 0x00)
+  (modify (set gray 0x10))
+  (assert_eq binary 0x1f)
+  (assert_eq reversed 0x01)
+  (modify (set gray 0x04))
+  (assert_eq binary 0x07)
+  (assert_eq reversed 0x04)
+  (modify (set gray 0x1b))
+  (assert_eq binary 0x12)
+  (assert_eq reversed 0x1b))
+
+(case static_function_scratch_arrays_are_filled_before_reads
+  (source "scratch_array.sv" #"
+    module Top(input logic [7:0] a, output logic [7:0] y);
+      function [7:0] transform(input logic [7:0] value);
+        logic [7:0] words [1:0];
+        for(integer i=0;i<2;i=i+1) begin
+          words[i]='0;
+          words[i][i]=value[i];
+        end
+        transform=words[0]+words[1];
+      endfunction
+      assign y=transform(a);
+    endmodule
+  "#)
+  (top Top)
+  (set a 3)
+  (eval)
+  (assert_eq y 3)
+  (set a 0)
+  (eval)
+  (assert_eq y 0)
+  (set a 2)
+  (eval)
+  (assert_eq y 2))
+
+(case constant_functions_preserve_concat_operand_widths
+  (source "constant_concat.sv" #"
+    module Top(output logic [15:0] a,b, output logic [7:0] zero_part);
+      function automatic [15:0] expand(input logic [3:0] value);
+        expand={{2{value}},value,4'h5};
+      endfunction
+      function automatic [7:0] trim(input logic [3:0] value);
+        trim={4'hd,{0{value}},value};
+      endfunction
+      localparam A=expand(4'h2), B=expand(4'ha), Z=trim(4'h3);
+      assign a=A;
+      assign b=B;
+      assign zero_part=Z;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 0x2225)
+  (assert_eq b 0xaaa5)
+  (assert_eq zero_part 0xd3))
+
+(case constant_functions_inside_selected_parameter_initializers
+  (source "selected_constant_function.sv" #"
+    module Parent #(parameter W=8)(output logic [31:0] y);
+      localparam logic [31:0] WIDTHS=W;
+      function automatic [31:0] make_mask(input integer unused);
+        integer width;
+        width=WIDTHS[0 +: 8];
+        make_mask={32{1'b1}}>>(32-width);
+      endfunction
+      localparam logic [31:0] MASK=(W==0) ? 32'(0) : make_mask(0);
+      assign y=MASK;
+    endmodule
+    module Top(output logic [31:0] a,b);
+      Parent p0(a);
+      Parent #(.W(4)) p1(b);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 255)
+  (assert_eq b 15))
