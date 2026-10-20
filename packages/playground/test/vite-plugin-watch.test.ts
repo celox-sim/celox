@@ -1,5 +1,11 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizePath } from "vite";
@@ -1043,5 +1049,145 @@ test.each([true, false])(
 			{ file: added, type: "update", read: () => "edited" },
 		);
 		expect(watcher.add).not.toHaveBeenCalled();
+	},
+);
+
+// Vitest's persistent module cache replays imports as URLs rooted at Vite's
+// root, rather than their original paths relative to the importer.
+test("cached root-relative imports retain their generated module identity", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-cached-import-"));
+	roots.push(root);
+	mkdirSync(join(root, "src"));
+	writeFileSync(join(root, "src", "Main.veryl"), "module Main {}\n");
+	writeFileSync(join(root, "Veryl.toml"), "[project]\nname = 'test'\n");
+	const { plugin, context } = await initialize(root);
+	for (const [url, file] of [
+		["/src/Main.veryl", join(root, "src", "Main.veryl")],
+		[
+			"/src/Main.veryl?dse=preserveAllPorts",
+			`${join(root, "src", "Main.veryl")}?dse=preserveAllPorts`,
+		],
+		["/Veryl.toml?celox-project", `${join(root, "Veryl.toml")}?celox-project`],
+		[
+			"/src/Main.veryl?celox-watch",
+			`${join(root, "src", "Main.veryl")}?celox-watch`,
+		],
+	]) {
+		const id = (plugin.resolveId as Function)(url, join(root, "index.html"));
+		expect(id).toBe(normalizePath(file!));
+		expect((plugin.load as Function).call(context, id)).toBeTypeOf("string");
+	}
+	expect((plugin.resolveId as Function)("/missing.veryl")).toBeUndefined();
+});
+
+// A project outside Vite's root is replayed through the /@fs/ URL namespace.
+test("cached external project imports retain their generated module identity", async () => {
+	const root = mkdtempSync(join(tmpdir(), "celox-external-cache-"));
+	const client = mkdtempSync(join(tmpdir(), "celox-external-client-"));
+	roots.push(root, client);
+	writeFileSync(join(root, "Main.veryl"), "module Main {}\n");
+	writeFileSync(join(root, "Veryl.toml"), "[project]\nname = 'test'\n");
+	const plugin = celox({ projectRoot: root });
+	const context = { addWatchFile: vi.fn(), warn: vi.fn() };
+	await (plugin.configResolved as Function)({ root: client });
+	await (plugin.buildStart as Function).call(context);
+	for (const query of ["", "?dse=preserveAllPorts", "?celox-watch"]) {
+		const file = normalizePath(join(root, "Main.veryl")) + query;
+		const id = (plugin.resolveId as Function)(
+			`/@fs/${file.replace(/^\//, "")}`,
+			join(client, "index.html"),
+		);
+		expect(id).toBe(file);
+		expect((plugin.load as Function).call(context, id)).toBeTypeOf("string");
+	}
+	const project = `${normalizePath(join(root, "Veryl.toml"))}?celox-project`;
+	const id = (plugin.resolveId as Function)(
+		`/@fs/${project.replace(/^\//, "")}`,
+	);
+	expect(id).toBe(project);
+	expect((plugin.load as Function).call(context, id)).toBeTypeOf("string");
+});
+
+// Both the host-absolute and Vite-root-relative paths exist. Their existence
+// alone must not let an unrelated host file take over a cached project URL.
+test("cached URLs prefer the project over colliding host paths", async () => {
+	const client = mkdtempSync(join(tmpdir(), "celox-collision-client-"));
+	const host = mkdtempSync(join(tmpdir(), "celox-collision-host-"));
+	roots.push(client, host);
+	const urlRoot = normalizePath(host).replace(/^[A-Z]:/i, "");
+	const project = join(client, urlRoot.replace(/^\//, ""));
+	mkdirSync(project, { recursive: true });
+	for (const dir of [host, project]) {
+		writeFileSync(join(dir, "Main.veryl"), "module Main {}\n");
+		writeFileSync(join(dir, "Veryl.toml"), "[project]\nname = 'test'\n");
+	}
+	const plugin = celox({ projectRoot: project });
+	const context = { addWatchFile: vi.fn(), warn: vi.fn() };
+	await (plugin.configResolved as Function)({ root: client });
+	await (plugin.buildStart as Function).call(context);
+	for (const [name, query] of [
+		["Main.veryl", ""],
+		["Main.veryl", "?dse=preserveAllPorts"],
+		["Main.veryl", "?celox-watch"],
+		["Veryl.toml", "?celox-project"],
+	]) {
+		const file = normalizePath(join(project, name!)) + query;
+		const url = `${urlRoot}/${name}${query}`;
+		const id = (plugin.resolveId as Function)(url, join(client, "index.html"));
+		expect(id).toBe(file);
+		expect((plugin.load as Function).call(context, id)).toBeTypeOf("string");
+	}
+
+	// Canonical absolute project IDs must stay stable even if their root-relative
+	// lookalikes also exist. Explicit /@fs/ URLs retain their absolute meaning.
+	const mirror = join(
+		client,
+		normalizePath(project)
+			.replace(/^[A-Z]:/i, "")
+			.replace(/^\//, ""),
+	);
+	mkdirSync(mirror, { recursive: true });
+	writeFileSync(join(mirror, "Main.veryl"), "module Main {}\n");
+	writeFileSync(join(mirror, "Veryl.toml"), "[project]\nname = 'other'\n");
+	for (const name of ["Main.veryl", "Veryl.toml?celox-project"]) {
+		const file = normalizePath(join(project, name));
+		expect((plugin.resolveId as Function)(file)).toBe(file);
+	}
+	const hostFile = normalizePath(join(host, "Main.veryl"));
+	expect(
+		(plugin.resolveId as Function)(`/@fs/${hostFile.replace(/^\//, "")}`),
+	).toBe(hostFile);
+});
+
+test.each([false, true])(
+	"cached prefix-shaped URLs fall back to the Vite root (filesystem root=%s)",
+	async (filesystemRoot) => {
+		const project = mkdtempSync(join(tmpdir(), "celox-prefix-project-"));
+		roots.push(project);
+		const client = join(project, "client");
+		const url = filesystemRoot
+			? `/celox-prefix-${project.split(/[\\/]/).at(-1)}/Main.veryl`
+			: normalizePath(join(project, "Main.veryl")).replace(/^[A-Z]:/i, "");
+		const rooted = join(client, url.replace(/^[A-Z]:/i, "").replace(/^\//, ""));
+		mkdirSync(dirname(rooted), { recursive: true });
+		writeFileSync(rooted, "module Main {}\n");
+		const plugin = celox({ projectRoot: filesystemRoot ? "/" : project });
+		// Resolution does not need buildStart; do not generate sidecars at '/'.
+		await (plugin.configResolved as Function)({ root: client });
+		for (const query of ["", "?dse=preserveAllPorts", "?celox-watch"]) {
+			expect((plugin.resolveId as Function)(url + query)).toBe(
+				normalizePath(rooted) + query,
+			);
+		}
+		expect(
+			(plugin.resolveId as Function)(`/@fs/${url.replace(/^\//, "")}`),
+		).toBeUndefined();
+		if (!filesystemRoot) {
+			// Once the canonical project file exists, keep that identity even though
+			// the cached-root lookalike exists too.
+			writeFileSync(join(project, "Main.veryl"), "module Main {}\n");
+			const canonical = normalizePath(join(project, "Main.veryl"));
+			expect((plugin.resolveId as Function)(canonical)).toBe(canonical);
+		}
 	},
 );
