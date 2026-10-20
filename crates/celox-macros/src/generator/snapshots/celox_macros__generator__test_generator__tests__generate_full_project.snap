@@ -536,13 +536,22 @@ impl LinearSorter {
         sim.get_four_state(self.d_in)
     }
     pub fn set_d_out(&self, sim: &mut celox::Simulator, index: usize, val: u16) {
-        let mut val_full = sim.get(self.d_out);
-        let element_width = 16usize;
-        let bit_offset = index * element_width;
-        let mask = ((celox::BigUint::from(1u32) << element_width) - 1u32) << bit_offset;
-        val_full = (val_full.clone() ^ (val_full & &mask))
-            | (celox::BigUint::from(val) << bit_offset);
-        sim.modify(|io| io.set_wide(self.d_out, val_full)).unwrap();
+        sim.modify(|io| {
+                assert!(
+                    index < 8usize, "array index {} out of bounds for {} elements",
+                    index, 8usize
+                );
+                let signal = self.d_out;
+                let (payload, xmask) = io.get_four_state(signal);
+                let bit_offset = index * 16usize;
+                let element_mask = (celox::BigUint::from(1u32) << 16usize) - 1u32;
+                let mask = &element_mask << bit_offset;
+                let payload = (&payload ^ (&payload & &mask))
+                    | ((celox::BigUint::from(val) & element_mask) << bit_offset);
+                let xmask = &xmask ^ (&xmask & &mask);
+                io.set_four_state(signal, payload, xmask);
+            })
+            .unwrap();
     }
     pub fn get_d_out(&self, sim: &mut celox::Simulator, index: usize) -> u16 {
         let val_full = sim.get(self.d_out);
@@ -672,7 +681,21 @@ impl<'a, 'b> LinearSorterIO<'a, 'b> {
     pub fn set_d_in_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.d_in, val, mask);
     }
-    pub fn set_d_out(&mut self, _index: usize, _val: u16) {}
+    pub fn set_d_out(&mut self, index: usize, val: u16) {
+        let io = &mut *self.io;
+        assert!(
+            index < 8usize, "array index {} out of bounds for {} elements", index, 8usize
+        );
+        let signal = self.ids.d_out;
+        let (payload, xmask) = io.get_four_state(signal);
+        let bit_offset = index * 16usize;
+        let element_mask = (celox::BigUint::from(1u32) << 16usize) - 1u32;
+        let mask = &element_mask << bit_offset;
+        let payload = (&payload ^ (&payload & &mask))
+            | ((celox::BigUint::from(val) & element_mask) << bit_offset);
+        let xmask = &xmask ^ (&xmask & &mask);
+        io.set_four_state(signal, payload, xmask);
+    }
     pub fn set_d_out_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.d_out, val, mask);
     }
@@ -758,13 +781,22 @@ impl LinearSorterWrapper {
         sim.get_four_state(self.d_in)
     }
     pub fn set_d_out(&self, sim: &mut celox::Simulator, index: usize, val: u16) {
-        let mut val_full = sim.get(self.d_out);
-        let element_width = 16usize;
-        let bit_offset = index * element_width;
-        let mask = ((celox::BigUint::from(1u32) << element_width) - 1u32) << bit_offset;
-        val_full = (val_full.clone() ^ (val_full & &mask))
-            | (celox::BigUint::from(val) << bit_offset);
-        sim.modify(|io| io.set_wide(self.d_out, val_full)).unwrap();
+        sim.modify(|io| {
+                assert!(
+                    index < 8usize, "array index {} out of bounds for {} elements",
+                    index, 8usize
+                );
+                let signal = self.d_out;
+                let (payload, xmask) = io.get_four_state(signal);
+                let bit_offset = index * 16usize;
+                let element_mask = (celox::BigUint::from(1u32) << 16usize) - 1u32;
+                let mask = &element_mask << bit_offset;
+                let payload = (&payload ^ (&payload & &mask))
+                    | ((celox::BigUint::from(val) & element_mask) << bit_offset);
+                let xmask = &xmask ^ (&xmask & &mask);
+                io.set_four_state(signal, payload, xmask);
+            })
+            .unwrap();
     }
     pub fn get_d_out(&self, sim: &mut celox::Simulator, index: usize) -> u16 {
         let val_full = sim.get(self.d_out);
@@ -897,7 +929,21 @@ impl<'a, 'b> LinearSorterWrapperIO<'a, 'b> {
     pub fn set_d_in_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.d_in, val, mask);
     }
-    pub fn set_d_out(&mut self, _index: usize, _val: u16) {}
+    pub fn set_d_out(&mut self, index: usize, val: u16) {
+        let io = &mut *self.io;
+        assert!(
+            index < 8usize, "array index {} out of bounds for {} elements", index, 8usize
+        );
+        let signal = self.ids.d_out;
+        let (payload, xmask) = io.get_four_state(signal);
+        let bit_offset = index * 16usize;
+        let element_mask = (celox::BigUint::from(1u32) << 16usize) - 1u32;
+        let mask = &element_mask << bit_offset;
+        let payload = (&payload ^ (&payload & &mask))
+            | ((celox::BigUint::from(val) & element_mask) << bit_offset);
+        let xmask = &xmask ^ (&xmask & &mask);
+        io.set_four_state(signal, payload, xmask);
+    }
     pub fn set_d_out_4state(&mut self, val: celox::BigUint, mask: celox::BigUint) {
         self.io.set_four_state(self.ids.d_out, val, mask);
     }
