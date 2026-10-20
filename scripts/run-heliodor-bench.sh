@@ -43,13 +43,13 @@ fi
 CELOX_TARGET_ROOT="${HELIODOR_CELOX_TARGET_DIR:-$CELOX_ROOT/target}"
 if [[ -z "$CELOX_RUNNER_BIN" ]]; then
     if [[ -n "$HELIODOR_CELOX_EXECUTION_TARGET" ]]; then
-        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_EXECUTION_TARGET/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_EXECUTION_TARGET/$HELIODOR_CELOX_CARGO_PROFILE/celox"
     else
-        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox"
     fi
 fi
 if [[ -z "$CELOX_CODEGEN_RUNNER_BIN" ]]; then
-    CELOX_CODEGEN_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+    CELOX_CODEGEN_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox"
 fi
 if [[ -z "$VERYL_TIMED_RUNNER_BIN" ]]; then
     VERYL_TIMED_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/veryl-heliodor"
@@ -57,7 +57,14 @@ fi
 HELIODOR_COMPILE_ONLY="${HELIODOR_COMPILE_ONLY:-${HELIODOR_CELOX_COMPILE_ONLY:-0}}"
 HELIODOR_COMPILE_TIMEOUT_SEC="${HELIODOR_COMPILE_TIMEOUT_SEC:-${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
-HELIODOR_CELOX_THREADS="${HELIODOR_CELOX_THREADS:-$(nproc 2>/dev/null || echo 2)}"
+default_celox_threads() {
+    local count
+    count=$(nproc 2>/dev/null || echo 2)
+    ((count > 64)) && count=64
+    ((count < 2)) && count=2
+    echo "$count"
+}
+HELIODOR_CELOX_THREADS="${HELIODOR_CELOX_THREADS:-$(default_celox_threads)}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.3}"
 VERYL_BIN="${VERYL_BIN:-}"
@@ -119,7 +126,7 @@ Environment:
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
   HELIODOR_CELOX_THREADS
-                       simulation threads of celox-parallel and celox-tiered (default: nproc)
+                       simulation threads of celox-parallel and celox-tiered (default: nproc clamped to 2..64)
   CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
@@ -1231,8 +1238,8 @@ build_celox_runner() {
         fi
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-bench \
-        --bin celox-heliodor --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
         return 1
@@ -1263,8 +1270,8 @@ build_celox_codegen_runner() {
         feature_args=(--features "$HELIODOR_CELOX_CODEGEN_CARGO_FEATURES")
     fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
-        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-bench \
-        --bin celox-heliodor --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-vpi \
+        --bin celox --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
         "${feature_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
         return 1
@@ -1463,7 +1470,7 @@ run_one() {
     local veryl_aot_cache_dir=""
     local -a source_files celox_args celox_cache_args celox_execution_command timed_veryl_args
     collect_test_source_files "$test" source_files || return "$?"
-    celox_args=()
+    celox_args=(--report --unlimited)
     celox_cache_args=()
     if [[ "$runner" == celox && -n "$HELIODOR_CELOX_BUILD_CACHE_DIR" ]]; then
         celox_cache_args+=(--build-cache-dir "$HELIODOR_CELOX_BUILD_CACHE_DIR")
@@ -1485,9 +1492,9 @@ run_one() {
         # disabled pass as a new command-line flag.
         celox_args+=(--sir-pass="$pass_override")
     done
-    celox_execution_command=("$CELOX_RUNNER_BIN")
+    celox_execution_command=("$CELOX_RUNNER_BIN" run)
     if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
-        celox_execution_command=("${CELOX_EXECUTION_PREFIX[@]}" "$CELOX_RUNNER_BIN")
+        celox_execution_command=("${CELOX_EXECUTION_PREFIX[@]}" "$CELOX_RUNNER_BIN" run)
     fi
     if [[ "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
         celox_args+=(--compile-only)
@@ -1534,7 +1541,7 @@ run_one() {
         celox)
             if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
                 run_in_heliodor "$timeout_sec" "$native_codegen_log" \
-                    "$CELOX_CODEGEN_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                    "$CELOX_CODEGEN_RUNNER_BIN" run --project "$HELIODOR_DIR" --top "$test" \
                     "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
                     "${celox_cache_args[@]}" \
                     --compile-only --native-image-output "$native_image_path"
@@ -1546,7 +1553,7 @@ run_one() {
                     fi
                     run_in_heliodor "$timeout_sec" "$log" \
                         "${celox_execution_command[@]}" \
-                        --project "$HELIODOR_DIR" --test "$test" \
+                        --project "$HELIODOR_DIR" --top "$test" \
                         "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
                         --native-image-input "$native_image_path"
                     process_status="$?"
@@ -1556,7 +1563,7 @@ run_one() {
             else
                 run_in_heliodor "$timeout_sec" "$log" \
                     "${celox_execution_command[@]}" \
-                    --project "$HELIODOR_DIR" --test "$test" \
+                    --project "$HELIODOR_DIR" --top "$test" \
                     "${celox_args[@]}" "${celox_cache_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
                 process_status="$?"
             fi
@@ -1564,7 +1571,7 @@ run_one() {
         celox-parallel)
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
-                --project "$HELIODOR_DIR" --test "$test" \
+                --project "$HELIODOR_DIR" --top "$test" \
                 "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
                 --threads "$HELIODOR_CELOX_THREADS"
             process_status="$?"
@@ -1572,22 +1579,22 @@ run_one() {
         celox-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
-                --project "$HELIODOR_DIR" --test "$test" \
+                --project "$HELIODOR_DIR" --top "$test" \
                 "${celox_args[@]}" --backend cranelift --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
         celox-tiered)
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
-                --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}" \
+                --project "$HELIODOR_DIR" --top "$test" \
+                "${celox_args[@]}" --require-compiled --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}" \
                 --threads "$HELIODOR_CELOX_THREADS"
             process_status="$?"
             ;;
         celox-interpreter)
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
-                --project "$HELIODOR_DIR" --test "$test" \
+                --project "$HELIODOR_DIR" --top "$test" \
                 "${celox_args[@]}" --backend interpreter --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
@@ -2132,6 +2139,7 @@ run_gate() {
     HELIODOR_RUNNERS="veryl-cc-sync celox celox-tiered veryl-cc-tiered"
     HELIODOR_TIMEOUT_SEC="$GATE_TIMEOUT_SEC"
     HELIODOR_CELOX_TIMEOUT_MULTIPLIER=1
+    HELIODOR_CELOX_THREADS=$(default_celox_threads)
     HELIODOR_COMPILE_ONLY=0
     HELIODOR_CELOX_BUILD_CACHE_DIR=""
     HELIODOR_COMPILE_TIMEOUT_SEC=""
@@ -2171,7 +2179,7 @@ run_gate() {
     invocation_dir="$(mktemp -d "$base_results_dir/gate_$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
     HELIODOR_RESULTS_DIR="$invocation_dir"
     HELIODOR_CELOX_TARGET_DIR="$invocation_dir/celox-target"
-    CELOX_RUNNER_BIN="$HELIODOR_CELOX_TARGET_DIR/release/celox-heliodor"
+    CELOX_RUNNER_BIN="$HELIODOR_CELOX_TARGET_DIR/release/celox"
     VERYL_TIMED_RUNNER_BIN="$HELIODOR_CELOX_TARGET_DIR/release/veryl-heliodor"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
 

@@ -1709,6 +1709,17 @@ mod host {
             self.image
         }
 
+        /// Consume the compilation without initializing executable memory,
+        /// retaining both the native artifact and its compilation warnings.
+        pub fn into_program_image_and_warnings(
+            self,
+        ) -> (
+            crate::backend::native::NativeProgramImage,
+            Vec<CompilationWarning>,
+        ) {
+            (self.image, self.warnings)
+        }
+
         /// Write the generated native image as a standalone binary container.
         pub fn write_image(
             &self,
@@ -3448,6 +3459,17 @@ mod host {
                 crate::backend::memory_layout::MemoryLayoutMode::Packed,
                 crate::backend::InterpBackend::new,
             )
+        }
+
+        /// Builds a timed simulation that starts interpreted and adopts compiled
+        /// code at a scheduler safe point once background compilation completes.
+        pub fn build_tiered(
+            self,
+        ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
+            let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
+            self.build_with_backend(layout, |program, options| {
+                Ok(crate::backend::TieredBackend::new(program, options))
+            })
         }
 
         fn build_with_backend<B: crate::SimBackend>(

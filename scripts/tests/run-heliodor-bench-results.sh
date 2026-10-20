@@ -470,6 +470,12 @@ run_one celox-tiered integration_tiered >/dev/null \
     || fail "tiered runner did not select the tiered backend"
 [[ " ${FIXTURE_RUN_ARGS[*]} " == *" --threads 4 "* ]] \
     || fail "tiered runner did not request parallel execution"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" run "* && " ${FIXTURE_RUN_ARGS[*]} " == *" --top integration_tiered "* ]] \
+    || fail "tiered runner did not use the normal CLI"
+for flag in --report --unlimited --require-compiled; do
+    [[ " ${FIXTURE_RUN_ARGS[*]} " == *" $flag "* ]] \
+        || fail "tiered runner omitted $flag"
+done
 assert_eq "$(awk -F '\t' 'NR == 9 { print $1 }' "$integration_results/results.tsv")" \
     celox-tiered "run_one tiered runner name"
 assert_eq "$(awk -F '\t' 'NR == 9 { print $12 }' "$integration_results/results.tsv")" NA \
