@@ -1,1 +1,1 @@
-Address lexer-supported triple-quoted strings and CRLF continuation decoding
+Reject repeated standard stream closes and preserve scheduled reset clock reflection
