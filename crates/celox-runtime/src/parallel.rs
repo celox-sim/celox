@@ -266,7 +266,10 @@ impl Shared {
                     timing.waits.push((other, completed, start, trace.nanos()));
                 }
             }
-            if !aborted {
+            // A failed producer publishes its abort before its progress. The
+            // acquire above may satisfy the wait without entering the loop,
+            // so reload abort after observing that progress.
+            if !aborted && !self.abort.0.load(Ordering::Acquire) {
                 if let (Some(trace), Some(timing)) = (trace, &mut timing) {
                     timing.start = trace.nanos();
                 }
@@ -640,19 +643,25 @@ mod tests {
     #[test]
     fn failures_skip_pending_work_and_report_the_first_task() {
         let (schedule, predecessors) = chain_schedule();
-        let mut pool = LanePool::new(3).unwrap();
-        let runner = recorder(predecessors.clone(), Some(0));
-        assert_eq!(
-            pool.run(&schedule, &runner),
-            Err(LaneTaskFailure { task: 0, code: 7 })
-        );
-        // Dependents of the failed task never ran.
-        assert!(!runner.done[1].load(Ordering::Acquire));
-        assert!(!runner.done[3].load(Ordering::Acquire));
-        // The pool remains usable after a failure.
-        let runner = recorder(predecessors, None);
-        pool.run(&schedule, &runner).unwrap();
-        assert_eq!(runner.calls.load(Ordering::Relaxed), 4);
+        for idle_spin in [Duration::ZERO, LanePool::DEFAULT_IDLE_SPIN] {
+            let mut pool = LanePool::with_idle_spin(3, idle_spin).unwrap();
+            // Exercise both parked and spinning workers across failure/recovery
+            // epochs: a dependent can observe progress just as abort is set.
+            for _ in 0..2000 {
+                let runner = recorder(predecessors.clone(), Some(0));
+                assert_eq!(
+                    pool.run(&schedule, &runner),
+                    Err(LaneTaskFailure { task: 0, code: 7 })
+                );
+                // Dependents of the failed task never ran.
+                assert!(!runner.done[1].load(Ordering::Acquire));
+                assert!(!runner.done[3].load(Ordering::Acquire));
+                // The pool remains usable after a failure.
+                let runner = recorder(predecessors.clone(), None);
+                pool.run(&schedule, &runner).unwrap();
+                assert_eq!(runner.calls.load(Ordering::Relaxed), 4);
+            }
+        }
     }
 
     #[test]
