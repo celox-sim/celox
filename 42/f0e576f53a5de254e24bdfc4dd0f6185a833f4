@@ -1,0 +1,1 @@
+Address review findings: preserve timed always driver validation, validate folded automatic NBAs, and reject unsupported scoped static formals and unobservable static-formal waits.
