@@ -143,8 +143,11 @@ Linux バージョンはシミュレーション内で起動するゲストの�
 | 両アーキテクチャの 8 hart | バックエンドごとに別ジョブ |
 | すべての SMP 構成（2・4・8 hart） | `celox-parallel` の 1 ジョブを追加 |
 
+Celoxの計測は通常の`celox run --report --unlimited`を使います。
+既定は2値で、ベンチ専用のCelox実行バイナリはビルドしません。
+
 `celox-parallel` は native バックエンドを[並列シミュレーション](../guide/parallel-simulation.md)で
-実行し、ホストの vCPU ごとに 1 スレッドを使います（`HELIODOR_CELOX_THREADS`、既定値は `nproc`）。
+実行し、ホストの vCPU ごとに 1 スレッドを使います（`HELIODOR_CELOX_THREADS`、既定値は `nproc` を2〜64に収めた値）。
 別ジョブにすることで、比較グループの実行時間の上限は変わりません。ダッシュボードでは
 シングルスレッドの native 実行と並べて「multi-threaded」として表示します。
 

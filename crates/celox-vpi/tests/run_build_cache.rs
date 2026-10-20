@@ -80,7 +80,7 @@ fn run_with_project(
     success: bool,
     environment: &[(&str, &std::ffi::OsStr)],
 ) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_celox-heliodor"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
     // Isolate the test from user diagnostics and codegen environment switches.
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("CELOX_") {
@@ -90,9 +90,10 @@ fn run_with_project(
     let output = command
         .envs(environment.iter().copied())
         .current_dir(working_dir)
+        .args(["run", "--report"])
         .arg("--project")
         .arg(project)
-        .args(["--test", "t", "--source-file", "src/test.veryl"])
+        .args(["--top", "t", "--source-file", "src/test.veryl"])
         .args(args)
         .output()
         .unwrap();
@@ -218,7 +219,7 @@ fn reuses_compilation_across_processes_and_invalidates_changed_inputs() {
         );
     }
     // Execution-only limits do not change the generated program.
-    cached(path, &["--tick-limit", "100"], "hit", true);
+    cached(path, &["--max-steps", "100"], "hit", true);
     for args in [
         vec!["--opt-level", "o0"],
         vec!["--four-state"],
@@ -731,4 +732,16 @@ module t {
     fs::remove_file(committed).unwrap();
     cached(path, &args, "miss", true);
     cached(path, &args, "hit", true);
+}
+
+#[test]
+fn cache_tracks_cli_parameter_overrides() {
+    let fixture = project(
+        "#[test(t)] module t #(param V: u32 = 1) { initial { $display(\"value=%0d\", V); $finish(); } }",
+    );
+    for (value, status) in [("1", "miss"), ("7", "miss"), ("7", "hit"), ("1", "hit")] {
+        let parameter = format!("V={value}");
+        let output = cached(fixture.path(), &["-G", &parameter], status, true);
+        assert!(output.contains(&format!("value={value}")), "{output}");
+    }
 }
