@@ -2381,18 +2381,19 @@ fn lower_module_with_overrides(
         )
     };
     mark_ff_event_domains(&event_vars, &mut variables);
-    let (initial_values, processes, wait_sites, nba_sites) = lower_initial_processes(
-        module,
-        &mut variables,
-        &mut name_to_id,
-        &constants,
-        &parameter_types,
-        four_state,
-        &mut runtime_event_sites,
-        &mut runtime_errors,
-        &mut extern_functions,
-        warnings,
-    )?;
+    let (initial_values, processes, wait_sites, nba_sites, host_request_sites) =
+        lower_initial_processes(
+            module,
+            &mut variables,
+            &mut name_to_id,
+            &constants,
+            &parameter_types,
+            four_state,
+            &mut runtime_event_sites,
+            &mut runtime_errors,
+            &mut extern_functions,
+            warnings,
+        )?;
     initial_memory_values.extend(initial_values);
 
     let shared_variables = variables
@@ -2493,6 +2494,7 @@ fn lower_module_with_overrides(
             counter_slots: Vec::new(),
             wait_sites,
             nba_sites,
+            host_request_sites,
             time_slot: name_to_id.get(TIME_SLOT).copied(),
         },
         variables,
@@ -3225,11 +3227,12 @@ fn lower_initial_processes(
         Vec<SymbolicProcess>,
         Vec<WaitSite<SourceVarId>>,
         Vec<NbaSite<SourceVarId>>,
+        Vec<celox_design::HostRequestSite<SourceVarId>>,
     ),
     sv::AnalyzerError,
 > {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -3284,7 +3287,7 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new(), Vec::new()));
+        return Ok((values, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut next_id = SourceVarId(
@@ -3342,6 +3345,7 @@ fn lower_initial_processes(
     pm.extern_functions = std::mem::take(extern_functions);
     let mut wait_sites = Vec::new();
     let mut nba_sites = Vec::new();
+    let mut host_request_sites = Vec::new();
     let processes = runtime
         .into_iter()
         .zip(slots)
@@ -3354,6 +3358,10 @@ fn lower_initial_processes(
             )?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
+            host_request_sites.extend(kernel.host_request_sites.into_iter().map(|mut site| {
+                site.process = index;
+                site
+            }));
             Ok(SymbolicProcess {
                 kernel: kernel.unit,
                 slots,
@@ -3363,7 +3371,13 @@ fn lower_initial_processes(
     *runtime_event_sites = std::mem::take(&mut pm.runtime_event_sites);
     *runtime_errors = std::mem::take(&mut pm.runtime_errors);
     *extern_functions = std::mem::take(&mut pm.extern_functions);
-    Ok((values, processes?, wait_sites, nba_sites))
+    Ok((
+        values,
+        processes?,
+        wait_sites,
+        nba_sites,
+        host_request_sites,
+    ))
 }
 
 fn lower_comb_processes(
@@ -5208,6 +5222,9 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         SystemFunction::Time
         | SystemFunction::Stime
         | SystemFunction::Random
+        | SystemFunction::DistUniform
+        | SystemFunction::TestPlusargs
+        | SystemFunction::ValuePlusargs
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
         | SystemFunction::Timeunit

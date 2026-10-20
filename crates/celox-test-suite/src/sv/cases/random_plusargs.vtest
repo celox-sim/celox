@@ -1,0 +1,114 @@
+(group random_plusargs (category sequential))
+
+; IEEE 1800-2023 20.14.2, Annex N: explicit seeds, inclusive bounds,
+; replay, full int interval, and degenerate bounds without advancing seed.
+(case dist_uniform_bounds_seed_and_replay
+  (source "dist_uniform.sv" #"
+    module Top(input logic clk, output logic ok);
+      int seed, replay, a, b, full_seed, full_value;
+      always_ff @(posedge clk) begin
+        seed = 17; replay = 17; ok = 1;
+        for (int i = 0; i < 3; i++) begin
+          a = $dist_uniform(seed, -17, 23);
+          b = $dist_uniform(replay, -17, 23);
+          ok &= a >= -17 && a <= 23 && a == b && seed == replay;
+        end
+        seed = 17;
+        a = $dist_uniform(seed, 7, 7);
+        ok &= a == 7 && seed == 17;
+        a = $dist_uniform(seed, 9, -9);
+        ok &= a == 9 && seed == 17;
+        seed = 17; full_seed = 17;
+        a = $dist_uniform(seed, -2147483648, 2147483647);
+        full_value = $dist_uniform(full_seed, -2147483648, 2147483647);
+        ok &= a == full_value && seed == full_seed;
+        seed = 17;
+        a = $dist_uniform(seed, 2147483640, 2147483647);
+        ok &= a >= 2147483640 && a <= 2147483647;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (tick clk)
+  (assert_eq ok 1))
+
+; No plusargs are configured by this portable case. Missing values preserve
+; their destinations, including calls used inside a larger expression.
+(case plusargs_absent_preserves_destination
+  (source "plusargs_absent.sv" #"
+    module Top(output logic ok);
+      int target, found;
+      initial begin
+        target = 123;
+        found = $value$plusargs("CELOX_ABSENT_UNIQUE=%d", target);
+        ok = found == 0 && target == 123 && !$test$plusargs("CELOX_ABSENT_UNIQUE");
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+; IEEE 1800-2023 5.9: string literals are unsigned packed bytes, including
+; escaped characters, when an integral expression consumes them.
+(case packed_string_literals_preserve_bytes_and_unsignedness
+  (source "packed_strings.sv" #"
+    module Top(output logic ok);
+      logic [23:0] bytes;
+      initial begin
+        bytes = {"A", "\101", "\x42"};
+        ok = bytes == 24'h414142 && "\n\t" == 16'h0a09;
+        ok &= "\377" > 0 && ("\377" >> 7) == 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq ok 1))
+
+(case dist_uniform_converts_wide_and_signed_seeds_to_int_formals
+  (source "dist_uniform_seed_width.sv" #"
+    module Top(input logic clk, output logic ok);
+      longint wide;
+      shortint narrow;
+      int reference_seed, a, b, c;
+      always_ff @(posedge clk) begin
+        wide = 64'h12345678ffffffff; narrow = -1; reference_seed = -1;
+        a = $dist_uniform(wide, -100, 100);
+        b = $dist_uniform(narrow, -100, 100);
+        c = $dist_uniform(reference_seed, -100, 100);
+        ok = a == b && b == c && wide[31:0] == reference_seed;
+        ok &= narrow == reference_seed[15:0];
+      end
+    endmodule
+  "#)
+  (top Top)
+  (tick clk)
+  (assert_eq ok 1))
+
+; Fixed Annex N reference vectors corroborated with Icarus. Checking only
+; bounds and replay would also accept an implementation that always returned
+; the lower bound.
+(case dist_uniform_reference_sequence
+  (source "dist_reference.sv" #"
+    module Top(output logic ok);
+      int seed, value;
+      initial begin
+        ok = 1; seed = 17;
+        value = $dist_uniform(seed, -17, 23);
+        ok &= value == -17 && seed == 1174174;
+        value = $dist_uniform(seed, -17, 23);
+        ok &= value == 19 && seed == -505354617;
+        value = $dist_uniform(seed, -17, 23);
+        ok &= value == -9 && seed == 861173020;
+        value = $dist_uniform(seed, -17, 23);
+        ok &= value == 17 && seed == -642763923;
+        seed = 0;
+        value = $dist_uniform(seed, 2147483640, 2147483647);
+        ok &= value == 2147483644 && seed == -1844104698;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

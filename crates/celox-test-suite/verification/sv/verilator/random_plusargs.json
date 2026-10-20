@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "$dist_uniform with longint or shortint seed variables generates C++ that passes cast temporaries to VL_DIST_UNIFORM(IData&); compilation fails because a non-const lvalue reference cannot bind to an rvalue. IEEE 1800-2023 20.14.2 permits an integral seed variable. Celox passes the unchanged width-conversion case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_dist_uniform_seed_width.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_dist_uniform_seed_width",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "$dist_uniform with longint or shortint seed variables generates C++ that passes cast temporaries to VL_DIST_UNIFORM(IData&); compilation fails because a non-const lvalue reference cannot bind to an rvalue. IEEE 1800-2023 20.14.2 permits an integral seed variable. Celox passes the unchanged width-conversion case.",
+        "upstream": []
+      },
+      "name": "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

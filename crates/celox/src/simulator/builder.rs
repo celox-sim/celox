@@ -1525,6 +1525,8 @@ mod host {
         pub allow_always_ff_function_effects: bool,
         /// Where the C functions of DPI-C imports are found.
         pub dpi: crate::DpiSymbols,
+        /// Ordered command-line arguments for SystemVerilog plusargs queries.
+        pub plusargs: Vec<String>,
     }
 
     /// A code-generated native program that has not been loaded into
@@ -1564,6 +1566,7 @@ mod host {
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
+        sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
         if let Some(path) = vcd_path {
             if sim.layout().unpacked_arrays.values().any(|array| {
                 !array.element_width.is_multiple_of(8)
@@ -1718,6 +1721,7 @@ mod host {
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
                 dpi: crate::DpiSymbols::default(),
+                plusargs: Vec::new(),
             }
         }
     }
@@ -1849,6 +1853,17 @@ mod host {
         #[cfg(test)]
         pub(crate) fn emit_triggers(mut self) -> Self {
             self.options.emit_triggers = true;
+            self
+        }
+
+        /// Set the ordered arguments queried by `$test$plusargs` and
+        /// `$value$plusargs`. A leading `+` is optional on each argument.
+        /// Queries currently require a timed procedural process, such as an
+        /// `initial` block executed by [`crate::Simulation`]. Value queries
+        /// support integral conversions and `%s` into packed integral targets;
+        /// real conversions and dynamic strings are unsupported.
+        pub fn plusargs(mut self, arguments: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            self.options.plusargs = arguments.into_iter().map(Into::into).collect();
             self
         }
 
@@ -2609,6 +2624,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2661,6 +2677,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2716,6 +2733,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2785,6 +2803,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -2992,6 +3011,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(
@@ -3180,6 +3200,7 @@ mod host {
                 sim.components
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
+                sim.plusargs = celox_runtime::plusargs::Plusargs(self.options.plusargs.clone());
                 sim.apply_initial_values();
                 sim.modify(|_| {}).map_err(|error| {
                     SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
@@ -3377,6 +3398,7 @@ mod host {
             );
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
+            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
                 let vcd_writer = crate::VcdWriter::new_with_time_precision(

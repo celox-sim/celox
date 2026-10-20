@@ -9,6 +9,7 @@
     "icarus/operators.json",
     "icarus/packed_structs.json",
     "icarus/procedural.json",
+    "icarus/random_plusargs.json",
     "icarus/review_regressions.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
