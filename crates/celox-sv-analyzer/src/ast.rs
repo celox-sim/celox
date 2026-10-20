@@ -1232,6 +1232,12 @@ impl Module {
                 }
             }
         }
+        procedural::timed_tasks::classify(
+            subroutines.iter().chain(imported.subroutines.iter()),
+            &comb_processes,
+            &mut ff_processes,
+            &mut initial_processes,
+        )?;
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -2190,6 +2196,7 @@ pub enum CombProcessKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    suspendable: bool,
     creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
@@ -2203,6 +2210,7 @@ impl FfProcess {
 
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            suspendable: false,
             creation_order: 0,
             events,
             body,

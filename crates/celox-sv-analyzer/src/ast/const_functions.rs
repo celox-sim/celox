@@ -301,6 +301,7 @@ impl ConstantFunctions {
                 name: name.clone(),
                 sensitivity_body: Vec::new(),
                 is_task: false,
+                automatic_locals: Vec::new(),
                 return_type: function.return_var.as_ref().map(|(_, ty)| ty.clone()),
                 return_var: function.return_var.as_ref().map(|(name, _)| name.clone()),
                 params: function

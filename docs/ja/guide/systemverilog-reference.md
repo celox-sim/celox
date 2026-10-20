@@ -39,7 +39,22 @@ outline: [2, 3]
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
 | initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
-| 関数 | `input` / `output` / `inout` 引数を持てる `function` と、タイミング制御のない `task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
+| 関数 | `input` / `output` / `inout` 引数を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
+
+### 時間待ちを含む task
+
+`initial` と通常の `always` から、`#delay`・`@(event)`・`wait (condition)` を
+含む task を呼び出せます。task のネストも可能です。呼び出しは呼び出し元の状態機械に
+インライン展開されます。エッジ待ちの `always` は task の完了後に次のエッジを待ちます。
+function・`always_comb`・`always @*`・`always_ff` からの時間待ち task 呼び出しは拒否します。
+
+automatic な引数とローカル変数は呼び出しごとに独立し、中断中も保持されます。
+module 内の static task の引数は共有されます。input／inout は呼び出し時にコピーされ、output／inout は
+task 終了時にコピー戻しされます（IEEE 1800-2023 13.3–13.3.2）。時間待ち task の
+static ローカル宣言は未対応のため、automatic を使ってください。
+package／`$unit` の static 引数を持つ時間待ち task と、static task 引数を読む `wait` 条件は、
+共有ストレージと変更通知に対応するまで拒否します。
+イベント式の制約は、プロセスに直接記述するイベント待ちと同じです。
 
 ### 組み込み関数とタスク
 
@@ -60,15 +75,13 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 その構文を追跡する issue の番号が含まれます。専用の issue がない構文は、フロントエンドの
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
-- クラス、タイミング制御を持つ task。
+- クラス。時間待ちを含む task の static ローカル宣言、再帰呼び出し、`ref` 引数。
 - interface のポート、`inout` / `ref` / 式を使う modport、virtual interface など。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
-- 振る舞い記述・検証向けの構文：タイミング制御を持つ `initial` ブロック、プロセスとして
-  実行される `initial` ブロック内のノンブロッキング代入、`final`、遅延と遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、クロックエッジ以外のイベント制御、
-  並行アサーション、`force` / `release`。
-- `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、`@*` 以外のレベルセンシティブなセンシティビティリスト、
-  ラッチを推論する不完全な組み合わせ代入。
+- 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
+  named event、`fork` / `join`、並行アサーション、`force` / `release`。
+- `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、ラッチを推論する不完全な組み合わせ代入。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
