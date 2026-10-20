@@ -1,0 +1,27 @@
+module Arrays (
+    a: input logic<5> [3],
+    wide: input logic<129> [2],
+    y: output logic<5> [3],
+    wide_y: output logic<129> [2],
+) {
+    assign y = a;
+    assign wide_y = wide;
+}
+
+interface ArrayBus {
+    var data: logic<5> [3];
+    modport sink { data: input, }
+}
+module InterfaceArrays (
+    bus: modport ArrayBus::sink,
+    y: output logic<5> [3],
+) {
+    assign y = bus.data;
+}
+
+module AnotherInterfaceArrays (
+    bus: modport ArrayBus::sink,
+    y: output logic<5> [3],
+) {
+    assign y = bus.data;
+}
