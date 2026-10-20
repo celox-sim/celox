@@ -161,6 +161,13 @@ host vCPU (`HELIODOR_CELOX_THREADS`, default `nproc`). Its own job keeps the
 comparison groups' time budgets unchanged. The dashboard shows it as
 "multi-threaded" next to single-threaded native execution.
 
+`celox-tiered` also uses `HELIODOR_CELOX_THREADS` on both AArch64 and x86-64.
+It starts on the interpreter and adopts native kernels with parallel execution
+enabled once compilation finishes. The scheduler can keep sequential kernels
+when parallel execution is not worthwhile. Set `HELIODOR_CELOX_THREADS=1` for
+the previous single-threaded tiered configuration. Earlier tiered measurements
+used one simulation thread; account for this when comparing historical timings.
+
 Recent complete eight-hart runs total 10–13 hours on x86-64 and 17–18 hours on
 AArch64. AArch64 four-hart runs total 5–7 hours, so splitting them into equivalent
 execution modes preserves useful same-CPU comparisons with time for builds.

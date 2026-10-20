@@ -119,7 +119,7 @@ Environment:
   HELIODOR_CELOX_TIMEOUT_MULTIPLIER
                        timeout Celox after N times the fastest successful Veryl baseline
   HELIODOR_CELOX_THREADS
-                       simulation threads of the celox-parallel runner (default: nproc)
+                       simulation threads of celox-parallel and celox-tiered (default: nproc)
   CELOX_OPT_LEVEL      O0, O1, or O2 for the Celox runner (default: O2)
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
@@ -1580,7 +1580,8 @@ run_one() {
             run_in_heliodor "$timeout_sec" "$log" \
                 "${celox_execution_command[@]}" \
                 --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}"
+                "${celox_args[@]}" --backend tiered --opt-level "${CELOX_OPT_LEVEL,,}" \
+                --threads "$HELIODOR_CELOX_THREADS"
             process_status="$?"
             ;;
         celox-interpreter)
@@ -1658,9 +1659,10 @@ run_one() {
                 result_valid=0
                 echo "error: $CELOX_RESULT_DIAGNOSTIC" >&2
             fi
-            if [[ "$runner" == celox-parallel && "$semantic_status" == pass ]] \
+            if [[ ( "$runner" == celox-parallel || "$runner" == celox-tiered ) \
+                && "$HELIODOR_CELOX_THREADS" -gt 1 && "$semantic_status" == pass ]] \
                 && ! grep -Fxq "CELOX_TEST_THREADS test=$test threads=$HELIODOR_CELOX_THREADS" "$log"; then
-                echo "error: celox-parallel log does not record $HELIODOR_CELOX_THREADS threads" >&2
+                echo "error: $runner log does not record $HELIODOR_CELOX_THREADS threads" >&2
                 semantic_status=invalid
                 result_valid=0
             fi
@@ -1733,6 +1735,11 @@ publish_result() {
 run_all() {
     validate_compile_only_runners || return "$?"
     validate_native_image_mode || return "$?"
+    if runner_enabled celox-tiered \
+        && { ! is_uint "$HELIODOR_CELOX_THREADS" || ((HELIODOR_CELOX_THREADS < 1)); }; then
+        echo "error: HELIODOR_CELOX_THREADS must be at least 1 for celox-tiered" >&2
+        return 2
+    fi
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
