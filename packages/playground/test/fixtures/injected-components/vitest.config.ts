@@ -1,6 +1,6 @@
-import celox from "@celox-sim/vite-plugin";
 import { resolve } from "node:path";
-import type { Plugin } from "vite";
+import celox from "@celox-sim/vite-plugin";
+import { normalizePath, type Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
 const virtualTbStep: Plugin = {
@@ -14,7 +14,7 @@ const virtualTbStep: Plugin = {
 };
 
 export default defineConfig({
-	root: import.meta.dirname,
+	root: process.env.CELOX_TEST_EXTERNAL_VITE_ROOT || import.meta.dirname,
 	resolve: {
 		alias: {
 			"@fixture/tb-helper": resolve(
@@ -26,8 +26,11 @@ export default defineConfig({
 	plugins: [
 		virtualTbStep,
 		celox({
+			projectRoot: import.meta.dirname,
 			testbenchComponents: "./tb-components.ts",
 		}),
 	],
-	test: { include: ["entry.test.ts"] },
+	test: {
+		include: [normalizePath(resolve(import.meta.dirname, "entry.test.ts"))],
+	},
 });
