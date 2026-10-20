@@ -328,6 +328,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    default: Option<ConstExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +385,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            default: None,
         }
     }
 
@@ -401,6 +403,15 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
+        self.default = default;
+        self
+    }
+
+    pub fn default(&self) -> Option<&ConstExpr> {
+        self.default.as_ref()
     }
 }
 

@@ -3,6 +3,10 @@ use super::*;
 // IEEE 1800-2023 11.5.1: the index operator and declaration direction
 // independently determine the endpoints of the selected range.
 sv_backends! {
+    fn procedural_loop_writes_memory_word_part_selects(sim) {
+        @case "indexed_select::procedural_loop_writes_memory_word_part_selects";
+    }
+
     fn constant_parameter_initializers_preserve_inferred_dimensions(sim) {
         @case "indexed_select::constant_parameter_initializers_preserve_inferred_dimensions";
     }
@@ -278,17 +282,9 @@ fn rejects_selected_widths_that_are_nonpositive() {
     }
 }
 
-#[test]
-fn rejects_indexed_selections_in_unlowered_constant_contexts() {
-    for declaration in [
-        "logic [P[4 +: 4]-1:0] y; assign y = '0;",
-        "typedef enum logic [3:0] { E = P[4 +: 4] } nibble; nibble y; assign y = E;",
-    ] {
-        let source =
-            format!("module Top; localparam logic [7:0] P = 8'hab; {declaration} endmodule");
-        Simulator::from_sv_sources(vec![(&source, Path::new("unlowered_constant.sv"))], "Top")
-            .build_cranelift()
-            .expect_err("unlowered indexed constants must be rejected");
+sv_backends! {
+    fn indexed_selections_in_constant_declaration_contexts(sim) {
+        @case "indexed_select::indexed_selections_in_constant_declaration_contexts";
     }
 }
 

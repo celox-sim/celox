@@ -54,4 +54,6 @@ pub use lowering::{
     prepare_external_hierarchy_with_foreign_resolver_with_options, schedule_sources_with_options,
 };
 
-pub use lowering::schedule_sources_with_force_signals;
+pub use lowering::{
+    schedule_sources_with_force_signals, schedule_sources_with_parameter_expressions,
+};

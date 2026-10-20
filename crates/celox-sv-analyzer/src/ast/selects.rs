@@ -979,8 +979,45 @@ pub(super) fn indexed_select_bounds_values(
         .unwrap_or(false);
     // The base is self-determined; endpoint arithmetic must not inherit its
     // unsigned type or truncate a carry across the base expression's width.
-    let base = eval_ast_const_expr(state, &base, &dimensions.const_env)
-        .ok_or_else(|| unsupported("indexed part-select start"))?;
+    let Some(base_value) = eval_ast_const_expr(state, &base, &dimensions.const_env) else {
+        // A procedural loop index is not constant while its body is bound.
+        // Keep the endpoints in declared coordinates so normal memory range
+        // flattening retains the element offset. Lowering can then unroll the
+        // loop before requiring a constant selection inside each memory word.
+        let memory_word = name
+            .and_then(|name| dimensions.get(name))
+            .is_some_and(|shape| {
+                !shape.unpacked.is_empty()
+                    && index_count == shape.unpacked.len()
+                    && shape.packed.len() == 1
+            });
+        let ty = self_determined_type(state, &base, dimensions).filter(|ty| ty.0 <= 32);
+        let Some(ty) = ty.filter(|_| memory_word) else {
+            return Err(unsupported("indexed part-select start"));
+        };
+        let base = ConstExpr::Resize {
+            expr: Box::new(self_determined_index(state, base, dimensions)),
+            width: 64,
+            signed: ty.1,
+        };
+        // Zero-extend unsigned indices before using signed endpoint arithmetic.
+        let base = ConstExpr::Resize {
+            expr: Box::new(base),
+            width: 64,
+            signed: true,
+        };
+        let other = ConstExpr::Binary {
+            left: Box::new(base.clone()),
+            op: if plus { BinaryOp::Add } else { BinaryOp::Sub },
+            right: Box::new(ConstExpr::Literal(format!("64'sd{}", width - 1))),
+        };
+        return Ok(if plus == ascending {
+            (base, other)
+        } else {
+            (other, base)
+        });
+    };
+    let base = base_value;
     let overflow = || unsupported("indexed part-select bounds");
     let offset = width - 1;
     let other = if plus {
@@ -1315,7 +1352,11 @@ fn self_determined_type(
             Some((literal.width, literal.signed))
         }
         ConstExpr::Ident(name) => {
-            let variable = dimensions.get(name)?;
+            let Some(variable) = dimensions.get(name) else {
+                return dimensions::parameter_type_from_const_env(const_env, name)
+                    .map(|ty| (ty.width, ty.signed))
+                    .or_else(|| const_env.contains_key(name).then_some((32, true)));
+            };
             if !variable.unpacked.is_empty() {
                 return None;
             }

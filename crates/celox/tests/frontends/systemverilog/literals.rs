@@ -28,6 +28,10 @@ fn simulates_systemverilog_literals_with_widths_and_masks() {
 }
 
 sv_backends! {
+    fn string_literals_are_unsigned_packed_bytes(sim) {
+        @case "literals::string_literals_are_unsigned_packed_bytes";
+    }
+
     fn simulates_systemverilog_unbased_unsized_literals(sim) {
         @case "literals::simulates_systemverilog_unbased_unsized_literals";
     }

@@ -87,3 +87,61 @@ fn run_and_build_share_project_target_and_cli_diagnostic_precedence() {
         assert!(!denied.status.success());
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn aggregate_input_defaults_can_be_enabled_with_diagnostic_policy() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("top.sv"),
+        r#"
+        module Child(input logic [7:0] a[2]='{8'ha5,8'h5a}, output logic [15:0] y);
+            assign y={a[0],a[1]};
+        endmodule
+        module Top(output logic [15:0] omitted, connected);
+            logic [7:0] a[2];
+            assign a[0]=8'h12;
+            assign a[1]=8'h34;
+            Child c0(.y(omitted));
+            Child c1(.a(a),.y(connected));
+            initial begin #1;
+                assert(omitted===16'ha55a && connected===16'h1234) else $fatal(1,"defaults");
+                $display("ok"); $finish;
+            end
+        endmodule
+    "#,
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("celox.toml"),
+        "sources=['top.sv']\ntop='Top'\n[diagnostics]\nunpacked_port_default='warn'\n",
+    )
+    .unwrap();
+    let run = |overrides: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_celox"))
+            .current_dir(project.path())
+            .arg("run")
+            .args(overrides)
+            .output()
+            .unwrap()
+    };
+    let warned = run(&[]);
+    assert!(
+        warned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warned.stderr)
+    );
+    assert_eq!(warned.stdout, b"ok\n");
+    assert!(String::from_utf8_lossy(&warned.stderr).contains("unpacked_port_default"));
+    let allowed = run(&["--diagnostic", "unpacked_port_default=allow"]);
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert_eq!(allowed.stdout, b"ok\n");
+    assert!(!String::from_utf8_lossy(&allowed.stderr).contains("unpacked_port_default"));
+    let rejected = run(&["--diagnostic", "unpacked_port_default=error"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unpacked_port_default"));
+}

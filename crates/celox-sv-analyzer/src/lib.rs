@@ -28,7 +28,8 @@ pub mod system_functions;
 pub mod typecheck;
 
 pub use ast::interfaces::{
-    InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces, plan_interfaces_with_member_paths,
+    InterfaceMemberPath, InterfaceMemberPaths, NativeInterfacePlan, plan_interfaces,
+    plan_interfaces_with_member_paths,
 };
 pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,

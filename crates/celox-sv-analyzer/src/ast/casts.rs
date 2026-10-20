@@ -73,24 +73,8 @@ pub(super) fn runtime_cast_target_expr(
             two_state,
         } => (target, numeric_size, two_state),
     };
-    let operand_signed = expr_signedness_with_return_types(
-        &expr,
-        &packed_dimensions.expression_signedness,
-        &packed_dimensions.functions,
-        &packed_dimensions.function_return_types,
-    )
-    .or_else(|| {
-        // A genvar or an untyped constant is an `int`.
-        let Expr::Ident(name) = &expr else {
-            return None;
-        };
-        const_env.contains_key(name).then(|| {
-            parameter_types_from_const_env(const_env)
-                .get(name)
-                .is_none_or(|r#type| r#type.signed)
-        })
-    })
-    .ok_or_else(|| unsupported("cast of an operand whose signedness is unknown"))?;
+    let operand_signed = dimensions::expression_signedness(&expr, packed_dimensions, const_env)
+        .ok_or_else(|| unsupported("cast of an operand whose signedness is unknown"))?;
     let expr = if two_state {
         Expr::Unary {
             op: UnaryOp::ToTwoState,

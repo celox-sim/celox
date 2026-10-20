@@ -1,6 +1,40 @@
 use super::*;
 
 sv_backends! {
+    fn generated_constants_select_words_from_128_bit_parameters_at_o2(sim) {
+        @setup {
+            // Icarus 13 rejects packed array parameters; the same source is
+            // independently checked with Verilator.
+            let source = r#"
+    module Top #(parameter logic [3:0][31:0] WORDS={4{32'd4}})(
+      output logic [15:0] widths, output logic [31:0] first,last,edge_first,edge_last);
+      for(genvar i=0;i<4;i=i+1) begin:g
+        localparam C=$clog2(WORDS[i]+1);
+        assign widths[i*4 +: 4]=C;
+      end
+      localparam FIRST=WORDS[0], LAST=WORDS[3];
+      localparam logic [3:0][31:0] EDGE=128'h80000000000000040000000480000000;
+      localparam E0=EDGE[0], E3=EDGE[3];
+      assign edge_first=E0;
+      assign edge_last=E3;
+      assign first=FIRST;
+      assign last=LAST;
+    endmodule
+  "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("constant_word.sv"))], "Top")
+            .opt_level(celox::OptLevel::O2);
+        assert_eq!(sim.get(sim.signal("widths")), BigUint::from(0x3333u32));
+        assert_eq!(sim.get(sim.signal("first")), BigUint::from(4u8));
+        assert_eq!(sim.get(sim.signal("last")), BigUint::from(4u8));
+        assert_eq!(sim.get(sim.signal("edge_first")), BigUint::from(0x80000000u32));
+        assert_eq!(sim.get(sim.signal("edge_last")), BigUint::from(0x80000000u32));
+    }
+
+    fn generate_local_typedefs_keep_lexical_scope(sim) {
+        @case "generate::generate_local_typedefs_keep_lexical_scope";
+    }
+
     fn bits_of_generate_local_array_element_localparam(sim) {
         @case "generate::bits_of_generate_local_array_element_localparam";
     }
@@ -235,4 +269,66 @@ fn keeps_four_state_generate_function_guards_nonexhaustive() {
             .contains("latch inference inside always_comb"),
         "{error}"
     );
+}
+
+// Icarus 13 rejects enum labels inside generate scopes and crashes while
+// elaborating this source. Keep O2 isolation coverage in the API harness;
+// the portable suite separately checks generated typedef layouts.
+sv_backends! {
+    fn generated_enum_and_shadowed_type_scopes_survive_o2(sim) {
+        @setup {
+            let source=r#"
+        module Top(input logic[7:0] a, output logic[7:0] y,z,widths,
+            output logic[3:0] root_value, output logic[7:0] parent_value);
+            typedef logic[3:0] T;
+            T root;
+            assign root=a[3:0];
+            assign root_value=root;
+            if(1) begin:left
+                typedef logic[7:0] T;
+                typedef enum logic[1:0] { OFF=0, ON=3 } state_t;
+                T temp;
+                state_t state;
+                assign state=ON;
+                assign temp=a;
+                assign y=(state==3) ? temp : 0;
+                if(1) begin:inner
+                    typedef logic[1:0] T;
+                    T tiny;
+                    assign tiny=a[1:0];
+                end
+                T after_inner;
+                assign after_inner=a;
+                assign parent_value=after_inner;
+            end
+            if(1) begin:right
+                typedef logic[3:0] T;
+                typedef enum logic[1:0] { OFF=1, ON=2 } state_t;
+                T temp;
+                state_t state;
+                assign state=ON;
+                assign temp=a[3:0];
+                assign z=(state==2) ? {4'hc,temp} : 0;
+            end
+            for(genvar i=0;i<2;i=i+1) begin:lanes
+                typedef logic[i+2:0] lane_t;
+                lane_t temp;
+                assign temp=a;
+                assign widths[4*i+:4]=$bits(temp);
+            end
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(source,Path::new("generated_enum.sv"))],"Top")
+            .opt_level(celox::OptLevel::O2);
+        let a=sim.signal("a");
+        for value in [0xa7u8,0x5c] {
+            sim.modify(|io| io.set(a,value)).unwrap();
+            assert_eq!(sim.get(sim.signal("y")),BigUint::from(value));
+            assert_eq!(sim.get(sim.signal("z")),BigUint::from(0xc0|(value&15)));
+            assert_eq!(sim.get(sim.signal("parent_value")),BigUint::from(value));
+            assert_eq!(sim.get(sim.signal("root_value")),BigUint::from(value&15));
+            assert_eq!(sim.get(sim.signal("widths")),BigUint::from(0x43u8));
+        }
+    }
 }
