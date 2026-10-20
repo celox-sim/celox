@@ -1,1 +1,3 @@
 Follow the rebased and reviewed latch implementation while preserving common diagnostic policy bindings.
+
+Follow the reviewed latch core, document the verified sensitivity distinctions and record fresh native/WASI validation.
