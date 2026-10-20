@@ -1,0 +1,1 @@
+Reproduced the remaining warm-cache failure on native Windows. Preserve absent optional configuration watch identities and validate the complete Windows CI JS test command.
