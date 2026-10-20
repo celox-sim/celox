@@ -1,5 +1,34 @@
 (group hierarchy (category hierarchy))
 
+(case input_port_defaults_use_child_scope_and_only_omitted_connections
+  (source "default_input.sv" #"
+        module Child #(parameter D=8'ha5)(output logic [7:0] y,
+            input logic [7:0] a=D);
+            assign y=a;
+        endmodule
+        module Fill(output logic [7:0] y, input logic [7:0] a='1);
+            assign y=a;
+        endmodule
+        module Top #(parameter D=0)(input logic [7:0] a,
+            output logic [7:0] omitted, open, connected, positional, fill);
+            Child #(.D(8'h96)) c0(.y(omitted));
+            Child c1(.a(),.y(open));
+            Child c2(.a(a),.y(connected));
+            Child c3(positional);
+            Fill c4(.y(fill));
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0))
+  (assert_eq omitted 0x96)
+  (assert_eq open 0xa5)
+  (assert_eq connected 0)
+  (assert_eq positional 0xa5)
+  (assert_eq fill 0xff)
+  (modify (set a 0x5a))
+  (assert_eq connected 0x5a)
+  (assert_eq omitted 0x96))
+
 (case drives_omitted_and_open_child_inputs_with_z
   (four_state)
   (source "open_input.sv" #"
@@ -558,3 +587,80 @@
   (assert_eq override_var 5)
   (assert_eq override_type 15)
   (assert_eq override_array 15))
+
+(case concatenated_parameter_actuals_use_each_parent_specialization
+  (source "concat_actual.sv" #"
+        module Child #(parameter P=0)(output logic [31:0] y);
+            assign y=P;
+        endmodule
+        module Parent #(parameter N=1, parameter logic[7:0] V=8'ha5)(
+            output logic[31:0] repeated, combined);
+            Child #(.P({N{V}})) c0(repeated);
+            Child #(.P({V,8'(N)})) c1(combined);
+        endmodule
+        module Top(output logic[31:0] a, b, c, d);
+            Parent #(.N(1),.V(8'h12)) p0(a,b);
+            Parent #(.N(3),.V(8'hc3)) p1(c,d);
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq a 0x12)
+  (assert_eq b 0x1201)
+  (assert_eq c 0xc3c3c3)
+  (assert_eq d 0xc303))
+
+(case conditional_parameter_actuals_follow_parent_specialization
+  (source "conditional_actual.sv" #"
+    module Child #(parameter P=0)(output logic [31:0] y);
+      assign y=P;
+    endmodule
+    module Parent #(parameter N=1)(output logic [31:0] y, z);
+      Child #(.P(N > 2 ? N+10 : 3)) c0(y);
+      Child #(.P(N > 2 ? (N > 4 ? 8 : 7) : 6)) c1(z);
+    endmodule
+    module Top(output logic [31:0] a,b,c,d);
+      Parent p0(a,b);
+      Parent #(.N(4)) p1(c,d);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 3)
+  (assert_eq b 6)
+  (assert_eq c 14)
+  (assert_eq d 7))
+
+(case generated_parameter_part_select_actuals
+  (source "selected_actual.sv" #"
+    module Child #(parameter P=0)(output logic [1:0] y);
+      assign y=P;
+    endmodule
+    module Parent #(parameter logic [7:0] P=8'he4)(output logic [7:0] y);
+      for(genvar i=0;i<4;i=i+1) begin:g
+        Child #(.P(P[i*2 +: 2])) c(y[i*2 +: 2]);
+      end
+    endmodule
+    module Top(output logic [7:0] a,b);
+      Parent p0(a);
+      Parent #(.P(8'h1b)) p1(b);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 0xe4)
+  (assert_eq b 0x1b))
+
+(case sized_parameter_actuals_follow_parent_specialization
+  (source "sized_actual.sv" #"
+    module Child #(parameter P=0)(output logic [31:0] y);
+      assign y=P;
+    endmodule
+    module Parent #(parameter N=8)(output logic [31:0] y);
+      Child #(.P(N'(16'hfedc))) c(y);
+    endmodule
+    module Top(output logic [31:0] a,b);
+      Parent p0(a);
+      Parent #(.N(12)) p1(b);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a 0xdc)
+  (assert_eq b 0xedc))

@@ -1,4 +1,20 @@
 sv_backends! {
+    fn constant_functions_inside_selected_parameter_initializers(sim) {
+        @case "procedural::constant_functions_inside_selected_parameter_initializers";
+    }
+
+    fn constant_functions_preserve_concat_operand_widths(sim) {
+        @case "procedural::constant_functions_preserve_concat_operand_widths";
+    }
+
+    fn static_function_scratch_arrays_are_filled_before_reads(sim) {
+        @case "procedural::static_function_scratch_arrays_are_filled_before_reads";
+    }
+
+    fn static_function_result_filled_by_constant_loops(sim) {
+        @case "procedural::static_function_result_filled_by_constant_loops";
+    }
+
     fn typedef_declaration_initializers(sim) {
         @case "procedural::typedef_declaration_initializers";
     }

@@ -47,3 +47,30 @@
   (let mask (xmask (get y)))
   (assert (== value 0b1011))
   (assert (== mask 0b0011)))
+
+(case string_literals_are_unsigned_packed_bytes
+  (source "string_literals.sv" #"
+        module Child #(parameter P="fallback")(output logic [63:0] y);
+            assign y=P;
+        endmodule
+        module Top #(parameter VENDOR="XILINX")(
+            output logic matched, output logic [63:0] forwarded,
+            output logic [47:0] escaped, output logic [23:0] underscore,
+            output logic [7:0] empty_width, output logic [15:0] extended);
+            localparam TEXT="A_B";
+            localparam COPY=TEXT;
+            assign matched=(VENDOR == "XILINX") && (COPY == "A_B");
+            Child #(.P(VENDOR)) child(forwarded);
+            assign escaped={"\101", "\x42", "\n", "\t", "\\", "\""};
+            assign underscore=COPY;
+            assign empty_width=$bits("");
+            assign extended="\200";
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq matched 1)
+  (assert_eq forwarded 0x58494c494e58)
+  (assert_eq escaped 0x41420a095c22)
+  (assert_eq underscore 0x415f42)
+  (assert_eq empty_width 8)
+  (assert_eq extended 0x80))

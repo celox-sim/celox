@@ -2,7 +2,7 @@
 
 use super::*;
 
-type Key = [usize; 5];
+type Key = [usize; 6];
 
 pub(in crate::ast) struct ScopeViews<'a> {
     dimensions: &'a PackedDimensions,
@@ -60,6 +60,7 @@ fn key(item: &Item) -> Key {
         item.names.identity(),
         Arc::as_ptr(&item.shadowed) as usize,
         Arc::as_ptr(&item.parameter_dimensions) as usize,
+        item.qualified_types.identity(),
     ]
 }
 
@@ -109,7 +110,7 @@ mod tests {
         );
         let inherited = HashMap::from_iter([("P".into(), Expr::Literal("99".into()))]);
         let original = &active[0];
-        let mut changed: Vec<_> = (0..5).map(|_| original.clone()).collect();
+        let mut changed: Vec<_> = (0..6).map(|_| original.clone()).collect();
         changed[0].env.insert("P".into(), 8);
         changed[1]
             .literals
@@ -117,14 +118,24 @@ mod tests {
         changed[2].names.insert("alias".into(), "g.x".into());
         Arc::make_mut(&mut changed[3].shadowed).insert("extra".into());
         Arc::make_mut(&mut changed[4].parameter_dimensions).clear();
+        changed[5]
+            .qualified_types
+            .insert("g.T".into(), Type::implicit());
         let mut views = ScopeViews::with_literals(&dimensions, &inherited);
         for item in active.iter().chain(&changed) {
             let (cached_dimensions, cached_literals) = views.get(item);
             assert_eq!(cached_dimensions, &item.dimensions(&dimensions));
             assert_eq!(&**cached_literals, &item.parameter_literals(&inherited));
         }
-        assert_eq!(views.views.len(), 8);
-        assert_eq!(views.literal_views.len(), 8);
+        assert!(!views.dimensions(original).type_aliases.contains_key("g.T"));
+        assert!(
+            views
+                .dimensions(&changed[5])
+                .type_aliases
+                .contains_key("g.T")
+        );
+        assert_eq!(views.views.len(), 9);
+        assert_eq!(views.literal_views.len(), 9);
         // Collector inputs also bound the cache: a different inherited context
         // must never see the materialization from the preceding collector.
         let other = HashMap::from_iter([("P".into(), Expr::Literal("7".into()))]);

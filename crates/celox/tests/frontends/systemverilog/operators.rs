@@ -1,4 +1,20 @@
 sv_backends! {
+    fn size_casts_resolve_generated_locals_and_parameter_expressions(sim) {
+        @case "operators::size_casts_resolve_generated_locals_and_parameter_expressions";
+    }
+
+    fn parameter_size_casts_in_generate_conditions(sim) {
+        @case "operators::parameter_size_casts_in_generate_conditions";
+    }
+    fn forwards_replicated_parameter_values(sim) {
+        @case "operators::forwards_replicated_parameter_values";
+    }
+    fn zero_count_replications_preserve_unknown_bits(sim) {
+        @case "operators::zero_count_replications_preserve_unknown_bits";
+    }
+    fn zero_count_replications_preserve_concat_bits(sim) {
+        @case "operators::zero_count_replications_preserve_concat_bits";
+    }
     fn multidimensional_packed_declared_ranges_four_state(sim) { @case "operators::multidimensional_packed_declared_ranges_four_state"; }
     fn multidimensional_packed_declared_ranges(sim) { @case "operators::multidimensional_packed_declared_ranges"; }
     fn multidimensional_packed_declared_range_writes(sim) { @case "operators::multidimensional_packed_declared_range_writes"; }

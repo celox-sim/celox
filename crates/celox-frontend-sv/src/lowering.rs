@@ -128,7 +128,7 @@ pub(crate) struct LoweredSvModule {
 #[derive(Clone)]
 struct AnalyzedSvModule {
     name: String,
-    interface_member_paths: HashMap<String, Vec<String>>,
+    interface_member_paths: HashMap<String, sv::InterfaceMemberPath>,
     source: std::rc::Rc<sv::ParsedSource>,
     implicit_nets_allowed: bool,
     /// The positional interface of every module in all sources, used to bind
@@ -1789,6 +1789,49 @@ pub fn schedule_sources_with_force_signals(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
+    let parameters = parameter_overrides
+        .iter()
+        .map(|(name, value)| (name.clone(), sv::ir::ConstExpr::Literal(value.to_string())))
+        .collect::<Vec<_>>();
+    schedule_sources_with_parameter_expressions(
+        sources,
+        top,
+        &parameters,
+        ignored_loops,
+        true_loops,
+        four_state,
+        parallel,
+        trace_options,
+        trace,
+        warnings,
+        analysis_options,
+        force_signals,
+    )
+}
+
+/// Schedule a design with typed SV constant expressions as top parameters.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_sources_with_parameter_expressions(
+    sources: &[(&str, &Path)],
+    top: &str,
+    parameter_overrides: &[(String, sv::ir::ConstExpr)],
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    parallel: &celox_frontend_core::ParallelScheduleOptions,
+    trace_options: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+    warnings: &mut Vec<crate::FrontendWarning>,
+    analysis_options: sv::AnalysisOptions,
+    force_signals: &[String],
+) -> Result<ScheduledRtlOutput, FrontendError> {
     let mut found = Vec::new();
     let scheduled = schedule_sources_collecting(
         sources,
@@ -1813,7 +1856,7 @@ pub fn schedule_sources_with_force_signals(
 fn schedule_sources_collecting(
     sources: &[(&str, &Path)],
     top: &str,
-    parameter_overrides: &[(String, u64)],
+    parameter_overrides: &[(String, sv::ir::ConstExpr)],
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -1845,7 +1888,7 @@ fn schedule_sources_collecting(
             .iter()
             .map(|(name, value)| LoweredSvParameterOverride {
                 name: name.clone(),
-                value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
+                value: Some(value.clone()),
                 bound_type: None,
                 bound_pattern: None,
             })
@@ -1990,7 +2033,13 @@ fn restore_interface_member_paths(module: &mut SimModule, source: &AnalyzedSvMod
                 source
                     .interface_member_paths
                     .get(segment)
-                    .cloned()
+                    .and_then(|path| path.restore(segment))
+                    .or_else(|| {
+                        source
+                            .interface_member_paths
+                            .values()
+                            .find_map(|path| path.restore(segment))
+                    })
                     .unwrap_or_else(|| vec![segment.clone()])
             })
             .collect();
@@ -2091,7 +2140,7 @@ fn specialize_module(
             module
                 .interface_member_paths
                 .iter()
-                .find(|(_, segments)| segments.join(".") == *path)
+                .find(|(_, segments)| segments.segments.join(".") == *path)
                 .map_or_else(|| path.clone(), |(flat, _)| flat.clone())
         })
         .collect::<Vec<_>>();
@@ -2313,7 +2362,38 @@ fn lower_module_with_overrides(
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
-        if port.is_net() || type_info.is_4state {
+        if let Some(default) = port.default() {
+            if !variable.array_dims.is_empty() {
+                warnings.push((
+                    crate::FrontendWarningKind::UnpackedPortDefault {
+                        module: name.clone(),
+                        port: port.name().to_string(),
+                    },
+                    None,
+                ));
+            }
+            let literal = sv::typecheck::context_size_const_integral_literal(
+                default,
+                &constants,
+                &parameter_types,
+                type_info.width,
+                type_info.signed,
+            )
+            .ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "nonconstant input port default `{}`",
+                    port.name()
+                ))
+            })?;
+            initial_memory_values.push(InitialStateValue {
+                address: id,
+                data: InitialStateData::Packed {
+                    value: literal.value,
+                    mask: literal.mask,
+                    written_mask: (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8),
+                },
+            });
+        } else if port.is_net() || type_info.is_4state {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
             let value = if port.is_net() {
                 BigUint::default()
@@ -2381,9 +2461,66 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
+    // Retain integral parameters for external observation, without adding them
+    // to name_to_id: HDL expressions must still fold parameter references as
+    // constants rather than introduce runtime loads.
+    for parameter in module.parameters() {
+        let Some(width) = parameter.resolved_width().filter(|width| *width > 0) else {
+            continue;
+        };
+        let signed = parameter.resolved_signed().unwrap_or(false);
+        let expr = parameter.value().cloned().or_else(|| {
+            constants
+                .get(parameter.name())
+                .copied()
+                .map(const_expr_from_i128)
+        });
+        let Some(literal) = expr.and_then(|expr| {
+            sv::typecheck::context_size_const_integral_literal(
+                &expr,
+                &constants,
+                &parameter_types,
+                width,
+                signed,
+            )
+        }) else {
+            continue;
+        };
+        let id = next_var_id(&mut next_id);
+        let written_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        initial_memory_values.push(InitialStateValue {
+            address: id,
+            data: InitialStateData::Packed {
+                value: literal.value,
+                mask: literal.mask,
+                written_mask,
+            },
+        });
+        variables.insert(
+            id,
+            SvVariable {
+                path: vec![parameter.name().to_string()],
+                width,
+                signed,
+                is_4state: true,
+                packed_ranges: vec![(width as i128 - 1, 0)],
+                array_dims: Vec::new(),
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Parameter,
+                type_kind: PortTypeKind::Logic,
+                source: None,
+                hidden: false,
+                force_control: None,
+            },
+        );
+    }
+
     let forceable = variables
         .iter()
         .filter_map(|(&id, var)| {
+            if var.kind == VariableKind::Parameter {
+                return None;
+            }
             let name = &var.path[0];
             force_signals.iter().any(|path| name == path).then_some(id)
         })
@@ -3914,6 +4051,39 @@ fn build_instance_glue(
                         ),
                     )?;
                     (expr, sources, source_ids)
+                } else if let Some(default) = child
+                    .source
+                    .ports()
+                    .iter()
+                    .find(|port| port.name() == formal)
+                    .and_then(|port| port.default())
+                {
+                    // IEEE 1800-2023 23.2.2.4: defaults belong to the child's
+                    // parameter scope, and apply only to omitted connections.
+                    let literal = sv::typecheck::context_size_const_integral_literal(
+                        default,
+                        &child.constants,
+                        &child.parameter_types,
+                        width,
+                        child_var.signed,
+                    )
+                    .ok_or_else(|| {
+                        ParserError::illegal_context(
+                            "systemverilog input port default",
+                            formal.clone(),
+                            None,
+                        )
+                    })?;
+                    (
+                        arena.alloc(SLTNode::Constant(
+                            literal.value,
+                            literal.mask,
+                            width,
+                            child_var.signed,
+                        ))?,
+                        HashSet::default(),
+                        Vec::new(),
+                    )
                 } else {
                     let unknown_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                     (
@@ -4387,7 +4557,9 @@ fn lower_glue_parent_expr(
                         )?
                     };
                 let width = celox_slt::get_width(node, arena);
-                nodes.push((node, width));
+                if width != 0 {
+                    nodes.push((node, width));
+                }
                 sources.extend(part_sources);
                 source_ids.extend(part_source_ids);
             }
@@ -5574,7 +5746,9 @@ fn lower_expr_with_context(
                     None,
                 )?;
                 let width = celox_slt::get_width(node, arena);
-                nodes.push((node, width));
+                if width != 0 {
+                    nodes.push((node, width));
+                }
                 sources.extend(part_sources);
             }
             Some((arena.alloc(SLTNode::Concat(nodes)).ok()?, sources))

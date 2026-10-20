@@ -3073,7 +3073,41 @@ pub fn plan_interfaces(
 }
 
 /// Original paths of flattened interface fields, indexed by bound module name.
-pub type InterfaceMemberPaths = HashMap<String, HashMap<String, Vec<String>>>;
+pub type InterfaceMemberPaths = HashMap<String, HashMap<String, InterfaceMemberPath>>;
+
+/// Provenance for a field flattened from an interface instance or instance array.
+#[derive(Clone, Debug)]
+pub struct InterfaceMemberPath {
+    pub segments: Vec<String>,
+    pub arrayed: bool,
+}
+
+impl InterfaceMemberPath {
+    /// Recover element indices only for a source-declared interface array.
+    pub fn restore(&self, flattened: &str) -> Option<Vec<String>> {
+        let [handle, member] = self.segments.as_slice() else {
+            return None;
+        };
+        if flattened == format!("{handle}{SEPARATOR}{member}") {
+            return Some(self.segments.clone());
+        }
+        if !self.arrayed {
+            return None;
+        }
+        let indexed = flattened.strip_suffix(&format!("{SEPARATOR}{member}"))?;
+        let mut indices = indexed.strip_prefix(handle)?;
+        if indices.is_empty() {
+            return None;
+        }
+        while !indices.is_empty() {
+            let rest = indices.strip_prefix('[')?;
+            let (index, tail) = rest.split_once(']')?;
+            index.parse::<i128>().ok()?;
+            indices = tail;
+        }
+        Some(vec![indexed.to_string(), member.clone()])
+    }
+}
 
 /// Build the interface plan and retain source member paths for reflection.
 pub fn plan_interfaces_with_member_paths(
@@ -3420,7 +3454,10 @@ pub fn plan_interfaces_with_member_paths(
                 for member in &design.interfaces[&handle.interface].members {
                     member_paths.insert(
                         format!("{handle_name}{SEPARATOR}{}", member.name),
-                        vec![handle_name.clone(), member.name.clone()],
+                        InterfaceMemberPath {
+                            segments: vec![handle_name.clone(), member.name.clone()],
+                            arrayed: handle.arrayed,
+                        },
                     );
                 }
             }

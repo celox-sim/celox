@@ -108,18 +108,21 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let mut ports = Vec::new();
         for port in module.ports() {
             port_table.insert(module, port)?;
-            ports.push(ir::Port::new(
-                port.name().to_string(),
-                port.direction().into(),
-                ir::Type::from_ast(
-                    port.r#type().clone(),
-                    &ast::const_functions::Environment {
-                        constants: &constants,
-                        functions: &state.const_functions,
-                    },
-                ),
-                port.is_net(),
-            ));
+            ports.push(
+                ir::Port::new(
+                    port.name().to_string(),
+                    port.direction().into(),
+                    ir::Type::from_ast(
+                        port.r#type().clone(),
+                        &ast::const_functions::Environment {
+                            constants: &constants,
+                            functions: &state.const_functions,
+                        },
+                    ),
+                    port.is_net(),
+                )
+                .with_default(port.default().cloned().map(Into::into)),
+            );
         }
         let signals = module
             .signals()

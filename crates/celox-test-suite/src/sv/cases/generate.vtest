@@ -871,3 +871,58 @@
   (top Top)
   (eval)
   (assert_eq y 4))
+
+(case generate_local_typedefs_keep_lexical_scope
+  (source "generate_types.sv" #"
+        module Top(input logic[7:0] a, output logic[7:0] y,z,widths,
+            output logic[3:0] root_value, output logic[7:0] parent_value);
+            typedef logic[3:0] T;
+            T root;
+            assign root=a[3:0];
+            assign root_value=root;
+            if(1) begin:left
+                typedef logic[7:0] T;
+                typedef logic[1:0] state_t; localparam LEFT_ON=3;
+                T temp;
+                state_t state;
+                assign state=LEFT_ON;
+                assign temp=a;
+                assign y=(state==3) ? temp : 0;
+                T after_inner;
+                if(1) begin:inner
+                    typedef logic[1:0] inner_t;
+                    inner_t tiny;
+                    assign tiny=a[1:0];
+                end
+                assign after_inner=a;
+                assign parent_value=after_inner;
+            end
+            if(1) begin:right
+                typedef logic[3:0] T;
+                typedef logic[1:0] state_t; localparam RIGHT_ON=2;
+                T temp;
+                state_t state;
+                assign state=RIGHT_ON;
+                assign temp=a[3:0];
+                assign z=(state==2) ? {4'hc,temp} : 0;
+            end
+            for(genvar i=0;i<2;i=i+1) begin:lanes
+                typedef logic[i+2:0] lane_t;
+                lane_t temp;
+                assign temp=a;
+                assign widths[4*i+:4]=$bits(temp);
+            end
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 0xa7))
+  (assert_eq y 0xa7)
+  (assert_eq z 0xc7)
+  (assert_eq root_value 7)
+  (assert_eq parent_value 0xa7)
+  (assert_eq widths 0x43)
+  (modify (set a 0x5c))
+  (assert_eq y 0x5c)
+  (assert_eq z 0xcc)
+  (assert_eq root_value 0xc)
+  (assert_eq parent_value 0x5c))

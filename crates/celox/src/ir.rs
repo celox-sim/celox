@@ -988,10 +988,7 @@ impl RuntimeProgram {
             let instance = self.design.instance(scope.instance_id).unwrap();
             for state_address in instance.state_addresses() {
                 let variable = self.design.variable(state_address).unwrap();
-                if matches!(
-                    variable.var_kind,
-                    VariableKind::Parameter | VariableKind::Constant
-                ) {
+                if variable.var_kind == VariableKind::Constant {
                     continue;
                 }
                 if instance.path_index.get(&variable.path) != Some(&Some(*state_address)) {
@@ -1024,6 +1021,7 @@ impl RuntimeProgram {
                     _ => SignalDirection::Internal,
                 };
                 signals.push(ReflectionSignal {
+                    is_parameter: variable.var_kind == VariableKind::Parameter,
                     full_name: format!("{parent_name}.{name}"),
                     name: name.clone(),
                     parent: scope_ids[&parent_name],

@@ -5827,9 +5827,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "ANSI port default value",
+            "default value on a non-input port",
             r#"
-            module Top(input wire a = 1'b1, output wire y); assign y = a; endmodule
+            module Top(input wire a, output wire y = 1'b1); assign y = a; endmodule
         "#,
         ),
         (

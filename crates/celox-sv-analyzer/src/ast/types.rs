@@ -11,8 +11,34 @@ pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
+    type_aliases_in_scope(syntax_tree, const_env, &HashMap::default(), true, None)
+}
+
+/// Resolve a selected body while retaining its enclosing lexical type bindings.
+pub(super) fn type_aliases_from_body_with_env(
+    syntax_tree: &AnalysisContext<'_>,
+    items: &[celox_sv_syntax::BodyItemId],
+    const_env: &HashMap<String, i128>,
+    inherited: &HashMap<String, Type>,
+) -> Converted<HashMap<String, Type>> {
+    type_aliases_in_scope(syntax_tree, const_env, inherited, false, Some(items))
+}
+
+fn type_aliases_in_scope(
+    syntax_tree: &AnalysisContext<'_>,
+    const_env: &HashMap<String, i128>,
+    inherited: &HashMap<String, Type>,
+    include_header: bool,
+    items: Option<&[celox_sv_syntax::BodyItemId]>,
+) -> Converted<HashMap<String, Type>> {
     let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
-    if syntax_tree.scope_handle() != crate::source_tree::ScopeHandle::Compilation {
+    aliases.extend(
+        inherited
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone())),
+    );
+    if include_header && syntax_tree.scope_handle() != crate::source_tree::ScopeHandle::Compilation
+    {
         for parameter in syntax_tree.root_unit()?.parameters.iter().flatten() {
             add_type_parameter(
                 parameter,
@@ -23,11 +49,11 @@ pub(super) fn type_aliases_from_scope_with_env(
             )?;
         }
     }
-    let mut pending = syntax_tree
-        .body_membership()?
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
+    let members = match items {
+        Some(items) => items.to_vec(),
+        None => syntax_tree.body_membership()?,
+    };
+    let mut pending = members.into_iter().rev().collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
         match &syntax_tree.declarations().body_item(id).kind {
             BodyItemKind::Region(items) => pending.extend(items.iter().rev()),
