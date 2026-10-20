@@ -1,1 +1,6 @@
-Record reviewed seed-width exclusions and newly passing conformance cases in their owning stack commits
+Revision history for #1610:
+
+rev 2 (content) 2026-10-20 12:05 UTC — Record reviewed seed-width exclusions and newly passing conformance cases in their owning stack commits
+rev 1 (initial) 2026-10-20 12:05 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1610,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"11a2b89185b733034aaa4ad36d223edfde214852","timestamp_iso":"2026-10-20T12:05:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"11a2b89185b733034aaa4ad36d223edfde214852","new_sha":"557041f768ee625aef3ade4e30151d9744059a82","timestamp_iso":"2026-10-20T12:05:30Z","reason":"Record reviewed seed-width exclusions and newly passing conformance cases in their owning stack commits","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/11a2b89185b733034aaa4ad36d223edfde214852...557041f768ee625aef3ade4e30151d9744059a82"}]} -->
