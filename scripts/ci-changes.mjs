@@ -83,11 +83,12 @@ export function affectsHeliodorArm64(files) {
           "crates/celox-backend-arm64/",
           "crates/celox-backend-common/",
           "crates/celox/src/backend/native/",
+          "crates/celox-vpi/src/bin/celox/",
           "scripts/ci-changes.",
         ]) ||
         [
           "crates/celox/src/backend.rs",
-          "crates/celox-bench/src/bin/celox-heliodor.rs",
+          "crates/celox-vpi/src/bin/celox.rs",
           "scripts/run-heliodor-bench.sh",
           "scripts/heliodor-revision",
           "scripts/setup-arm64-backend-dev.sh",

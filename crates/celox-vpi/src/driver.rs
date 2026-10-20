@@ -39,8 +39,8 @@ pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProg
             .four_state(true)
             .native_force_support(true)
             .opt_level(celox::OptLevel::O0)
-            .build()
-            .map(|simulator| simulator.shared_code().program_image().clone())
+            .compile_native()
+            .map(|compiled| compiled.into_program_image())
             .map_err(|error| format!("compilation failed: {error}"))
     } else {
         compile_native_image_with_diagnostics(source, top, DiagnosticPolicy::default())
@@ -97,7 +97,7 @@ fn compile_native_image_configured(
     legacy_force: bool,
     parameters: &BTreeMap<String, u64>,
 ) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
-    let simulator = if let Ok(metadata_path) = Metadata::search_from(source) {
+    let compiled = if let Ok(metadata_path) = Metadata::search_from(source) {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata
@@ -127,7 +127,7 @@ fn compile_native_image_configured(
             .fold(builder, |builder, (name, value)| {
                 builder.param(name, *value)
             })
-            .build()
+            .compile_native()
     } else {
         let contents = std::fs::read_to_string(source)
             .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
@@ -142,11 +142,10 @@ fn compile_native_image_configured(
             .fold(builder, |builder, (name, value)| {
                 builder.param(name, *value)
             })
-            .build()
+            .compile_native()
     }
     .map_err(|error| format!("compilation failed: {error}"))?;
-    let image = simulator.shared_code().program_image().clone();
-    Ok((image, simulator.into_warnings()))
+    Ok(compiled.into_program_image_and_warnings())
 }
 
 /// Run cocotb's VPI bootstrap against a compiled native program instance.

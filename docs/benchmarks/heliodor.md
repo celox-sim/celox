@@ -155,9 +155,12 @@ same VM within each group below (36 jobs for the complete suite):
 | 8 harts, either architecture | Four jobs, one per backend |
 | Every SMP workload (2, 4, 8 harts) | One more job: `celox-parallel` |
 
+Celox measurements use the normal `celox run` CLI with `--report --unlimited`.
+The runner defaults to two-state; the benchmark no longer builds a dedicated Celox executable.
+
 `celox-parallel` is the native backend with
 [multi-threaded simulation](../guide/parallel-simulation.md), using one thread per
-host vCPU (`HELIODOR_CELOX_THREADS`, default `nproc`). Its own job keeps the
+host vCPU (`HELIODOR_CELOX_THREADS`, default `nproc` clamped to 2–64). Its own job keeps the
 comparison groups' time budgets unchanged. The dashboard shows it as
 "multi-threaded" next to single-threaded native execution.
 

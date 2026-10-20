@@ -12,6 +12,9 @@ use serde::Deserialize;
 pub(super) struct DesignArgs {
     /// Ordered SV sources, or one Veryl project entry file.
     pub sources: Vec<PathBuf>,
+    /// Select a Veryl source relative to --project (repeatable).
+    #[arg(long = "source-file")]
+    source_files: Vec<PathBuf>,
     /// Override a compilation diagnostic: CODE=allow|warn|error (repeatable).
     #[arg(long = "diagnostic", value_name = "CODE=LEVEL")]
     diagnostics: Vec<String>,
@@ -38,7 +41,7 @@ pub(super) struct DesignArgs {
     /// Clear the project's force_signals list.
     #[arg(long)]
     no_force_signals: bool,
-    /// Project manifest (otherwise discover celox.toml when no inputs are given).
+    /// celox.toml manifest, Veryl.toml, or Veryl project directory.
     #[arg(long, value_name = "FILE")]
     project: Option<PathBuf>,
     /// Named target in celox.toml.
@@ -131,6 +134,7 @@ struct Target {
 
 #[derive(Default)]
 pub(super) struct Design {
+    pub project_root: Option<PathBuf>,
     pub diagnostics: celox::DiagnosticPolicy,
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
@@ -164,10 +168,16 @@ impl DesignArgs {
     }
 
     pub fn resolve(self) -> Result<Design, String> {
+        self.resolve_for_run(false)
+    }
+
+    pub fn resolve_for_run(self, image_input: bool) -> Result<Design, String> {
         let manifest_path = match self.project {
             Some(path) => Some(path),
             None if self.target.is_some()
-                || (self.sources.is_empty() && self.filelists.is_empty()) =>
+                || (self.sources.is_empty()
+                    && self.source_files.is_empty()
+                    && self.filelists.is_empty()) =>
             {
                 let cwd = std::env::current_dir()
                     .map_err(|error| format!("failed to locate current directory: {error}"))?;
@@ -183,90 +193,134 @@ impl DesignArgs {
             );
         }
         let mut design = Design::default();
+        let mut manifest_source_root = None;
         if let Some(path) = manifest_path {
-            let path = path
-                .canonicalize()
-                .map_err(|error| format!("failed to open project {}: {error}", path.display()))?;
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read project {}: {error}", path.display()))?;
-            let config: Manifest = toml::from_str(&text)
-                .map_err(|error| format!("invalid project {}: {error}", path.display()))?;
-            let base = path.parent().expect("canonical project has a parent");
-            let target_name = self.target.as_ref().or(config.default_target.as_ref());
-            let selected = match target_name {
-                Some(name) => Some(config.targets.get(name).ok_or_else(|| {
-                    format!(
-                        "unknown target `{name}` in {}; available targets: {}",
-                        path.display(),
-                        config
-                            .targets
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })?),
-                None if config.top.is_some() || config.targets.is_empty() => None,
-                None if config.targets.len() == 1 => config.targets.values().next(),
-                None => {
-                    return Err(format!(
-                        "select --target NAME; available targets: {}",
-                        config
-                            .targets
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
+            if path.is_dir()
+                || path.file_name().is_some_and(|name| name == "Veryl.toml")
+                || (image_input && !path.exists())
+            {
+                if self.target.is_some() {
+                    return Err("--target requires a celox.toml manifest".into());
                 }
-            };
-            design.extend(
-                base,
-                &config.sources,
-                &config.filelists,
-                &config.include_dirs,
-                &config.defines,
-            )?;
-            design.extend_parameters(&config.parameters)?;
-            design.diagnostics = config.diagnostics.clone();
-            design.top = config.top.clone().unwrap_or_default();
-            let mut opt_level = config.opt_level.as_deref();
-            design.signal_access.live_signals = config.live_signals.clone().unwrap_or_default();
-            design.signal_access.force_signals = config.force_signals.clone().unwrap_or_default();
-            design.max_steps = config.max_steps;
-            if let Some(target) = selected {
-                design.extend_parameters(&target.parameters)?;
-                design.diagnostics.0.extend(target.diagnostics.0.clone());
+                let root = if path.file_name().is_some_and(|name| name == "Veryl.toml") {
+                    path.parent().unwrap_or(Path::new(".")).to_path_buf()
+                } else {
+                    path.clone()
+                };
+                design.project_root = Some(root.clone());
+                if !image_input && self.source_files.is_empty() && self.sources.is_empty() {
+                    let manifest =
+                        veryl_metadata::Metadata::search_from(&path).map_err(|e| e.to_string())?;
+                    let mut metadata =
+                        veryl_metadata::Metadata::load(&manifest).map_err(|e| e.to_string())?;
+                    design.sources = metadata
+                        .paths::<&Path>(&[], false, false)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .filter(|path| !path.example)
+                        .map(|path| path.src)
+                        .collect();
+                }
+            } else {
+                let path = path.canonicalize().map_err(|error| {
+                    format!("failed to open project {}: {error}", path.display())
+                })?;
+                let text = std::fs::read_to_string(&path).map_err(|error| {
+                    format!("failed to read project {}: {error}", path.display())
+                })?;
+                let config: Manifest = toml::from_str(&text)
+                    .map_err(|error| format!("invalid project {}: {error}", path.display()))?;
+                let base = path.parent().expect("canonical project has a parent");
+                manifest_source_root = Some(base.to_path_buf());
+                let target_name = self.target.as_ref().or(config.default_target.as_ref());
+                let selected = match target_name {
+                    Some(name) => Some(config.targets.get(name).ok_or_else(|| {
+                        format!(
+                            "unknown target `{name}` in {}; available targets: {}",
+                            path.display(),
+                            config
+                                .targets
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?),
+                    None if config.top.is_some() || config.targets.is_empty() => None,
+                    None if config.targets.len() == 1 => config.targets.values().next(),
+                    None => {
+                        return Err(format!(
+                            "select --target NAME; available targets: {}",
+                            config
+                                .targets
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                };
                 design.extend(
                     base,
-                    &target.sources,
-                    &target.filelists,
-                    &target.include_dirs,
-                    &target.defines,
+                    &config.sources,
+                    &config.filelists,
+                    &config.include_dirs,
+                    &config.defines,
                 )?;
-                if let Some(top) = &target.top {
-                    design.top.clone_from(top);
+                design.extend_parameters(&config.parameters)?;
+                design.diagnostics = config.diagnostics.clone();
+                design.top = config.top.clone().unwrap_or_default();
+                let mut opt_level = config.opt_level.as_deref();
+                design.signal_access.live_signals = config.live_signals.clone().unwrap_or_default();
+                design.signal_access.force_signals =
+                    config.force_signals.clone().unwrap_or_default();
+                design.max_steps = config.max_steps;
+                if let Some(target) = selected {
+                    design.extend_parameters(&target.parameters)?;
+                    design.diagnostics.0.extend(target.diagnostics.0.clone());
+                    design.extend(
+                        base,
+                        &target.sources,
+                        &target.filelists,
+                        &target.include_dirs,
+                        &target.defines,
+                    )?;
+                    if let Some(top) = &target.top {
+                        design.top.clone_from(top);
+                    }
+                    opt_level = target.opt_level.as_deref().or(opt_level);
+                    if let Some(paths) = &target.live_signals {
+                        design.signal_access.live_signals.clone_from(paths);
+                    }
+                    if let Some(paths) = &target.force_signals {
+                        design.signal_access.force_signals.clone_from(paths);
+                    }
+                    design.max_steps = target.max_steps.or(design.max_steps);
                 }
-                opt_level = target.opt_level.as_deref().or(opt_level);
-                if let Some(paths) = &target.live_signals {
-                    design.signal_access.live_signals.clone_from(paths);
-                }
-                if let Some(paths) = &target.force_signals {
-                    design.signal_access.force_signals.clone_from(paths);
-                }
-                design.max_steps = target.max_steps.or(design.max_steps);
-            }
-            design.opt_level = opt_level
-                .map(|value| {
-                    celox::OptLevel::parse(value).ok_or_else(|| {
-                        format!("invalid opt_level `{value}`: expected O0, O1, or O2")
+                design.opt_level = opt_level
+                    .map(|value| {
+                        celox::OptLevel::parse(value).ok_or_else(|| {
+                            format!("invalid opt_level `{value}`: expected O0, O1, or O2")
+                        })
                     })
-                })
-                .transpose()?;
-            if design.max_steps == Some(0) {
-                return Err("max_steps must be positive".to_string());
+                    .transpose()?;
+                if design.max_steps == Some(0) {
+                    return Err("max_steps must be positive".to_string());
+                }
             }
         }
+        design.sources.extend(self.source_files.iter().map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                design
+                    .project_root
+                    .as_deref()
+                    .or(manifest_source_root.as_deref())
+                    .unwrap_or(Path::new("."))
+                    .join(path)
+            }
+        }));
         design.opt_level = self.opt_level.or(design.opt_level);
         if self.no_live_signals {
             design.signal_access.live_signals.clear();
@@ -310,7 +364,7 @@ impl DesignArgs {
         if let Some(top) = self.top {
             design.top = top;
         }
-        if design.sources.is_empty() {
+        if design.sources.is_empty() && !image_input {
             return Err(
                 "provide sources, -f FILE, or a celox.toml project with sources".to_string(),
             );
@@ -402,10 +456,11 @@ impl Design {
     }
 
     pub fn is_sv(&self) -> bool {
-        self.sources.iter().all(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "sv" || extension == "v")
-        })
+        !self.sources.is_empty()
+            && self.sources.iter().all(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "sv" || extension == "v")
+            })
     }
 
     fn extend(

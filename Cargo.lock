@@ -533,15 +533,12 @@ dependencies = [
 name = "celox-bench"
 version = "0.11.0"
 dependencies = [
- "blake3",
  "celox",
  "celox-design",
- "celox-frontend-veryl",
  "clap",
  "fxhash",
  "libc",
  "object 0.40.0",
- "pathdiff",
  "serde",
  "serde_json",
  "tempfile",
@@ -825,15 +822,22 @@ dependencies = [
 name = "celox-vpi"
 version = "0.11.0"
 dependencies = [
+ "blake3",
  "celox",
  "celox-design",
+ "celox-frontend-veryl",
  "celox-sv-analyzer",
  "clap",
  "fxhash",
+ "libc",
  "libloading",
+ "pathdiff",
  "serde",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "toml",
+ "tracing-subscriber",
  "veryl-metadata",
 ]
 

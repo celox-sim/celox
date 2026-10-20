@@ -483,7 +483,7 @@ impl NativeProgramImage {
     }
 
     /// Whether the image's generated code and state layout use four-state data.
-    pub(crate) fn four_state(&self) -> bool {
+    pub fn four_state(&self) -> bool {
         self.options.four_state
     }
 

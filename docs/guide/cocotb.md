@@ -33,10 +33,10 @@ target/release/celox run test/Top.veryl --top Top
 ```
 
 For SystemVerilog, pass `.sv` or `.v` sources in compilation order. The command
-uses four-state simulation and runs until `$finish` or no scheduled events
+uses two-state simulation by default (`--four-state` enables X/Z tracking) and runs until `$finish` or no scheduled events
 remain. For Veryl, pass one project entry file: Celox discovers `Veryl.toml`
 and collects the project's sources and dependencies. A standalone
-Veryl file also works. Select the native testbench module with `--top`.
+Veryl file also works. Both languages default to two-state simulation. Select the native testbench module with `--top`.
 Veryl uses the existing native testbench executor; a test may also complete by
 falling through its initial blocks.
 
@@ -57,7 +57,44 @@ testbench executor sends its HDL output to stderr.
 scheduler steps for SV and testbench ticks for Veryl. Reaching the Veryl tick
 limit before completion fails the command. This limit does not bound compilation
 or work within a single step/tick; use an external process timeout when a wall
-clock limit is needed. Source languages cannot be mixed in one invocation.
+clock limit is needed. `--unlimited` removes the step/tick limit. Source languages cannot be mixed in one invocation.
+
+## Select execution and collect measurements
+
+`celox run` accepts `--threads N` (1–64, default 1) and `--four-state` for both
+languages. Both languages support `--backend native|tiered|interpreter|cranelift|wasm`
+(default: native). Tiered starts interpreted and adopts compiled code at a scheduler
+safe point while preserving pending events. For example:
+
+```sh
+celox run test/Top.sv --top Top --backend tiered --threads 4
+```
+
+For Veryl native testbenches it also provides:
+
+| Options | Purpose |
+| --- | --- |
+| `--report` | Emit machine-readable `CELOX_*` configuration, timing, tiered statistics and result records on stdout. |
+| `--require-compiled` | With `--report --backend tiered`, require generated code to be exercised in a completed run. Normal tiered runs can finish on the interpreter. |
+| `--compile-only` | Compile native, Cranelift or WASM code without executing the testbench. |
+| `--build-cache-dir DIR` | Cache native compilation for a Veryl.toml project in a trusted local directory. |
+| `--native-image-output FILE` | Export a native image with `--compile-only`. |
+| `--native-image-input FILE` | Execute an image without reading HDL sources. |
+| `--dump-ir-dir DIR` | Write native compiler diagnostics; add `--dump-ir-and-run` to execute as well. |
+
+```sh
+celox run --project /path/to/veryl-project --top smoke --backend tiered --threads 4
+celox run test/Top.veryl --top Top --four-state
+celox run --project /path/to/veryl-project --top smoke --report --unlimited
+```
+
+`--project` accepts a Veryl project directory or `Veryl.toml` as well as
+`celox.toml`. `--source-file PATH` selects a Veryl source relative to the project;
+repeat it to select multiple files. Heliodor benchmarks invoke this same CLI
+with `--report --unlimited`; no separate Celox benchmark executable is used.
+The report preserves compile/execute/generated-code timing intervals, and tiered
+execution time includes background compilation and promotion. Short tiered runs
+need not promote unless `--require-compiled` is requested.
 
 ## Manage a multi-file project
 
