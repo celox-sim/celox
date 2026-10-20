@@ -64,7 +64,7 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 | 乱数 | `$urandom`、`$urandom_range`、`$random`、`$dist_uniform` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | シミュレーション時刻 | `$time` と `$stime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
-| コマンドライン引数 | `$test$plusargs` と `$value$plusargs` は時間付き `initial` とそこから呼ぶサブルーチンで使用可能 |
+| 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`。時間を持つプロセスで実行 |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -96,7 +96,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 式：ストリーミング連結（[#447](https://github.com/celox-sim/celox/issues/447)）、パラメータ式での
   リダクション演算子（[#456](https://github.com/celox-sim/celox/issues/456)）。
 - システムタスクとシステム関数：Celox は IEEE 1800-2023 が定義するすべての名前を、
-  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$realtime`、`$fopen` など）は、
+  附属書 D の任意のものも含めて知っています。呼び出した位置で対応していないもの（式の中の `$realtime`、`$fgetc` など）は、
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
@@ -213,6 +213,26 @@ static なローカル変数は未対応です。`automatic` と宣言してく�
 アドレス指定がなくワード数が範囲と合わない場合はコンパイル警告（`Simulator::warnings()`）に
 なり、余ったワードは無視され、足りない分のメモリは変わりません。
 
+### 実行時のファイル出力
+
+`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` とその `b` / `o` / `h` 形は、
+時間を持つ `Simulation` で実行します（IEEE 1800-2023 21.3）。引数が1個の
+`$fopen` は multichannel descriptor を返し、OR で複数の出力先を選べます。
+ビット0は標準出力です。モードを指定すると file descriptor を返します。
+閉じたチャネルは再利用され、オープン失敗は0を返します。無効な descriptor や
+書き込み失敗は実行時エラーです。ファイル名とモードは文字列リテラルまたは
+整数の packed 文字列を指定できます。パスは UTF-8 に限定し、相対パスはホスト
+プロセスの作業ディレクトリを基準とします。動的な `string` 値は未対応です。
+
+`$writememh` / `$writememb` は呼び出し時点の静的 unpacked 配列を、既存ファイルを
+上書きして出力します（21.5）。実行時の開始・終了アドレスで順方向・逆方向を
+指定でき、範囲外は実行時エラーです。X/Z を保持し、アドレス指示子は出力しません。
+動的配列と連想配列は未対応です。既存の `$readmemh` / `$readmemb` は引き続き
+コンパイル時に読み込みます。
+
+これらを直接またはサブルーチン経由で呼ぶエッジプロセスには `Simulation` が必要で、
+`Simulator` のビルダーはエラーを返します。組み合わせプロセスからの呼び出しは未対応です。
+
 ### 集約型の定数パラメータ
 
 集約型の定数パラメータ（unpacked 配列や、パターンで与える packed 構造体）は、
@@ -234,15 +254,21 @@ Celox は program ブロックを持たず、それ以外からの呼び出し�
 その呼び出し位置でコンパイル警告（`Simulator::warnings()`）を出します。定数関数内の呼び出しも同様です。
 関数宣言内の呼び出しは、その関数を使わなくても警告します。定数評価が実行したかどうかには依存しません。
 
-### コマンドライン引数
+### 実行時 I/O と plusargs
 
-`initial` とそのサブルーチンからの plusargs 検索には `Simulation::from_sv_sources`
-を使います。組合せプロセスとエッジで起動するプロセスからの検索は未対応です。
+`initial` やエッジで起動する `always` / `always_ff` と、そのサブルーチンからの
+ホスト I/O には `Simulation::from_sv_sources` を使います。組合せプロセスからは
+未対応です。時間付き実行が必要なエッジプロセスを `Simulator` で構築するとエラーになります。
 
 引数は `.plusargs(["+COUNT=12", "+TRACE"])` で順序を保って渡します。
 `$test$plusargs` は前方一致で検索し、`$value$plusargs` は整数変換と packed 整数変数への
 `%s` を扱います。最初に一致した引数を使い、未一致の場合は書き込み先の値を保持します。
 real 変換と動的 string は未対応です。
+
+ファイル descriptor とメモリ書き出しは[実行時のファイル出力](#実行時のファイル出力)を参照してください。
+
+ファイル I/O を含むデザインでは、ホスト側の状態を保存できないため、
+checkpoint と状態ファイルの保存・復元はエラーになります。
 
 `$dist_uniform(seed, start, end)` は Annex N の一様分布を使い、整数の seed 変数を更新します。
 両端を含み、境界が同じ値か逆順なら seed を進めず `start` を返します。
