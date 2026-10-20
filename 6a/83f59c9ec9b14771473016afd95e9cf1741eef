@@ -1,1 +1,6 @@
-Apply the partial-word reduction AND correction to AArch64, add direct AArch64 execution coverage, and run the shared SV regression in ARM64 CI.
+Revision history for #1638:
+
+rev 2 (content) 2026-10-20 16:49 UTC — Apply the partial-word reduction AND correction to AArch64, add direct AArch64 execution coverage, and run the shared SV regression in ARM64 CI.
+rev 1 (initial) 2026-10-20 16:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1638,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"55d3027bf27db7dae41371b45785528a6c8a3fe3","timestamp_iso":"2026-10-20T16:49:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"55d3027bf27db7dae41371b45785528a6c8a3fe3","new_sha":"6a83f59c9ec9b14771473016afd95e9cf1741eef","timestamp_iso":"2026-10-20T16:49:56Z","reason":"Apply the partial-word reduction AND correction to AArch64, add direct AArch64 execution coverage, and run the shared SV regression in ARM64 CI.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/55d3027bf27db7dae41371b45785528a6c8a3fe3...6a83f59c9ec9b14771473016afd95e9cf1741eef"}]} -->
