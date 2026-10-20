@@ -5975,6 +5975,12 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Stime
         | SystemFunction::Random
         | SystemFunction::DistUniform
+        | SystemFunction::DistNormal
+        | SystemFunction::DistExponential
+        | SystemFunction::DistPoisson
+        | SystemFunction::DistChiSquare
+        | SystemFunction::DistT
+        | SystemFunction::DistErlang
         | SystemFunction::TestPlusargs
         | SystemFunction::ValuePlusargs
         | SystemFunction::Urandom

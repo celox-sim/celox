@@ -36,6 +36,7 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 #[cfg(feature = "host-runtime")]
 mod host {
     mod declaration;
+    mod distribution;
     mod file_io;
     mod fread;
     mod scan;

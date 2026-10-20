@@ -1727,6 +1727,17 @@ mod host {
             .runtime_schema
             .host_request_sites
             .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Distribution)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message: "probabilistic distributions require Simulation; Simulator does not execute scheduled process kernels".into(),
+                signals: Vec::new(),
+            }));
+        }
+        if program
+            .runtime_schema
+            .host_request_sites
+            .iter()
             .any(|site| site.kind == celox_design::HostRequestKind::Vcd)
         {
             return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
@@ -3799,6 +3810,49 @@ mod host {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn extended_host_requests_survive_native_image_roundtrip() {
+        let source = r#"module Top(output bit ok);
+            int seed, value, parsed, count;
+            initial begin
+                seed = 17;
+                value = $dist_normal(seed, 0, 10);
+                count = $sscanf("42", "%d", parsed);
+                ok = value == -4 && parsed == 42 && count == 1;
+            end
+        endmodule"#;
+        let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("host_image.sv"))],
+            "Top",
+        )
+        .emit_triggers()
+        .into_laid_out_program(crate::MemoryLayoutMode::ElementStrided)
+        .unwrap();
+        let image =
+            crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let runtime = image.runtime_program();
+        // SAFETY: this image was compiled from the trusted source above.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+        let mut simulator =
+            crate::Simulator::with_backend_and_program_for_simulation(backend, runtime, warnings);
+        simulator.apply_initial_values();
+        simulator.modify(|_| {}).unwrap();
+        let mut sim = crate::Simulation::new(simulator);
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), num_bigint::BigUint::from(1u8));
     }
 
     #[cfg(all(

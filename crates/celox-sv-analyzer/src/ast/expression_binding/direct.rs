@@ -853,6 +853,12 @@ pub(in crate::ast) fn bind_value(
                                 SystemFunction::Urandom
                                     | SystemFunction::Random
                                     | SystemFunction::DistUniform
+                                    | SystemFunction::DistNormal
+                                    | SystemFunction::DistExponential
+                                    | SystemFunction::DistPoisson
+                                    | SystemFunction::DistChiSquare
+                                    | SystemFunction::DistT
+                                    | SystemFunction::DistErlang
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
                                     | SystemFunction::Fopen
