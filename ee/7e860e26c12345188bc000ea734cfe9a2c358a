@@ -1,0 +1,1 @@
+Rebase the dependent CLI/cocotb stack onto current origin/master at user request; preserve merged clock fixes and O2 defaults.
