@@ -253,9 +253,7 @@ fn check(
                 Declaration::Final(x) => checker.statements(&x.statements),
                 Declaration::Inst(x) => {
                     for input in &x.inputs {
-                        for expression in &input.exprs {
-                            checker.expression(expression);
-                        }
+                        checker.expression(&input.expr);
                     }
                     for output in &x.outputs {
                         checker.destinations(&output.dst);
@@ -369,7 +367,7 @@ impl Checker<'_, '_> {
     }
 
     fn select(&mut self, index: &VarIndex, select: &VarSelect) {
-        for expression in index.0.iter().chain(&select.0) {
+        for expression in index.expressions().chain(&select.0) {
             self.expression(expression);
         }
         if let Some((_, expression)) = &select.1 {
@@ -386,7 +384,10 @@ impl Checker<'_, '_> {
                 Factor::SystemFunctionCall(call) => self.system_call(call),
                 Factor::Variable(_, index, select, _) => self.select(index, select),
                 Factor::HierVariable(x) => self.select(&x.index, &x.select),
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Unary(_, inner, _) => self.expression(inner),
             Expression::Binary(left, _, right, _) => {

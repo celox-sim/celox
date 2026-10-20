@@ -1633,7 +1633,7 @@ fn collect_expression_effects(
                 );
                 effects.hierarchical_reads.push((**reference).clone());
             }
-            Factor::Value(_) | Factor::Anonymous(_) => {}
+            Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) => {}
         },
         Expression::Unary(_, expression, _) => {
             effects.append(collect_expression_effects(
@@ -1854,7 +1854,7 @@ fn collect_index_select_effects(
     active_functions: &mut HashSet<VarId>,
     effects: &mut Effects,
 ) {
-    for expression in &index.0 {
+    for expression in index.expressions() {
         effects.append(collect_expression_effects(
             expression,
             module,
@@ -2049,6 +2049,7 @@ mod tests {
                 var_path: VarPath(vec![StrId::default()]),
                 index: VarIndex::default(),
                 select: VarSelect::default(),
+                array: Default::default(),
                 comptime: Comptime::default(),
             },
         ))));

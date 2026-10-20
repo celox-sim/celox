@@ -6,6 +6,7 @@
 pub(crate) mod artifact;
 mod component;
 mod config;
+mod constant_loops;
 mod dynamic_for_check;
 mod error;
 mod file_dependencies;
@@ -33,6 +34,7 @@ pub(crate) use celox_frontend_core::{
     ScheduledRtl, ScheduledRtlOutput, SourceAddr, SourceVarId, VariableInfo, VariableKind,
 };
 pub use config::BuildConfig;
+pub use constant_loops::lower_constant_loops;
 pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_for_bounds};
 pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
 pub use file_dependencies::{FileDependency, FileDependencyCollector, capture_file_dependencies};

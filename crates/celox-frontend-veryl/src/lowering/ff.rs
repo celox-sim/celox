@@ -860,8 +860,7 @@ impl<'a> FfParser<'a> {
             16,
             |dst| {
                 dst.index
-                    .0
-                    .iter()
+                    .expressions()
                     .map(|index| eval_constexpr(index)?.to_usize())
                     .collect()
             },
