@@ -1,1 +1,6 @@
-Accept established exclude, test, and simulation manifest fields when explicit Veryl sources are passed to the CLI; add regression coverage for run and vpi build.
+Revision history for #1605:
+
+rev 2 (content) 2026-10-20 11:03 UTC — Accept established exclude, test, and simulation manifest fields when explicit Veryl sources are passed to the CLI; add regression coverage for run and vpi build.
+rev 1 (initial) 2026-10-20 11:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1605,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"32802531ee78e8d85b3b85d42c4b115ea46d0175","timestamp_iso":"2026-10-20T11:03:01Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"32802531ee78e8d85b3b85d42c4b115ea46d0175","new_sha":"b39651d434566aa56ebc586453a97df000ae1efc","timestamp_iso":"2026-10-20T11:03:01Z","reason":"Accept established exclude, test, and simulation manifest fields when explicit Veryl sources are passed to the CLI; add regression coverage for run and vpi build.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/32802531ee78e8d85b3b85d42c4b115ea46d0175...b39651d434566aa56ebc586453a97df000ae1efc"}]} -->
