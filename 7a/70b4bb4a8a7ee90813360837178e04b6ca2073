@@ -1,0 +1,1 @@
+Rebase onto current master after SV randomization, parameter literal, and WASM loader changes; preserve latch diagnostics and reconcile overlapping analyzer/CLI changes.
