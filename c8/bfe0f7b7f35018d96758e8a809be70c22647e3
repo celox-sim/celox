@@ -1,1 +1,6 @@
-Address review: select module interface contracts without collecting unrelated port-bearing local interfaces; add mixed-design regression
+Revision history for #1622:
+
+rev 2 (content) 2026-10-20 14:23 UTC — Address review: select module interface contracts without collecting unrelated port-bearing local interfaces; add mixed-design regression
+rev 1 (initial) 2026-10-20 14:23 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1622,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"78a71633895d6ca937bcadb5586f696a52101fe0","timestamp_iso":"2026-10-20T14:23:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"78a71633895d6ca937bcadb5586f696a52101fe0","new_sha":"c8bfe0f7b7f35018d96758e8a809be70c22647e3","timestamp_iso":"2026-10-20T14:23:33Z","reason":"Address review: select module interface contracts without collecting unrelated port-bearing local interfaces; add mixed-design regression","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/78a71633895d6ca937bcadb5586f696a52101fe0...c8bfe0f7b7f35018d96758e8a809be70c22647e3"}]} -->
