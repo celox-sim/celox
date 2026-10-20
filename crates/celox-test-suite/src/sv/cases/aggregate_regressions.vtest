@@ -1,0 +1,265 @@
+(group aggregate_regressions (category regression))
+
+(case continuous_nested_concatenated_targets
+  (four_state)
+  (source "concat_targets.sv" #"
+    module Top(input logic [15:0] data,
+      output wire [3:0] a, b, output wire [7:0] c, swapped);
+      assign {{a,b},c} = data;
+      assign {swapped[3:0],swapped[7:4]} = data[7:0];
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 0xabcd 0xffff 0x1234)
+    (modify (set data value))
+    (assert_eq a (& (>> value 12) 15))
+    (assert_eq b (& (>> value 8) 15))
+    (assert_eq c (& value 255))
+    (assert_eq swapped (| (<< (& value 15) 4) (& (>> value 4) 15)))))
+
+(case concatenated_runtime_index
+  (four_state)
+  (source "concat_index.sv" #"
+    module Top(input logic [3:0][7:0] data, input logic sel, ptr,
+      output wire [7:0] y);
+      assign y=data[{sel,ptr}];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set data 0x44332211))
+  (for index (range 0 4)
+    (modify (set sel (>> index 1)) (set ptr (& index 1)))
+    (assert_eq y (* (+ index 1) 0x11)))
+  (modify (set sel (fourstate 1 1)))
+  (assert (== (xmask (get y)) 255)))
+
+(case concatenated_static_loop_initializer
+  (source "concat_loop.sv" #"
+    module Top(input logic [3:0] x, output wire [3:0] y);
+      function automatic [3:0] f(input logic [3:0] value);
+        logic [3:0] mask; integer i;
+        i=0;
+        for(mask={1'b1,{3{1'b0}}};mask!=0;mask=mask>>1) begin
+          f[i]=value[i]; i=i+1;
+        end
+      endfunction
+      assign y=f(x);
+    endmodule
+  "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify (set x value))
+    (assert_eq y value)))
+
+(case parameter_element_forwarding
+  (source "parameter_element.sv" #"
+    module Child #(parameter A=16)(output wire [7:0] y);
+      localparam W=$clog2(A+1);
+      wire [W-1:0] value=W'(A);
+      assign y=value;
+    endmodule
+    module Parent #(parameter N=2, V={32'd8,32'd16})(output wire [N*8-1:0] y);
+      localparam [N-1:0][31:0] WORDS=V;
+      for(genvar n=0;n<N;n=n+1) begin:g
+        Child #(.A(WORDS[n])) child(y[n*8+:8]);
+      end
+    endmodule
+    module Top(output wire[15:0] y, output wire[39:0] wide);
+      Parent p(y);
+      Parent #(.N(5),.V({32'd1,32'd2,32'd4,32'd8,32'd16})) p5(wide);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0x0810)
+  (assert_eq wide 0x0102040810))
+
+(case parameter_runtime_element_bit
+  (four_state)
+  (source "parameter_dynamic_bit.sv" #"
+    module Top(input logic [2:0] i, output wire y);
+      localparam [1:0][3:0] FLAGS=8'b10100101;
+      assign y=FLAGS[1][i];
+    endmodule
+  "#)
+  (top Top)
+  (for index (range 0 4)
+    (modify (set i index))
+    (assert_eq y (& (>> 10 index) 1)))
+  (modify (set i 4))
+  (assert (== (xmask (get y)) 1))
+  (modify (set i (fourstate 7 7)))
+  (assert (== (xmask (get y)) 1)))
+
+(case independent_clock_memory_writers
+  (four_state)
+  (source "dual_clock_memory.sv" #"
+    module Top(input logic a_clk,b_clk,a_en,b_en,
+      input logic[1:0] a_addr,b_addr, input logic[7:0] a_data,b_data,
+      output wire[7:0] q0,q1,q2,q3);
+      logic[7:0] mem[4];
+      initial for(integer i=0;i<4;i=i+1) mem[i]=0;
+      always @(posedge a_clk) if(a_en) mem[a_addr]<=a_data;
+      always @(posedge b_clk) if(b_en) mem[b_addr]<=b_data;
+      assign q0=mem[0]; assign q1=mem[1]; assign q2=mem[2]; assign q3=mem[3];
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a_clk 0) (set b_clk 0) (set a_en 1) (set b_en 1)
+    (set a_addr 0) (set b_addr 1) (set a_data 0x12) (set b_data 0x34))
+  (modify (set a_clk 1) (set b_clk 1))
+  (assert_eq q0 0x12) (assert_eq q1 0x34)
+  (modify (set a_clk 0) (set b_clk 0) (set a_addr 2) (set b_addr 3)
+    (set a_data 0x56) (set b_data 0x78))
+  (modify (set a_clk 1))
+  (run_until 1)
+  (modify (set a_clk 0))
+  (assert_eq q0 0x12) (assert_eq q1 0x34) (assert_eq q2 0x56) (assert_eq q3 0)
+  (modify (set b_clk 1))
+  (run_until 2)
+  (modify (set b_clk 0))
+  (assert_eq q2 0x56) (assert_eq q3 0x78)
+  ; Concurrent processes may enqueue competing NBAs in either order (4.6/4.7).
+  ; A complete word wins; untouched elements retain their previous values.
+  (modify (set a_clk 0) (set b_clk 0) (set a_addr 2) (set b_addr 2)
+    (set a_data 0x9a) (set b_data 0xbc))
+  (modify (set a_clk 1) (set b_clk 1))
+  (run_until 3)
+  (assert (|| (== (get q2) 0x9a) (== (get q2) 0xbc)))
+  (assert_eq q0 0x12) (assert_eq q1 0x34) (assert_eq q3 0x78)
+  (modify (set a_clk 0) (set b_clk 0) (set a_en 0) (set b_addr 3)
+    (set b_data (fourstate 0xa5 0xff)))
+  (modify (set b_clk 1))
+  (run_until 4)
+  (assert_eq (xmask (get q3)) 0xff)
+  (modify (set b_clk 0) (set a_en 1) (set b_en 0) (set a_addr 0) (set a_data 0x42))
+  (modify (set a_clk 1))
+  (run_until 5)
+  (assert_eq q0 0x42) (assert_eq q1 0x34)
+  (assert_eq (xmask (get q3)) 0xff))
+
+(case independent_clock_byte_writers
+  (four_state)
+  (source "dual_clock_bytes.sv" #"
+    module Top(input logic a_clk,b_clk, input logic[1:0] en,
+      input logic[2:0] addr, input logic[15:0] data,
+      output wire[15:0] q0,q1);
+      localparam BYTE_W=8;
+      logic[15:0] mem[2];
+      initial begin mem[0]=0; mem[1]=0; end
+      always @(posedge a_clk) begin
+        for(integer i=0;i<2;i=i+1)
+          if(en[i]) mem[addr][BYTE_W*i+:BYTE_W]<=data[BYTE_W*i+:BYTE_W];
+      end
+      always @(posedge b_clk) if(en[0]) mem[1]<=16'h1234;
+      assign q0=mem[0]; assign q1=mem[1];
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a_clk 0) (set b_clk 0) (set en 3) (set addr 0) (set data 0xabcd))
+  (modify (set a_clk 1) (set b_clk 1))
+  (run_until 1)
+  (assert_eq q0 0xabcd) (assert_eq q1 0x1234)
+  (modify (set a_clk 0) (set en 2) (set data 0x5678))
+  (modify (set a_clk 1))
+  (run_until 2)
+  (assert_eq q0 0x56cd)
+  (modify (set a_clk 0) (set en 3) (set addr 2) (set data 0xffff))
+  (modify (set a_clk 1))
+  (run_until 3)
+  (assert_eq q0 0x56cd) (assert_eq q1 0x1234)
+  (modify (set a_clk 0) (set addr (fourstate 7 7)))
+  (modify (set a_clk 1))
+  (run_until 4)
+  (assert_eq q0 0x56cd) (assert_eq q1 0x1234))
+
+(case coincident_disjoint_byte_writers
+  (four_state)
+  (source "shared_bytes.sv" #"
+    module Top(input logic a_clk,b_clk, input logic[1:0] addr,
+      input logic[15:0] data, output wire[15:0] q0,q1);
+      logic[15:0] mem[2];
+      initial begin mem[0]=0; mem[1]=0; end
+      always @(posedge a_clk) mem[addr][15:8]<=data[15:8];
+      always @(posedge b_clk) mem[addr][7:0]<=data[7:0];
+      assign q0=mem[0]; assign q1=mem[1];
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (modify (set a_clk 0) (set b_clk 0) (set addr 0) (set data 0xabcd))
+  (modify (set a_clk 1) (set b_clk 1))
+  (run_until 1)
+  (assert_eq q0 0xabcd) (assert_eq q1 0)
+  (modify (set a_clk 0) (set b_clk 0) (set addr 1) (set data 0x1234))
+  (modify (set a_clk 1) (set b_clk 1))
+  (run_until 2)
+  (assert_eq q0 0xabcd) (assert_eq q1 0x1234))
+
+(case shared_memory_reads_pre_edge_values
+  (four_state)
+  (source "shared_snapshot.sv" #"
+    module Top(input bit a_clk,b_clk, input bit[1:0] addr,
+      input bit[7:0] data, output wire[31:0] q);
+      logic[7:0] mem[4];
+      initial begin mem[0]=1; mem[1]=2; mem[2]=3; mem[3]=4; end
+      always @(posedge a_clk)
+        for(integer i=0;i<4;i=i+1) mem[i]<=mem[(i+3)%4];
+      always @(posedge b_clk) mem[addr]<=data;
+      assign q={mem[3],mem[2],mem[1],mem[0]};
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq q 0x04030201)
+  (modify (set a_clk 0) (set b_clk 0) (set addr 0) (set data 0x55))
+  (modify (set a_clk 1))
+  (run_until 1)
+  (assert_eq q 0x03020104)
+  (modify (set a_clk 0) (set b_clk 1))
+  (run_until 2)
+  (assert_eq q 0x03020155)
+  (modify (set b_clk 0) (set a_clk 1))
+  (run_until 3)
+  (assert_eq q 0x02015503))
+
+
+(case masked_feed_forward_dependencies
+  (four_state)
+  (source "masked_dependencies.sv" #"
+    module Top(input logic [3:0] enable, output wire [3:0] grant, grant_swapped);
+      for (genvar n=0; n<4; n=n+1) begin:g
+        assign grant[n] = enable[n] && ((grant & (4'b1111 >> (4-n))) == 0);
+        assign grant_swapped[n] = enable[n] && (((4'b1111 >> (4-n)) & grant_swapped) == 0);
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (range 0 16)
+    (modify (set enable value))
+    (assert_eq grant (& value (- 16 value)))
+    (assert_eq grant_swapped (& value (- 16 value))))
+  (modify (set enable (fourstate 8 8)))
+  (assert_eq grant (fourstate 8 8))
+  (assert_eq grant_swapped (fourstate 8 8)))
+
+
+(case continuous_function_dynamic_scratch_write
+  (four_state)
+  (source "continuous_function_scratch.sv" #"
+    module Top(input logic [2:0] index, input logic value, output wire [7:0] y);
+      function automatic [7:0] f(input logic [2:0] position, input logic data);
+        f=0;
+        f[position]=data;
+      endfunction
+      assign y=f(index,value);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set value 1))
+  (for position (range 0 8)
+    (modify (set index position))
+    (assert_eq y (<< 1 position)))
+  (modify (set index (fourstate 7 7)))
+  (assert_eq y 0))

@@ -13,7 +13,7 @@ mod file_io;
 
 use super::procedural::*;
 use super::*;
-use celox_design::{CounterKind, NbaSite, WaitSite};
+use celox_design::{CounterKind, NbaSite, SPARSE_WORKING_REGION, WaitSite};
 use celox_frontend_core::process::{ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
 use celox_slt::SLTToSIRLowerer;
@@ -34,6 +34,7 @@ struct FunctionBlocks {
 
 pub(super) struct Ff<'p, 'a> {
     pub m: &'p mut ProcModule<'a>,
+    sparse_memories: HashSet<SourceVarId>,
     b: SIRBuilder<Addr>,
     /// Variables read from the working region.
     working: HashSet<SourceVarId>,
@@ -97,6 +98,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         }
         Self {
             m,
+            sparse_memories: HashSet::default(),
             b: SIRBuilder::new(),
             working: HashSet::default(),
             nonblocking: HashSet::default(),
@@ -119,6 +121,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             nba_sites: Vec::new(),
             host_request_sites: Vec::new(),
         }
+    }
+
+    pub fn with_sparse_memories(mut self, names: &HashSet<String>) -> Self {
+        self.sparse_memories = names.iter().filter_map(|name| self.m.id(name)).collect();
+        self
     }
 
     /// Where a write of `id`, and a read of a value the process wrote, go:
@@ -2203,6 +2210,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                     bit_offset: 0,
                     dynamic_bit_offset: None,
                 };
+                if self.sparse_memories.contains(&id) {
+                    let part = self.b.alloc_logic(packed_element_width);
+                    self.b.emit(SIRInstruction::Slice(
+                        part,
+                        value,
+                        inner_index * packed_element_width,
+                        packed_element_width,
+                    ));
+                    self.when(valid, |this| {
+                        this.store(id, offset, packed_element_width, part);
+                        Ok(())
+                    })?;
+                    continue;
+                }
                 let old = self.b.alloc_logic(packed_element_width);
                 let target = self.target(id);
                 self.b.emit(SIRInstruction::Load(
@@ -2230,6 +2251,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             bit_offset: access.lsb,
             dynamic_bit_offset: None,
         };
+        if self.sparse_memories.contains(&id) {
+            return self.when(valid, |this| {
+                this.store(id, offset, target_width, value);
+                Ok(())
+            });
+        }
         let old = self.b.alloc_logic(target_width);
         let target = self.target(id);
         self.b.emit(SIRInstruction::Load(
@@ -3463,6 +3490,15 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
+        if self
+            .working
+            .iter()
+            .any(|id| self.sparse_memories.contains(id))
+        {
+            return Err(unsupported(
+                "blocking writes to a shared edge-triggered memory",
+            ));
+        }
         // Merge the written ranges of each variable.
         let mut ranges: HashMap<SourceVarId, Vec<BitAccess>> = HashMap::default();
         for (id, access) in std::mem::take(&mut self.targets) {
@@ -3517,7 +3553,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             stage_nonblocking(body, &staged, self.m)
         };
-        emit_ff_seeds(&mut self.b, &targets);
+        let ordinary_targets: Vec<_> = targets
+            .iter()
+            .copied()
+            .filter(|target| !self.sparse_memories.contains(&target.id))
+            .collect();
+        emit_ff_seeds(&mut self.b, &ordinary_targets);
         for stage in &staged {
             let width = self.m.var(stage.mask).width;
             let zero = self.b.alloc_bit(width, false);
@@ -3527,18 +3568,44 @@ impl<'p, 'a> Ff<'p, 'a> {
         if self.exec_block(&body)? {
             self.b.seal_block(SIRTerminator::Return);
         }
-        let eval = seal_drained(self.b);
+        let mut eval = seal_drained(self.b);
+        if eval.blocks.values().flat_map(|block| &block.instructions).any(|instruction| {
+            matches!(instruction, SIRInstruction::Load(_, address, ..)
+                if address.region == WORKING_REGION && self.sparse_memories.contains(&address.var_id))
+        }) {
+            return Err(unsupported("read-modify-write destination in a shared FF memory"));
+        }
+        for block in eval.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                if let SIRInstruction::Store(address, ..) = instruction
+                    && address.region == WORKING_REGION
+                    && self.sparse_memories.contains(&address.var_id)
+                {
+                    address.region = SPARSE_WORKING_REGION;
+                }
+            }
+        }
         let (active_targets, nba_targets): (Vec<_>, Vec<_>) = targets
             .iter()
             .copied()
             .partition(|target| self.working.contains(&target.id));
         let mut apply = SIRBuilder::new();
-        emit_ff_commits(&mut apply, &targets);
+        emit_sparse_memory_commits(
+            &mut apply,
+            &targets,
+            &self.sparse_memories,
+            self.m.variables,
+        );
         emit_nba_merges(&mut apply, &staged, self.m);
         let mut active = SIRBuilder::new();
         emit_ff_commits(&mut active, &active_targets);
         let mut nba = SIRBuilder::new();
-        emit_ff_commits(&mut nba, &nba_targets);
+        emit_sparse_memory_commits(
+            &mut nba,
+            &nba_targets,
+            &self.sparse_memories,
+            self.m.variables,
+        );
         emit_nba_merges(&mut nba, &staged, self.m);
         Ok(FfProcessUnits {
             eval,
@@ -3547,6 +3614,40 @@ impl<'p, 'a> Ff<'p, 'a> {
             nba: seal_builder(nba),
             targets,
         })
+    }
+}
+
+/// Reuse the sparse next-state protocol used by the Veryl frontend: no whole
+/// memory seed, and publication touches only the dirty ranges.
+fn emit_sparse_memory_commits(
+    builder: &mut SIRBuilder<Addr>,
+    targets: &[VarAtomBase<SourceVarId>],
+    sparse: &HashSet<SourceVarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+) {
+    let mut committed = HashSet::default();
+    for target in targets {
+        if sparse.contains(&target.id) {
+            if !committed.insert(target.id) {
+                continue;
+            }
+            // Sparse publication consumes this memory's complete dirty set,
+            // including updates from other processes evaluated before commit.
+            // Describe the full object, and publish it once even if this
+            // process writes several disjoint static ranges.
+            builder.emit(SIRInstruction::Commit(
+                Addr {
+                    region: SPARSE_WORKING_REGION,
+                    var_id: target.id,
+                },
+                stable(target.id),
+                SIROffset::Static(0),
+                variables[&target.id].width,
+                Vec::new(),
+            ));
+        } else {
+            emit_ff_commits(builder, std::slice::from_ref(target));
+        }
     }
 }
 

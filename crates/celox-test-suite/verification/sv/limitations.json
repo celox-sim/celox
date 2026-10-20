@@ -134,7 +134,9 @@
         "review_regressions::preserves_use_site_dimensions_in_function_alias_types",
         "system_functions::dimensions_is_independent_of_unknown_values",
         "system_functions::isunbounded_restores_procedural_parameter_type_metadata",
-        "types::packed_parameters_of_signed_named_types_have_signed_elements"
+        "types::packed_parameters_of_signed_named_types_have_signed_elements",
+        "aggregate_regressions::parameter_element_forwarding",
+        "aggregate_regressions::parameter_runtime_element_bit"
       ]
     }
   },
