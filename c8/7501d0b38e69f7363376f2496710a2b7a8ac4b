@@ -1,0 +1,1 @@
+Update retained sv-tests expectations from the official CI report: file-position, EOF and flush probes now pass in both state modes.
