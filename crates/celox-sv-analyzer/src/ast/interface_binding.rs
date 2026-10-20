@@ -268,6 +268,7 @@ pub(super) fn analyze_module(
         true,
         Some(&header_ports),
     )?;
+    let mut caller_ports = caller.ports.clone();
     let mut caller_symbols = caller.symbols.as_ref().unwrap().clone();
     let _caller_scope = scope::install(&tree.state, Arc::new(caller_symbols.clone()));
     let _functions = const_functions::install(&tree.state, caller.constant_functions.clone());
@@ -295,6 +296,7 @@ pub(super) fn analyze_module(
                 true,
                 Some(&header_ports),
             )?;
+            caller_ports = caller.ports.clone();
             caller_symbols = caller.symbols.unwrap();
             generated = true;
             let mut current = caller_symbols.clone();
@@ -324,7 +326,7 @@ pub(super) fn analyze_module(
                 binding_declaration_view(&view_ports, &instantiations, tree, &imported)?;
             let mut header_imports = imported.clone();
             header_imports.declarations_only = true;
-            caller_symbols = Module::from_selected_scope(
+            let caller = Module::from_selected_scope(
                 &tree.child(&header_tree, &overrides),
                 &name,
                 &overrides,
@@ -332,9 +334,9 @@ pub(super) fn analyze_module(
                 Arc::new(header_imports),
                 true,
                 Some(&header_ports),
-            )?
-            .symbols
-            .unwrap();
+            )?;
+            caller_ports = caller.ports.clone();
+            caller_symbols = caller.symbols.unwrap();
         }
         let mut current = caller_symbols.clone();
         current.extend(&imported);
@@ -345,8 +347,12 @@ pub(super) fn analyze_module(
         }
         let _scope = scope::install(&tree.state, Arc::new(current.clone()));
         let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
+        // Exported scope symbols omit ordinary module ports. Keep the
+        // selected caller header available for connection width discovery.
+        let mut connection_ports = caller_ports.clone();
+        connection_ports.extend(current.ports.iter().cloned());
         let mut dimensions = packed_dimensions_from_ports_and_signals(
-            &current.ports,
+            &connection_ports,
             &current.signals,
             &current.const_env,
             &current.type_aliases,
@@ -416,10 +422,10 @@ pub(super) fn analyze_module(
                         .insert(handle.clone(), elements.clone());
                 }
             }
-            for local_handle in elements.elements {
+            for (ordinal, local_handle) in elements.elements.iter().enumerate() {
                 let handle = generated_item.as_ref().map_or_else(
                     || local_handle.clone(),
-                    |item| item.instance_name(&local_handle),
+                    |item| item.instance_name(local_handle),
                 );
                 imported
                     .interface_types
@@ -443,6 +449,14 @@ pub(super) fn analyze_module(
                             imported.declarations_only,
                         )
                     })?;
+                let port_state = module.constant_function_state();
+                let port_symbols = module.symbols.as_ref().unwrap();
+                let port_dimensions = packed_dimensions_from_ports_and_signals(
+                    &module.ports,
+                    &module.signals,
+                    &port_symbols.const_env,
+                    &port_symbols.type_aliases,
+                );
                 for port in &module.ports {
                     let signal = Signal {
                         name: port.name.clone(),
@@ -459,6 +473,70 @@ pub(super) fn analyze_module(
                     };
                     let Some(actual) = connection.actual_expr.clone() else {
                         continue;
+                    };
+                    let actual = if elements.shape.is_empty() {
+                        actual
+                    } else {
+                        let port_shape = port_dimensions.get(&port.name).unwrap();
+                        let port_width = lvalue_expr_type(
+                            &port_state,
+                            &LValue::Ident(port.name.clone()),
+                            &port_dimensions,
+                        )
+                        .ok_or_else(|| unsupported("interface array port width"))?
+                        .width;
+                        let actual_width = expr_static_width(&tree.state, &actual, &dimensions)
+                            .ok_or_else(|| unsupported("interface array connection width"))?;
+                        let actual_shape = if let Some(root) =
+                            connection_expression(authored, &port.name, Some(&interface))?
+                        {
+                            dimensions::operand_shape(root, tree, &dimensions)?
+                        } else if let Expr::Ident(name) = &actual {
+                            dimensions.get(name).cloned()
+                        } else {
+                            None
+                        };
+                        let unpacked_sizes =
+                            |shape: &VariableDimensions,
+                             state: &AnalysisState,
+                             env: &HashMap<String, i128>| {
+                                shape
+                                    .unpacked
+                                    .iter()
+                                    .map(|dimension| {
+                                        usize::try_from(eval_ast_const_expr(
+                                            state,
+                                            &dimension.width,
+                                            env,
+                                        )?)
+                                        .ok()
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            };
+                        let actual_shape = actual_shape
+                            .as_ref()
+                            .map(|shape| unpacked_sizes(shape, &tree.state, &dimensions.const_env))
+                            .unwrap_or_else(|| Some(Vec::new()))
+                            .ok_or_else(|| unsupported("interface array actual shape"))?;
+                        let port_shape =
+                            unpacked_sizes(port_shape, &port_state, &port_dimensions.const_env)
+                                .ok_or_else(|| unsupported("interface array port shape"))?;
+                        let (origin, ascending) =
+                            connection_slice_origin(&actual, &tree.state, &dimensions)?;
+                        let shape = ConnectionShape {
+                            unpacked: actual_shape,
+                            width: actual_width,
+                            origin,
+                            ascending,
+                        };
+                        distribute_port_connection(
+                            actual,
+                            &shape,
+                            &port_shape,
+                            port_width,
+                            &elements,
+                            ordinal,
+                        )?
                     };
                     let bound = format!("{handle}${}", port.name);
                     let assignment = match port.direction {
@@ -847,6 +925,111 @@ fn formal_dimensions(
         })
         .map(|port| port.dimensions.clone())
         .ok_or_else(|| unsupported(format!("missing interface port `{port_name}`")))
+}
+
+struct ConnectionShape {
+    unpacked: Vec<usize>,
+    width: usize,
+    origin: ConstExpr,
+    ascending: bool,
+}
+
+/// Single packed dimensions retain authored indices in analyzer expressions;
+/// unpacked and multi-packed selections already use flat storage coordinates.
+fn connection_slice_origin(
+    actual: &Expr,
+    state: &AnalysisState,
+    dimensions: &PackedDimensions,
+) -> Converted<(ConstExpr, bool)> {
+    let (name, selected_origin) = match actual {
+        Expr::Ident(name) => (name, None),
+        Expr::Select { expr, lsb, .. } => {
+            let Expr::Ident(name) = expr.as_ref() else {
+                return Ok((ConstExpr::Literal("0".into()), false));
+            };
+            (name, Some(lsb.clone()))
+        }
+        _ => return Ok((ConstExpr::Literal("0".into()), false)),
+    };
+    if let Some(shape) = dimensions.get(name)
+        && shape.unpacked.is_empty()
+        && let [dimension] = shape.packed.as_slice()
+        && !dimension.normalize_single
+    {
+        let left = eval_ast_const_expr(state, &dimension.left, &dimensions.const_env)
+            .ok_or_else(|| unsupported("interface connection packed bound"))?;
+        let right = eval_ast_const_expr(state, &dimension.right, &dimensions.const_env)
+            .ok_or_else(|| unsupported("interface connection packed bound"))?;
+        return Ok((
+            selected_origin.unwrap_or_else(|| dimension.right.clone()),
+            left < right,
+        ));
+    }
+    Ok((
+        selected_origin.unwrap_or_else(|| ConstExpr::Literal("0".into())),
+        false,
+    ))
+}
+
+/// IEEE 1800-2023 23.3.3.5. Packed actuals distribute MSB-first;
+/// unpacked actuals use the compiler's declaration-order element layout.
+fn distribute_port_connection(
+    actual: Expr,
+    shape: &ConnectionShape,
+    port_shape: &[usize],
+    port_width: usize,
+    elements: &ArrayBinding,
+    ordinal: usize,
+) -> Converted<Expr> {
+    let actual_shape = shape.unpacked.as_slice();
+    let actual_width = shape.width;
+    if actual_shape == port_shape && actual_width == port_width {
+        return Ok(actual);
+    }
+    let packed = actual_shape.is_empty() && port_shape.is_empty();
+    let distributed_shape = elements
+        .shape
+        .iter()
+        .chain(port_shape)
+        .copied()
+        .collect::<Vec<_>>();
+    if (!packed && actual_shape != distributed_shape)
+        || port_width.checked_mul(elements.elements.len()) != Some(actual_width)
+    {
+        return Err(unsupported(format!(
+            "interface array connection shape/width: {actual_width} bits {actual_shape:?} for {} ports of {port_width} bits {port_shape:?}",
+            elements.elements.len(),
+        )));
+    }
+    let offset = if packed {
+        elements.elements.len() - ordinal - 1
+    } else {
+        ordinal
+    } * port_width;
+    let coordinate = |offset: usize| {
+        let offset = const_expr_from_i128(offset as i128);
+        if shape.ascending {
+            ConstExpr::Binary {
+                left: Box::new(shape.origin.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(offset),
+            }
+        } else {
+            add_expr(shape.origin.clone(), offset)
+        }
+    };
+    let msb = coordinate(offset + port_width - 1);
+    let lsb = coordinate(offset);
+    let expr = match actual {
+        Expr::Select { expr, .. } if matches!(expr.as_ref(), Expr::Ident(_)) => expr,
+        value => Box::new(value),
+    };
+    Ok(Expr::Select {
+        expr,
+        msb,
+        lsb,
+        signed: false,
+    })
 }
 
 fn connection_lvalue(expr: Expr) -> Converted<LValue> {

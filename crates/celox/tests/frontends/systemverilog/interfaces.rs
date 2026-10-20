@@ -1,6 +1,25 @@
 use super::*;
 
 sv_backends! {
+    fn distributes_multidimensional_connections_to_interface_arrays(sim) {
+        @case "interfaces::distributes_multidimensional_connections_to_interface_arrays";
+    }
+
+    fn distributes_array_port_connections_to_interface_arrays(sim) {
+        @case "interfaces::distributes_array_port_connections_to_interface_arrays";
+    }
+
+    fn distributes_unpacked_connections_to_interface_arrays(sim) {
+        @case "interfaces::distributes_unpacked_connections_to_interface_arrays";
+    }
+
+    fn mixes_module_contracts_with_local_interface_connections(sim) {
+        @case "interfaces::mixes_module_contracts_with_local_interface_connections";
+    }
+    fn distributes_packed_connections_to_interface_arrays(sim) {
+        @case "interfaces::distributes_packed_connections_to_interface_arrays";
+    }
+
     fn binds_implicit_named_interface_ports(sim) {
         @case "interfaces::binds_implicit_named_interface_ports";
     }
