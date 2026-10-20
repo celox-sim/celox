@@ -804,6 +804,11 @@ fn collect_statement_reads(
                             collect_expression_reads(&arg.0, funcs, active_functions, reads);
                         }
                     }
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            collect_expression_reads(value, funcs, active_functions, reads);
+                        }
+                    }
                     TbMethod::RandomSeed { value } => {
                         collect_expression_reads(value, funcs, active_functions, reads);
                     }
@@ -2603,6 +2608,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     | TbMethod::FileWrite { .. }
                     | TbMethod::FileClose
                     | TbMethod::FileFlush
+                    | TbMethod::Queue { .. }
                     | TbMethod::Component { .. }
                     | TbMethod::RandomSeed { .. }
                     | TbMethod::RandomGet { .. }
@@ -3073,6 +3079,72 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 Some(GenericTestbenchStatement::RandomGetSeed {
                     handle: self.resource_name(tb.inst),
                     ret,
+                })
+            }
+            TbMethod::Queue {
+                op,
+                value,
+                width,
+                signed,
+                four_state,
+                capacity,
+            } => {
+                use celox_testbench::QueueOp as Q;
+                use veryl_analyzer::ir::QueueOp as V;
+                let op = match op {
+                    V::PushBack => Q::PushBack,
+                    V::PushFront => Q::PushFront,
+                    V::PopFront => Q::PopFront,
+                    V::PopBack => Q::PopBack,
+                    V::DropFront => Q::DropFront,
+                    V::DropBack => Q::DropBack,
+                    V::Front => Q::Front,
+                    V::Back => Q::Back,
+                    V::Clear => Q::Clear,
+                    V::Size => Q::Size,
+                    V::IsEmpty => Q::IsEmpty,
+                    V::IsFull => Q::IsFull,
+                };
+                let mut value_mask = num_bigint::BigUint::default();
+                let mut value_width = *width as usize;
+                let mut value_signed = false;
+                let mut value_target = None;
+                let compiled_value = value.as_ref().map(|value| {
+                    value_width = ec.natural_width(value);
+                    value_signed = expression_signed(value);
+                    let is_literal = matches!(value, Expression::Term(f) if matches!(f.as_ref(), Factor::Value(_)));
+                    if (value.comptime().is_const || is_literal)
+                        && let Some((bits, mask, w, signed)) = crate::bitaccess::celox_value_from_comptime_in_context(value.comptime(), Some(*width as usize))
+                    {
+                        value_mask = mask; value_width = w; value_signed = signed;
+                        return ExprBytecode::new(vec![TbOpcode::ConstWide(bits)]);
+                    }
+                    if let Expression::Term(factor) = value {
+                        let input = match factor.as_ref() {
+                            Factor::Variable(id, index, select, _) => Some(VerylComponentInputBinding::Root { id: *id, index: index.clone(), select: select.clone() }),
+                            Factor::HierVariable(reference) => Some(VerylComponentInputBinding::Hierarchical(reference.clone())),
+                            _ => None,
+                        };
+                        value_target = input.as_ref().and_then(|input| ec.resolve_component_input_target(input));
+                    }
+                    ec.compile_with_width(value, *width as usize)
+                });
+                Some(GenericTestbenchStatement::Queue {
+                    handle: self.resource_name(tb.inst),
+                    op,
+                    value: compiled_value,
+                    value_target,
+                    value_mask,
+                    value_width,
+                    value_signed,
+                    width: *width,
+                    signed: *signed,
+                    four_state: *four_state,
+                    capacity: *capacity,
+                    ret: match tb.ret.as_deref() {
+                        Some(dst) => Some(ec.resolve_target(dst)?),
+                        None => None,
+                    },
                 })
             }
             TbMethod::Component { method, args } => {
@@ -3624,6 +3696,25 @@ fn validate_testbench_statements(
                                 source,
                                 active_functions,
                             )?;
+                        }
+                    }
+                    TbMethod::Queue { value, .. } => {
+                        if let Some(value) = value {
+                            // The expression VM is two-state. Direct queue values use
+                            // a separate mask source; reject expressions that would
+                            // silently discard X/Z before entering the queue.
+                            let direct = matches!(value, Expression::Term(factor) if matches!(factor.as_ref(), Factor::Value(_) | Factor::Variable(..) | Factor::HierVariable(_)));
+                            if !value.comptime().r#type.is_2state()
+                                && !value.comptime().is_const
+                                && !direct
+                            {
+                                return Err(ParserError::illegal_context(
+                                    "four-state queue argument expression",
+                                    "runtime four-state queue arguments require a direct variable or selection; compound four-state expressions are not supported by the testbench expression VM",
+                                    Some(&value.comptime().token),
+                                ));
+                            }
+                            validate_testbench_expression(value, lookup, source, active_functions)?;
                         }
                     }
                     TbMethod::RandomSeed { value } => {

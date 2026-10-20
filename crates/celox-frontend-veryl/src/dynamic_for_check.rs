@@ -1551,6 +1551,21 @@ fn collect_statement_effects(
                         effects.mark_unknown("component method may write connected output state");
                     }
                 }
+                TbMethod::Queue { value, .. } => {
+                    effects.observable = true;
+                    if let Some(value) = value {
+                        effects.append(collect_expression_effects(value, module, active_functions));
+                    }
+                    if let Some(destination) = call.ret.as_deref() {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            &mut effects,
+                            from_ff,
+                        );
+                    }
+                }
                 TbMethod::RandomSeed { value } => {
                     effects.observable = true;
                     effects.append(collect_expression_effects(value, module, active_functions));
