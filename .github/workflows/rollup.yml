@@ -1,0 +1,81 @@
+name: Roll up stacks
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Create, resume, refresh source snapshots, or cancel a rollup
+        type: choice
+        options: [create, resume, refresh, cancel]
+        default: create
+      pull_requests:
+        description: 'Create: stack-tip PR numbers, e.g. 1571,1591 (dependencies included)'
+        type: string
+      rollup:
+        description: 'Resume/refresh/cancel: the existing rollup PR number'
+        type: string
+      base:
+        description: 'Create: destination branch'
+        type: choice
+        options: [master, develop]
+        default: master
+      queue:
+        description: 'Create: request merging once all conflicts are resolved'
+        type: boolean
+        default: false
+  pull_request_target:
+    types: [synchronize, closed, converted_to_draft]
+
+# Claiming/restoring source holds and refreshing integration branches must not
+# race another rollup. Never cancel an operation halfway through publication.
+concurrency:
+  group: github-rollup-management
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  rollup:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository &&
+      ((startsWith(github.head_ref, 'rollup/') && github.event.action != 'converted_to_draft') || contains(github.event.pull_request.labels.*.name, 'rollup:source')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Create rollup app token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+
+      # Execute only the trusted default-branch controller. The controller
+      # reads source commits as git data in a disposable separate checkout.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Configure git authentication
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: gh auth setup-git
+
+      - name: Manage rollup
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          ROLLUP_OPERATION: ${{ inputs.operation }}
+          ROLLUP_TIPS: ${{ inputs.pull_requests }}
+          ROLLUP_NUMBER: ${{ inputs.rollup }}
+          ROLLUP_BASE: ${{ inputs.base }}
+          ROLLUP_QUEUE: ${{ inputs.queue }}
+        run: node scripts/github-rollup.mjs

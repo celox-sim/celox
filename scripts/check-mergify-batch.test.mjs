@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { renderBody } from "./rollup-plan.mjs";
 import {
   batchPullRequestNumbers,
   stackDependency,
@@ -70,6 +71,24 @@ test("validates every source PR against policy from the exact batch tree", async
   );
   assert.ok(f.calls.includes("/repos/o/r/pulls/12"));
   assert.ok(f.calls.includes("/repos/o/r/pulls/13"));
+});
+
+test("queue batches reject stale rollup source snapshots", async () => {
+  const f = fixture();
+  const pinned = "d".repeat(40);
+  f.input.metadata = { pull_requests: [{ number: 12 }] };
+  Object.assign(f.source, { number: 12, head: { sha: sourceSha, ref: "rollup/123", repo: { full_name: "o/r" } },
+    body: renderBody({ repository: "o/r", id: "123", base: "master", baseSha,
+      tips: [34], queue: true, sources: [{ number: 34, sha: pinned, heldBefore: false }] }, "Ready") });
+  let head = pinned;
+  const api = async (path) => {
+    if (path === "/repos/o/r/pulls/34") return { state: "open", head: { sha: head, repo: { full_name: "o/r" } } };
+    if (path === `/repos/o/r/compare/${pinned}...${sourceSha}`) return { status: "ahead" };
+    return f.api(path);
+  };
+  assert.deepEqual(await validateBatch(f.input, api, f.commits, f.policy), [12]);
+  head = "e".repeat(40);
+  await assert.rejects(validateBatch(f.input, api, f.commits, f.policy), /source #34 changed/);
 });
 
 test("rejects spoofed batch authors, forks, stale heads, and non-drafts", async () => {

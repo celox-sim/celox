@@ -85,6 +85,11 @@ endpoint.
   `master` (no stable-lane release check or release-impact check); the merge
   queue validates them in full.
 
+The GitHub **Roll up stacks** workflow is the integration exception: it owns
+synthetic `rollup/*` branches and publishes an aggregate PR while preserving
+source commits. Use that workflow for rollup creation, refresh and cancellation;
+do not rewrite the original stack branches or close their PRs manually.
+
 ## Adding tests
 
 When adding tests, consider adding them to `crates/celox-test-suite` so

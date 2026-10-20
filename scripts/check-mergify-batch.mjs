@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { isConventionalPrTitle } from "./check-pr-title.mjs";
+import { validateRollupSources } from "./rollup-plan.mjs";
 import {
   githubJson,
   loadPullRequestCommits,
@@ -140,6 +141,7 @@ export async function validateBatch(
       if (errors.length)
         throw new Error(`#${sourceNumber}: ${errors.join("; ")}`);
     }
+    await validateRollupSources(repository, source, api);
   }
   return numbers;
 }

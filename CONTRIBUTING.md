@@ -158,6 +158,51 @@ chain on the stack root, bottom-up. Queueing the top member queues every member
 below it. The batch validator resolves each member's root through the same
 marker chain, so a stack branch without it is still refused.
 
+### Roll up conflicting stacks from GitHub
+
+Use **Actions → Roll up stacks → Run workflow** on `master`. Choose `create`,
+enter the **tip PR numbers** of the stacks (for example `1571,1591`), and select
+`master` or `develop` as the destination. The workflow follows the `Depends-On`
+chains, deduplicates shared predecessors, and creates one rollup PR. Fork PRs,
+drafts, dependency cycles and chains targeting another destination are rejected.
+The existing Release App credentials are used, including workflow-write access
+when the selected changes include workflow files.
+
+The workflow pins each source head, preserves the original commits, and adds
+`rollup:source` and `release:hold` to its sources. Their branches are never
+rewritten. Another managed rollup cannot claim the same sources. The rollup's
+title is derived from the highest release impact of all included commits,
+including sources still waiting on conflict resolution. `Release-As` commits
+must use the release workflow instead.
+
+When two sources conflict, the rollup stays draft and links a **resolution PR**.
+Open that PR and use GitHub's **Resolve conflicts** button, then commit the
+resolution. This edits a copy of the source branch. The workflow automatically
+resumes the rollup; repeat for any further conflicts. If the rollup itself
+conflicts with its destination, use **Resolve conflicts** on the main rollup
+PR. GitHub's editor supports simple text conflicts; for conflicts it cannot
+edit, resolve and push only the indicated rollup/resolution branch locally.
+
+Once every source is integrated, the workflow marks the rollup ready for review.
+Add `merge-ready` to queue it, or select the **queue** checkbox when creating it
+to request queueing automatically when conflict resolution completes. The normal
+combined-tree queue checks still apply. Source updates or conversion to draft
+stop an active rollup; queue validation also checks the pins and commit ancestry.
+
+To recover an interrupted run, select `resume` and enter the **rollup PR number**.
+To incorporate new source heads, select `refresh` with that number. Refresh
+rebuilds the integration from the new snapshots; previous conflict resolutions
+are not reused across changed snapshots. If stack membership changes, cancel
+and create a new rollup. Sources merged as part of the rollup retain their
+history; the rollup also carries closing references for source PR cleanup.
+
+To abandon it, select `cancel` with the rollup PR number, or close the rollup
+PR. The controller closes its resolution PRs, removes `rollup:source`, and
+restores only the holds it added. Holds present before the rollup stay in place.
+The same cleanup runs after a successful merge. Source PRs are never closed by
+the cancellation operation. Controller results and recovery errors appear in
+the Actions run summary.
+
 Lydite tests use the independent change-selected and daily cadence described
 below, including on Mergify queue draft PRs.
 The `Queue validation` merge condition requires the selected checks in `ci.yml` to pass;

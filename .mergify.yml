@@ -25,6 +25,8 @@ scopes:
           - scripts/check-mergify-batch.test.mjs
           - scripts/check-mergify-queue-title.mjs
           - scripts/check-mergify-queue-title.test.mjs
+          - scripts/rollup-plan.mjs
+          - scripts/rollup-plan.test.mjs
       pr-policy:
         include:
           - .github/workflows/pr-title.yml
@@ -36,6 +38,8 @@ scopes:
           - scripts/check-mergify-batch.test.mjs
           - scripts/check-mergify-queue-title.mjs
           - scripts/check-mergify-queue-title.test.mjs
+          - scripts/rollup-plan.mjs
+          - scripts/rollup-plan.test.mjs
   capacities:
     core: 2
     pr-policy: 1
