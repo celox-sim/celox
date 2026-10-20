@@ -1,0 +1,1 @@
+Resolve conflicts after #1580 changed native testbench CLI defaults to O2; preserve the new default in project fallback and tests.
