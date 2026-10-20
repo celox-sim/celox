@@ -3127,6 +3127,11 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                         };
                         value_target = input.as_ref().and_then(|input| ec.resolve_component_input_target(input));
                     }
+                    // Bytecode evaluates in the element's width context. Only
+                    // direct signal reads still need source-width resizing.
+                    if value_target.is_none() {
+                        value_width = *width as usize;
+                    }
                     ec.compile_with_width(value, *width as usize)
                 });
                 Some(GenericTestbenchStatement::Queue {
