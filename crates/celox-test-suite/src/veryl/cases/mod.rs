@@ -8,6 +8,10 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/veryl/cases/tb_queue.vtest",
+        text: include_str!("tb_queue.vtest"),
+    },
+    Group {
         file: "src/veryl/cases/tb_string.vtest",
         text: include_str!("tb_string.vtest"),
     },

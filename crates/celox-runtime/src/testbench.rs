@@ -318,6 +318,36 @@ fn bind_statement<B: SimBackend>(
                 ret: bind_optional_target(backend, ret)?,
             })
         }
+        GenericTestbenchStatement::Queue {
+            handle,
+            op,
+            value,
+            value_target,
+            value_mask,
+            value_width,
+            value_signed,
+            width,
+            signed,
+            four_state,
+            capacity,
+            ret,
+        } => Some(GenericTestbenchStatement::Queue {
+            handle,
+            op,
+            width,
+            signed,
+            four_state,
+            capacity,
+            value: match value {
+                Some(value) => Some(bind_expr(backend, value)?),
+                None => None,
+            },
+            value_target: bind_optional_target(backend, value_target)?,
+            value_mask,
+            value_width,
+            value_signed,
+            ret: bind_optional_target(backend, ret)?,
+        }),
         GenericTestbenchStatement::ComponentMethod {
             instance,
             method,
