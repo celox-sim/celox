@@ -151,6 +151,7 @@ Override individual compilation diagnostics by their displayed code:
 ```toml
 [diagnostics]
 mixed_timescale = "warn"
+inferred_latch = "warn"
 exit_outside_program = "allow"
 memory_file_word_count = "error"
 ```
@@ -162,7 +163,7 @@ Use the exact code printed in the diagnostic; entries for codes not encountered
 by a compilation have no effect.
 
 Recoverable errors support relaxation only when the compiler defines a fallback.
-Currently `mixed_timescale` is the supported error: IEEE 1800-2023 §3.14.2.3 requires
+`mixed_timescale` is one supported error: IEEE 1800-2023 §3.14.2.3 requires
 consistent explicit time units and precisions. Its default is `error`. With `warn`
 or `allow`, undeclared settings use Celox's defaults (1ns unit, 1ps precision),
 explicit settings remain effective, and the global precision includes default
@@ -175,6 +176,15 @@ or `allow`, Celox stages their nonblocking writes in sparse next-state storage
 and commits dirty chunks. Ordinary `always` procedures can share a memory
 without this diagnostic. Simultaneous
 writes to the same bits from different processes have no portable ordering.
+
+`inferred_latch` rejects retained assignments in SystemVerilog and Veryl
+`always_comb` by default. Set it to `warn` to simulate the latch with a
+source-located warning, or `allow` to simulate it silently. Ordinary `always @*`
+and explicit `always_latch` do not require this relaxation. Nonblocking latch
+assignments and unsupported combinational feedback remain errors.
+The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: true`
+options provide `allow` only when this diagnostic has no explicit setting;
+an explicit `error`, `warn` or `allow` takes precedence.
 
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:

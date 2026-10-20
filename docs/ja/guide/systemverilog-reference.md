@@ -35,7 +35,7 @@ outline: [2, 3]
 | 領域 | サポート内容 |
 | --- | --- |
 | 連続論理 | `assign`、`wire w = expr;` |
-| 組み合わせプロセス | `always_comb`、`always @*`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
+| 組み合わせプロセス | `always_comb`、`always @*`、ブロッキング代入の `always_latch`、ブロックローカル変数、逐次・依存するブロッキング代入、プロセスが書き込む前の変数の読み出し（直前の値） |
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
 | initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if` / `for`、`$readmemh` / `$readmemb` を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しない） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーション |
@@ -99,7 +99,8 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event、`fork` / `join`、並行アサーション、`force` / `release`。
-- `always_latch`（[#431](https://github.com/celox-sim/celox/issues/431)）、ラッチを推論する不完全な組み合わせ代入。
+- `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。`@*` 以外のレベルセンシティブなセンシティビティリストは未対応です。
+- `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
@@ -193,6 +194,28 @@ hard packed untagged union のメンバーは、同じビットベクタを共�
 メンバー名やフィールド分割が異なっても扱えます。型付き scalar パターンは、既定値が
 通常の値であるパラメータも上書きできます。unpacked パターンは配列の位置と形状を保持します。
 
+### ラッチ
+
+明示的な `always_latch` と通常の `always @*` は、ブロッキング代入による値の保持に対応します。
+SystemVerilog と Veryl の `always_comb` の不完全な代入は、共通の
+[`[diagnostics]` 設定](./celox-toml.md#diagnostics) で `inferred_latch = "warn"` または `"allow"` を指定すると値を保持します。既定は `error` です。
+Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatches: true` も利用できますが、明示した診断設定が優先されます。
+通常の `eval_comb` と `initial` テストベンチの両方で
+使用でき、ゲートが開いている間はデータの変化が出力に伝わり、閉じると直前の値を保持します。
+4状態モードの未初期化ラッチは X で始まります。手続き型 `if` の条件が X または Z の場合は、真側を実行しません。
+
+`always_comb` と `always_latch` は時刻 0 にも一度実行します。`always @*` は
+感度リストの入力変化を待ちます。これには `initial` ブロックや連続代入による変化も含みます。
+同じ入力で `eval_comb` を繰り返しても再実行しません。`always_comb` と同様に、書き込む式は `always_latch` の
+感度リストから除外します（IEEE 1800-2023 9.2.2.2、9.2.2.3）。プロセス間の
+フィードバックには従来どおり明示的なループ設定が必要です。このオプションは、
+明示的な算術フィードバックに対する Veryl アナライザーのエラーを抑制しません。
+`bus[0]` のような選択を読む場合、`always @*` は変数全体を監視し、
+`always_comb` と `always_latch` は静的に特定できる最長の接頭部を監視します。
+後者は呼び出した関数本体の読み取りも含みますが、task 呼び出しは引数の式だけが
+感度に寄与します（IEEE 1800-2023 9.4.2.2、9.2.2.2.1）。
+ノンブロッキング代入（`<=`）には NBA スケジューリングが必要であり、推論を許可しても未対応です。
+
 ### 変数の寿命
 
 変数の寿命は IEEE 1800-2023 6.21 に従います。プロセスのブロック、関数、タスクの中で宣言した
@@ -201,8 +224,8 @@ hard packed untagged union のメンバーは、同じビットベクタを共�
 保持し、初期化子は時刻 0 に 1 回だけ実行します。`always_ff` 内の `int count; count++;` は数を数えます。
 automatic なローカル変数は、ブロックに入るたびに初期化します。どの経路でも読む前に書き込むため、入った
 時点の値が読まれない static なローカル変数は、どちらでも同じ動作です。static なローカル変数は値を保持する
-ため、一部の経路でしか書き込まない `always_comb` のローカル変数はラッチになり、ほかのラッチと同じく
-拒否します。呼び出しをまたいで値を保持する関数・タスクの static なローカル変数と、初期化子が定数でない
+ため、一部の経路でしか書き込まない `always_comb` のローカル変数はラッチになり、ほかの暗黙のラッチと同じく
+`inferred_latch` の緩和が必要です。呼び出しをまたいで値を保持する関数・タスクの static なローカル変数と、初期化子が定数でない
 static なローカル変数は未対応です。`automatic` と宣言してください。static な関数の結果も static なので、
 結果を代入しない経路を持つ関数（2 値の引数のすべての値を項目が網羅する `case` を除く）も拒否します。既定の寿命（`interface automatic`）が
 使用先のモジュールと異なる interface は拒否します。
