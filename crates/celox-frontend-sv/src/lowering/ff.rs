@@ -1882,6 +1882,18 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn exec(&mut self, stmt: &sv::ir::Stmt) -> Result<bool, sv::AnalyzerError> {
+        if matches!(
+            stmt,
+            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::Wait(_)
+        ) && (self.kernel.is_none()
+            || self.active_calls.iter().any(|name| {
+                self.m
+                    .subroutine(name)
+                    .is_some_and(|subroutine| !subroutine.is_task)
+            }))
+        {
+            return Err(unsupported("timed task call outside a suspendable process"));
+        }
         match stmt {
             sv::ir::Stmt::Assign {
                 lhs,
@@ -2647,6 +2659,38 @@ impl<'p, 'a> Ff<'p, 'a> {
                 "function call `{name}` with too many arguments"
             )));
         }
+        // Each inlined automatic task activation owns persistent storage, so
+        // another process can enter the same task while this one is suspended.
+        // Static formals/locals deliberately keep their module-wide addresses.
+        let mut activation = Vec::new();
+        if self.kernel.is_some() && subroutine.is_task {
+            for name in &subroutine.automatic_locals {
+                let original = self
+                    .m
+                    .id(name)
+                    .ok_or_else(|| unsupported(format!("task local `{name}`")))?;
+                let variable = self.m.var(original).clone();
+                let (copy, copy_name) = self.m.temp(
+                    "task_local",
+                    variable.width,
+                    variable.signed,
+                    variable.is_4state,
+                );
+                self.m.variables.insert(
+                    copy,
+                    SvVariable {
+                        path: vec![copy_name],
+                        ..variable
+                    },
+                );
+                if let Some(width) = self.element_widths.get(&stable(original)).copied() {
+                    self.element_widths.insert(stable(copy), width);
+                    self.element_widths.insert(working(copy), width);
+                }
+                self.m.name_to_id.insert(name.clone(), copy);
+                activation.push((name.clone(), original));
+            }
+        }
         // Evaluate every input before any formal is written: an argument may
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
@@ -2698,7 +2742,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .map_err(slt_error)?;
                 }
                 inputs.push((id, self.lower_slt(&arena, node)?));
-            } else {
+            } else if self.kernel.is_none()
+                || !subroutine.is_task
+                || subroutine.automatic_locals.contains(&param.name)
+            {
                 let value = self.default_reg(id);
                 inputs.push((id, value));
             }
@@ -2738,6 +2785,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let parts = lvalues;
                 self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
             }
+        }
+        for (name, original) in activation {
+            self.m.name_to_id.insert(name, original);
         }
         Ok(subroutine.return_var.clone())
     }
@@ -3561,6 +3611,23 @@ impl Ff<'_, '_> {
         let mut names = HashSet::default();
         expr_idents(condition, &mut names);
         subroutine_reads(self.m, condition, &mut names);
+        // Static task formals can change when another caller copies arguments
+        // in, but hidden local storage has no observable change counters yet.
+        // Do not compile a wait that would silently miss that wakeup, including
+        // dependencies read indirectly by a function in the condition.
+        if self.m.subroutines.values().any(|subroutine| {
+            subroutine.is_task
+                && subroutine.params.iter().any(|param| {
+                    !subroutine.automatic_locals.contains(&param.name)
+                        && names.iter().any(|name| {
+                            self.m.id(name).is_some_and(|id| {
+                                self.m.is_hidden(id) && Some(id) == self.m.id(&param.name)
+                            })
+                        })
+                })
+        }) {
+            return Err(unsupported("wait condition reading a static task argument"));
+        }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))

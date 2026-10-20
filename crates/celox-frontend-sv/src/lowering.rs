@@ -1103,6 +1103,15 @@ fn local_driver_ranges(
         body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
         driver_id += 1;
     }
+    // Ordinary always processes with timing (including edge processes
+    // converted after timed-task classification) retain their driver identity.
+    // One-shot initial blocks and declaration initializers are not drivers.
+    for process in module.initial_processes().iter().filter(|p| p.repeats()) {
+        if condition_is_active(process.condition(), constants, parameter_types) {
+            body_driver_ranges(&mut drivers, process.body(), driver_id, &scan);
+        }
+        driver_id += 1;
+    }
     drivers
 }
 
