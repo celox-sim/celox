@@ -1,0 +1,1 @@
+Correct the PR description to the implemented two-state default and add its CLI/native-image regression.
