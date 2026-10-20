@@ -1,1 +1,1 @@
-Sync after #1645 merged, retain the two-state CLI default, and publish separately validated Taxi fixes.
+Correct the PR description to the implemented two-state default and add its CLI/native-image regression.
