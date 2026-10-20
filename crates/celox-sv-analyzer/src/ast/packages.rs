@@ -125,7 +125,7 @@ impl Packages {
     }
 
     pub(crate) fn with_warnings(mut self, warnings: Vec<super::warnings::AnalyzerWarning>) -> Self {
-        self.warnings = warnings;
+        super::warnings::append(&mut self.warnings, warnings);
         self
     }
 
@@ -194,11 +194,19 @@ impl Packages {
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
     ) -> Result<Self, AnalyzerError> {
+        Self::analyze_with_options(trees, roots, false)
+    }
+
+    pub(crate) fn analyze_with_options(
+        trees: &[(&SyntaxTree, &Path)],
+        roots: Option<&[&str]>,
+        allow_mixed_timescales: bool,
+    ) -> Result<Self, AnalyzerError> {
         let mut warnings = Vec::new();
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots) {
+        match Self::analyze_with_roots_impl(trees, roots, allow_mixed_timescales) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -207,14 +215,22 @@ impl Packages {
     fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
+        allow_mixed_timescales: bool,
     ) -> Result<Self, AnalyzerError> {
-        let mut timescales = timescales::Timescales::collect(trees)?;
+        let mut timescales =
+            timescales::Timescales::collect_with_options(trees, allow_mixed_timescales)?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
+        let mixed_timescales = timescales.has_mixed_timescales();
         let timescales = Arc::new(timescales);
         let state = std::rc::Rc::new(AnalysisState::default());
         let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+        if mixed_timescales {
+            packages
+                .warnings
+                .push(super::warnings::AnalyzerWarning::MixedTimescale);
+        }
         packages.call_sites = state.next_call_site.clone();
         let units: Vec<_> = trees
             .iter()

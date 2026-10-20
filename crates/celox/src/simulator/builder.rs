@@ -176,6 +176,20 @@ pub(super) fn elaborate_parameterized_module(
         .map(|(name, value)| (resource_table::insert_str(name), value.clone()))
         .collect();
 
+    for name in values.keys() {
+        if !property
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == *name)
+        {
+            return Err(ParserError::illegal_context(
+                "top-level parameter override",
+                format!("unknown top-level parameter override `{name}`"),
+                Some(&top_token),
+            ));
+        }
+    }
+
     // push_override expects expressions that have already been evaluated in
     // the formal parameter type (as get_overridden_params does for HDL insts).
     // Resolve the header in declaration order so dependent widths/defaults see
@@ -290,6 +304,7 @@ fn analyze(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
@@ -301,6 +316,8 @@ fn analyze(
     Vec<FrontendDiagnostic>,
     Vec<CompilationWarning>,
 ) {
+    #[cfg(not(feature = "systemverilog"))]
+    let _ = diagnostic_policy;
     symbol_table::clear();
     attribute_table::clear();
 
@@ -378,10 +395,11 @@ fn analyze(
         let references = super::mixed::referenced_sv_components(
             authored_parsers.iter().map(|parser| &parser.veryl),
         );
-        let contracts = celox_frontend_sv::interface_signatures_for(
+        let contracts = celox_frontend_sv::interface_signatures_for_with_options(
             sv_sources,
             Some(&references),
             &mut sv_probe_warnings,
+            diagnostic_policy.sv_options(),
         )
         .map_err(|error| match error {
             celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
@@ -586,6 +604,7 @@ fn analyze(
                         trace_out,
                         optimize_options,
                         diagnostics,
+                        diagnostic_policy,
                         preserve_element_storage_layout,
                         testbench_random_seed,
                         component_libraries,
@@ -751,6 +770,7 @@ pub fn compile_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -866,6 +886,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     reset_type: Option<ResetType>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -898,6 +919,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         &[],
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -957,6 +979,7 @@ fn compile_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -979,6 +1002,7 @@ fn compile_to_sir_with_layout_mode(
         param_overrides,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1054,7 +1078,9 @@ pub fn compile_sv_to_sir(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        &[],
     )
 }
 
@@ -1081,7 +1107,9 @@ fn compile_sv_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -1105,11 +1133,13 @@ fn compile_sv_to_sir_with_layout_mode(
         trace_out,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         metadata.test.seed,
         component_libraries,
         component_file_base,
         &mut sv_warnings,
+        force_signals,
     );
     let warnings = sv_warnings
         .into_iter()
@@ -1210,6 +1240,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &crate::DiagnosticPolicy::default(),
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -1242,6 +1273,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -1264,6 +1296,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         param_overrides,
         optimize_options,
         diagnostics,
+        diagnostic_policy,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1326,12 +1359,20 @@ fn compile_hdl_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+    force_signals: &[String],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if !force_signals.is_empty() && !sources.is_empty() {
+        return Err(crate::CodegenError::message(
+            "force_signals currently require pure SystemVerilog sources",
+        )
+        .into());
+    }
     #[cfg(not(feature = "systemverilog"))]
     {
         debug_assert!(sv_sources.is_empty());
@@ -1349,6 +1390,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1372,6 +1414,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1392,7 +1435,9 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             layout_mode,
+            force_signals,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,
@@ -1409,6 +1454,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             param_overrides,
             optimize_options,
             diagnostics,
+            diagnostic_policy,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1461,12 +1507,15 @@ mod host {
         pub x86_options: crate::backend::X86BackendOptions,
         pub trace: crate::debug::TraceOptions,
         pub diagnostics: crate::RuntimeDiagnostics,
+        pub diagnostic_policy: crate::DiagnosticPolicy,
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
         /// Emit the additional combinational entries needed to reapply foreign
         /// force overrides between procedural store boundaries.
         pub native_force_support: bool,
+        /// Explicit hierarchical observation and native force targets.
+        pub signal_access: crate::SignalAccessOptions,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
         /// When the tiered backend adopts background-compiled code.
@@ -1661,8 +1710,10 @@ mod host {
                 x86_options: crate::backend::X86BackendOptions::default(),
                 trace: Default::default(),
                 diagnostics: Default::default(),
+                diagnostic_policy: Default::default(),
                 emit_triggers: false,
                 native_force_support: false,
+                signal_access: crate::SignalAccessOptions::default(),
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
@@ -2037,6 +2088,14 @@ mod host {
             self
         }
 
+        /// Declare hierarchical observation and native force targets.
+        /// This preserves the requested optimization level. Force targets currently
+        /// require a pure SystemVerilog design and the native backend.
+        pub fn signal_access(mut self, options: crate::SignalAccessOptions) -> Self {
+            self.options.signal_access = options;
+            self
+        }
+
         /// Mark a signal as externally observable (live) for dead store elimination.
         pub fn live_signal(
             mut self,
@@ -2053,7 +2112,13 @@ mod host {
             self
         }
 
-        /// Configure diagnostics explicitly for this build.
+        /// Override recoverable compilation diagnostic severities.
+        pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
+            self.options.diagnostic_policy = policy;
+            self
+        }
+
+        /// Configure runtime and optimizer diagnostics explicitly for this build.
         pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
             self.options.diagnostics = diagnostics.runtime;
             self.options.optimize_options.diagnostics = diagnostics.sir;
@@ -2376,7 +2441,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let (program, mut warnings) = if let Some(artifact) = &self.frontend_artifact {
+            let compiled = if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2388,7 +2453,7 @@ mod host {
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         layout_mode,
-                    )?
+                    )
                 } else {
                     compile_frontend_testbench_to_sir_with_layout_mode(
                         artifact,
@@ -2404,12 +2469,13 @@ mod host {
                         self.reset_type,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
+                        &self.options.diagnostic_policy,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
                         &self.file_dependencies,
-                    )?
+                    )
                 }
             } else {
                 compile_hdl_to_sir_with_layout_mode(
@@ -2427,13 +2493,18 @@ mod host {
                     &self.param_overrides,
                     &self.options.optimize_options,
                     &self.options.diagnostics,
+                    &self.options.diagnostic_policy,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
-                )?
+                    &self.options.signal_access.force_signals,
+                )
             };
+            let (program, mut warnings) = compiled
+                .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy))?;
+            self.options.diagnostic_policy.apply(&mut warnings)?;
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
             }
@@ -2449,6 +2520,7 @@ mod host {
                 tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
             }
 
+            validate_signal_access(&laid_out, &self.options.signal_access)?;
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 let dse_start = phase_timing.then(crate::timing::now);
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
@@ -3025,6 +3097,7 @@ mod host {
                         self.reset_type,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
+                        &self.options.diagnostic_policy,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
@@ -3048,21 +3121,27 @@ mod host {
                     &self.param_overrides,
                     &self.options.optimize_options,
                     &self.options.diagnostics,
+                    &self.options.diagnostic_policy,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
+                    &self.options.signal_access.force_signals,
                 )
             };
 
+            let program_res = program_res
+                .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
             let sim_res = program_res.and_then(|(program, mut warnings)| {
+                self.options.diagnostic_policy.apply(&mut warnings)?;
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
                 if self.vcd_path.is_some() {
                     laid_out.enable_vcd_tracking();
                 }
 
+                validate_signal_access(&laid_out, &self.options.signal_access)?;
                 if self.options.dead_store_policy != DeadStorePolicy::Off {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
@@ -3319,6 +3398,21 @@ mod host {
         }
     }
 
+    fn validate_signal_access(
+        program: &LaidOutProgram,
+        access: &crate::SignalAccessOptions,
+    ) -> Result<(), SimulatorError> {
+        for path in access.live_signals.iter().chain(&access.force_signals) {
+            if program.hierarchical_signal_addr(path).is_none() {
+                return Err(crate::CodegenError::message(format!(
+                    "unknown or ambiguous signal `{path}`"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
     fn run_dead_store_elimination(
         program: &mut LaidOutProgram,
@@ -3333,8 +3427,21 @@ mod host {
         // signals named with `live_signal()`.
         externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
-        // User-specified live signals
         let mut listed = HashSet::default();
+        for path in options
+            .signal_access
+            .live_signals
+            .iter()
+            .chain(&options.signal_access.force_signals)
+        {
+            let addr = program
+                .hierarchical_signal_addr(path)
+                .expect("validated signal path");
+            externally_live.insert(addr);
+            listed.insert(addr);
+        }
+
+        // User-specified live signals
         for (inst_path, var_path) in live_signals {
             let inst_refs: Vec<(&str, usize)> =
                 inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();

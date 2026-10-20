@@ -80,7 +80,7 @@ impl ParsedSource {
     /// Analyze the packages declared in `sources`, each once, after the
     /// packages it depends on.
     pub fn analyze_packages(sources: &[&ParsedSource]) -> Result<Packages, AnalyzerError> {
-        Self::analyze_packages_impl(sources, None)
+        Self::analyze_packages_with_options(sources, None, crate::AnalysisOptions::default())
     }
 
     /// Analyze packages and time queries using the roots selected by the
@@ -89,12 +89,14 @@ impl ParsedSource {
         sources: &[&ParsedSource],
         roots: &[&str],
     ) -> Result<Packages, AnalyzerError> {
-        Self::analyze_packages_impl(sources, Some(roots))
+        Self::analyze_packages_with_options(sources, Some(roots), crate::AnalysisOptions::default())
     }
 
-    fn analyze_packages_impl(
+    /// Analyze a design with an explicit timescale compatibility policy.
+    pub fn analyze_packages_with_options(
         sources: &[&ParsedSource],
         roots: Option<&[&str]>,
+        options: crate::AnalysisOptions,
     ) -> Result<Packages, AnalyzerError> {
         let trees: Vec<_> = sources
             .iter()
@@ -102,7 +104,8 @@ impl ParsedSource {
             .collect();
         let mut warnings = Vec::new();
         let packages = (|| {
-            let mut packages = Packages::analyze_with_roots(&trees, roots)?;
+            let mut packages =
+                Packages::analyze_with_options(&trees, roots, options.allow_mixed_timescales)?;
             ast::warnings::append(&mut warnings, packages.warnings().iter().cloned());
             for source in sources {
                 for handle in source.tree.root_scopes()? {

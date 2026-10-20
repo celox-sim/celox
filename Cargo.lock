@@ -827,10 +827,13 @@ version = "0.11.0"
 dependencies = [
  "celox",
  "celox-design",
+ "celox-sv-analyzer",
  "clap",
  "fxhash",
  "libloading",
+ "serde",
  "tempfile",
+ "toml",
  "veryl-metadata",
 ]
 

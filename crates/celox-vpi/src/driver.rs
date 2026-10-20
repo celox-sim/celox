@@ -1,8 +1,10 @@
 //! Shared compiler and cocotb runtime entry points used by the command-line tools.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
-use celox::{NativeProgramImage, NativeProgramInstance, Simulator};
+use celox::{
+    CompilationWarning, DiagnosticPolicy, NativeProgramImage, NativeProgramInstance, Simulator,
+};
 use libloading::{Library, Symbol};
 use veryl_metadata::Metadata;
 
@@ -20,7 +22,7 @@ pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProg
     if sources.len() > 1 && !all_sv {
         return Err("multiple source paths require only .sv files; pass one Veryl project entry file for Veryl designs".to_string());
     }
-    let simulator = if all_sv {
+    if all_sv {
         let contents = sources
             .iter()
             .map(|path| {
@@ -38,7 +40,64 @@ pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProg
             .native_force_support(true)
             .opt_level(celox::OptLevel::O0)
             .build()
-    } else if let Ok(metadata_path) = Metadata::search_from(source) {
+            .map(|simulator| simulator.shared_code().program_image().clone())
+            .map_err(|error| format!("compilation failed: {error}"))
+    } else {
+        compile_native_image_with_diagnostics(source, top, DiagnosticPolicy::default())
+            .map(|(image, _)| image)
+    }
+}
+
+/// Compile with a severity policy and retain warnings for the CLI boundary.
+pub fn compile_native_image_with_diagnostics(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_configured(
+        source,
+        top,
+        policy,
+        celox::OptLevel::O0,
+        celox::SignalAccessOptions::default(),
+        true,
+        &BTreeMap::new(),
+    )
+}
+
+/// Compile with an explicit observation/force contract, retaining optimization.
+pub fn compile_native_image_with_options(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_with_parameters(source, top, policy, level, access, &BTreeMap::new())
+}
+
+/// Compile with numeric top parameter overrides, leaving project source files intact.
+pub fn compile_native_image_with_parameters(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+    parameters: &BTreeMap<String, u64>,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_configured(source, top, policy, level, access, false, parameters)
+}
+
+fn compile_native_image_configured(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+    legacy_force: bool,
+    parameters: &BTreeMap<String, u64>,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    let simulator = if let Ok(metadata_path) = Metadata::search_from(source) {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata
@@ -56,23 +115,38 @@ pub fn compile_native_sources(sources: &[&Path], top: &str) -> Result<NativeProg
             .iter()
             .map(|(contents, path)| (contents.as_str(), path.as_path()))
             .collect::<Vec<_>>();
-        Simulator::from_sources(source_refs, top)
+        let builder = Simulator::from_sources(source_refs, top)
             .with_metadata(metadata)
+            .diagnostic_policy(policy.clone())
             .four_state(true)
-            .native_force_support(true)
-            .opt_level(celox::OptLevel::O0)
+            .native_force_support(legacy_force)
+            .signal_access(access.clone())
+            .opt_level(level);
+        parameters
+            .iter()
+            .fold(builder, |builder, (name, value)| {
+                builder.param(name, *value)
+            })
             .build()
     } else {
         let contents = std::fs::read_to_string(source)
             .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
-        Simulator::from_sources(vec![(contents.as_str(), source)], top)
+        let builder = Simulator::from_sources(vec![(contents.as_str(), source)], top)
+            .diagnostic_policy(policy.clone())
             .four_state(true)
-            .native_force_support(true)
-            .opt_level(celox::OptLevel::O0)
+            .native_force_support(legacy_force)
+            .signal_access(access.clone())
+            .opt_level(level);
+        parameters
+            .iter()
+            .fold(builder, |builder, (name, value)| {
+                builder.param(name, *value)
+            })
             .build()
     }
-    .map_err(|error| format!("compilation failed: {error:?}"))?;
-    Ok(simulator.shared_code().program_image().clone())
+    .map_err(|error| format!("compilation failed: {error}"))?;
+    let image = simulator.shared_code().program_image().clone();
+    Ok((image, simulator.into_warnings()))
 }
 
 /// Run cocotb's VPI bootstrap against a compiled native program instance.

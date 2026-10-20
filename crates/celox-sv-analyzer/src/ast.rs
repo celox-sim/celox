@@ -138,7 +138,7 @@ mod selects;
 mod shared_map;
 mod statements;
 mod subroutine_owners;
-mod timescales;
+pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -1422,7 +1422,7 @@ pub(crate) fn generated_time_declarations(
     sources: &[(&str, &std::path::Path)],
     roots: Option<&[&str]>,
 ) -> Result<String, AnalyzerError> {
-    timescales::generated_source_declarations(sources, roots)
+    timescales::generated_source_declarations(sources, roots, false)
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;

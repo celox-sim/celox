@@ -116,3 +116,91 @@ Vite プラグインは `test_veryl/` を自動的に検出し、そこで宣言
 - すべてのテストソースディレクトリはシミュレーション時にプロジェクトソースと統合されます。両方のモジュールが同じ名前空間で利用できます。
 - Vite プラグインは本番ソースと同様に、ホットリロード時にテストソースの型も再生成します。
 - `[simulation]` の設定は、プロジェクト内の `Simulation.fromProject` / `Simulation.create` 呼び出しすべてに適用されます。呼び出し時に `{ maxSteps }` を指定すると、常に `celox.toml` の値より優先されます。
+
+### `[diagnostics]`
+
+診断に表示されるコードを使って、コンパイル時の診断レベルを個別に変更できます。
+
+```toml
+[diagnostics]
+mixed_timescale = "warn"
+exit_outside_program = "allow"
+memory_file_word_count = "error"
+```
+
+`allow` は診断を抑制し、`warn` は警告を残してコンパイルを続行し、`error` はコンパイルを失敗させます。指定しない診断は既定のレベルを維持します。既存の Veryl・SystemVerilog の警告にも適用できます。診断に表示されたコードをそのまま指定してください。そのコンパイルで発生しないコードの設定は影響しません。
+
+エラーの緩和は、コンパイラが継続時の動作を定義している診断に対応します。現在の対象は `mixed_timescale` です。IEEE 1800-2023 §3.14.2.3 が求める時間単位・精度の明示指定の一貫性を検査し、既定では `error` になります。`warn` または `allow` を選ぶと、未指定部分には Celox の既定値（単位 1ns、精度 1ps）を適用します。明示した値は維持し、全体の精度には既定値を使うスコープも含めます。構文エラー、未対応の構文、不正な精度指定は引き続きエラーになります。
+
+プロジェクトのシミュレータ生成時は `Veryl.toml` と同じ場所の設定を読み込みます。CLI は単独の SystemVerilog プロジェクトにも対応します。
+
+```sh
+celox run bus.sv top.sv --top Top --diagnostic mixed_timescale=warn
+celox vpi build --project ./celox.toml --target compat --diagnostic exit_outside_program=allow
+```
+
+両コマンドは [CLI ガイド](./cocotb.md) のプロジェクト探索・パス解決の規則を使います。ソースを明示した場合は `--project FILE` で設定を読み込みます。入力の指定がない場合、または `--target NAME` を指定した場合は、カレントディレクトリから親へ `celox.toml` を探索します。ターゲットごとに一部の診断だけ上書きすることもできます。
+
+```toml
+sources = ["bus.sv", "top.sv"]
+top = "Top"
+
+[diagnostics]
+mixed_timescale = "error"
+
+[targets.compat.diagnostics]
+mixed_timescale = "warn"
+```
+
+共通設定→選択したターゲット→CLI の順に優先されます。`--diagnostic CODE=LEVEL` は繰り返し指定でき、同じコードを複数回指定した場合は最後の指定が有効です。`celox run` と `celox vpi build` は抑制していない警告を表示します。診断レベルを変更しても、最適化設定や実行時エラーの扱いは変わりません。
+
+## CLIの最適化と信号アクセス
+
+`celox run` と `celox vpi build` は、共通設定とターゲット設定に次の項目を指定できます。
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+opt_level = "O2"
+live_signals = ["Top.uut.debug_count"]
+force_signals = ["Top.uut.state"]
+
+[targets.observe]
+opt_level = "O1"
+force_signals = []
+```
+
+最適化レベルの既定値は `celox run` では `O2`、`celox vpi build` では `O1` です。信号リストの既定値は空です。`O2` では出力に影響しない内部の計算を削除することがあるため、外部から観測する信号を `live_signals` で保持します。`force_signals` は保持対象にもなり、シンボリック評価とSIR最適化より前に外部から値を切り替える制御を追加します。これにより、blocking代入と後続の式もforceされた値を参照できます。設計全体を `O0` に変更することはありません。forceの許可対象は生成した実行バイナリにも保存され、宣言外へのforceは失敗します。
+
+パスはtopを含むVPI上の完全名を指定します（例: `Top.uut.s_axis.tdata`）。存在しない名前や曖昧な名前はコンパイルエラーとなり、ワイルドカードは展開しません。明示的なforceは、現在SystemVerilogのpacked変数全体とinterfaceが所有するメンバーに対応しています。interfaceメンバーは子のmodport側の別名ではなく、所有する変数を指定してください。構造化ポートの別名をforce対象にするとエラーになります。unpacked配列、clock/resetのイベント信号、Verylまたは混在設計のforce対象はエラーになります。観測対象の指定は両方の言語に対応しています。
+
+```sh
+celox vpi build --project celox.toml -O O2 \
+  --live-signal Top.uut.debug_count --force-signal Top.uut.state -o dut-sim
+celox run --project celox.toml --target observe --no-force-signals
+```
+
+共通設定→選択したターゲット→CLIの順に優先されます。信号リストは全体を置き換えます。ターゲットで省略したリストは共通設定を継承し、`[]` で空にできます。CLIでは `--live-signal` / `--force-signal` を繰り返して列挙し、`--no-live-signals` / `--no-force-signals` で継承したリストを空にできます。リストを空にするオプションと、対応するパス指定は併用できません。これらの設定はCLIの2つのコンパイルコマンドに適用されます。JavaScriptのシミュレータオプションは別に指定します。
+
+## CLIのtopパラメータ指定
+
+`run` と `vpi build` では、`-G NAME=VALUE` または `--parameter NAME=VALUE` を繰り返し指定できます（`--param` も同じ意味です）。選択したtopモジュールの数値パラメータをエラボレーション前に上書きします。SystemVerilog・Verylの両方で使え、ソースの書き換えは不要です。
+
+```sh
+celox vpi build --project celox.toml -G ID_EN=1 -G DEST_EN=1 -o dut-sim
+```
+
+```toml
+sources = ["top.sv"]
+top = "Top"
+
+[parameters]
+ID_EN = 1
+DEST_EN = 1
+DATA_W = 8
+
+[targets.wide.parameters]
+DATA_W = 64
+```
+
+共通設定→選択したターゲット→CLIの順に、パラメータ名ごとに上書きします。同じ名前の最後の指定が有効になり、他の名前の指定は継承します。値は符号なし64bit整数で、10進数・`0x`（16進）・`0o`（8進）・`0b`（2進）を使えます。`0x12_34` のような桁区切りも使えます。TOMLでは整数または文字列（`DATA_W = "0x40"`）で指定し、TOMLの符号付き64bit整数の範囲を超える値は文字列にします。負数、HDLの式やリテラル、HDLの文字列値、型パラメータには対応していません。型変換と切り詰めには、HDL側で宣言したパラメータの型が使われます。不正な指定や存在しないパラメータ名はエラーになります。

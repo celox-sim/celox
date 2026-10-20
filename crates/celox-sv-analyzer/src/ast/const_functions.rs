@@ -168,6 +168,12 @@ impl ConstantFunctions {
                 super::warnings::AnalyzerWarning::ExitOutsideProgram { site: left },
                 super::warnings::AnalyzerWarning::ExitOutsideProgram { site: right },
             ) => left.cmp(right),
+            (
+                super::warnings::AnalyzerWarning::MixedTimescale,
+                super::warnings::AnalyzerWarning::MixedTimescale,
+            ) => std::cmp::Ordering::Equal,
+            (super::warnings::AnalyzerWarning::MixedTimescale, _) => std::cmp::Ordering::Less,
+            (_, super::warnings::AnalyzerWarning::MixedTimescale) => std::cmp::Ordering::Greater,
         });
         warnings
     }
