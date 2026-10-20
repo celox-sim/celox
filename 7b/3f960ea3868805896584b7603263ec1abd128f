@@ -1,1 +1,1 @@
-Enforce source dump limits during VCD header output and validate resumption
+Honor initial header dump limits, omitted dumpvars depth, and shared string decoding for filenames
