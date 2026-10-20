@@ -66,6 +66,8 @@ pub enum SystemFunction {
     Urandom,
     /// `$urandom_range` (18.13.2).
     UrandomRange,
+    /// `$fopen` (21.3.1).
+    Fopen,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -79,6 +81,11 @@ pub enum ArrayQuery {
 }
 
 impl SystemFunction {
+    /// Calls that return through the timed scheduler's host boundary.
+    pub fn is_host_request(self) -> bool {
+        matches!(self, Self::Fopen | Self::TestPlusargs | Self::ValuePlusargs)
+    }
+
     /// The name, with its leading `$`.
     pub const fn name(self) -> &'static str {
         match self {
@@ -110,6 +117,7 @@ impl SystemFunction {
             Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
             Self::UrandomRange => "$urandom_range",
+            Self::Fopen => "$fopen",
         }
     }
 
@@ -144,6 +152,7 @@ impl SystemFunction {
                 | Self::TestPlusargs
                 | Self::ValuePlusargs
                 | Self::Urandom
+                | Self::Fopen
                 | Self::UrandomRange
         )
     }
@@ -177,7 +186,7 @@ impl SystemFunction {
             Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
                 Some((32, true))
             }
-            Self::Urandom | Self::UrandomRange | Self::Stime => Some((32, false)),
+            Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
@@ -220,6 +229,12 @@ pub enum SystemTask {
     Write(Radix),
     /// `$readmemb` and `$readmemh` (21.4).
     Readmem(MemoryFormat),
+    /// File output tasks (21.3).
+    Fclose,
+    Fdisplay(Radix),
+    Fwrite(Radix),
+    /// Memory snapshot output (21.5).
+    Writemem(MemoryFormat),
     /// Veryl's immediate assertions, emitted into SystemVerilog as calls of
     /// `$assert(condition, message...)`, which ends the simulation when the
     /// condition fails, and `$assert_continue`, which reports and continues.
@@ -274,6 +289,14 @@ impl Radix {
 }
 
 impl SystemTask {
+    /// Tasks executed synchronously by the timed simulation host.
+    pub fn is_host_request(self) -> bool {
+        matches!(
+            self,
+            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_)
+        )
+    }
+
     /// The name, with its leading `$`.
     pub const fn name(self) -> &'static str {
         use Radix::{Binary, Decimal, Hexadecimal, Octal};
@@ -294,6 +317,17 @@ impl SystemTask {
             Self::Write(Binary) => "$writeb",
             Self::Write(Octal) => "$writeo",
             Self::Write(Hexadecimal) => "$writeh",
+            Self::Fclose => "$fclose",
+            Self::Fdisplay(Decimal) => "$fdisplay",
+            Self::Fdisplay(Binary) => "$fdisplayb",
+            Self::Fdisplay(Octal) => "$fdisplayo",
+            Self::Fdisplay(Hexadecimal) => "$fdisplayh",
+            Self::Fwrite(Decimal) => "$fwrite",
+            Self::Fwrite(Binary) => "$fwriteb",
+            Self::Fwrite(Octal) => "$fwriteo",
+            Self::Fwrite(Hexadecimal) => "$fwriteh",
+            Self::Writemem(MemoryFormat::Binary) => "$writememb",
+            Self::Writemem(MemoryFormat::Hexadecimal) => "$writememh",
             Self::Readmem(MemoryFormat::Binary) => "$readmemb",
             Self::Readmem(MemoryFormat::Hexadecimal) => "$readmemh",
             Self::Assert => "$assert",
@@ -699,16 +733,56 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$monitoron", Task),
     unsupported("$monitoroff", Task),
     // 21.3 File input/output system tasks and system functions
-    unsupported("$fopen", Function),
-    unsupported("$fclose", Task),
-    unsupported("$fdisplay", Task),
-    unsupported("$fdisplayb", Task),
-    unsupported("$fdisplayo", Task),
-    unsupported("$fdisplayh", Task),
-    unsupported("$fwrite", Task),
-    unsupported("$fwriteb", Task),
-    unsupported("$fwriteo", Task),
-    unsupported("$fwriteh", Task),
+    function(SystemFunction::Fopen, 1, Some(2)),
+    task(SystemTask::Fclose, ProceduralAndInitial, 1, Some(1)),
+    task(
+        SystemTask::Fdisplay(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
     unsupported("$fstrobe", Task),
     unsupported("$fstrobeb", Task),
     unsupported("$fstrobeo", Task),
@@ -749,8 +823,18 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         Some(4),
     ),
     // 21.5 Writing memory array data to a file
-    unsupported("$writememb", Task),
-    unsupported("$writememh", Task),
+    task(
+        SystemTask::Writemem(MemoryFormat::Binary),
+        ProceduralAndInitial,
+        2,
+        Some(4),
+    ),
+    task(
+        SystemTask::Writemem(MemoryFormat::Hexadecimal),
+        ProceduralAndInitial,
+        2,
+        Some(4),
+    ),
     // 21.6 Command line input
     function(SystemFunction::TestPlusargs, 1, Some(1)),
     function(SystemFunction::ValuePlusargs, 2, Some(2)),

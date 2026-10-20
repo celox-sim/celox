@@ -1,0 +1,37 @@
+(group file_io (category sequential))
+
+(case stdout_preserves_format_and_call_order
+  (four_state)
+  (source "stdout_file_io.sv" #"
+    module Top(output bit done);
+      int fd;
+      initial begin
+        $display("before");
+        $fwrite(32'h8000_0001, "fd:%0d,", 12);
+        $fdisplayh(1, "mcd:%h", 8'bxz010101);
+        $display("after");
+        done = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq done 1)
+  (expect_output "before\nfd:12,mcd:X5\nafter\n"))
+
+(case edge_procedures_execute_requests_in_statement_order
+  (source "edge_file_io.sv" #"
+    module Top(output int count);
+      bit clk;
+      initial begin clk = 0; #1 clk = 1; #1 clk = 0; #1 clk = 1; end
+      always_ff @(posedge clk) begin
+        $fwrite(1, "ff:%0d,", count);
+        count = count + 1;
+      end
+      always @(negedge clk) $fdisplay(1, "neg:%0d", count);
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3)
+  (assert_eq count 2)
+  (expect_output "ff:0,neg:1\nff:1,"))

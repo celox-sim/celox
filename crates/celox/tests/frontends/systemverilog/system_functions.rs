@@ -437,11 +437,11 @@ sv_backends! {
     fn dist_uniform_converts_wide_and_signed_seeds_to_int_formals(sim) {
         @case "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals";
     }
-    fn dist_uniform_reference_sequence(sim) {
-        @case "random_plusargs::dist_uniform_reference_sequence";
-    }
     fn dist_uniform_bounds_seed_and_replay(sim) {
         @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
+    }
+    fn dist_uniform_reference_sequence(sim) {
+        @case "random_plusargs::dist_uniform_reference_sequence";
     }
     fn plusargs_absent_preserves_destination(sim) {
         @case "random_plusargs::plusargs_absent_preserves_destination";
@@ -1797,9 +1797,9 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system function `$fopen`",
+            "system function `$fgetc`",
             r#"module Top(input logic a, output logic y);
-                always_comb begin $fopen("x.txt"); y = a; end
+                always_comb begin $fgetc(0); y = a; end
             endmodule"#,
         ),
         (

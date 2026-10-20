@@ -60,6 +60,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("synthesizable.vtest"),
     },
     Group {
+        file: "src/sv/cases/file_io.vtest",
+        text: include_str!("file_io.vtest"),
+    },
+    Group {
         file: "src/sv/cases/system_functions.vtest",
         text: include_str!("system_functions.vtest"),
     },

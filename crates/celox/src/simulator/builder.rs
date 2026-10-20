@@ -1550,6 +1550,28 @@ mod host {
         injected_components: crate::InjectedComponents,
     }
 
+    fn validate_untimed_host_requests(
+        program: &crate::ir::RuntimeProgram,
+    ) -> Result<(), SimulatorError> {
+        if program
+            .runtime_schema
+            .processes
+            .iter()
+            .any(|slots| slots.requires_timed_simulation)
+            || program
+                .runtime_schema
+                .host_request_sites
+                .iter()
+                .any(|site| site.requires_timed_simulation)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message: "edge procedures using system file I/O or plusargs require Simulation; Simulator does not execute scheduled process kernels".into(),
+                signals: Vec::new(),
+            }));
+        }
+        Ok(())
+    }
+
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -1563,11 +1585,12 @@ mod host {
         vcd_path: Option<std::path::PathBuf>,
         injected_components: crate::InjectedComponents,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        validate_untimed_host_requests(&program)?;
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
         sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
-        if let Some(path) = vcd_path {
+        if vcd_path.is_some() {
             if sim.layout().unpacked_arrays.values().any(|array| {
                 !array.element_width.is_multiple_of(8)
                     || array.element_stride != array.element_width / 8
@@ -1577,6 +1600,8 @@ mod host {
                 ))
                 .with_warnings(std::mem::take(&mut sim.warnings)));
             }
+        }
+        if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::VcdWriter::new_with_time_precision(
                 path,
@@ -2594,6 +2619,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2662,6 +2688,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2719,6 +2746,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2788,6 +2816,7 @@ mod host {
                     vcd_recording,
                 ))?
             };
+            validate_untimed_host_requests(laid_out.runtime())?;
 
             if let Some(s) = phase_start {
                 tracing::debug!(
@@ -2837,6 +2866,7 @@ mod host {
                 .into_laid_out_program(
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 )?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -2880,6 +2910,7 @@ mod host {
                     crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     Some(&mut trace),
                 )?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -3005,6 +3036,7 @@ mod host {
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            validate_untimed_host_requests(laid_out.runtime())?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)
                 .map_err(|error| error.with_warnings(std::mem::take(&mut warnings)))?;
             let mut sim =
@@ -3157,6 +3189,7 @@ mod host {
                 self.options.diagnostic_policy.apply(&mut warnings)?;
                 let mut laid_out =
                     program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+                validate_untimed_host_requests(laid_out.runtime())?;
                 if self.vcd_path.is_some() {
                     laid_out.enable_vcd_tracking();
                 }
@@ -3443,7 +3476,6 @@ mod host {
     ) {
         use crate::HashSet;
         let mut externally_live = HashSet::default();
-
         // Native testbench expressions bypass SIR and read simulator memory
         // directly. Their inputs are therefore external DSE roots just like
         // signals named with `live_signal()`.
