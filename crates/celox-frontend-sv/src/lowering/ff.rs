@@ -66,6 +66,7 @@ pub(super) struct Ff<'p, 'a> {
     wait_sites: Vec<WaitSite<SourceVarId>>,
     /// The nonblocking assignment sites of the process, by local index.
     nba_sites: Vec<NbaSite<SourceVarId>>,
+    host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
     direct: bool,
 }
 
@@ -114,6 +115,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process: 0,
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_request_sites: Vec::new(),
         }
     }
 
@@ -831,6 +833,20 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.urandom_range(args)?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::TestPlusargs
+                        | sv::ir::SystemFunction::ValuePlusargs),
+                    ),
+                args,
+                ..
+            } => self.plusargs(*function, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::DistUniform),
+                args,
+                ..
+            } => self.dist_uniform(args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Random),
                 args,
                 ..
@@ -1388,6 +1404,308 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         Ok(result)
+    }
+
+    /// Annex N's uniform transform, represented as an exact rational. The
+    /// largest product has 79 bits, so 96-bit temporaries avoid overflow.
+    fn dist_uniform(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp as B, Expr as E};
+        let seed = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported("seed of `$dist_uniform`"))?;
+        let (lvalues, seed_read) = self.capture_system_actual(seed)?;
+        let seed_width = self
+            .m
+            .comparison_width(&seed_read, &seed_read)
+            .ok_or_else(|| unsupported("integral seed of `$dist_uniform`"))?;
+        let seed_signed = self.expr_signed(seed);
+        let original = self
+            .host_hidden(
+                "dist_original_seed",
+                &seed_read,
+                seed_width,
+                seed_signed,
+                true,
+            )?
+            .1;
+        let mut bound = |index| -> Result<E, sv::AnalyzerError> {
+            let value = self.hoist(
+                args.get(index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| unsupported("bounds of `$dist_uniform`"))?,
+            )?;
+            let value = E::Resize {
+                expr: Box::new(value),
+                width: 32,
+                signed: true,
+            };
+            self.hidden("dist_bound", &value, true)
+        };
+        let start = bound(1)?;
+        let end = bound(2)?;
+        let current = self.int_formal(original.clone());
+        let current = self.hidden("dist_old_seed", &current, false)?;
+        // The distribution's inout formal is int. Only the final copyout
+        // writes the caller's actual, whose selector was captured once.
+        let formal = self.hidden("dist_seed_formal", &current, true)?;
+        let full = self.random(Some(&formal))?;
+        let next = E::Binary {
+            left: Box::new(E::Binary {
+                left: Box::new(E::Mux {
+                    condition: Box::new(E::Binary {
+                        left: Box::new(current.clone()),
+                        op: B::Eq,
+                        right: Box::new(E::Literal("32'd0".into())),
+                    }),
+                    then_expr: Box::new(E::Literal("32'd259341593".into())),
+                    else_expr: Box::new(current.clone()),
+                }),
+                op: B::Mul,
+                right: Box::new(E::Literal("32'd69069".into())),
+            }),
+            op: B::Add,
+            right: Box::new(E::Literal("32'd1".into())),
+        };
+        let next = self.hidden("dist_next_seed", &next, false)?;
+        let lit = |n: i128| {
+            if n < 0 {
+                E::Unary {
+                    op: sv::ir::UnaryOp::Minus,
+                    expr: Box::new(E::Literal(format!("96'sd{}", -n))),
+                }
+            } else {
+                E::Literal(format!("96'sd{n}"))
+            }
+        };
+        let bin = |left, op, right| E::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let wide = |value| E::Resize {
+            expr: Box::new(value),
+            width: 96,
+            signed: true,
+        };
+        let mux = |condition, then_expr, else_expr| E::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        };
+        let start = wide(start);
+        let end = wide(end);
+        let invalid = bin(start.clone(), B::Ge, end.clone());
+        // If end is INT_MAX, Annex N shifts the lower bound down by one,
+        // and adds one after the uniform transform.
+        let shifted = bin(end.clone(), B::Eq, lit(i32::MAX as i128));
+        let shifted_value = mux(shifted.clone(), lit(1), lit(0));
+        let a = bin(start.clone(), B::Sub, shifted_value.clone());
+        let span = bin(bin(end.clone(), B::Sub, start.clone()), B::Add, lit(1));
+        // Extract the 23-bit mantissa before converting to signed wide
+        // arithmetic. Widening the raw seed as signed would sign-extend its
+        // high bit, and a logical shift would then retain those high ones.
+        let m = wide(E::Resize {
+            expr: Box::new(bin(next, B::Shr, E::Literal("32'd9".into()))),
+            width: 32,
+            signed: false,
+        });
+        let fraction = bin(
+            bin(m.clone(), B::Mul, lit(8_388_608)),
+            B::Add,
+            bin(lit(8_388_608), B::Add, m),
+        );
+        let denominator = lit(1i128 << 46);
+        let numerator = bin(
+            bin(a, B::Mul, denominator.clone()),
+            B::Add,
+            bin(span, B::Mul, fraction),
+        );
+        let numerator = bin(
+            numerator,
+            B::Add,
+            bin(shifted_value, B::Mul, denominator.clone()),
+        );
+        let numerator = self
+            .host_hidden("dist_numerator", &numerator, 96, true, false)?
+            .1;
+        let negative_integral = bin(
+            bin(numerator.clone(), B::Lt, lit(0)),
+            B::LogicAnd,
+            bin(
+                bin(numerator.clone(), B::BitAnd, lit((1i128 << 46) - 1)),
+                B::Eq,
+                lit(0),
+            ),
+        );
+        let value = bin(
+            bin(numerator, B::Sar, lit(46)),
+            B::Sub,
+            mux(negative_integral, lit(1), lit(0)),
+        );
+        let value = self.host_hidden("dist_value", &value, 96, true, false)?.1;
+        let value = mux(
+            bin(value.clone(), B::Lt, start.clone()),
+            start.clone(),
+            mux(bin(value.clone(), B::Gt, end.clone()), end.clone(), value),
+        );
+        let is_full = bin(
+            bin(start.clone(), B::Eq, lit(i32::MIN as i128)),
+            B::LogicAnd,
+            bin(end, B::Eq, lit(i32::MAX as i128)),
+        );
+        let value = mux(invalid.clone(), start, mux(is_full, wide(full), value));
+        // A degenerate/reversed interval returns start without consuming seed.
+        let next = E::Resize {
+            expr: Box::new(formal),
+            width: seed_width,
+            signed: true,
+        };
+        let restored = mux(invalid, original, next);
+        match lvalues.as_slice() {
+            [lvalue] => self.assign(lvalue, &restored)?,
+            parts => self.assign_concat(parts, &restored)?,
+        }
+        Ok(E::Resize {
+            expr: Box::new(value),
+            width: 32,
+            signed: true,
+        })
+    }
+
+    /// Capture an inout/output actual's reference before reading or writing
+    /// it, including selectors changed by the call or by other selectors.
+    fn capture_system_actual(
+        &mut self,
+        expr: &sv::ir::Expr,
+    ) -> Result<(Vec<sv::ir::LValue>, sv::ir::Expr), sv::AnalyzerError> {
+        use sv::ir::{Expr, LValue};
+        let parts =
+            lvalue_from_expr(expr).ok_or_else(|| unsupported("integral output/inout actual"))?;
+        let signed = self.expr_signed(expr);
+        let mut captured = Vec::new();
+        for part in parts {
+            let part = self.hoist_lvalue(&part)?;
+            captured.push(self.freeze_lvalue(part)?);
+        }
+        let reads = captured
+            .iter()
+            .map(|part| match part {
+                LValue::Ident(name) => Expr::Ident(name.clone()),
+                LValue::Select { name, msb, lsb, .. } => Expr::Select {
+                    expr: Box::new(Expr::Ident(name.clone())),
+                    msb: msb.clone(),
+                    lsb: lsb.clone(),
+                    signed,
+                },
+            })
+            .collect::<Vec<_>>();
+        let read = if reads.len() == 1 {
+            reads.into_iter().next().unwrap()
+        } else {
+            Expr::Concat(reads)
+        };
+        Ok((captured, read))
+    }
+
+    fn host_hidden(
+        &mut self,
+        purpose: &str,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+        four_state: bool,
+    ) -> Result<(SourceVarId, sv::ir::Expr), sv::AnalyzerError> {
+        let value = self.eval(expr, Some((width, signed)))?;
+        let (id, name) = self.m.temp(purpose, width, signed, four_state);
+        self.store(id, SIROffset::Static(0), width, value);
+        Ok((id, sv::ir::Expr::Ident(name)))
+    }
+
+    fn plusargs(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::Expr;
+        if self.kernel.is_none() {
+            return Err(unsupported(format!(
+                "{} outside a timed process",
+                function.name()
+            )));
+        }
+        let query = self.hoist(
+            args.first()
+                .and_then(Option::as_ref)
+                .ok_or_else(|| unsupported("plusargs query"))?,
+        )?;
+        let width = self
+            .m
+            .comparison_width(&query, &query)
+            .ok_or_else(|| unsupported("packed plusargs query"))?;
+        let (query_id, _) = self.host_hidden("plusargs_query", &query, width, false, true)?;
+        let value_query = function == sv::ir::SystemFunction::ValuePlusargs;
+        let mut results = Vec::new();
+        let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
+        results.push(HostRequestValue {
+            id: ret_id,
+            width: 32,
+            signed: true,
+            is_string: false,
+        });
+        let target = if value_query {
+            let expr = args
+                .get(1)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| unsupported("plusargs destination"))?;
+            let (lvalues, captured) = self.capture_system_actual(expr)?;
+            let width = self
+                .m
+                .comparison_width(expr, expr)
+                .ok_or_else(|| unsupported("integral plusargs destination"))?;
+            let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
+            results.push(HostRequestValue {
+                id,
+                width,
+                signed: false,
+                is_string: false,
+            });
+            Some((lvalues, result))
+        } else {
+            None
+        };
+        let site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Plusargs)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: 0,
+            kind: HostRequestKind::Plusargs,
+            requires_timed_simulation: false,
+            operation: u32::from(value_query),
+            args: vec![HostRequestValue {
+                id: query_id,
+                width,
+                signed: false,
+                is_string: true,
+            }],
+            results,
+            strings: Vec::new(),
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Plusargs, site))
+            .map_err(kernel_error)?;
+        if let Some((lvalues, result)) = target {
+            match lvalues.as_slice() {
+                [lvalue] => self.assign(lvalue, &result)?,
+                parts => self.assign_concat(parts, &result)?,
+            }
+        }
+        Ok(Expr::Ident(ret_name))
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
@@ -3367,6 +3685,7 @@ impl Ff<'_, '_> {
             unit,
             wait_sites: self.wait_sites,
             nba_sites: self.nba_sites,
+            host_request_sites: self.host_request_sites,
         })
     }
 
@@ -3743,6 +4062,7 @@ pub(super) struct KernelUnit {
     pub unit: ExecutionUnit<Addr>,
     pub wait_sites: Vec<WaitSite<SourceVarId>>,
     pub nba_sites: Vec<NbaSite<SourceVarId>>,
+    pub host_request_sites: Vec<celox_design::HostRequestSite<SourceVarId>>,
 }
 
 /// Iterations, as a power of two, between the yields of a kernel loop that

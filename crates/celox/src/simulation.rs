@@ -107,6 +107,23 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.runtime_finish()
     }
 
+    fn host_request(
+        &mut self,
+        request: &celox_design::HostRequestSite<SignalRef>,
+        timestamp: u64,
+    ) -> Result<(), Halt> {
+        match request.kind {
+            celox_design::HostRequestKind::Plusargs => {
+                self.run_plusargs_request(request, timestamp)
+            }
+            _ => Err(celox_runtime::SimulatorErrorCode::Runtime {
+                message: format!("unsupported host request family {:?}", request.kind),
+                signals: Vec::new(),
+            }
+            .into()),
+        }
+    }
+
     fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         self.backend
             .run_process(index)

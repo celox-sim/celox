@@ -345,6 +345,13 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
+Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
+seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
+20.14.2 permits an integral seed variable. The unchanged case passes Celox's
+backends; the source and observed failures are retained in
+[`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
+
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
 
 The `indexed_select::constant_part_select_indices_of_concatenations` case also

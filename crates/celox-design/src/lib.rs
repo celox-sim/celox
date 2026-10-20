@@ -250,6 +250,9 @@ pub enum ProcessStatus {
     /// It resumes at the point stored in [`ProcessSlots::resume`] when the
     /// simulation continues.
     Stop,
+    /// A synchronous host operation. The delay slot holds its family and
+    /// local site index; the same process resumes after the host responds.
+    HostRequest,
 }
 
 impl ProcessStatus {
@@ -266,6 +269,7 @@ impl ProcessStatus {
             Self::Nba => 7,
             Self::Yield => 8,
             Self::Stop => 9,
+            Self::HostRequest => 10,
         }
     }
 
@@ -280,8 +284,100 @@ impl ProcessStatus {
             7 => Some(Self::Nba),
             8 => Some(Self::Yield),
             9 => Some(Self::Stop),
+            10 => Some(Self::HostRequest),
             _ => None,
         }
+    }
+}
+
+/// Family of a synchronous host operation performed by a process kernel.
+/// Each family numbers its request sites independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HostRequestKind {
+    Plusargs,
+    FileIo,
+    Vcd,
+}
+
+impl HostRequestKind {
+    /// Encode a request in the process's existing 64-bit delay slot.
+    pub const fn encode(self, site: u32) -> u64 {
+        let family = match self {
+            Self::Plusargs => 1u64,
+            Self::FileIo => 2,
+            Self::Vcd => 3,
+        };
+        (family << 32) | site as u64
+    }
+
+    /// Decode a request, rejecting unknown families and reserved bits.
+    pub const fn decode(request: u64) -> Option<(Self, u32)> {
+        let family = match request >> 32 {
+            1 => Self::Plusargs,
+            2 => Self::FileIo,
+            3 => Self::Vcd,
+            _ => return None,
+        };
+        Some((family, request as u32))
+    }
+}
+
+/// A state slot exchanged with a synchronous host operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRequestValue<A> {
+    pub id: A,
+    pub width: usize,
+    pub signed: bool,
+    pub is_string: bool,
+}
+
+impl<A: Copy> HostRequestValue<A> {
+    pub fn map<B>(&self, map: &mut impl FnMut(A) -> B) -> HostRequestValue<B> {
+        HostRequestValue {
+            id: map(self.id),
+            width: self.width,
+            signed: self.signed,
+            is_string: self.is_string,
+        }
+    }
+}
+
+/// One synchronous host request of a process. Sites are numbered within
+/// each process and family in their declaration order. Argument slots are
+/// evaluated by the kernel before it suspends; result slots are written by
+/// the host before the kernel resumes. `operation` and `strings` are the
+/// operation family's stable, backend-independent descriptor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRequestSite<A> {
+    pub process: usize,
+    /// This request belongs to an edge procedure lowered to a scheduled kernel.
+    pub requires_timed_simulation: bool,
+    pub kind: HostRequestKind,
+    pub operation: u32,
+    pub args: Vec<HostRequestValue<A>>,
+    pub results: Vec<HostRequestValue<A>>,
+    pub strings: Vec<String>,
+}
+
+impl<A: Copy> HostRequestSite<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> HostRequestSite<B> {
+        HostRequestSite {
+            process: self.process,
+            requires_timed_simulation: self.requires_timed_simulation,
+            kind: self.kind,
+            operation: self.operation,
+            args: self.args.iter().map(|value| value.map(&mut map)).collect(),
+            results: self
+                .results
+                .iter()
+                .map(|value| value.map(&mut map))
+                .collect(),
+            strings: self.strings.clone(),
+        }
+    }
+
+    pub fn slots(&self) -> impl Iterator<Item = A> + '_ {
+        self.args.iter().chain(&self.results).map(|value| value.id)
     }
 }
 
@@ -602,6 +698,8 @@ pub struct RuntimeSchema<A> {
     /// Nonblocking assignment sites of the process kernels, ordered like
     /// `wait_sites`.
     pub nba_sites: Vec<NbaSite<A>>,
+    /// Synchronous host operations of the process kernels.
+    pub host_request_sites: Vec<HostRequestSite<A>>,
     /// Canonical event domains whose evaluation commits the results of
     /// their blocking assignments, in the active region; their apply units
     /// commit only the nonblocking results.
@@ -632,6 +730,7 @@ impl<A> Default for RuntimeSchema<A> {
             watches: Vec::new(),
             wait_sites: Vec::new(),
             nba_sites: Vec::new(),
+            host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
         }
@@ -1216,6 +1315,54 @@ impl<V: fmt::Display> fmt::Display for RegionedAbsoluteAddrBase<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_request_encoding_keeps_families_and_full_site_indices_distinct() {
+        for kind in [
+            HostRequestKind::Plusargs,
+            HostRequestKind::FileIo,
+            HostRequestKind::Vcd,
+        ] {
+            for site in [0, 1, u32::MAX] {
+                assert_eq!(
+                    HostRequestKind::decode(kind.encode(site)),
+                    Some((kind, site))
+                );
+            }
+        }
+        for invalid in [0, u32::MAX as u64, 4u64 << 32, 1u64 << 63] {
+            assert_eq!(HostRequestKind::decode(invalid), None);
+        }
+        assert_eq!(
+            ProcessStatus::from_code(10),
+            Some(ProcessStatus::HostRequest)
+        );
+    }
+
+    #[test]
+    fn host_request_mapping_relocates_operands_and_results() {
+        let value = |id| HostRequestValue {
+            id,
+            width: 17,
+            signed: true,
+            is_string: false,
+        };
+        let site = HostRequestSite {
+            process: 2,
+            kind: HostRequestKind::Plusargs,
+            requires_timed_simulation: false,
+            operation: 1,
+            args: vec![value(3u32)],
+            results: vec![value(5)],
+            strings: vec!["COUNT=%d".into()],
+        };
+        let relocated = site.map(|id| id + 10);
+        assert_eq!(relocated.slots().collect::<Vec<_>>(), vec![13, 15]);
+        assert_eq!(relocated.process, 2);
+        assert_eq!(relocated.args[0].width, 17);
+        assert!(relocated.results[0].signed);
+        assert_eq!(relocated.strings, site.strings);
+    }
 
     #[test]
     fn bit_access_splits_only_at_internal_boundaries() {

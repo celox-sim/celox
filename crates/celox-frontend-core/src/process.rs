@@ -21,8 +21,8 @@
 //! [`WaitSite`]: celox_design::WaitSite
 
 use celox_design::{
-    NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots, ProcessStatus,
-    RegionedVarAddrBase, STABLE_REGION,
+    HostRequestKind, NbaSite, PROCESS_DELAY_WIDTH, PROCESS_STATUS_WIDTH, ProcessSlots,
+    ProcessStatus, RegionedVarAddrBase, STABLE_REGION,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRSwitchCase,
@@ -160,6 +160,17 @@ impl ProcessKernelBuilder {
     /// when it continues.
     pub fn stop(&mut self) -> Result<(), ProcessKernelError> {
         self.suspend(ProcessStatus::Stop)
+    }
+
+    /// Perform a synchronous host operation, then continue at a new resume
+    /// point. Arguments and results live in the request site's state slots.
+    pub fn host_request(
+        &mut self,
+        kind: HostRequestKind,
+        site: u32,
+    ) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(kind.encode(site));
+        self.suspend(ProcessStatus::HostRequest)
     }
 
     /// Suspend at wait site `site` of this process. The open block
