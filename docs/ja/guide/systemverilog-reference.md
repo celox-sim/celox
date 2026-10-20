@@ -64,7 +64,7 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 | 乱数 | `$urandom`、`$urandom_range`、`$random`、`$dist_uniform` はクロックで起動するプロセス、`always_comb`、`always @*`、`initial` とそれらから呼ぶサブルーチンで使用可能。`$urandom` の任意の整数式によるシード、`$random` のシード変数、プロセスごとに独立した乱数列 |
 | シミュレーション時刻 | `$time` と `$stime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
-| 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`。時間を持つプロセスで実行 |
+| 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`、[VCD 制御](./vcd#systemverilog-source-controls)。時間を持つプロセスで実行 |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -267,7 +267,8 @@ real 変換と動的 string は未対応です。
 
 ファイル descriptor とメモリ書き出しは[実行時のファイル出力](#実行時のファイル出力)を参照してください。
 
-ファイル I/O を含むデザインでは、ホスト側の状態を保存できないため、
+[VCD 制御](./vcd#systemverilog-source-controls)の記録開始は、その時刻の状態が確定した後です。
+ファイル I/O または SV からの VCD 制御を含むデザインでは、ホスト側の状態を保存できないため、
 checkpoint と状態ファイルの保存・復元はエラーになります。
 
 `$dist_uniform(seed, start, end)` は Annex N の一様分布を使い、整数の seed 変数を更新します。

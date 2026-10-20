@@ -357,7 +357,10 @@ impl Packages {
 /// The variables package `name` declares: each is one object, shared by
 /// every module that uses it (IEEE 1800-2023 26.2). Constant variables are
 /// left out; they are copied like parameters. Package nets are rejected.
-fn package_variables(name: &str, tree: &SyntaxTree) -> Result<HashSet<String>, AnalyzerError> {
+pub(super) fn package_variables(
+    name: &str,
+    tree: &SyntaxTree,
+) -> Result<HashSet<String>, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataDeclaration};
     let native = tree.declarations();
     let mut variables = HashSet::default();
