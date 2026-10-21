@@ -26,3 +26,31 @@ pub(in crate::ast) fn body(id: BodyItemId, tree: &SyntaxTree) -> Converted<Value
         .filter(|parameter| matches!(parameter.kind, ParameterKind::Value { .. }))
         .collect())
 }
+
+/// Names owned by this declaration scope must not inherit an earlier pass's
+/// values, or a same-named imported binding, during prefix evaluation.
+pub(in crate::ast) fn scope_names(tree: &SyntaxTree) -> Converted<Vec<String>> {
+    let mut names = Vec::new();
+    if let Some(unit) = tree.scope_handle().unit(tree.declarations()) {
+        names.extend(
+            unit.parameters
+                .iter()
+                .flatten()
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Value { .. }))
+                .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
+        );
+    }
+    for id in tree.body_membership()? {
+        if matches!(
+            tree.declarations().body_item(id).kind,
+            BodyItemKind::Parameter(_)
+        ) {
+            names.extend(
+                body(id, tree)?
+                    .iter()
+                    .map(|parameter| instances::normalize_identifier(&parameter.name.spelling)),
+            );
+        }
+    }
+    Ok(names)
+}

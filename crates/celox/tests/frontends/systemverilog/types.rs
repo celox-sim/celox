@@ -1,4 +1,13 @@
 sv_backends! {
+    fn inherited_parameter_aliases_materialize_replication_masks(sim) {
+        @case "types::inherited_parameter_aliases_materialize_replication_masks";
+    }
+    fn inherited_parameter_aliases_preserve_types_and_unknowns(sim) {
+        @case "types::inherited_parameter_aliases_preserve_types_and_unknowns";
+    }
+}
+
+sv_backends! {
     fn constant_functions_in_unpacked_port_dimensions(sim) {
         @case "types::constant_functions_in_unpacked_port_dimensions";
     }

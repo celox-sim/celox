@@ -167,8 +167,12 @@ pub(super) fn parameters_from_scope(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
-    let mut environment =
-        parameters::ParameterEnvironment::new(&syntax_tree.state, &parameters, base_const_env);
+    let mut environment = parameters::ParameterEnvironment::new(
+        &syntax_tree.state,
+        &parameters,
+        base_const_env,
+        &parameters::ownership::scope_names(syntax_tree)?,
+    );
     let header = syntax_tree
         .scope_handle()
         .unit(syntax_tree.declarations())

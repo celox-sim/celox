@@ -38,9 +38,11 @@
             assign bus.data = v[$bits(bus.data)-1:0];
         endmodule
         module Reader(Bus.r bus, output logic [15:0] o);
+            localparam WIDTH = bus.W;
+            localparam MASK = {WIDTH{1'b1}};
             always_comb begin
                 o = '0;
-                o[$bits(bus.data)-1:0] = bus.data;
+                o[$bits(bus.data)-1:0] = bus.data & MASK;
             end
         endmodule
         module Top(input logic [15:0] v, output logic [15:0] o12, output logic [15:0] o4);
