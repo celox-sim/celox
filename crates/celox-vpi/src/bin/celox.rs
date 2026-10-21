@@ -943,6 +943,7 @@ mod tests {
                 object("next", StateRole::Comb, stale, 0),
             ],
             schedule: None,
+            strings: Vec::new(),
         }
     }
 

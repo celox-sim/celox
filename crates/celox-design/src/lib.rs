@@ -54,6 +54,28 @@ pub struct VariableMetadata {
     /// Per-dimension sizes for array ports (for example, `[4]` for `logic<32>[4]`).
     /// Empty means scalar.
     pub array_dims: Vec<usize>,
+    /// What each element holds. Handle elements are 32-bit two-state slots.
+    #[serde(default)]
+    pub value_kind: ValueKind,
+}
+
+/// Bit width of a handle element in state memory.
+pub const HANDLE_WIDTH: usize = 32;
+
+/// What a state element holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ValueKind {
+    /// Packed bits.
+    #[default]
+    Bits,
+    /// A handle of a string in the simulator's heap.
+    StrRef,
+}
+
+impl ValueKind {
+    pub fn is_handle(self) -> bool {
+        self != Self::Bits
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1596,6 +1618,7 @@ mod tests {
             kind: DomainKind::Other,
             type_kind: PortTypeKind::Logic,
             array_dims: vec![4],
+            value_kind: Default::default(),
         };
 
         assert_eq!(metadata.width, 32);
@@ -1613,6 +1636,7 @@ mod tests {
                 kind: DomainKind::ClockPosedge,
                 type_kind: PortTypeKind::Clock,
                 array_dims: Vec::new(),
+                value_kind: Default::default(),
             },
         );
         design.events.aliases.insert(11, 10);
@@ -1641,6 +1665,7 @@ mod tests {
                             kind,
                             type_kind: PortTypeKind::Logic,
                             array_dims: Vec::new(),
+                            value_kind: Default::default(),
                         },
                     );
                 }
@@ -1673,6 +1698,7 @@ mod tests {
                     kind,
                     type_kind: PortTypeKind::Logic,
                     array_dims: Vec::new(),
+                    value_kind: Default::default(),
                 },
             );
         }

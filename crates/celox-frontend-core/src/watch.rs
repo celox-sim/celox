@@ -501,6 +501,7 @@ pub fn declare_counter_slots(
                             kind: DomainKind::Other,
                             type_kind: PortTypeKind::Bit,
                             array_dims: Vec::new(),
+                            value_kind: Default::default(),
                         },
                         unpacked_ranges: Vec::new(),
                         packed_dims: vec![EVENT_COUNTER_WIDTH],

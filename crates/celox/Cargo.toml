@@ -52,6 +52,7 @@ celox-sir-opt         = { workspace = true, default-features = false }
 celox-slt             = { workspace = true }
 celox-state-layout    = { workspace = true }
 celox-runtime         = { workspace = true }
+celox-heap            = { workspace = true }
 celox-testbench       = { workspace = true }
 fxhash                = { workspace = true }
 thiserror             = { workspace = true }

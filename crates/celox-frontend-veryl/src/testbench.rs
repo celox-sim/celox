@@ -1556,7 +1556,7 @@ impl ExprCompiler<'_> {
         }
         ops.push(TbOpcode::LoadString {
             location: Self::state_location_at(address, 0),
-            elements: info.width,
+            elements: info.width / celox_design::HANDLE_WIDTH,
         });
     }
 
@@ -3922,6 +3922,7 @@ mod tests {
                 kind: DomainKind::Other,
                 type_kind: PortTypeKind::Logic,
                 array_dims: Vec::new(),
+                value_kind: Default::default(),
             },
         };
 

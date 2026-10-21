@@ -92,7 +92,7 @@ fn state_range<B: SimBackend>(backend: &B) -> std::ops::Range<usize> {
 #[derive(Clone)]
 pub struct Checkpoint {
     image: StateImage,
-    testbench_strings: celox_testbench::TestbenchStrings,
+    heap: celox_heap::Heap,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
     /// Whether the design had finished a timed simulation.
@@ -102,7 +102,7 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Bytes in the saved memory image and string contents, excluding allocator overhead.
     pub fn state_size(&self) -> usize {
-        self.image.len() + self.testbench_strings.values().map(Vec::len).sum::<usize>()
+        self.image.len() + self.heap.content_size()
     }
 }
 
@@ -159,7 +159,7 @@ impl<B: SimBackend> Simulator<B> {
         }
         Ok(Checkpoint {
             image: StateImage::capture(&self.backend, self.state_fingerprint()),
-            testbench_strings: self.testbench_strings.clone(),
+            heap: self.heap.clone(),
             comb_observer_snapshots: self.comb_observer_snapshots.clone(),
             comb_observer_initial_eval: self.comb_observer_initial_eval,
             frozen: self.frozen,
@@ -179,8 +179,7 @@ impl<B: SimBackend> Simulator<B> {
         checkpoint
             .image
             .restore_into(&mut self.backend, fingerprint)?;
-        self.testbench_strings
-            .clone_from(&checkpoint.testbench_strings);
+        self.heap.clone_from(&checkpoint.heap);
         self.comb_observer_snapshots
             .clone_from(&checkpoint.comb_observer_snapshots);
         self.comb_observer_initial_eval = checkpoint.comb_observer_initial_eval;
