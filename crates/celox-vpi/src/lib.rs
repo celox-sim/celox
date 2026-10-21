@@ -138,14 +138,15 @@ impl SignalSelection {
         }
     }
 
-    fn resolve(self, runtime: &NativeProgramInstance) -> Option<celox::ReflectionSignal> {
-        let mut signal = runtime.reflection().signal(self.root)?.clone();
+    /// Resolve storage without cloning hierarchy names or dimension metadata.
+    fn signal(self, runtime: &NativeProgramInstance) -> Option<celox::SignalRef> {
+        let root = runtime.reflection().signal(self.root)?;
+        let mut signal = root.signal;
         if self.depth == 0 {
             return Some(signal);
         }
-        let count = signal.unpacked_dims.iter().product::<usize>();
-        let element_width = signal.signal.width / count;
-        let remaining = signal
+        let count = root.unpacked_dims.iter().product::<usize>();
+        let remaining = root
             .unpacked_dims
             .get(self.depth..)?
             .iter()
@@ -153,6 +154,33 @@ impl SignalSelection {
         if self.first.checked_add(remaining)? > count {
             return None;
         }
+        if let Some(mut array) = signal.array_layout {
+            signal.offset = signal
+                .offset
+                .checked_add(self.first.checked_mul(array.element_stride)?)?;
+            signal.width = remaining.checked_mul(root.signal.width / count)?;
+            array.element_count = remaining;
+            signal.array_layout = Some(array);
+        }
+        Some(signal)
+    }
+
+    fn domain_kind(self, runtime: &NativeProgramInstance) -> Option<DomainKind> {
+        let root = runtime.reflection().signal(self.root)?;
+        Some(if self.depth == 0 {
+            root.domain_kind
+        } else {
+            DomainKind::Other
+        })
+    }
+
+    fn resolve(self, runtime: &NativeProgramInstance) -> Option<celox::ReflectionSignal> {
+        let mut signal = runtime.reflection().signal(self.root)?.clone();
+        signal.signal = self.signal(runtime)?;
+        if self.depth == 0 {
+            return Some(signal);
+        }
+        let count = signal.unpacked_dims.iter().product::<usize>();
         let mut stride = count;
         for (&size, &(left, right)) in signal
             .unpacked_dims
@@ -170,15 +198,6 @@ impl SignalSelection {
             let suffix = format!("[{index}]");
             signal.name.push_str(&suffix);
             signal.full_name.push_str(&suffix);
-        }
-        if let Some(mut array) = signal.signal.array_layout {
-            signal.signal.offset = signal
-                .signal
-                .offset
-                .checked_add(self.first.checked_mul(array.element_stride)?)?;
-            signal.signal.width = remaining.checked_mul(element_width)?;
-            array.element_count = remaining;
-            signal.signal.array_layout = Some(array);
         }
         signal.unpacked_dims.drain(..self.depth);
         signal.unpacked_ranges.drain(..self.depth);
@@ -228,17 +247,18 @@ impl SignalSelection {
     }
 
     fn width(self, runtime: &NativeProgramInstance) -> Option<usize> {
-        Some(
-            self.slice(runtime)
-                .map_or(self.resolve(runtime)?.signal.width, |(_, width)| width),
-        )
+        if let Some((_, width)) = self.slice(runtime) {
+            Some(width)
+        } else {
+            Some(self.signal(runtime)?.width)
+        }
     }
 
     fn identity(self, runtime: &NativeProgramInstance) -> Option<VpiSignalIdentity> {
         let storage = if self.depth == 0 || self.slice(runtime).is_some() {
             runtime.signal_identity(self.root)?
         } else {
-            NativeSignalIdentity::State(self.resolve(runtime)?.signal)
+            NativeSignalIdentity::State(self.signal(runtime)?)
         };
         Some(VpiSignalIdentity {
             storage,
@@ -247,7 +267,7 @@ impl SignalSelection {
     }
 
     fn read(self, runtime: &NativeProgramInstance) -> Option<(BigUint, BigUint)> {
-        let signal = self.resolve(runtime)?.signal;
+        let signal = self.signal(runtime)?;
         let Some((offset, width)) = self.slice(runtime) else {
             return Some(runtime.backend().get_four_state(signal));
         };
@@ -265,7 +285,7 @@ impl SignalSelection {
     }
 
     fn write(self, runtime: &mut NativeProgramInstance, bits: BigUint, mask: BigUint) {
-        let Some(signal) = self.resolve(runtime).map(|signal| signal.signal) else {
+        let Some(signal) = self.signal(runtime) else {
             return;
         };
         let Some((offset, width)) = self.slice(runtime) else {
@@ -1163,26 +1183,22 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
-    if !with_runtime(|runtime| {
-        id.resolve(runtime)
-            .is_some_and(|signal| signal.unpacked_dims.is_empty())
+    with_host(|host| {
+        borrow_cell(&host.runtime, |runtime| {
+            let runtime = runtime.as_ref()?;
+            let signal = runtime.reflection().signal(id.root)?;
+            if id.depth != signal.unpacked_dims.len() {
+                return None;
+            }
+            let width = id.width(runtime)?;
+            let identity = id.identity(runtime)?;
+            if let Some(forced) = host.forced_values.borrow().get(&identity) {
+                return Some((forced.value.clone(), forced.mask.clone(), width));
+            }
+            let (value, mask) = id.read(runtime)?;
+            Some((value, mask, width))
+        })
     })
-    .unwrap_or(false)
-    {
-        return None;
-    }
-    let (identity, width) =
-        with_runtime(|runtime| Some((id.identity(runtime)?, id.width(runtime)?))).flatten()?;
-    if let Some(forced) =
-        with_host(|host| borrow_cell(&host.forced_values, |forced| forced.get(&identity).cloned()))
-    {
-        return Some((forced.value, forced.mask, width));
-    }
-    with_runtime(|runtime| {
-        let (value, mask) = id.read(runtime)?;
-        Some((value, mask, id.width(runtime)?))
-    })
-    .flatten()
 }
 
 fn format_binary(value: &BigUint, mask: &BigUint, width: usize) -> String {
@@ -1290,7 +1306,9 @@ unsafe fn write_snapshot_value(
         return;
     };
     let metadata = with_runtime(|runtime| {
-        id.resolve(runtime)
+        runtime
+            .reflection()
+            .signal(id.root)
             .and_then(|signal| Some((id.width(runtime)?, signal.signed)))
     })
     .flatten();
@@ -1330,9 +1348,14 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let Some((bits, mask, width)) = value_bits(id) else {
         return;
     };
-    let signed = with_runtime(|runtime| id.resolve(runtime).map(|signal| signal.signed))
-        .flatten()
-        .unwrap_or(false);
+    let signed = with_runtime(|runtime| {
+        runtime
+            .reflection()
+            .signal(id.root)
+            .map(|signal| signal.signed)
+    })
+    .flatten()
+    .unwrap_or(false);
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
     encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
 }
@@ -1471,7 +1494,9 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     };
     if with_runtime(|runtime| {
-        id.resolve(runtime)
+        runtime
+            .reflection()
+            .signal(id.root)
             .is_some_and(|signal| signal.is_parameter)
     })
     .unwrap_or(false)
@@ -1479,8 +1504,10 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     }
     if !with_runtime(|runtime| {
-        id.resolve(runtime)
-            .is_some_and(|signal| signal.unpacked_dims.is_empty())
+        runtime
+            .reflection()
+            .signal(id.root)
+            .is_some_and(|signal| id.depth == signal.unpacked_dims.len())
     })
     .unwrap_or(false)
         || (id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG))
@@ -1544,12 +1571,10 @@ pub unsafe extern "C" fn vpi_put_value(
     }
 
     let signal_info = with_runtime(|runtime| {
-        id.resolve(runtime).and_then(|signal| {
-            Some((
-                id.width(runtime)?,
-                signal.signal.is_4state && runtime.four_state(),
-            ))
-        })
+        Some((
+            id.width(runtime)?,
+            id.signal(runtime)?.is_4state && runtime.four_state(),
+        ))
     })
     .flatten();
     let Some((width, is_4state)) = signal_info else {
@@ -1584,11 +1609,8 @@ pub unsafe extern "C" fn vpi_put_value(
             })
         })
         .or_else(|| {
-            with_runtime(|runtime| {
-                let signal = id.resolve(runtime)?;
-                Some(runtime.backend().get_four_state(signal.signal))
-            })
-            .flatten()
+            with_runtime(|runtime| Some(runtime.backend().get_four_state(id.signal(runtime)?)))
+                .flatten()
         });
         let Some((deposited_value, deposited_mask)) = deposited else {
             return ptr::null_mut();
@@ -1608,7 +1630,7 @@ pub unsafe extern "C" fn vpi_put_value(
         None
     };
     let succeeded = with_runtime_mut(|runtime| {
-        let Some(signal) = id.resolve(runtime) else {
+        let Some(domain_kind) = id.domain_kind(runtime) else {
             return false;
         };
         let Some((old_value, old_mask)) = id.read(runtime) else {
@@ -1631,7 +1653,7 @@ pub unsafe extern "C" fn vpi_put_value(
                     identity,
                     bits.clone(),
                     mask.clone(),
-                    signal.domain_kind,
+                    domain_kind,
                     old_level,
                     new_level,
                 );
