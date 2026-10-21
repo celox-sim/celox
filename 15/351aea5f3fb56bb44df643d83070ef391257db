@@ -1,3 +1,6 @@
-Replay after correcting the lower PR coverage statement; source tree unchanged.
+Revision history for #1661:
 
-Replay the lower CI corrections for retained evidence and cocotb 2.1 packed handles.
+rev 2 (rebase) 2026-10-21 00:07 UTC — Replay after correcting the lower PR coverage statement; source tree unchanged.  Replay the lower CI corrections for retained evidence and cocotb 2.1 packed handles.
+rev 1 (initial) 2026-10-21 00:07 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1661,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f203b6a24eb9542e666f0139da67c579043b0557","timestamp_iso":"2026-10-21T00:07:01Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"f203b6a24eb9542e666f0139da67c579043b0557","new_sha":"15351aea5f3fb56bb44df643d83070ef391257db","timestamp_iso":"2026-10-21T00:07:01Z","reason":"Replay after correcting the lower PR coverage statement; source tree unchanged.\n\nReplay the lower CI corrections for retained evidence and cocotb 2.1 packed handles.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f203b6a24eb9542e666f0139da67c579043b0557...15351aea5f3fb56bb44df643d83070ef391257db"}]} -->
