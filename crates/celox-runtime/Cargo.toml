@@ -11,6 +11,7 @@ rust-version.workspace = true
 
 [dependencies]
 celox-design = { workspace = true }
+celox-heap = { workspace = true }
 celox-state-layout = { workspace = true }
 celox-testbench = { workspace = true }
 bit-set = { workspace = true }

@@ -97,7 +97,7 @@ Common reasons a design needs changes are:
   ([#1707](https://github.com/celox-sim/celox/issues/1707)).
 - Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
 - Non-ANSI module ports, wildcard `.*` connections, gate primitives and `bind`.
-- Strings, `real`, unpacked structs and several interface features.
+- `real`, unpacked structs and several interface features.
 
 The [complete limitations list](./systemverilog-reference#what-is-not-supported)
 includes narrower restrictions and tracking issues. Unsupported constructs

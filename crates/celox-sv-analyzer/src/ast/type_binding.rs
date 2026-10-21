@@ -231,6 +231,8 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
     let (kind, width, signed) = match name {
         "real" | "realtime" => (TypeKind::Real, Some(64), true),
         "shortreal" => (TypeKind::Shortreal, Some(32), true),
+        // A heap handle; see `celox_design::HANDLE_WIDTH`.
+        "string" => (TypeKind::String, Some(32), false),
         "bit" => (TypeKind::Bit, None, false),
         "logic" => (TypeKind::Logic, None, false),
         "reg" => (TypeKind::Reg, None, false),

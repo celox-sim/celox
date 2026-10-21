@@ -28,6 +28,7 @@ outline: [2, 3]
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
+| 文字列 | `string` 型の変数、関数の引数と戻り値。文字列・文字列リテラル・キャスト（`string'(x)`）の代入、`==` / `!=` と大小比較、連結と複製（実行時の回数も可）、文字の読み書き（`s[i]`）、メソッド `len`、`getc`、`putc`、`toupper`、`tolower`、`compare`、`icompare`、`substr`、`atoi` / `atohex` / `atooct` / `atobin`、`itoa` / `hextoa` / `octtoa` / `bintoa`。`%s` と書式なしの表示。[文字列](#strings)を参照 |
 | パラメータ | 整数のパラメータ、128ビットを超える幅と X/Z を保持するパラメータ上書き、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 
 ### プロセスと制御
@@ -126,7 +127,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート宣言（[#426](https://github.com/celox-sim/celox/issues/426)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、文字列、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、soft packed union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
 - 順序回路のプロセス：イベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）と単純な信号以外のエッジ
   オペランド（[#464](https://github.com/celox-sim/celox/issues/464)）。このようなエッジ、複数ビットのエッジ信号、リセットを持たない
   複数のエッジを持つ通常の `always` も、プロセスとして実行できるようになるまで拒否します
@@ -150,6 +151,12 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 ### 上限なしのパラメータ
 
 `$isunbounded(P)` は、値パラメータが `$` の場合に1、それ以外では0を1ビットの符号なし値として返します。`$` は別のパラメータへの代入やインスタンスのパラメータ上書きでも保持されます（IEEE 1800-2023 6.20.7、20.6.3）。
+
+### 文字列 {#strings}
+
+`string` 型の変数はシミュレータのヒープ上の文字列への参照を持ちます。代入、等値比較、値の変化の検出は 32 ビット整数と同じコストで、文字列の中身を読む・作る演算だけがランタイムを呼び出します。文字列はタイムスロットの間と各 `tick` の後に回収されます。IEEE 1800-2023 6.16 のとおり、文字列にするときに NUL バイトは取り除かれ、文字列へ代入・キャストした整数値は最上位のバイトから並びます。
+
+未対応：`$sformat` / `$sformatf`、`atoreal` / `realtoa`、`$value$plusargs`・ファイル I/O・DPI-C の文字列引数、VPI・VCD 出力・TypeScript API での文字列値。
 
 ### インスタンス配列の要素
 

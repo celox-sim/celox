@@ -29,6 +29,7 @@ synthesis and is tested at the design level.
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
+| Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -136,7 +137,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, soft packed unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
-  unpacked structs, strings and `real`.
+  unpacked structs and `real`.
 - Sequential processes: `iff` qualifiers ([#452](https://github.com/celox-sim/celox/issues/452)) and edge operands other than a
   plain signal ([#464](https://github.com/celox-sim/celox/issues/464)) in event lists. A plain `always` with
   such an edge, a multi-bit edge signal, or several edges without a reset is
@@ -195,6 +196,20 @@ Elements are addressed by their declared
 index: `child_signal(&[("u", 3)], "y")` and `dut.u[3]` reach `u[3]` of
 `Child u[3:2](...)`, and `InstanceHierarchy::index` holds the index. Arrays
 with a negative bound are rejected.
+
+### Strings {#strings}
+
+A `string` variable holds a reference to text in the simulator's heap, so
+assigning, comparing for equality and detecting a change of a string cost the
+same as for a 32-bit integer; operations that read or build text call into the
+runtime. Strings are collected between time slots and after each `tick`.
+As IEEE 1800-2023 6.16 requires, NUL bytes are removed when text becomes a
+string, and an integral value assigned or cast to a string contributes its
+bytes from the most significant one.
+
+Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
+arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
+VCD output and the TypeScript API.
 
 ### Out-of-range selects
 

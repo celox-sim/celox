@@ -75,6 +75,7 @@ impl<B: SimBackend> Simulator<B> {
                         signed: arg.signed,
                         is_string: arg.is_string,
                         float_precision: arg.float_precision,
+                        handle: false,
                     })
                     .collect();
                 let process = &self.program.runtime_schema.processes[site.process];
@@ -104,6 +105,7 @@ impl<B: SimBackend> Simulator<B> {
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
                     arg_float_precision: Vec::new(),
+                    arg_is_handle: Vec::new(),
                 };
                 let mut message = render_runtime_event_message(
                     &format,

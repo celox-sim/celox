@@ -97,16 +97,7 @@ fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    let (memory, _) = sim.backend.memory_as_ptr();
-    let trace = sim.backend.layout().trace.as_ref();
-    expr.eval_with_heap(memory.cast_mut(), Some(&mut sim.heap), |offset, len| {
-        if let Some(trace) = trace {
-            // SAFETY: bytecode is bound to this simulator's memory layout.
-            unsafe {
-                trace.mark_range(memory.cast_mut(), offset, len);
-            }
-        }
-    })
+    eval_backend_expr(&mut sim.backend, expr)
 }
 
 pub(crate) fn eval_backend_expr<B: SimBackend>(
@@ -114,18 +105,25 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
     // This pointer is used only during evaluation, never exposed to a host.
-    // Observe VM stores explicitly instead of disabling tracking for reads.
+    // Observe VM stores explicitly instead of disabling tracking for reads;
+    // they are marked once the heap is no longer borrowed.
     let (memory, _) = backend.memory_as_ptr();
-    let trace = backend.layout().trace.as_ref();
-    expr.eval_value_with_write_observer(memory.cast_mut(), |offset, len| {
-        if let Some(trace) = trace {
+    let mut writes = Vec::new();
+    let value = expr.eval_with_heap(
+        memory.cast_mut(),
+        Some(backend.heap_mut()),
+        |offset, len| writes.push((offset, len)),
+    );
+    if let Some(trace) = backend.layout().trace.as_ref() {
+        for (offset, len) in writes {
             // SAFETY: bound bytecode writes valid locations in this image, and
             // the simulator cannot execute concurrently with this evaluation.
             unsafe {
                 trace.mark_range(memory.cast_mut(), offset, len);
             }
         }
-    })
+    }
+    value
 }
 
 fn format_assert_arg<B: SimBackend>(
@@ -254,7 +252,7 @@ fn sim_set_target<B: SimBackend>(
             eval_expr(sim, &selection.offset).to_u64() as usize / celox_design::HANDLE_WIDTH
         });
         if index < target.signal.width / celox_design::HANDLE_WIDTH {
-            let handle = sim.heap.intern(&bytes);
+            let handle = sim.backend.heap_mut().intern(&bytes);
             let element = SignalRef {
                 offset: target.signal.offset + index * celox_heap::HANDLE_BYTES,
                 width: celox_design::HANDLE_WIDTH,
@@ -300,7 +298,7 @@ fn collect_testbench_heap<B: SimBackend>(
     private_signals: &[SignalRef],
     locals: &[Vec<(BigUint, BigUint)>],
 ) {
-    if !sim.heap.should_collect() {
+    if !sim.backend.heap().should_collect() {
         return;
     }
     let slots = sim.handle_slots();
@@ -1716,6 +1714,20 @@ fn exec_testbench<B: SimBackend>(
     if blocks.len() <= 1 {
         return exec_detailed(sim, testbench.statements(), ctx);
     }
+    // Suspended processes keep their temporaries outside state memory, so
+    // only the poll loop collects, with those temporaries as roots.
+    let blocked = std::mem::replace(&mut sim.heap_safepoints_blocked, true);
+    let result = exec_processes(sim, testbench, ctx, &blocks);
+    sim.heap_safepoints_blocked = blocked;
+    result
+}
+
+fn exec_processes<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    testbench: &CompiledTestbench<B>,
+    ctx: &mut DetailedExecContext,
+    blocks: &[&[TestbenchStatement<B>]],
+) -> ExecResult {
     initialize_process_clocks(sim, testbench.statements());
     // The compiler's function slots are shared by inline call sites. Keep
     // only these temporaries private; design variables remain shared between

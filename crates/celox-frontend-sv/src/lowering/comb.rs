@@ -3446,6 +3446,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         let mut arg_signed = Vec::with_capacity(values.len());
         let mut arg_is_string = Vec::with_capacity(values.len());
         let mut arg_float_precision = Vec::with_capacity(values.len());
+        let mut arg_is_handle = Vec::with_capacity(values.len());
         for value in &values {
             let node = match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
@@ -3455,6 +3456,11 @@ impl<'p, 'a> Comb<'p, 'a> {
                         expr.clone()
                     };
                     let signed = self.expr_signed(&expr);
+                    arg_is_handle.push(reads_string_variable(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -3475,6 +3481,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     arg_signed.push(false);
                     arg_is_string.push(true);
                     arg_float_precision.push(None);
+                    arg_is_handle.push(false);
                     slt_constant(self.arena, value, width, false)?
                 }
                 sv::ir::SystemTaskArg::Empty => {
@@ -3553,6 +3560,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             arg_signed,
             arg_is_string,
             arg_float_precision,
+            arg_is_handle,
         });
         let mut preceding_writes = Vec::new();
         for (id, range) in store.iter() {

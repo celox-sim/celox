@@ -116,6 +116,7 @@ fn register_comb_runtime_event_site<'a>(
             .iter()
             .map(|arg| arg.0.comptime().r#type.is_string())
             .collect(),
+        arg_is_handle: Vec::new(),
     };
     let id = collector.sites.len() as u32;
     collector.sites.push(site);

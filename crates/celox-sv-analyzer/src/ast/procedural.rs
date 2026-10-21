@@ -70,12 +70,13 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
         randomizable: !r#type.is_enum,
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
+        string: matches!(r#type.kind(), TypeKind::String),
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
         is_2state: matches!(
             r#type.kind(),
-            TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal
+            TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal | TypeKind::String
         ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
@@ -465,7 +466,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &self.dims,
             )?;
         }
+        if let Some(stmt) = self.string_character_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
         let (written, lhs) = self.native_lvalue(left)?;
+        if op != "="
+            && expression_binding::native_string(left, self.tree.declarations(), &self.dims)
+        {
+            return Err(unsupported(format!("operator `{op}` on a string")));
+        }
         let mut rhs = if op == "=" {
             expression_binding::expression(
                 right,
@@ -489,6 +498,73 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         ) {
             rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
         }
+        self.rename_expr(&mut rhs);
+        Ok(Stmt::Assign {
+            lhs,
+            rhs,
+            nonblocking,
+        })
+    }
+
+    /// `str[i] = c`, which replaces one character like `str.putc(i, c)`
+    /// (IEEE 1800-2023 6.16.2).
+    fn string_character_assignment(
+        &self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let celox_sv_syntax::ExprKind::Select {
+            expression,
+            dimension,
+        } = &native
+            .expression(expression_binding::ungroup(left, native))
+            .kind
+        else {
+            return Ok(None);
+        };
+        if !expression_binding::native_string(*expression, native, &self.dims) {
+            return Ok(None);
+        }
+        let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+            return Err(unsupported("part-select of a string"));
+        };
+        if op != "=" {
+            return Err(unsupported(format!(
+                "operator `{op}` on a string character"
+            )));
+        }
+        let index = expression_binding::value(index, native, self.tree, &self.dims)?;
+        let character = expression_binding::value(right, native, self.tree, &self.dims)?;
+        self.string_update(
+            *expression,
+            StringOp::Putc,
+            vec![index, character],
+            nonblocking,
+        )
+        .map(Some)
+    }
+
+    /// `string = op(string, args)`: a method that updates the string it is
+    /// called on.
+    fn string_update(
+        &self,
+        string: celox_sv_syntax::ExprId,
+        op: StringOp,
+        args: Vec<Expr>,
+        nonblocking: bool,
+    ) -> Result<Stmt, AnalyzerError> {
+        let (written, lhs) = self.native_lvalue(string)?;
+        let LValue::Ident(name) = &written else {
+            return Err(unsupported(format!(
+                "string method `{op}` on an array element"
+            )));
+        };
+        let receiver = (op == StringOp::Putc).then(|| Expr::Ident(name.clone()));
+        let mut rhs =
+            expression_binding::string_call(op, receiver.into_iter().chain(args).collect());
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
             lhs,
@@ -750,6 +826,33 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        if let celox_sv_syntax::ExprKind::Call {
+            expression,
+            arguments,
+        } = &native
+            .expression(expression_binding::ungroup(root, native))
+            .kind
+            && let Some((op, string)) =
+                expression_binding::string_method(*expression, native, &self.dims)
+        {
+            let (_, count) = StringOp::method(&op.to_string()).expect("a method name");
+            let args = arguments
+                .iter()
+                .map(|arg| arg.value.filter(|_| arg.name.is_none()))
+                .collect::<Option<Vec<_>>>()
+                .filter(|args| args.len() == count)
+                .ok_or_else(|| unsupported(format!("arguments of string method `{op}`")))?
+                .into_iter()
+                .map(|arg| expression_binding::value(arg, native, self.tree, &self.dims))
+                .collect::<Result<Vec<_>, _>>()?;
+            // A method that returns a value has no effect as a statement.
+            return if op.updates_receiver() {
+                Ok(vec![self.string_update(string, op, args, false)?])
+            } else {
+                Ok(Vec::new())
+            };
+        }
         let discarded = matches!(
             self.tree.declarations().expression(root).kind,
             celox_sv_syntax::ExprKind::Cast { .. }

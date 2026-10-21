@@ -121,6 +121,10 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
     #[serde(default)]
     pub arg_float_precision: Vec<Option<FloatPrecision>>,
+    /// Arguments that are heap handles of strings, formatted as their
+    /// contents. Missing entries are not handles.
+    #[serde(default)]
+    pub arg_is_handle: Vec<bool>,
 }
 
 /// A function in the host's C ABI that the design calls, such as a
@@ -1598,6 +1602,7 @@ mod tests {
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
             arg_float_precision: Vec::new(),
+            arg_is_handle: Vec::new(),
         });
         runtime.comb_observers.push(RuntimeCombObserver {
             site_id: 0,

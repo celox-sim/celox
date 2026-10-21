@@ -12,6 +12,7 @@
 mod file_io;
 mod fread;
 mod scan;
+mod strings;
 
 use super::procedural::*;
 use super::*;
@@ -263,6 +264,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     }
                     continue;
                 }
+                sv::ir::Callee::String(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -865,6 +867,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.scan_function(*function, args)?,
             Expr::Call {
+                callee: sv::ir::Callee::String(op),
+                args,
+                ..
+            } => self.string_call(*op, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
                 ..
@@ -997,6 +1004,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
                     _ => None,
                 };
+                self.m.variables.get_mut(&temp).unwrap().string =
+                    r#type.kind() == sv::ir::TypeKind::String;
                 let Some(result) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -2070,6 +2079,13 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
+        let converted = match self.m.id(lhs.name()) {
+            Some(id) if matches!(lhs, sv::ir::LValue::Ident(_)) => {
+                self.string_conversion(id, rhs.clone())
+            }
+            _ => rhs.clone(),
+        };
+        let rhs = &converted;
         let owned_rhs = if self.m.calls(rhs) {
             self.hoist(rhs)?
         } else {
@@ -2832,6 +2848,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut arg_signed = Vec::with_capacity(values.len());
         let mut arg_is_string = Vec::with_capacity(values.len());
         let mut arg_float_precision = Vec::with_capacity(values.len());
+        let mut arg_is_handle = Vec::with_capacity(values.len());
         for value in &values {
             match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
@@ -2841,6 +2858,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                         expr.clone()
                     };
                     let signed = self.expr_signed(&expr);
+                    arg_is_handle.push(reads_string_variable(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -2864,6 +2886,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     arg_signed.push(false);
                     arg_is_string.push(true);
                     arg_float_precision.push(None);
+                    arg_is_handle.push(false);
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Empty => {
@@ -2904,6 +2927,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             arg_signed,
             arg_is_string,
             arg_float_precision,
+            arg_is_handle,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,
@@ -3435,6 +3459,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let actual = self.string_conversion(id, actual);
                 let actual = if self.m.calls(&actual) {
                     self.hoist(&actual)?
                 } else {
@@ -4586,6 +4611,7 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                string: false,
             },
         );
         let mut renames = HashMap::default();
@@ -4811,6 +4837,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     }
                     continue;
                 }
+                // A string operation is a value of its operands.
+                sv::ir::Callee::String(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if !visited.insert(name.clone()) {
