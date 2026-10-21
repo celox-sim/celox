@@ -1,1 +1,6 @@
-Resolve PR #1672 conflict with master namespace validation from #1621 while preserving the full timescale analysis options.
+Revision history for #1672:
+
+rev 2 (content) 2026-10-21 03:00 UTC — Resolve PR #1672 conflict with master namespace validation from #1621 while preserving the full timescale analysis options.
+rev 1 (initial) 2026-10-21 03:00 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1672,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d1d30454be2654cad711e435c6bd3dd6a9901d2b","timestamp_iso":"2026-10-21T03:00:11Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d1d30454be2654cad711e435c6bd3dd6a9901d2b","new_sha":"f27f368637324c566606642da8e970b8b47e613d","timestamp_iso":"2026-10-21T03:00:11Z","reason":"Resolve PR #1672 conflict with master namespace validation from #1621 while preserving the full timescale analysis options.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d1d30454be2654cad711e435c6bd3dd6a9901d2b...f27f368637324c566606642da8e970b8b47e613d"}]} -->
