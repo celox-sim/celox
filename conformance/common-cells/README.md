@@ -1,6 +1,6 @@
 # Upstream SystemVerilog testbench smoke test
 
-Daily full CI runs the unmodified `cc_graycode_tb` from
+Daily full CI runs the unmodified `cc_graycode_tb` and `cc_popcount_tb` from
 [PULP common_cells](https://github.com/pulp-platform/common_cells), pinned by
 [`revision`](revision). The same job runs on manual `ci.yml` dispatches and on
 develop's nightly full CI. It exercises the `celox run --project` CLI with the
@@ -11,9 +11,15 @@ task, and immediate assertions. It checks binary/Gray round trips and changes
 in the Gray code population count. This is a small combinational design smoke
 test, not coverage of all common_cells modules or clocked testbenches.
 
+The popcount TB covers widths 1, 5, 16, 32, 64, and 981 with unconstrained
+scope randomization, explicit-unit `#5ns` delays, and immediate assertions
+comparing the RTL with `$countones`. The randomizer supports arbitrary packed
+widths; 981 is this upstream test's largest vector, not an implementation limit.
+
 The gate first requires the original RTL/TB to exit successfully. It then forces
-the Gray encoder output to zero in a separate RTL copy and requires exit code 1
-with an assertion diagnostic. Compilation errors, crashes and timeouts do not
+the Gray encoder output to zero and disables popcount accumulation in separate
+RTL copies, requiring exit code 1 with the corresponding assertion diagnostic
+for each. Compilation errors, crashes and timeouts do not
 satisfy this negative control. Upstream files are never edited. Each execution
 has a two-minute wall timeout and the CLI's default scheduler step limit.
 
@@ -29,7 +35,8 @@ node scripts/run-common-cells.mjs work/common-cells target/debug/celox work/comm
 ```
 
 The output directory contains the generated `celox.toml`, negative-control
-sources, both logs, and a `result.json` written only after both checks pass.
+sources, the popcount manifests, four logs, and a `result.json` written only after all
+four executions pass their positive or negative expectations.
 Use a fresh output directory for each run. CI retains this directory for 14 days,
 including on failure; failures feed the existing Full CI issue reporter.
 
