@@ -354,6 +354,17 @@ backends; the source and observed failures are retained in
 
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
 
+The interface-array connection cases cover packed distribution, unpacked
+connections and array ports, and multidimensional instance arrays (IEEE
+1800-2023 23.3.3.5). Verilator 5.052 passes the three one-dimensional cases,
+but counts only the inner instance dimension when validating the packed
+connection width of a 2x2 array. Icarus 13.0 passes the packed case; it rejects
+unpacked actuals, aborts on interface array ports, and explicitly rejects
+multidimensional instance arrays. The exact case exclusions retain the
+[Verilator diagnostics](verification/repros/sv_interface_array_connections_verilator.json)
+and [Icarus diagnostics](verification/repros/sv_interface_array_connections_icarus.json).
+Celox runs all four unchanged cases on every backend.
+
 The `indexed_select::constant_part_select_indices_of_concatenations` case also
 uses these standard concatenation and replication selections as array indices
 (IEEE 1800-2023 11.4.12). Icarus 13.0 rejects them with syntax errors before
@@ -397,7 +408,9 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_mixed_state_struct_members` | execute | icarus | 1 | Icarus 13.0 does not convert a 2-state member of a packed struct with 4-state members from four state when reading it, so a compound assignment to the member keeps X; IEEE 1800-2023 7.2.1 converts it. Verilator cannot check four-state values. |
 | `sv_icarus_unary_plus_unknown` | execute | icarus | 1 | Icarus 13.0 returns the operand of a unary plus unchanged when it has X or Z bits; IEEE 1800-2023 11.4.3 makes the result of an arithmetic operator all X. Verilator cannot check four-state values. |
 | `sv_icarus_runtime_packed_subselect` | compile | icarus | 3 | Icarus 13.0 rejects a further select after a runtime index into a multidimensional packed array, or after runtime indices into an unpacked array of them (t[k][j], t[k][2:1], u[j][k][i]: "Array index expressions must be constant here"). Verilator passes the two-state case; the four-state one is outside what it checks. |
-| `sv_icarus_interfaces` | compile | icarus | 14 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). |
+| `sv_verilator_multidimensional_interface_connections` | compile | verilator | 1 | Verilator 5.052 validates a 2x2 scalar interface array against a two-bit connection instead of four bits. See the focused interface-array evidence above. |
+| `sv_icarus_interface_array_connections` | compile | icarus | 3 | Icarus 13.0 rejects distributed unpacked actuals and multidimensional instances, and aborts on interface array ports. See the focused interface-array evidence above. |
+| `sv_icarus_interfaces` | compile | icarus | 15 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |

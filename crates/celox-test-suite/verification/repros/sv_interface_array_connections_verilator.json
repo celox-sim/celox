@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.11.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "include_ignored": false,
+  "note": "Focused pre-exclusion compile failures for interface array connections (IEEE 1800-2023 23.3.3.5). Shared sources and assertions remain in src/sv/cases/interfaces.vtest; no failure was converted to a pass.",
+  "counts": {
+    "passed": 0,
+    "rejected": 0,
+    "unexpected_accept": 0,
+    "mismatch": 0,
+    "emission_error": 0,
+    "compile_error": 1,
+    "runtime_error": 0,
+    "unsupported": 0,
+    "ignored": 0
+  },
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:29: Input port connection 'value' as part of a module instance array requires 1 or 2 bits, but connection's VARREF 'data' generates 4 bits. (IEEE 1800-2023 23.3.3)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |       Wire grid [2:1][4:3](.value(data), .result(y));\n      |                             ^~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:6:43: Output port connection 'result' as part of a module instance array requires 1 or 2 bits, but connection's VARREF 'y' generates 4 bits. (IEEE 1800-2023 23.3.3)\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |       Wire grid [2:1][4:3](.value(data), .result(y));\n      |                                           ^~~~~~\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "interfaces::distributes_multidimensional_connections_to_interface_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
