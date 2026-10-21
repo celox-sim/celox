@@ -405,10 +405,10 @@ fn return_type(
     }
     Ok(Some(ty))
 }
-/// The methods of `class` as subroutines `class::method`: a method takes
-/// the handle `this` before its formals, and the constructor, declared or
-/// implicit, returns the handle of the object it creates (IEEE 1800-2023
-/// 8.6, 8.7).
+/// The methods of `class` as subroutines `class::method`: a method that is
+/// not static takes the handle `this` before its formals, and the
+/// constructor, declared or implicit, returns `this` once it has
+/// initialized it (IEEE 1800-2023 8.6, 8.7, 8.10).
 fn class_signatures(
     class: &celox_sv_syntax::ClassDeclaration,
     tree: &AnalysisContext<'_>,
@@ -418,25 +418,25 @@ fn class_signatures(
     let Some(handle) = classes::handle_type(tree, &class_name) else {
         return Ok(());
     };
+    let this = (
+        FunctionArgumentMetadata {
+            name: classes::THIS.into(),
+            direction: ParamDirection::Input,
+            has_default: false,
+        },
+        handle.clone(),
+    );
     let mut constructor = false;
     for method in &class.methods {
         let subroutine = tree.declarations().subroutine(method.subroutine);
         let mut formals = formal_types(subroutine, tree, context)?;
+        if !method.qualifiers.is_static {
+            formals.insert(0, this.clone());
+        }
         let result = if subroutine.kind == SubroutineKind::Constructor {
             constructor = true;
             Some(Some(handle.clone()))
         } else {
-            formals.insert(
-                0,
-                (
-                    FunctionArgumentMetadata {
-                        name: classes::THIS.into(),
-                        direction: ParamDirection::Input,
-                        has_default: false,
-                    },
-                    handle.clone(),
-                ),
-            );
             return_type(subroutine, tree, context)?
         };
         publish_signature(
@@ -450,7 +450,7 @@ fn class_signatures(
     if !constructor {
         publish_signature(
             classes::Class::subroutine_name(&class_name, "new"),
-            Vec::new(),
+            vec![this],
             Some(Some(handle)),
             tree,
             context,

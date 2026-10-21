@@ -121,6 +121,14 @@ impl ScopeImports {
                 if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
                     continue;
                 }
+                // `C::name` names a member of class `C` (IEEE 1800-2023 8.23).
+                if native
+                    .classes
+                    .iter()
+                    .any(|class| normalize_identifier(&class.name.spelling) == package)
+                {
+                    continue;
+                }
                 if !nested.iter().any(|(start, end, names)| {
                     (*start..*end).contains(&expression.tokens.start) && names.contains(&package)
                 }) {

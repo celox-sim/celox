@@ -229,3 +229,86 @@ module Top(output int result, output bit same, output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq same 1) (assert_eq result 6281))
+
+(case static_properties_and_methods
+  (source "class.sv" #"
+module Top(output bit done);
+    class Counter;
+        static int created = 0;
+        static string last = "none";
+        int id;
+        function new();
+            created++;
+            id = created;
+        endfunction
+        static function int next(int by = 1);
+            created += by;
+            return created;
+        endfunction
+        function int peek();
+            return created * 10 + id;
+        endfunction
+    endclass
+    Counter a, b;
+    initial begin
+        a = new;
+        b = new;
+        $display("created=%0d a=%0d b=%0d", Counter::created, a.id, b.id);
+        a.created = 7;
+        $display("b.created=%0d peek=%0d", b.created, b.peek());
+        $display("next=%0d next=%0d", Counter::next(), a.next(3));
+        Counter::last = "set";
+        $display("last=%s", b.last);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "created=2 a=1 b=2\nb.created=7 peek=72\nnext=8 next=11\nlast=set\n"))
+
+(case constructors_chain_to_base
+  (source "class.sv" #"
+module Top(output bit done);
+    class Base;
+        int a = 1;
+        int b;
+        function new(int b = 2);
+            this.b = b + a;
+        endfunction
+        function int sum();
+            return a + b;
+        endfunction
+    endclass
+    class Derived extends Base;
+        int c = a * 100;
+        function new(int c0);
+            super.new(c0 * 2);
+            c += c0;
+        endfunction
+        function int sum();
+            return super.sum() * 1000 + c + super.b;
+        endfunction
+    endclass
+    class Fixed extends Base(40);
+    endclass
+    class Default extends Base;
+        int d = b;
+    endclass
+    Derived d;
+    Base b;
+    Fixed f;
+    Default e;
+    initial begin
+        d = new(3);
+        b = d;
+        $display("a=%0d b=%0d c=%0d", d.a, d.b, d.c);
+        $display("derived=%0d base=%0d", d.sum(), b.sum());
+        f = new;
+        e = Default::new;
+        $display("fixed=%0d default=%0d", f.b, e.d);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a=1 b=7 c=103\nderived=8110 base=8\nfixed=41 default=3\n"))

@@ -265,9 +265,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     /// Hide the module-scope names that the properties of `class` shadow
     /// inside its methods (IEEE 1800-2023 8.5), until the scope ends.
+    /// A static property's name is renamed to the module variable that holds
+    /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
+        self.dims.class_scope = Some(class.name.clone());
         for property in &class.properties {
             let entry = self.take_binding(&property.name, None, 0);
+            self.scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
+        }
+        for property in &class.statics {
+            let entry = self.take_binding(
+                &property.name,
+                Some(property.variable.clone()),
+                property.r#type.packed_ranges.len(),
+            );
+            self.dims.insert(
+                property.name.clone(),
+                dimensions_from_type(&property.r#type),
+            );
+            self.dims
+                .expression_signedness
+                .insert(property.name.clone(), property.r#type.is_signed());
             self.scopes
                 .last_mut()
                 .expect("a body always has a scope")
@@ -619,6 +641,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             value = expression_binding::string_operand(value, &self.dims);
         }
+        self.property_store(&property, handle, op, value).map(Some)
+    }
+
+    /// `h.p op value`: a store of `value` into property `property` of the
+    /// object `handle`, combined with its old value by a compound `op`.
+    fn property_store(
+        &self,
+        property: &classes::Property,
+        handle: Expr,
+        op: &str,
+        mut value: Expr,
+    ) -> Result<Stmt, AnalyzerError> {
         if op != "=" {
             let operator = match op.strip_suffix('=') {
                 Some("+") => BinaryOp::Add,
@@ -648,7 +682,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             vec![handle, value],
         );
         self.rename_expr(&mut store);
-        Ok(Some(Stmt::Eval(store)))
+        Ok(Stmt::Eval(store))
     }
 
     /// A call of a class method as a statement, `h.m(args)`, `h.m`, or an
@@ -674,14 +708,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 else {
                     return Ok(None);
                 };
-                let receiver = match receiver {
-                    Some(receiver) => {
-                        expression_binding::value(receiver, native, self.tree, &self.dims)?
+                let mut args = match receiver {
+                    expression_binding::ObjectReceiver::Handle(receiver) => vec![Some(
+                        expression_binding::value(receiver, native, self.tree, &self.dims)?,
+                    )],
+                    expression_binding::ObjectReceiver::This => {
+                        vec![Some(expression_binding::object_this())]
                     }
-                    None => expression_binding::object_this(),
+                    expression_binding::ObjectReceiver::Static => Vec::new(),
                 };
-                let mut args = vec![Some(receiver)];
-                args.resize(formals + 1, None);
+                args.resize(
+                    formals + usize::from(receiver != expression_binding::ObjectReceiver::Static),
+                    None,
+                );
                 Expr::Call {
                     callee: Callee::Subroutine(name),
                     args,
@@ -770,6 +809,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             "--" => "-=",
             _ => return Err(unsupported("increment or decrement operator")),
         };
+        let native = self.tree.declarations();
+        if let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, *expression, native, &self.dims)?
+        {
+            if property.field.handle.is_some() {
+                return Err(unsupported(format!("operator `{operator}` on a handle")));
+            }
+            let handle =
+                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+            return self.property_store(&property, handle, op, Expr::Literal("1".into()));
+        }
         let (written, lhs) = self.native_lvalue(*expression)?;
         let mut rhs = assignment_op_expr(
             &self.tree.state,
@@ -1485,21 +1535,18 @@ pub(super) fn subroutine_argument_names(
             let handle = classes::handle_type(tree, &class)
                 .ok_or_else(|| unsupported(format!("class `{class}`")))?;
             let mut constructor = false;
-            for native_id in classes::declared_methods(tree, &class)? {
+            let this = (
+                classes::THIS.to_owned(),
+                ParamDirection::Input,
+                handle.clone(),
+                None,
+            );
+            for (native_id, is_static) in classes::declared_methods(tree, &class)? {
                 let native = tree.declarations().subroutine(native_id);
                 let mut params = subroutine_param_declarations(native, tree, &item.env, &aliases)?;
-                if native.kind == celox_sv_syntax::SubroutineKind::Constructor {
-                    constructor = true;
-                } else {
-                    params.insert(
-                        0,
-                        (
-                            classes::THIS.to_owned(),
-                            ParamDirection::Input,
-                            handle.clone(),
-                            None,
-                        ),
-                    );
+                constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
+                if !is_static {
+                    params.insert(0, this.clone());
                 }
                 let qualified = item.name(&classes::Class::subroutine_name(
                     &class,
@@ -1525,9 +1572,12 @@ pub(super) fn subroutine_argument_names(
             }
             if !constructor {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
-                directions.insert(qualified.clone(), Vec::new());
-                shapes.insert(qualified.clone(), Vec::new());
-                names.insert(qualified, Vec::new());
+                directions.insert(qualified.clone(), vec![ParamDirection::Input]);
+                shapes.insert(
+                    qualified.clone(),
+                    vec![dimensions_from_type(&scoped_type(handle, &item.env))],
+                );
+                names.insert(qualified, vec![classes::THIS.to_owned()]);
             }
         }
     }
@@ -1701,6 +1751,12 @@ pub(super) fn lower_subroutine(
     let native = tree.declarations().subroutine(native_id);
     let name = instances::normalize_identifier(&native.name.spelling);
     let constructor = native.kind == celox_sv_syntax::SubroutineKind::Constructor;
+    let is_static = class.is_some_and(|class| {
+        class
+            .methods
+            .iter()
+            .any(|method| method.native == native_id && method.qualifiers.is_static)
+    });
     let handle = class
         .map(|class| {
             classes::handle_type(tree, &class.name)
@@ -1779,9 +1835,9 @@ pub(super) fn lower_subroutine(
         .collect::<Result<Vec<_>, _>>()?;
     let mut lowered_params = Vec::new();
     let mut formal_types = HashMap::default();
-    // A method receives the handle of its object first, and a constructor
-    // returns the handle of the object it creates.
-    let this = handle.clone().filter(|_| !constructor).map(|handle| {
+    // A method that is not static receives the handle of its object first,
+    // and a constructor returns the handle of the object it initializes.
+    let this = handle.clone().filter(|_| !is_static).map(|handle| {
         (
             classes::THIS.to_owned(),
             ParamDirection::Input,
@@ -1811,21 +1867,42 @@ pub(super) fn lower_subroutine(
             default,
         });
     }
-    let return_var = return_type.as_ref().map(|r#type| {
-        builder.declare(
-            if constructor { classes::THIS } else { &name },
-            r#type.clone(),
-        )
-    });
+    let return_var = return_type
+        .as_ref()
+        .map(|r#type| builder.declare(&name, r#type.clone()));
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
     let parameter_locals_end = builder.state.locals.len();
-    let mut body = match (class, &return_var) {
-        (Some(class), Some(this)) if constructor => builder.constructor_prologue(class, this)?,
-        _ => Vec::new(),
-    };
-    body.extend(builder.native_body(&native.items, &native.authored_statements)?);
+    let mut items = native.items.clone();
+    let mut prologue = Vec::new();
+    if let (Some(class), Some(result), Some(this)) = (class, &return_var, lowered_params.first())
+        && constructor
+    {
+        // An explicit `super.new` call is made before the property
+        // initializers, with the base call the prologue makes.
+        let arguments = match (
+            super_new(tree.declarations(), &items),
+            classes::base_arguments(tree, &class.name),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(unsupported(
+                    "`super.new` in a class whose `extends` passes constructor arguments",
+                ));
+            }
+            (Some(_), None) if class.base.is_none() => {
+                return Err(unsupported("`super.new` in a class without a base"));
+            }
+            (Some((index, arguments)), None) => {
+                items.remove(index);
+                arguments
+            }
+            (None, arguments) => arguments.unwrap_or_default(),
+        };
+        prologue = builder.constructor_prologue(class, &this.name, result, arguments)?;
+    }
+    let mut body = prologue;
+    body.extend(builder.native_body(&items, &native.authored_statements)?);
     builder.pop_scope();
     let static_types: HashMap<String, Type> = builder
         .state
@@ -1978,35 +2055,103 @@ pub(super) fn lower_subroutine(
     Ok(subroutine)
 }
 
+/// The `super.new(args)` call that starts constructor body `items`, as its
+/// index in `items` and its arguments (IEEE 1800-2023 8.15, 8.17).
+fn super_new<'a>(
+    native: &'a celox_sv_syntax::Declarations,
+    items: &[celox_sv_syntax::StatementId],
+) -> Option<(usize, &'a [celox_sv_syntax::Argument])> {
+    use celox_sv_syntax::{ExprKind, StatementKind};
+    let (index, statement) = items.iter().enumerate().find(|(_, id)| {
+        !matches!(
+            native.statement(**id).kind,
+            StatementKind::Declaration(_) | StatementKind::Empty
+        )
+    })?;
+    let StatementKind::Expression(root) = native.statement(*statement).kind else {
+        return None;
+    };
+    let root = expression_binding::ungroup(root, native);
+    let (callee, arguments) = match &native.expression(root).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        _ => (root, &[][..]),
+    };
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(callee).kind
+    else {
+        return None;
+    };
+    (separator == "."
+        && name.spelling == "new"
+        && matches!(&native.expression(*expression).kind,
+            ExprKind::Name(name) if name.spelling == "super"))
+    .then_some((index, arguments))
+}
+
 impl BodyBuilder<'_, '_, '_> {
-    /// The statements a constructor of `class` runs before its body: create
-    /// the object into `this` and initialize the properties that have
-    /// initializers (IEEE 1800-2023 8.7, 8.8).
-    fn constructor_prologue(&mut self, class: &classes::Class, this: &str) -> Converted<Vec<Stmt>> {
+    /// The statements a constructor of `class` runs before its body, on the
+    /// object `this` its caller allocated: return `this` as `result`, call
+    /// the constructor of the base with `arguments`, and initialize the
+    /// properties the class declares (IEEE 1800-2023 8.7, 8.8, 8.17).
+    fn constructor_prologue(
+        &mut self,
+        class: &classes::Class,
+        this: &str,
+        result: &str,
+        arguments: &[celox_sv_syntax::Argument],
+    ) -> Converted<Vec<Stmt>> {
         let native = self.tree.declarations();
-        let handles = class
-            .properties
-            .iter()
-            .filter_map(|property| {
-                property
-                    .field
-                    .handle
-                    .map(|handle| (property.field.offset, handle))
-            })
-            .collect();
         let mut body = vec![Stmt::Assign {
-            lhs: LValue::Ident(this.to_owned()),
-            rhs: classes::object_call(
-                system_functions::ObjectOp::New {
-                    class: class.id,
-                    size: class.size,
-                    handles,
-                },
-                Vec::new(),
-            ),
+            lhs: LValue::Ident(result.to_owned()),
+            rhs: Expr::Ident(this.to_owned()),
             nonblocking: false,
         }];
-        for property in &class.properties {
+        if let Some(base) = &class.base {
+            let base = classes::class(
+                self.tree,
+                base,
+                &self.dims.const_env,
+                &self.dims.type_aliases,
+            )?;
+            let formals = base.constructor_formals(native);
+            if arguments.len() > formals {
+                return Err(unsupported(format!(
+                    "constructor of class `{}` with {} arguments",
+                    base.name,
+                    arguments.len()
+                )));
+            }
+            let mut args = vec![Some(Expr::Ident(this.to_owned()))];
+            for argument in arguments {
+                if argument.name.is_some() {
+                    return Err(unsupported("named constructor argument"));
+                }
+                args.push(
+                    argument
+                        .value
+                        .map(|value| {
+                            let mut value =
+                                expression_binding::value(value, native, self.tree, &self.dims)?;
+                            self.rename_expr(&mut value);
+                            Ok::<_, AnalyzerError>(value)
+                        })
+                        .transpose()?,
+                );
+            }
+            args.resize(formals + 1, None);
+            body.push(Stmt::Call {
+                name: classes::Class::subroutine_name(&base.name, "new"),
+                args,
+                arg_order: Vec::new(),
+            });
+        }
+        for property in class.own_properties() {
             let Some(initializer) = property.initializer else {
                 continue;
             };
@@ -2057,16 +2202,9 @@ fn lower_class(
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
     let class = classes::class(tree, name, declaration_env, type_aliases)?;
-    if let Some(base) = &class.base
-        && classes::class(tree, base, declaration_env, type_aliases)?
-            .method("new")
-            .is_some()
-    {
-        return Err(unsupported("class extending a class with a constructor"));
-    }
     let mut subroutines = Vec::new();
     let mut constructor = false;
-    for id in classes::declared_methods(tree, name)? {
+    for (id, _) in classes::declared_methods(tree, name)? {
         constructor |=
             tree.declarations().subroutine(id).kind == celox_sv_syntax::SubroutineKind::Constructor;
         subroutines.push(lower_subroutine(
@@ -2084,6 +2222,13 @@ fn lower_class(
     if !constructor {
         let handle = classes::handle_type(tree, name)
             .ok_or_else(|| unsupported(format!("class `{name}`")))?;
+        let ir_type = crate::ir::Type::from_ast(
+            scoped_type(handle.clone(), declaration_env),
+            &const_functions::Environment {
+                constants: &*item.env,
+                functions: &tree.state.const_functions,
+            },
+        );
         let mut builder = BodyBuilder::new(
             tree,
             item_dimensions,
@@ -2095,7 +2240,13 @@ fn lower_class(
         builder.push_scope();
         builder.enter_class_scope(&class);
         let this = builder.declare(classes::THIS, handle.clone());
-        let body = builder.constructor_prologue(&class, &this)?;
+        let result = builder.declare("new", handle);
+        let body = builder.constructor_prologue(
+            &class,
+            &this,
+            &result,
+            classes::base_arguments(tree, name).unwrap_or_default(),
+        )?;
         builder.pop_scope();
         let mut subroutine = Subroutine {
             name: item.name(&classes::Class::subroutine_name(name, "new")),
@@ -2105,15 +2256,15 @@ fn lower_class(
                 .map(|local| local.name.clone())
                 .collect(),
             persistent_locals: Vec::new(),
-            return_type: Some(crate::ir::Type::from_ast(
-                scoped_type(handle, declaration_env),
-                &const_functions::Environment {
-                    constants: &*item.env,
-                    functions: &tree.state.const_functions,
-                },
-            )),
-            params: Vec::new(),
-            return_var: Some(this),
+            return_type: Some(ir_type.clone()),
+            params: vec![SubroutineParam {
+                name: this,
+                source_name: classes::THIS.to_owned(),
+                direction: ParamDirection::Input,
+                r#type: ir_type,
+                default: None,
+            }],
+            return_var: Some(result),
             body,
             sensitivity_body: Vec::new(),
         };
@@ -2206,6 +2357,12 @@ pub(super) fn initial_processes_from_scope(
                         value,
                     ));
                 }
+            }
+        }
+        // Static class properties are initialized like variables.
+        for property in classes::item_statics(item.id, tree, &item.env, &type_aliases) {
+            if let Some(value) = property.initializer {
+                assignments.push((property.variable, value));
             }
         }
         if !assignments.is_empty() {
