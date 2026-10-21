@@ -22,6 +22,8 @@ pub struct SymbolicVariable {
     pub signed: bool,
     pub metadata: VariableMetadata,
     pub packed_dims: Vec<usize>,
+    /// Declared unpacked bounds, in storage order; empty uses zero-based dimensions.
+    pub unpacked_ranges: Vec<(i128, i128)>,
     pub source: Option<SourceLocation>,
     pub module_affiliated: bool,
 }
