@@ -349,6 +349,15 @@ checkpoint と状態ファイルの保存・復元はエラーになります。
 `$dist_uniform(seed, start, end)` は Annex N の一様分布を使い、整数の seed 変数を更新します。
 両端を含み、境界が同じ値か逆順なら seed を進めず `start` を返します。
 
+`$dist_normal`、`$dist_exponential`、`$dist_poisson`、`$dist_chi_square`、
+`$dist_t`、`$dist_erlang` は時間付き `Simulation` のプロセスとそのサブルーチンで
+Annex N の分布を使います。引数と戻り値は符号付き32ビット整数です。
+整数の inout seed は int に変換し、添字付き要素の場合も一度だけ書き戻します。
+指数・Poisson分布の mean、カイ二乗・t分布の自由度、Erlang分布の両引数は正値が必要です。
+不正な値は seed を更新せず実行時エラーとして診断します。正規分布の mean と標準偏差は
+任意の整数を受け付けます。SV の `real` 型は必要ありません。seed はデザインの状態なので、
+checkpoint の復元で乱数列を再現できます。
+
 ## 時刻と精度 {#time-and-precision}
 
 `$timeunit` と `$timeprecision` は秒を基準とする指数を32ビットの符号付き整数で

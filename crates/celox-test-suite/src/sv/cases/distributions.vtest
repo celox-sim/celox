@@ -1,0 +1,67 @@
+(group distributions (category sequential))
+
+; IEEE 1800-2023 20.14.2 and normative Annex N: signed int values and
+; exact explicit-seed transitions, independently corroborated with Icarus.
+(case annex_n_reference_values
+  (source "distributions.sv" #"
+    module Top(output logic ok);
+      int seed, value;
+      initial begin
+        ok = 1;
+        seed = 17; value = $dist_normal(seed, 0, 10);
+        ok &= value == -4 && seed == -642763923;
+        seed = 17; value = $dist_exponential(seed, 10);
+        ok &= value == 82 && seed == 1174174;
+        seed = 17; value = $dist_poisson(seed, 10);
+        ok &= value == 3 && seed == -642763923;
+        seed = 17; value = $dist_chi_square(seed, 5);
+        ok &= value == 2 && seed == -1369077693;
+        seed = 17; value = $dist_t(seed, 5);
+        ok &= value == 0 && seed == -434453879;
+        seed = 17; value = $dist_erlang(seed, 3, 10);
+        ok &= value == 33 && seed == 861173020;
+        seed = 0; value = $dist_normal(seed, -3, 5);
+        ok &= value == -1 && seed == 1082744015;
+        seed = -1; value = $dist_exponential(seed, 10);
+        ok &= value == 0 && seed == -69068;
+        seed = -1; value = $dist_poisson(seed, 1);
+        ok &= value == 3 && seed == 1486841147;
+        seed = 1; value = $dist_chi_square(seed, 2);
+        ok &= value == 22 && seed == 69070;
+        seed = 1; value = $dist_t(seed, 1);
+        ok &= value == -4 && seed == 2044158073;
+        seed = 0; value = $dist_erlang(seed, 1, 3);
+        ok &= value == 2 && seed == -1844104698;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))
+
+(case replay_and_normal_parameters
+  (source "distribution_replay.sv" #"
+    module Top(output logic ok);
+      int a, b, seed, replay;
+      initial begin
+        seed = 0; replay = 0; ok = 1;
+        for (int i = 0; i < 4; i++) begin
+          a = $dist_normal(seed, -17, 0); b = $dist_normal(replay, -17, 0);
+          ok &= a == -17 && a == b && seed == replay;
+          a = $dist_exponential(seed, 7); b = $dist_exponential(replay, 7);
+          ok &= a == b && seed == replay;
+          a = $dist_poisson(seed, 8); b = $dist_poisson(replay, 8);
+          ok &= a == b && seed == replay;
+          a = $dist_chi_square(seed, 2); b = $dist_chi_square(replay, 2);
+          ok &= a == b && seed == replay;
+          a = $dist_t(seed, 1); b = $dist_t(replay, 1);
+          ok &= a == b && seed == replay;
+          a = $dist_erlang(seed, 2, 9); b = $dist_erlang(replay, 2, 9);
+          ok &= a == b && seed == replay;
+        end
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq ok 1))

@@ -919,6 +919,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.plusargs(*function, args)?,
             Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::DistNormal
+                        | sv::ir::SystemFunction::DistExponential
+                        | sv::ir::SystemFunction::DistPoisson
+                        | sv::ir::SystemFunction::DistChiSquare
+                        | sv::ir::SystemFunction::DistT
+                        | sv::ir::SystemFunction::DistErlang),
+                    ),
+                args,
+                ..
+            } => self.distribution(*function, args)?,
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::DistUniform),
                 args,
                 ..
@@ -1820,6 +1833,79 @@ impl<'p, 'a> Ff<'p, 'a> {
         let (id, name) = self.m.temp(purpose, width, signed, four_state);
         self.store(id, SIROffset::Static(0), width, value);
         Ok((id, sv::ir::Expr::Ident(name)))
+    }
+
+    fn distribution(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::{HostRequestKind, HostRequestSite, HostRequestValue};
+        use sv::ir::{Expr, SystemFunction as F};
+        if self.kernel.is_none() {
+            return Err(unsupported(format!(
+                "{} outside a timed process",
+                function.name()
+            )));
+        }
+        let operation = match function {
+            F::DistNormal => 0,
+            F::DistExponential => 1,
+            F::DistPoisson => 2,
+            F::DistChiSquare => 3,
+            F::DistT => 4,
+            F::DistErlang => 5,
+            _ => unreachable!(),
+        };
+        let seed = args
+            .first()
+            .and_then(Option::as_ref)
+            .ok_or_else(|| unsupported("distribution seed"))?;
+        // Capture selectors once before evaluating the other actuals, and
+        // suspend with an int formal rather than writing the caller's storage.
+        let (lvalues, captured) = self.capture_system_actual(seed)?;
+        let formal = self.int_formal(captured);
+        let (seed_id, seed_result) =
+            self.host_hidden("distribution_seed", &formal, 32, true, true)?;
+        let value = |id| HostRequestValue {
+            float_precision: None,
+            id,
+            width: 32,
+            signed: true,
+            is_string: false,
+        };
+        let mut operands = vec![value(seed_id)];
+        for arg in args.iter().skip(1) {
+            let arg = self.hoist(
+                arg.as_ref()
+                    .ok_or_else(|| unsupported("distribution argument"))?,
+            )?;
+            let formal = self.int_formal(arg);
+            let (id, _) = self.host_hidden("distribution_arg", &formal, 32, true, true)?;
+            operands.push(value(id));
+        }
+        let (ret_id, ret_name) = self.m.temp("distribution_result", 32, true, false);
+        let site = self
+            .host_request_sites
+            .iter()
+            .filter(|site| site.kind == HostRequestKind::Distribution)
+            .count() as u32;
+        self.host_request_sites.push(HostRequestSite {
+            process: 0,
+            kind: HostRequestKind::Distribution,
+            requires_timed_simulation: false,
+            operation,
+            args: operands,
+            results: vec![value(ret_id), value(seed_id)],
+            strings: Vec::new(),
+        });
+        self.with_kernel(|kernel| kernel.host_request(HostRequestKind::Distribution, site))
+            .map_err(kernel_error)?;
+        match lvalues.as_slice() {
+            [lvalue] => self.assign(lvalue, &seed_result)?,
+            parts => self.assign_concat(parts, &seed_result)?,
+        }
+        Ok(Expr::Ident(ret_name))
     }
 
     fn plusargs(

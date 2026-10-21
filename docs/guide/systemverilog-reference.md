@@ -530,6 +530,17 @@ the whole design.
 its integral seed variable and includes both bounds. Equal or reversed bounds
 return `start` without advancing the seed.
 
+`$dist_normal`, `$dist_exponential`, `$dist_poisson`, `$dist_chi_square`,
+`$dist_t` and `$dist_erlang` use the Annex N distributions in timed
+`Simulation` processes and their subroutines. Arguments and results are signed
+32-bit integers; the integral inout seed is converted to an int and copied
+back once, including when its actual is an indexed element. Exponential and
+Poisson means, chi-square and t degrees of freedom, and both Erlang parameters
+must be positive; invalid parameters report a runtime error without updating
+the seed. Normal accepts any integer mean and standard deviation. These
+functions do not require an SV `real` type. Their seed is design state, so
+checkpoints replay their sequence.
+
 ## Mixing Veryl and SystemVerilog {#mixed-language}
 
 `Simulator::from_mixed_sources`combines both source lists in one simulation.

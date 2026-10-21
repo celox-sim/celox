@@ -2,6 +2,7 @@
 
 pub mod backend;
 mod derived_tick;
+pub mod distribution;
 mod edge;
 mod error;
 mod event_buffer;
