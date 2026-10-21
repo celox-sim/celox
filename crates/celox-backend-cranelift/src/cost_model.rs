@@ -18,6 +18,28 @@ pub const CLIF_INST_THRESHOLD: usize = 8_000_000;
 ///   VReg::MAX / 1.7 ≈ 1_233_000  →  rounded down to 1_000_000.
 pub const VREG_VALUE_THRESHOLD: usize = 1_000_000;
 
+/// Keep generated spill frames below the stack available on ordinary host
+/// threads. The single-pass allocator gives branch arguments and parameters
+/// distinct eight-byte spill slots, even when their live ranges do not overlap.
+/// Leave headroom for lowering temporaries and ABI bookkeeping; compilation
+/// also checks the actual frame size before exposing executable code.
+pub const FUNCTION_VALUE_THRESHOLD: usize = 64 * 1024;
+
+/// Maximum generated frame, including spills and outgoing call arguments.
+pub const STACK_FRAME_LIMIT: u32 = 1024 * 1024;
+
+pub(crate) fn block_param_cost(
+    params: &[RegisterId],
+    register_map: &HashMap<RegisterId, RegisterType>,
+    four_state: bool,
+) -> usize {
+    let planes = if four_state { 2 } else { 1 };
+    params
+        .iter()
+        .map(|reg| num_chunks(reg_width(register_map, reg)) * planes)
+        .sum()
+}
+
 fn num_chunks(width: usize) -> usize {
     width.div_ceil(64).max(1)
 }
@@ -42,11 +64,18 @@ pub fn estimate_clif_cost(
 ) -> usize {
     let state_mul = if four_state { 2 } else { 1 };
 
+    // Scalar FP operations use translate_float's integer-bit helper ABI:
+    // operand normalization, constants, one indirect call and result packing.
+    // Include headroom for mask normalization and narrow-value extension.
+    const FLOAT_HELPER_COST: usize = 32;
+
     match inst {
         SIRInstruction::Imm(dst, _) => {
             let width = reg_width(register_map, dst);
             num_chunks(width).max(1) * state_mul
         }
+        SIRInstruction::Binary(_, _, BinaryOp::Float { .. }, _)
+        | SIRInstruction::Unary(_, UnaryOp::Float { .. }, _) => FLOAT_HELPER_COST,
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
             // The translator computes common_logical_width = max(dst, lhs, rhs)
             // and operates at that width for the computation.
@@ -54,6 +83,21 @@ pub fn estimate_clif_cost(
             let l_w = reg_width(register_map, lhs);
             let r_w = reg_width(register_map, rhs);
             let width = d_w.max(l_w).max(r_w);
+
+            if matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor) {
+                // Payload, precise unknown-mask expression, and X
+                // normalization are separate operations. And/Or need five
+                // mask operations per chunk, rather than a second copy of
+                // the payload operation. Include promotion/padding overhead.
+                let per_chunk = if !four_state {
+                    3
+                } else if matches!(op, BinaryOp::Xor) {
+                    5
+                } else {
+                    10
+                };
+                return per_chunk * num_chunks(width) + 12;
+            }
 
             if width <= 64 {
                 let base = match op {
@@ -113,18 +157,16 @@ pub fn estimate_clif_cost(
             }
         }
         SIRInstruction::Mux(dst, cond, then_val, else_val) => {
-            // Mux is a conditional select: roughly same cost as a Binary op.
+            // The condition is reduced to known-one/unknown predicates. An
+            // unknown condition then merges both value and mask planes, using
+            // nine operations per output chunk in addition to that reduction.
             let d_w = reg_width(register_map, dst);
             let c_w = reg_width(register_map, cond);
             let t_w = reg_width(register_map, then_val);
             let e_w = reg_width(register_map, else_val);
             let width = d_w.max(c_w).max(t_w).max(e_w);
-            if width <= 64 {
-                3 * state_mul
-            } else {
-                let nc = num_chunks(width);
-                nc * state_mul
-            }
+            let output_chunks = num_chunks(width);
+            12 * num_chunks(c_w) + (if four_state { 12 } else { 4 }) * output_chunks + 18
         }
         SIRInstruction::Unary(dst, op, src) => {
             // Unary also uses max(dst, src) as common width
@@ -132,21 +174,59 @@ pub fn estimate_clif_cost(
             let s_w = reg_width(register_map, src);
             let width = d_w.max(s_w);
 
-            if width <= 64 {
-                let base = match op {
-                    UnaryOp::PopCount
-                    | UnaryOp::CountLeadingZeros
-                    | UnaryOp::CountTrailingZeros => 3,
-                    _ => 2,
+            if matches!(
+                op,
+                UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
+            ) {
+                // emit_wide_bit_count scans each source chunk. CLZ adds a
+                // conditional contribution and zero predicate; CTZ also
+                // selects the logical chunk width when a chunk is zero.
+                let source_chunks = num_chunks(s_w);
+                let payload = match op {
+                    UnaryOp::PopCount => 2 * source_chunks + 12,
+                    UnaryOp::CountLeadingZeros => 6 * source_chunks + 12,
+                    UnaryOp::CountTrailingZeros => 8 * source_chunks + 12,
+                    _ => unreachable!(),
                 };
-                base * state_mul
+                return payload
+                    + if four_state {
+                        // Scan masks, construct each destination mask, and
+                        // normalize its payload to X, plus setup/padding.
+                        3 * source_chunks + 4 * num_chunks(d_w) + 8
+                    } else {
+                        0
+                    };
+            }
+
+            if four_state {
+                let nc = num_chunks(width);
+                // Reduction masks perform a second, dominant-value scan of
+                // the source; merely doubling the payload cost misses it.
+                return match op {
+                    UnaryOp::Float { .. } => FLOAT_HELPER_COST,
+                    UnaryOp::LogicNot | UnaryOp::Or | UnaryOp::And => 10 * nc + 32,
+                    UnaryOp::Xor => 8 * nc + 20,
+                    UnaryOp::Minus => 12 * nc + 16,
+                    UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::ToTwoState => 4 * nc + 12,
+                    UnaryOp::PopCount => 8 * nc + 20,
+                    UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 10 * nc + 20,
+                };
+            }
+
+            if width <= 64 {
+                // Logical-to-physical promotions and the final width mask
+                // add constants and operations even for one-bit values.
+                12
             } else {
                 let nc = num_chunks(width);
                 let base = match op {
                     UnaryOp::Minus => 5 * nc + 1,
-                    UnaryOp::LogicNot => 2 * nc + 4,
-                    UnaryOp::PopCount => 2 * nc + 1,
-                    UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 3 * nc + 1,
+                    UnaryOp::LogicNot | UnaryOp::Or | UnaryOp::And => 3 * nc + 12,
+                    // popcnt + parity xor per source chunk; the wide helper
+                    // also constructs zero padding before truncation.
+                    UnaryOp::Xor => 4 * nc + 4,
+                    UnaryOp::PopCount => 3 * nc + 12,
+                    UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 4 * nc + 12,
                     _ => 2 * nc,
                 };
                 base * state_mul
@@ -217,11 +297,10 @@ pub fn estimate_clif_cost(
 
 /// Estimate the total CLIF cost for an entire execution unit.
 pub fn estimate_eu_cost(eu: &ExecutionUnit<RegionedAbsoluteAddr>, four_state: bool) -> usize {
-    let state_mul = if four_state { 2 } else { 1 };
     let mut cost = 0usize;
     for block in eu.blocks.values() {
         // Block params
-        cost += block.params.len() * state_mul;
+        cost += block_param_cost(&block.params, &eu.register_map, four_state);
         // Instructions
         for inst in &block.instructions {
             cost += estimate_clif_cost(inst, &eu.register_map, four_state);
@@ -269,12 +348,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scalar_float_helper_costs_cover_both_precisions_and_state_modes() {
+        use celox_design::{FloatBinaryOp, FloatPrecision, FloatUnaryOp};
+        for precision in [FloatPrecision::F32, FloatPrecision::F64] {
+            let register_map = (0..3)
+                .map(|register| {
+                    (
+                        RegisterId(register),
+                        RegisterType::Bit {
+                            width: precision.width(),
+                            signed: false,
+                        },
+                    )
+                })
+                .collect();
+            let binary = SIRInstruction::Binary(
+                RegisterId(0),
+                RegisterId(1),
+                BinaryOp::Float {
+                    op: FloatBinaryOp::Add,
+                    precision,
+                },
+                RegisterId(2),
+            );
+            for op in [
+                FloatUnaryOp::Neg,
+                FloatUnaryOp::FromSigned { width: 32 },
+                FloatUnaryOp::ToSigned {
+                    width: 32,
+                    round: true,
+                },
+            ] {
+                let unary = SIRInstruction::Unary(
+                    RegisterId(0),
+                    UnaryOp::Float { op, precision },
+                    RegisterId(1),
+                );
+                for four_state in [false, true] {
+                    assert_eq!(estimate_clif_cost(&unary, &register_map, four_state), 32);
+                    assert_eq!(estimate_clif_cost(&binary, &register_map, four_state), 32);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_threshold_constants() {
         const _: () = assert!(CLIF_INST_THRESHOLD < 16_000_000);
         const _: () = assert!(CLIF_INST_THRESHOLD > 4_000_000);
         // VReg::MAX = (1 << 21) - 1 = 2_097_151
         const _: () = assert!(VREG_VALUE_THRESHOLD < 2_097_151);
         const _: () = assert!(VREG_VALUE_THRESHOLD > 500_000);
+    }
+
+    #[test]
+    fn wide_block_parameters_count_each_machine_value_and_plane() {
+        let register_map = [
+            (RegisterId(0), RegisterType::Logic { width: 512 }),
+            (RegisterId(1), RegisterType::Logic { width: 65 }),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            block_param_cost(&[RegisterId(0), RegisterId(1)], &register_map, false),
+            10
+        );
+        assert_eq!(
+            block_param_cost(&[RegisterId(0), RegisterId(1)], &register_map, true),
+            20
+        );
     }
 
     #[test]

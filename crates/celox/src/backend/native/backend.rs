@@ -399,6 +399,7 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) dead_store_policy: celox_design::DeadStorePolicy,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) live_signals: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) declaration_startup: Option<celox_design::DeclarationStartup<AbsoluteAddr>>,
     pub(crate) processes: Vec<celox_design::ProcessSlots<AbsoluteAddr>>,
     pub(crate) watches: Vec<celox_design::EventWatch<AbsoluteAddr>>,
     pub(crate) wait_sites: Vec<celox_design::WaitSite<AbsoluteAddr>>,
@@ -509,6 +510,7 @@ impl NativeProgramImage {
                 // The image retains the final classification in comb_writes;
                 // optimization-time classification roots are no longer used.
                 persistent_comb_state: Default::default(),
+                declaration_startup: self.runtime_schema.declaration_startup.clone(),
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
                 processes: self.runtime_schema.processes.clone(),
@@ -2410,6 +2412,7 @@ fn compile_program(
                 wait_sites: sir.runtime().runtime_schema.wait_sites.clone(),
                 nba_sites: sir.runtime().runtime_schema.nba_sites.clone(),
                 host_request_sites: sir.runtime().runtime_schema.host_request_sites.clone(),
+                declaration_startup: sir.runtime().runtime_schema.declaration_startup.clone(),
                 active_commits: sir.runtime().runtime_schema.active_commits.clone(),
                 time_slots: sir.runtime().runtime_schema.time_slots.clone(),
             },

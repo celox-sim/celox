@@ -1543,7 +1543,11 @@ impl SIRTranslator {
                 &cross_chunk_targets,
                 cross_chunk_edges,
                 chunk_func_refs,
-                &chunk.outgoing_spills,
+                chunk
+                    .outgoing_spills_at
+                    .get(id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
                 scratch_base_offset,
             );
         }

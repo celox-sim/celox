@@ -151,14 +151,14 @@ impl CraneliftEvalCombPlan {
         let timing = options.diagnostics.optimizer_timing;
         if timing {
             use celox_backend_cranelift::cost_model::{
-                CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost,
+                CLIF_INST_THRESHOLD, FUNCTION_VALUE_THRESHOLD, estimate_eu_cost,
                 estimate_eu_value_count,
             };
             for (i, eu) in sir.sir.eval_comb.iter().enumerate() {
                 let inst_cost = estimate_eu_cost(eu, options.four_state);
                 let value_count = estimate_eu_value_count(eu, options.four_state);
                 tracing::debug!(
-                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{VREG_VALUE_THRESHOLD}",
+                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{FUNCTION_VALUE_THRESHOLD}",
                     eu.blocks.len(),
                     eu.blocks
                         .values()
@@ -170,18 +170,9 @@ impl CraneliftEvalCombPlan {
 
         let split_start = timing.then(crate::timing::now);
         use celox_backend_cranelift::tail_call_split;
-        if let Some(chunks) =
-            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
-        {
-            if let Some(start) = split_start {
-                tracing::debug!(
-                    "[split] TailCallChunks: {} chunks, took {:?}",
-                    chunks.len(),
-                    start.elapsed()
-                );
-            }
-            Self::TailCallChunks(chunks)
-        } else if let Some(plan) =
+        // Multi-block units need memory-spilled chunks. Select them first so
+        // an oversized EU is not hidden inside an EU-boundary tail-call plan.
+        if let Some(plan) =
             tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
@@ -193,6 +184,17 @@ impl CraneliftEvalCombPlan {
                 );
             }
             Self::MemorySpilled(plan)
+        } else if let Some(chunks) =
+            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
+        {
+            if let Some(start) = split_start {
+                tracing::debug!(
+                    "[split] TailCallChunks: {} chunks, took {:?}",
+                    chunks.len(),
+                    start.elapsed()
+                );
+            }
+            Self::TailCallChunks(chunks)
         } else {
             Self::Unsplit
         }

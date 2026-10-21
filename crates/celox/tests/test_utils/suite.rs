@@ -141,6 +141,7 @@ pub fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
     let builder = design.parameters.iter().fold(
         Simulator::from_sources(sources, &design.top)
             .four_state(design.four_state)
+            .allow_inferred_latches(design.allow_inferred_latches)
             .allow_always_ff_function_effects(true),
         |builder, (name, value)| builder.param(name, *value),
     );
@@ -210,7 +211,8 @@ fn build_sv(design: &Design, sources: &[(&str, &std::path::Path)]) -> Result<Box
             .iter()
             .fold(
                 Simulator::from_sv_sources(emitted.as_sv_sources(), &design.top)
-                    .four_state(design.four_state),
+                    .four_state(design.four_state)
+                    .allow_inferred_latches(design.allow_inferred_latches),
                 |builder, (name, value)| builder.param(name, *value),
             )
             .build()

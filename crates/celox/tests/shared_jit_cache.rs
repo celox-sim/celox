@@ -712,6 +712,25 @@ fn native_program_image_rejects_v20_before_decoding_unpacked_bound_schema() {
     ));
 }
 
+/// Version 23 adds latch declaration-startup metadata to the version 22 image.
+#[test]
+fn native_program_image_rejects_v22_before_decoding_latch_startup_schema() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&22u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(22))
+    ));
+}
+
 #[test]
 fn native_program_image_rejects_v3_before_decoding_changed_schema() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();

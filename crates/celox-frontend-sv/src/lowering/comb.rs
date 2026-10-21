@@ -3769,6 +3769,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                     })
                     .collect();
                 paths.push(LogicPath {
+                    transparent_copy: self.continuous,
                     target: LogicPathTarget::Var(VarAtomBase::new(id, lsb, msb)),
                     sources: sources
                         .into_iter()

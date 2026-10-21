@@ -20,6 +20,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("random_plusargs.vtest"),
     },
     Group {
+        file: "src/sv/cases/latch.vtest",
+        text: include_str!("latch.vtest"),
+    },
+    Group {
         file: "src/sv/cases/always_comb.vtest",
         text: include_str!("always_comb.vtest"),
     },

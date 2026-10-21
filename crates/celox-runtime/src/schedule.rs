@@ -124,6 +124,8 @@ impl<B: SimBackend> ResolvedSchedule<B> {
             .processes
             .iter()
             .map(|process| ProcessRefs {
+                is_initializer: process.slots.is_initializer,
+                resume: resolve(&process.slots.resume),
                 starts_with_event_wait: process.slots.requires_timed_simulation,
                 status: resolve(&process.slots.status),
                 delay: resolve(&process.slots.delay),

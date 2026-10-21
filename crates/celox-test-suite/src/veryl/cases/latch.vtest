@@ -1,0 +1,114 @@
+(group latch (category sequential))
+
+(case transparent_chain
+  (allow_inferred_latches)
+  (source "test.veryl" #"
+module Top(en: input logic, d: input logic<8>, unrelated: input logic,
+           q: output logic<8>, downstream: output logic<8>, passthrough: output logic) {
+    always_comb { if en { q = d; } }
+    always_comb { if en { downstream = q; } }
+    assign passthrough = unrelated;
+}
+"#)
+  (top Top)
+  (modify (set en 1) (set d 7) (set unrelated 0))
+  (assert_eq q 7)
+  (assert_eq downstream 7)
+  (modify (set d 13))
+  (assert_eq q 13)
+  (assert_eq downstream 13)
+  ; Closing the gate and changing data together must preserve the old value.
+  (modify (set en 0) (set d 99))
+  (assert_eq q 13)
+  (assert_eq downstream 13)
+  (eval)
+  (eval)
+  (assert_eq q 13)
+  (modify (set unrelated 1) (set d 55))
+  (assert_eq q 13)
+  (assert_eq downstream 13)
+  (modify (set en 1))
+  (assert_eq q 55)
+  (assert_eq downstream 55))
+
+(case partial_ranges
+  (allow_inferred_latches)
+  (source "test.veryl" #"
+module Top(low_en: input logic, high_en: input logic, d: input logic<8>, q: output logic<8>) {
+    always_comb {
+        if low_en { q[3:0] = d[3:0]; }
+        if high_en { q[7:4] = d[7:4]; }
+    }
+}
+"#)
+  (top Top)
+  (modify (set low_en 1) (set high_en 1) (set d 0xa5))
+  (assert_eq q 0xa5)
+  (modify (set low_en 1) (set high_en 0) (set d 0x3c))
+  (assert_eq q 0xac)
+  (modify (set low_en 0) (set high_en 1) (set d 0x71))
+  (assert_eq q 0x7c)
+  (modify (set high_en 0) (set d 0xff))
+  (assert_eq q 0x7c))
+
+(case four_state_enable
+  (allow_inferred_latches)
+  (four_state)
+  (source "test.veryl" #"
+module Top(en: input logic, d: input logic<8>, q: output logic<8>) {
+    always_comb { if en { q = d; } }
+}
+"#)
+  (top Top)
+  (modify (set en 0) (set d 0))
+  (assert_eq q (fourstate 0xff 0xff))
+  (modify (set en 1) (set d 0xa5))
+  (assert_eq q (fourstate 0xa5 0))
+  ; A procedural if with an indeterminate condition takes no true branch.
+  (modify (set en (fourstate 1 1)) (set d 0x3c))
+  (assert_eq q (fourstate 0xa5 0))
+  (modify (set en (fourstate 0 1)))
+  (assert_eq q (fourstate 0xa5 0))
+  (modify (set en 1) (set d (fourstate 0xb7 0x12)))
+  (assert_eq q (fourstate 0xb7 0x12))
+  (modify (set en 0) (set d 0))
+  (assert_eq q (fourstate 0xb7 0x12)))
+
+(case dynamic_partial_writes
+  (allow_inferred_latches)
+  (source "test.veryl" #"
+module Top(en: input logic, index: input logic<2>, d: input logic<4>, q: output logic<16>) {
+    always_comb { if en { q[index * 4+:4] = d; } }
+}
+"#)
+  (top Top)
+  (for (i value) (list (0 1) (1 2) (2 3) (3 4))
+    (modify (set en 1) (set index i) (set d value)))
+  (assert_eq q 0x4321)
+  (modify (set en 0) (set index 2) (set d 0xf))
+  (assert_eq q 0x4321)
+  (modify (set en 1))
+  (assert_eq q 0x4f21)
+  (modify (set index 0) (set d 0xa))
+  (assert_eq q 0x4f2a))
+
+(case unpacked_array_input
+  (allow_inferred_latches)
+  (source "test.veryl" #"
+module Top(en: input logic, index: input logic<2>, d: input logic<20>, q: output logic<5>) {
+    var lanes: logic<5>[4];
+    for i in 0..4 : gen_lanes { assign lanes[i] = d[i * 5+:5]; }
+    always_comb { if en { q = lanes[index]; } }
+}
+"#)
+  (top Top)
+  (modify (set en 1) (set index 0) (set d 0x9ace3))
+  (assert_eq q 3)
+  (modify (set index 2))
+  (assert_eq q 11)
+  (modify (set d 0xab525))
+  (assert_eq q 13)
+  (modify (set en 0) (set index 3) (set d 0))
+  (assert_eq q 13)
+  (modify (set en 1))
+  (assert_eq q 0))

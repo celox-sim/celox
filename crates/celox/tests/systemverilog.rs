@@ -112,6 +112,8 @@ mod hierarchy;
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
 mod interfaces;
+#[path = "frontends/systemverilog/latch.rs"]
+mod latch;
 #[path = "frontends/systemverilog/literals.rs"]
 mod literals;
 #[path = "frontends/systemverilog/mixed.rs"]

@@ -75,6 +75,7 @@ o = tmp;
   (assert_eq o 0xEE))
 
 (case test_always_comb_read_before_write_uses_previous_value
+  (allow_inferred_latches)
   (source "test.veryl" #"
 module Top (
     a: input logic,

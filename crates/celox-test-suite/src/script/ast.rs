@@ -266,6 +266,7 @@ pub struct ScriptCase {
     pub expectation: Expectation,
     pub tags: Vec<TestTag>,
     pub four_state: bool,
+    pub allow_inferred_latches: bool,
     /// Each source file is its parts joined by newlines.
     pub sources: Vec<(PathBuf, Vec<SourcePart>)>,
     pub top: String,
@@ -815,6 +816,7 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
             expectation: Expectation::Simulation,
             tags: Vec::new(),
             four_state: false,
+            allow_inferred_latches: false,
             sources: Vec::new(),
             top: String::new(),
             parameters: Vec::new(),
@@ -853,6 +855,10 @@ pub fn group(text: &str) -> Result<(String, Vec<ScriptCase>), ScriptError> {
                         return error(clause_pos, "expected `(expect reject)`");
                     }
                     case.expectation = Expectation::CompilationError;
+                }
+                Some("allow_inferred_latches") => {
+                    arity(clause_items, clause_pos, 0, Some(0))?;
+                    case.allow_inferred_latches = true;
                 }
                 Some("four_state") => {
                     arity(clause_items, clause_pos, 0, Some(0))?;

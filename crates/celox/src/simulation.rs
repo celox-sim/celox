@@ -116,6 +116,19 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.runtime_finish()
     }
 
+    fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.reset_declaration_state();
+        Ok(())
+    }
+    fn prime_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.prime_declaration_state();
+        Ok(())
+    }
+    fn apply_declaration_startup(&mut self) -> Result<(), Halt> {
+        self.apply_ordinary_initial_state();
+        Ok(())
+    }
+
     fn host_request(
         &mut self,
         request: &celox_design::HostRequestSite<SignalRef>,
@@ -282,14 +295,20 @@ pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> Simul
 }
 
 impl<B: SimBackend> Simulation<B> {
-    pub(crate) fn new(mut simulator: Simulator<B>) -> Self {
-        let state = simulation_state(&simulator);
+    #[cfg(test)]
+    pub(crate) fn new(simulator: Simulator<B>) -> Self {
+        Self::try_new(simulator).expect("runtime static declaration initialization failed")
+    }
+
+    pub(crate) fn try_new(mut simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+        let mut state = simulation_state(&simulator);
         simulator.host_watch = host_watch(&simulator.backend, &simulator.schedule);
         // Only a timed simulation ends at an RTL `$finish`; a bare
         // `Simulator`, ticks included, leaves that to the host.
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.skip_runtime_finish();
-        Self { simulator, state }
+        state.initialize_declarations(&mut simulator)?;
+        Ok(Self { simulator, state })
     }
 
     /// Returns warnings emitted during compilation.
@@ -342,6 +361,9 @@ impl<B: SimBackend> Simulation<B> {
         self.state.advance_time(&mut self.simulator.backend, time);
         self.simulator.host_watch.set_log(host_writes);
         self.simulator.frozen = self.state.is_finished();
+        // Capturing a state during a stopped initializer is forbidden. A
+        // successfully loaded file therefore replaces that transient phase.
+        self.simulator.declaration_phase = false;
         Ok(())
     }
 
@@ -364,6 +386,7 @@ impl<B: SimBackend> Simulation<B> {
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
         self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator.declaration_phase = false;
         self.simulator
             .host_watch
             .set_log(checkpoint.host_writes.clone());

@@ -900,6 +900,7 @@ impl LValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
     creation_order: usize,
+    site: Option<SourceSpan>,
     kind: CombProcessKind,
     condition: Option<ConstExpr>,
     assignments: Vec<Assignment>,
@@ -908,6 +909,10 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    pub fn site(&self) -> Option<&SourceSpan> {
+        self.site.as_ref()
+    }
+
     /// Reads removed from executable branches still affect implicit sensitivity.
     pub fn sensitivity_body(&self) -> &[Stmt] {
         &self.sensitivity_body
@@ -926,6 +931,7 @@ impl CombProcess {
     ) -> Self {
         Self {
             creation_order: 0,
+            site: None,
             sensitivity_body: Vec::new(),
             kind,
             condition,
@@ -957,6 +963,7 @@ impl CombProcess {
 pub enum CombProcessKind {
     ContinuousAssign,
     AlwaysComb,
+    AlwaysLatch,
     AlwaysStar,
 }
 
@@ -1350,6 +1357,7 @@ impl From<ast::CombProcess> for CombProcess {
                 .collect(),
         );
         result.creation_order = process.creation_order();
+        result.site = process.site().cloned();
         result.sensitivity_body = process
             .sensitivity_body()
             .iter()
@@ -1365,6 +1373,7 @@ impl From<ast::CombProcessKind> for CombProcessKind {
         match kind {
             ast::CombProcessKind::ContinuousAssign => CombProcessKind::ContinuousAssign,
             ast::CombProcessKind::AlwaysComb => CombProcessKind::AlwaysComb,
+            ast::CombProcessKind::AlwaysLatch => CombProcessKind::AlwaysLatch,
             ast::CombProcessKind::AlwaysStar => CombProcessKind::AlwaysStar,
         }
     }

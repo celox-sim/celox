@@ -3514,7 +3514,10 @@ fn rejects_unimplemented_timing_constructs() {
             "logic a; initial @* a = 1;",
             "`@*` event control in a process",
         ),
-        ("logic a, y; always_latch y = a;", "always_latch process"),
+        (
+            "logic a, y; always_latch y <= a;",
+            "nonblocking assignment inside always_latch",
+        ),
         (
             "function void t(); #1; endfunction",
             "delay control in a subroutine",
@@ -6520,4 +6523,18 @@ fn accepts_integral_select_indices_including_real_conversion() {
         );
         analyze_source(&source, Path::new("integer_index.sv")).expect(index);
     }
+}
+
+#[test]
+fn explicit_output_data_types_default_to_variables() {
+    let source = analyze_source(
+        "module Top(input logic i, output logic q,r, output wire logic w, output [3:0] implicit_o); endmodule",
+        Path::new("port_kinds.sv"),
+    ).unwrap();
+    let ports = source.modules()[0].ports();
+    assert!(ports[0].is_net());
+    assert!(!ports[1].is_net());
+    assert!(!ports[2].is_net());
+    assert!(ports[3].is_net());
+    assert!(ports[4].is_net());
 }

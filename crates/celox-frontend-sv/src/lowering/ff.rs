@@ -3421,6 +3421,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         body: &[sv::ir::Stmt],
         sensitivity_body: &[sv::ir::Stmt],
         kind: sv::ir::CombProcessKind,
+        allow_inferred_latches: bool,
+        site: Option<&sv::ir::SourceSpan>,
         explicit_targets: &[SourceVarId],
         arena: &mut SLTNodeArena<SourceVarId>,
     ) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
@@ -3455,6 +3457,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.b.seal_block(SIRTerminator::Return);
         }
         let body_unit = seal_drained(std::mem::replace(&mut self.b, SIRBuilder::new()));
+        // The analyzer promotes static locals whose entry value is observable
+        // to module signals (lifetimes::keep_static_locals). Remaining hidden
+        // locals are initialized per activation; they cannot retain old state.
         let mut targets: Vec<_> = self
             .targets
             .iter()
@@ -3472,6 +3477,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
         }
         let mut targets = merged;
+        if kind == sv::ir::CombProcessKind::AlwaysComb
+            && super::comb_retention::retains_state(
+                &body_unit,
+                &targets,
+                &targets
+                    .iter()
+                    .map(|target| (target.id, self.m.var(target.id).width))
+                    .collect(),
+            )
+        {
+            if !allow_inferred_latches {
+                return Err(unsupported("latch inference inside always_comb"));
+            }
+            self.m.warn(crate::FrontendWarningKind::InferredLatch, site);
+        }
         let dependencies = super::comb::subtract_written_sensitivity(reads.clone(), &targets);
         let mut sources: Vec<_> = if always_comb {
             dependencies.clone()
@@ -3493,6 +3513,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         self.b
             .emit(SIRInstruction::Imm(changed, SIRValue::new(0u8)));
         let mut snapshots = Vec::new();
+        let mut sensitivity_counters = Vec::new();
+        let mut counter_snapshots = Vec::new();
         for source in &sources {
             let width = source.access.msb - source.access.lsb + 1;
             let (saved, _) = self.m.temp(
@@ -3528,6 +3550,40 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
             changed = next;
             snapshots.push((saved, width, current));
+            // A source can change and return to its saved value inside one
+            // initial activation. Count occurrences around stores before
+            // optimization, rather than relying only on the settled value.
+            let bits = celox_design::EVENT_COUNTER_WIDTH;
+            let (counter, _) = self.m.temp("comb_occurrences", bits, false, false);
+            let (saved_counter, _) = self.m.temp("comb_seen", bits, false, false);
+            let current_counter = self.b.alloc_bit(bits, false);
+            let previous_counter = self.b.alloc_bit(bits, false);
+            self.b.emit(SIRInstruction::Load(
+                current_counter,
+                stable(counter),
+                SIROffset::Static(0),
+                bits,
+            ));
+            self.b.emit(SIRInstruction::Load(
+                previous_counter,
+                stable(saved_counter),
+                SIROffset::Static(0),
+                bits,
+            ));
+            let differs = self.b.alloc_bit(1, false);
+            self.b.emit(SIRInstruction::Binary(
+                differs,
+                current_counter,
+                BinaryOp::NeCase,
+                previous_counter,
+            ));
+            let next = self.b.alloc_bit(1, false);
+            self.b
+                .emit(SIRInstruction::Binary(next, changed, BinaryOp::Or, differs));
+            changed = next;
+            self.store(saved_counter, SIROffset::Static(0), bits, current_counter);
+            sensitivity_counters.push((*source, counter));
+            counter_snapshots.push((counter, saved_counter));
         }
         let run = self.b.alloc_bit(1, false);
         if always_comb {
@@ -3569,6 +3625,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                     width,
                 ));
                 self.store(saved, SIROffset::Static(0), width, current);
+            }
+        }
+        if !always_comb {
+            // The event control is rearmed after its body, so occurrences
+            // caused by this activation itself are already consumed.
+            for &(counter, saved) in &counter_snapshots {
+                let bits = celox_design::EVENT_COUNTER_WIDTH;
+                let current = self.b.alloc_bit(bits, false);
+                self.b.emit(SIRInstruction::Load(
+                    current,
+                    stable(counter),
+                    SIROffset::Static(0),
+                    bits,
+                ));
+                self.store(saved, SIROffset::Static(0), bits, current);
             }
         }
         self.jump(done);
@@ -3618,9 +3689,23 @@ impl<'p, 'a> Ff<'p, 'a> {
                 })
                 .map_err(slt_error)?;
             paths.push(LogicPath {
+                transparent_copy: false,
                 target: LogicPathTarget::Process {
                     process: initialized,
-                    after_initials: kind == sv::ir::CombProcessKind::AlwaysComb,
+                    sensitivity_counters: sensitivity_counters.clone(),
+                    startup: (!always_comb).then(|| celox_slt::CombStartup {
+                        initialized,
+                        counters: counter_snapshots.clone(),
+                        inputs: sources
+                            .iter()
+                            .cloned()
+                            .zip(snapshots.iter().map(|&(saved, _, _)| saved))
+                            .collect(),
+                    }),
+                    after_initials: matches!(
+                        kind,
+                        sv::ir::CombProcessKind::AlwaysComb | sv::ir::CombProcessKind::AlwaysLatch
+                    ),
                     target,
                     unit: Box::new(unit.clone()),
                 },

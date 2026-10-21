@@ -38,6 +38,10 @@ pub(super) fn comb_processes_from_scope(
         )?;
         for process in &mut processes[start..] {
             process.creation_order = creation_order;
+            process.site = procedural::source_span(
+                syntax_tree.declarations().body_item(item.id).tokens,
+                syntax_tree,
+            );
             for assignment in &mut process.assignments {
                 item.assignment(assignment);
             }
@@ -317,10 +321,10 @@ fn comb_process_from_procedure(
     Ok(Some(CombProcess {
         sensitivity_body,
         ..CombProcess::procedural(
-            if procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysComb {
-                CombProcessKind::AlwaysComb
-            } else {
-                CombProcessKind::AlwaysStar
+            match procedure.kind {
+                celox_sv_syntax::ProcedureKind::AlwaysComb => CombProcessKind::AlwaysComb,
+                celox_sv_syntax::ProcedureKind::AlwaysLatch => CombProcessKind::AlwaysLatch,
+                _ => CombProcessKind::AlwaysStar,
             },
             condition,
             body,

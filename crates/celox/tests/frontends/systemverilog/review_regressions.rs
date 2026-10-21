@@ -5426,9 +5426,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "always_latch process",
+            "nonblocking assignment inside always_latch",
             r#"
-            module Top(input logic a, output logic y); always_latch y = a; endmodule
+            module Top(input logic a, output logic y); always_latch y <= a; endmodule
         "#,
         ),
         (
