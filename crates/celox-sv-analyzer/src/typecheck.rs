@@ -615,9 +615,21 @@ fn context_binary_operands(
     let (left_type, right_type) = integral_binary_operands(left, right)?;
     let width = left_type.width.max(right_type.width);
     let signed = left_type.signed && right_type.signed;
-    let left = eval_integral_in_context(left, width, signed)?;
-    let right = eval_integral_in_context(right, width, signed)?;
-    Some((left, right, signed))
+    // These values were already evaluated in their own expression contexts.
+    // IEEE 1800-2023 11.8.2 requires another descent only when the enclosing
+    // context changes their size or signedness.
+    let in_context = |expr, literal: IntegralLiteral| {
+        if literal.width == width && literal.signed == signed {
+            Some(literal)
+        } else {
+            eval_integral_in_context(expr, width, signed)
+        }
+    };
+    Some((
+        in_context(left, left_type)?,
+        in_context(right, right_type)?,
+        signed,
+    ))
 }
 
 fn eval_literal_binary(
@@ -987,8 +999,11 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                 return Some(literal);
             }
             let operand = self_determined_integral_literal(expr)?;
-            let operand =
-                eval_integral_in_context(expr, (*width).max(operand.width), operand.signed)?;
+            let operand = if *width <= operand.width {
+                operand
+            } else {
+                eval_integral_in_context(expr, *width, operand.signed)?
+            };
             let extension = signed_extension(&operand, operand.signed);
             Some(resize_integral_literal(operand, *width, *signed, extension))
         }
@@ -1801,6 +1816,60 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 #[cfg(test)]
 mod literal_tests {
     use super::*;
+
+    #[test]
+    fn evaluates_deep_constant_casts_without_repeated_context_walks() {
+        for (value, expected) in [("32'h12", "32'h12"), ("32'h1z", "32'h1x")] {
+            let mut expr = ConstExpr::Literal(value.into());
+            // Each layer used to evaluate every inner layer twice. Keep this
+            // deep enough to catch that growth without a wall-clock assertion.
+            for _ in 0..48 {
+                expr = ConstExpr::Resize {
+                    expr: Box::new(ConstExpr::Binary {
+                        left: Box::new(expr),
+                        op: BinaryOp::BitXor,
+                        right: Box::new(ConstExpr::Literal("32'hf".into())),
+                    }),
+                    width: 32,
+                    signed: false,
+                };
+            }
+            assert_eq!(
+                integral_literal_from_const_expr(&expr),
+                parse_integral_literal(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn changed_constant_contexts_recompute_width_and_signedness() {
+        let binary = |left, op, right| ConstExpr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let carry = binary(
+            ConstExpr::Literal("32'hffffffff".into()),
+            BinaryOp::Add,
+            ConstExpr::Literal("32'd1".into()),
+        );
+        let widened = binary(carry, BinaryOp::Add, ConstExpr::Literal("64'd0".into()));
+        assert_eq!(
+            integral_literal_from_const_expr(&widened),
+            parse_integral_literal("64'h100000000")
+        );
+
+        let quotient = binary(
+            ConstExpr::Literal("32'shffffffff".into()),
+            BinaryOp::Div,
+            ConstExpr::Literal("32'sd2".into()),
+        );
+        let unsigned = binary(quotient, BinaryOp::Add, ConstExpr::Literal("32'd0".into()));
+        assert_eq!(
+            integral_literal_from_const_expr(&unsigned),
+            parse_integral_literal("32'h7fffffff")
+        );
+    }
 
     #[test]
     fn evaluates_nested_logical_parameter_chains() {
