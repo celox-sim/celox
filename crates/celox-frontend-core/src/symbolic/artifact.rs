@@ -99,6 +99,9 @@ pub struct SimModule {
     /// Extern functions the module calls; its `ExternCall`s index this list.
     pub extern_functions: Vec<ExternFunction>,
     pub initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
+    pub folded_initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
+    /// Static declaration state, before initial blocks or combinational activity.
+    pub declaration_initial_memory_values: Vec<InitialStateValue<SourceVarId>>,
     pub comb_boundaries: HashMap<SourceVarId, BTreeSet<usize>>,
     pub arena: SLTNodeArena<SourceVarId>,
     pub reset_clock_map: HashMap<SourceVarId, SourceVarId>,

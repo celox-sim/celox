@@ -15,7 +15,7 @@ use veryl_parser::resource_table::StrId;
 
 use crate::{
     BuildConfig, HashMap, ParserError, SourceVarId, VariableKind,
-    lowering::{bitaccess, types::resolve_total_width},
+    lowering::{bitaccess, latch::lower_retained_comb_process, types::resolve_total_width},
 };
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
@@ -27,6 +27,7 @@ pub struct VerylSymbolicRtl<'a> {
     pub symbolic: crate::symbolic::artifact::SymbolicRtl,
     pub module_ir: HashMap<celox_design::ModuleId, &'a veryl_analyzer::ir::Module>,
     pub source_id_maps: HashMap<celox_design::ModuleId, HashMap<VarId, SourceVarId>>,
+    pub inferred_latch_diagnostics: Vec<crate::FrontendDiagnostic>,
 }
 
 /// Export source-neutral port signatures before either language's hierarchy is
@@ -109,6 +110,7 @@ pub fn external_signatures_named(
             glue_blocks: HashMap::default(),
             indexed_instance_names: crate::HashSet::default(),
             comb_blocks: Vec::new(),
+            comb_process_ranges: Vec::new(),
             comb_observers: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
@@ -122,7 +124,7 @@ pub fn external_signatures_named(
         let mut port_ids = module.ports.values().copied().collect::<Vec<_>>();
         port_ids.sort();
         let port_order = port_ids.iter().map(|id| ids[id]).collect();
-        let (mut sim_module, _) =
+        let (mut sim_module, _, _) =
             project_module_with_ids(&empty, module, config, ids, &HashMap::default())?;
         sim_module.name = name(module);
         let unresolved_instances = sv_descendants(module, &mut memo)
@@ -143,6 +145,17 @@ pub fn external_signatures_named(
     Ok(external)
 }
 
+/// One authored combinational process, before source identity projection.
+#[derive(Clone)]
+pub struct CombProcess {
+    pub paths: std::ops::Range<usize>,
+    pub reads: crate::HashSet<VarAtomBase<VarId>>,
+    pub token: veryl_parser::token_range::TokenRange,
+    /// Exact bounded specialization proved that every output is independent
+    /// of values stored by the process's preceding activation.
+    pub proven_combinational: bool,
+}
+
 #[derive(Clone)]
 pub struct VerylSimModule {
     pub name: StrId,
@@ -159,6 +172,8 @@ pub struct VerylSimModule {
     /// Source instance declarations that explicitly have an array dimension.
     pub indexed_instance_names: crate::HashSet<StrId>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
+    /// Output projections belonging to each authored combinational process.
+    pub comb_process_ranges: Vec<CombProcess>,
     pub comb_observers: Vec<CombObserver<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
@@ -405,6 +420,7 @@ pub(crate) fn project_module_with_ids(
     (
         crate::symbolic::artifact::SimModule,
         HashMap<VarId, SourceVarId>,
+        Vec<crate::FrontendDiagnostic>,
     ),
     ParserError,
 > {
@@ -412,7 +428,7 @@ pub(crate) fn project_module_with_ids(
     source_variables.sort_unstable_by_key(|(id, _)| **id);
 
     let mut source_texts = HashMap::default();
-    let variables = source_variables
+    let mut variables = source_variables
         .into_iter()
         .map(|(id, variable)| {
             let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(ir, *id)?;
@@ -466,11 +482,33 @@ pub(crate) fn project_module_with_ids(
     let mut arena = SLTNodeArena::new();
     let mut cache = HashMap::default();
     let map_id = |id: &VarId| ids[id];
-    let comb_blocks = module
+    let mut comb_blocks: Vec<_> = module
         .comb_blocks
         .iter()
         .map(|path| path.map_addr(&module.arena, &mut arena, &mut cache, &map_id))
         .collect::<Result<_, _>>()?;
+    let mut inferred_latch_diagnostics = Vec::new();
+    if config.allow_inferred_latches {
+        for process in &module.comb_process_ranges {
+            if !process.proven_combinational
+                && lower_retained_comb_process(
+                    &mut comb_blocks[process.paths.clone()],
+                    &arena,
+                    &mut variables,
+                    process
+                        .reads
+                        .iter()
+                        .map(|atom| {
+                            VarAtomBase::new(ids[&atom.id], atom.access.lsb, atom.access.msb)
+                        })
+                        .collect(),
+                )
+            {
+                inferred_latch_diagnostics
+                    .push(crate::FrontendDiagnostic::inferred_latch(&process.token));
+            }
+        }
+    }
     let comb_observers = module
         .comb_observers
         .iter()
@@ -584,6 +622,21 @@ pub(crate) fn project_module_with_ids(
                 .collect(),
             runtime_event_sites: module.runtime_event_sites.clone(),
             extern_functions: Vec::new(),
+            folded_initial_memory_values: Vec::new(),
+            declaration_initial_memory_values: module
+                .initial_memory_values
+                .iter()
+                .filter(|value| {
+                    matches!(
+                        module.variables[&value.address].kind,
+                        veryl_analyzer::ir::VarKind::Const | veryl_analyzer::ir::VarKind::Param
+                    )
+                })
+                .map(|value| InitialStateValue {
+                    address: ids[&value.address],
+                    data: value.data.clone(),
+                })
+                .collect(),
             initial_memory_values: module
                 .initial_memory_values
                 .iter()
@@ -612,6 +665,7 @@ pub(crate) fn project_module_with_ids(
             time_slot: None,
         },
         ids,
+        inferred_latch_diagnostics,
     ))
 }
 

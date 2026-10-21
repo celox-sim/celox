@@ -16,87 +16,66 @@ Execution Unit 0:
     r1: bit<64>
     r2: bit<64>
     r3: bit<1>
-    r4: bit<1>
     r5: bit<1>
     r6: logic<1>
     r7: bit<1>
-    r8: bit<1>
     r9: bit<1>
-    r10: logic<1>
     r11: bit<1>
     r12: bit<1>
     r13: bit<1>
-    r14: logic<1>
     r15: bit<1>
     r16: bit<1>
     r17: bit<1>
-    r18: logic<1>
     r19: bit<1>
     r20: bit<1>
     r21: bit<1>
-    r22: logic<1>
     r23: bit<1>
     r24: bit<1>
     r25: bit<1>
-    r26: logic<1>
     r27: bit<1>
     r28: bit<1>
     r29: bit<1>
-    r30: logic<1>
     r31: bit<1>
     r32: bit<1>
     r33: bit<1>
-    r34: logic<1>
     r35: bit<1>
     r36: bit<1>
     r37: bit<1>
-    r38: logic<1>
     r39: bit<1>
     r40: bit<1>
     r41: bit<1>
-    r42: logic<1>
     r43: bit<1>
     r44: bit<1>
     r45: bit<1>
-    r46: logic<1>
     r47: bit<1>
     r48: bit<1>
     r49: bit<1>
-    r50: logic<1>
     r51: bit<1>
     r52: bit<1>
     r53: bit<1>
-    r54: logic<1>
     r55: bit<1>
     r56: bit<1>
     r57: bit<1>
-    r58: logic<1>
     r59: bit<1>
     r60: bit<1>
     r61: bit<1>
-    r62: logic<1>
     r63: bit<1>
     r64: bit<1>
     r65: bit<1>
-    r66: logic<1>
     r67: bit<1>
     r68: bit<1>
     r69: bit<1>
-    r70: logic<1>
     r71: bit<1>
     r72: bit<1>
     r73: bit<1>
-    r74: logic<1>
     r75: logic<1>
     r76: logic<1>
     r77: bit<1>
     r78: bit<1>
     r79: bit<1>
-    r80: logic<1>
     r81: bit<1>
     r82: bit<1>
     r83: bit<1>
-    r84: logic<1>
     r85: bit<1>
     r86: bit<1>
     r87: bit<64>

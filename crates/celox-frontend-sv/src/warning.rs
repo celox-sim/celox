@@ -35,6 +35,8 @@ impl Eq for FrontendWarning {}
 /// What a [`FrontendWarning`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
 pub enum FrontendWarningKind {
+    #[error("latch inference inside always_comb: assignments retain their previous values")]
+    InferredLatch,
     /// IEEE 1800-2023 3.14.2.3 requires consistent explicit timing declarations.
     #[error("mixed explicit and default time units or precisions across design elements")]
     MixedTimescale,
@@ -149,6 +151,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::MixedTimescale => "mixed_timescale",
             FrontendWarningKind::MultipleAlwaysFfDrivers { .. } => "multiple_always_ff_drivers",
             FrontendWarningKind::UnpackedPortDefault { .. } => "unpacked_port_default",
+            FrontendWarningKind::InferredLatch => "inferred_latch",
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
         }))
@@ -160,6 +163,9 @@ impl miette::Diagnostic for FrontendWarning {
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self.kind {
+            FrontendWarningKind::InferredLatch => {
+                "assign every output on every path, or configure diagnostics.inferred_latch as warn or allow"
+            }
             FrontendWarningKind::MixedTimescale => {
                 "declare timeunit/timeprecision consistently; undeclared scopes use 1ns/1ps when this check is relaxed"
             }

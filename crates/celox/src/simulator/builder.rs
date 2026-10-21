@@ -310,6 +310,7 @@ fn analyze(
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    _allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> (
     Result<OptimizedSir, SimulatorError>,
@@ -519,6 +520,7 @@ fn analyze(
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.allow_inferred_latches = true;
     build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
@@ -685,6 +687,11 @@ fn analyze(
     };
     #[cfg(not(feature = "systemverilog"))]
     let elaboration_warnings = Vec::new();
+    errors.retain(|error| {
+        !frontend_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.covers_uncovered_branch(error))
+    });
     (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
@@ -758,7 +765,94 @@ pub fn compile_to_sir_with_file_dependencies(
     optimize_options: &crate::optimizer::OptimizeOptions,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_to_sir_with_layout_mode(
+    compile_to_sir_with_latch_policy(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        false,
+        file_dependencies,
+    )
+}
+
+/// Compile Veryl with an explicit inferred-latch policy and file lookup collector.
+///
+/// The default compilation APIs reject inferred latches. Pass `true` here to
+/// allow them, or use `SimulatorBuilder::allow_inferred_latches` on host targets.
+pub fn compile_to_sir_with_latch_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    allow_inferred_latches: bool,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_to_sir_with_diagnostic_policy(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &crate::DiagnosticPolicy::default().with_inferred_latches(allow_inferred_latches),
+        file_dependencies,
+    )
+}
+
+/// Compile Veryl with the same per-code policy used by host builders and celox.toml.
+pub fn compile_to_sir_with_diagnostic_policy(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostic_policy: &crate::DiagnosticPolicy,
+    file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let result = compile_to_sir_with_layout_mode(
         sources,
         top,
         ignored_loops,
@@ -772,14 +866,19 @@ pub fn compile_to_sir_with_file_dependencies(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
-        &crate::DiagnosticPolicy::default(),
+        diagnostic_policy,
         None,
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        true,
         file_dependencies,
-    )
+    );
+    let (program, mut warnings) =
+        result.map_err(|error| error.apply_diagnostic_policy(diagnostic_policy))?;
+    diagnostic_policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 /// Compile an elaborated external-frontend artifact to optimized SIR.
@@ -895,6 +994,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     // The testbench drives time itself and never resumes process kernels.
@@ -929,6 +1029,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -990,6 +1091,7 @@ fn compile_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
@@ -1014,6 +1116,7 @@ fn compile_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -1071,7 +1174,7 @@ pub fn compile_sv_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_sv_to_sir_with_layout_mode(
+    let result = compile_sv_to_sir_with_layout_mode(
         sources,
         top,
         ignored_loops,
@@ -1088,9 +1191,14 @@ pub fn compile_sv_to_sir(
         &crate::DiagnosticPolicy::default(),
         None,
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        false,
         &[],
         &[],
-    )
+    );
+    let policy = crate::DiagnosticPolicy::default();
+    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
+    policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1119,6 +1227,7 @@ fn compile_sv_to_sir_with_layout_mode(
     diagnostic_policy: &crate::DiagnosticPolicy,
     sv_timescale: Option<crate::SvTimescale>,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    _allow_inferred_latches: bool,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
@@ -1140,6 +1249,7 @@ fn compile_sv_to_sir_with_layout_mode(
     }
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
+    build_config.allow_inferred_latches = true;
     if let Some(clock_type) = clock_type {
         build_config.clock_type = clock_type;
     }
@@ -1253,7 +1363,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
     optimize_options: &crate::optimizer::OptimizeOptions,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
-    compile_mixed_to_sir_with_layout_mode(
+    let result = compile_mixed_to_sir_with_layout_mode(
         sources,
         sv_sources,
         top,
@@ -1274,8 +1384,13 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
         false,
+        false,
         file_dependencies,
-    )
+    );
+    let policy = crate::DiagnosticPolicy::default();
+    let (program, mut warnings) = result.map_err(|error| error.apply_diagnostic_policy(&policy))?;
+    policy.apply(&mut warnings)?;
+    Ok((program, warnings))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1308,6 +1423,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics, elaboration_warnings) = analyze(
@@ -1332,6 +1448,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
         allow_always_ff_function_effects,
+        allow_inferred_latches,
         file_dependencies,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -1396,6 +1513,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
     allow_always_ff_function_effects: bool,
+    allow_inferred_latches: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
@@ -1435,6 +1553,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         )
     }
@@ -1460,6 +1579,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         ),
         (true, false) => compile_sv_to_sir_with_layout_mode(
@@ -1479,6 +1599,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             diagnostic_policy,
             sv_timescale,
             layout_mode,
+            allow_inferred_latches,
             force_signals,
             sv_param_literals,
         ),
@@ -1503,6 +1624,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             layout_mode,
             recover_comb_loops,
             allow_always_ff_function_effects,
+            allow_inferred_latches,
             file_dependencies,
         ),
     }
@@ -1569,6 +1691,8 @@ mod host {
         /// Allow Celox to lower function side effects that Veryl rejects in
         /// `always_ff` for SystemVerilog compatibility.
         pub allow_always_ff_function_effects: bool,
+        /// Permit inferred latches in `always_comb`; disabled by default.
+        pub allow_inferred_latches: bool,
         /// Where the C functions of DPI-C imports are found.
         pub dpi: crate::DpiSymbols,
         /// Ordered command-line arguments for SystemVerilog plusargs queries.
@@ -1820,6 +1944,7 @@ mod host {
                 dead_store_policy: DeadStorePolicy::Off,
                 tier_promotion: TierPromotion::Always,
                 allow_always_ff_function_effects: false,
+                allow_inferred_latches: false,
                 dpi: crate::DpiSymbols::default(),
                 plusargs: Vec::new(),
             }
@@ -1982,6 +2107,17 @@ mod host {
 
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
+            self
+        }
+
+        /// Allow incomplete assignments and retained values in `always_comb`.
+        ///
+        /// Disabled by default. When enabled, inferred latches retain their
+        /// value while closed and follow their inputs while open. Explicit
+        /// SystemVerilog `always_latch` and ordinary `always @*` processes do
+        /// not require this option.
+        pub fn allow_inferred_latches(mut self, enable: bool) -> Self {
+            self.options.allow_inferred_latches = enable;
             self
         }
 
@@ -2571,6 +2707,11 @@ mod host {
             ),
             SimulatorError,
         > {
+            self.options.diagnostic_policy = self
+                .options
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(self.options.allow_inferred_latches);
             // VCD descriptors currently describe packed whole objects. Apply
             // the same layout rule to every factory, including native images.
             let layout_mode = if self.vcd_path.is_some() {
@@ -2622,6 +2763,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.allow_inferred_latches,
                         &self.file_dependencies,
                     )
                 }
@@ -2647,6 +2789,7 @@ mod host {
                     layout_mode,
                     !self.options.native_force_support,
                     self.options.allow_always_ff_function_effects,
+                    self.options.allow_inferred_latches,
                     &self.file_dependencies,
                     &self.options.signal_access.force_signals,
                     &self.sv_param_literals,
@@ -3226,6 +3369,11 @@ mod host {
         /// Compiles the Veryl source and constructs the core logic simulator,
         /// while capturing compilation trace data as configured by TraceOptions.
         pub fn build_with_trace(mut self) -> crate::debug::CompilationTraceResult {
+            self.options.diagnostic_policy = self
+                .options
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(self.options.allow_inferred_latches);
             self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
@@ -3284,6 +3432,7 @@ mod host {
                             layout_mode,
                             !self.options.native_force_support,
                             self.options.allow_always_ff_function_effects,
+                            self.options.allow_inferred_latches,
                             &self.file_dependencies,
                         )
                     }
@@ -3309,6 +3458,7 @@ mod host {
                         layout_mode,
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
+                        self.options.allow_inferred_latches,
                         &self.file_dependencies,
                         &self.options.signal_access.force_signals,
                         &self.sv_param_literals,
@@ -3603,10 +3753,26 @@ mod host {
                 sim.vcd_writer = Some(vcd_writer);
             }
             sim.apply_initial_values();
-            sim.modify(|_| {}).map_err(|error| {
-                SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
-            })?;
-            Ok(crate::Simulation::new(sim))
+            // Runtime static declarations precede every comb activation.
+            if !sim
+                .program
+                .runtime_schema
+                .processes
+                .iter()
+                .any(|slots| slots.is_initializer)
+            {
+                sim.modify(|_| {}).map_err(|error| {
+                    SimulatorError::from(error).with_warnings(std::mem::take(&mut sim.warnings))
+                })?;
+            }
+            let warnings = std::mem::take(&mut sim.warnings);
+            match crate::Simulation::try_new(sim) {
+                Ok(mut simulation) => {
+                    simulation.simulator.warnings = warnings;
+                    Ok(simulation)
+                }
+                Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+            }
         }
     }
 
@@ -3686,6 +3852,77 @@ mod host {
         assert!(text.contains("Top.u[1]"), "{text}");
         assert!(text.contains("\\state.value"), "{text}");
         assert!(text.contains("\\literal[0]"), "{text}");
+    }
+
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn runtime_declaration_startup_survives_native_image_roundtrip() {
+        let source = r#"module Top;
+            int a = $urandom | 1;
+            logic [31:0] q = 32'h55;
+            always @* q = a;
+            initial a = 0;
+            initial begin
+                #1;
+                if (a !== 0 || q !== 0) $fatal(1, "ordinary initial overwrite was lost");
+                a = 5;
+                #1;
+                if (q !== 5) $fatal(1, "later wildcard event was lost");
+                $finish;
+            end
+        endmodule"#;
+        for four_state in [false, true] {
+            let (program, warnings, options, _, _) = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("native-declaration.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed)
+            .unwrap();
+            let image =
+                crate::backend::native::NativeBackend::compile_image(&program, &options).unwrap();
+            let image = crate::NativeProgramImage::from_container_bytes(
+                &image.to_container_bytes().unwrap(),
+            )
+            .unwrap();
+            let runtime = image.runtime_program();
+            // SAFETY: this image was compiled from the trusted source above.
+            let backend =
+                unsafe { crate::backend::native::NativeBackend::from_image(image) }.unwrap();
+            let mut simulator = crate::Simulator::with_backend_and_program_for_simulation(
+                backend, runtime, warnings,
+            );
+            simulator.apply_initial_values();
+            // The constructor completes declarations, primes sensitivity, and
+            // replays folded ordinary writes before exposing the simulation.
+            let mut simulation = crate::Simulation::try_new(simulator).unwrap();
+            let a = simulation.signal("a");
+            let q = simulation.signal("q");
+            // Read storage directly: public get() would settle the pending
+            // ordinary write and wake the wildcard before these assertions.
+            assert_eq!(
+                crate::SimBackend::get(&simulation.simulator.backend, a),
+                0u8.into()
+            );
+            assert_eq!(
+                crate::SimBackend::get(&simulation.simulator.backend, q),
+                0x55u8.into()
+            );
+            for _ in 0..16 {
+                if simulation.is_finished() || simulation.step().unwrap().is_none() {
+                    break;
+                }
+            }
+            assert!(simulation.is_finished());
+            assert_eq!(simulation.get(q), 5u8.into());
+        }
     }
 
     /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.

@@ -352,6 +352,51 @@ seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
 backends; the source and observed failures are retained in
 [`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
 
+Verilator 5.052 executes `always @*` once at time zero in
+`latch::classic_star_declaration_startup`, before any sensitivity input changes.
+Static declarations initialize before procedures start (IEEE 1800-2023 6.8),
+while `always @*` waits for an input change (9.2.2.2.2).
+The [adapter-free reproduction](verification/repros/wildcard_declaration_startup.sv)
+fails the same assertion in Verilator and passes in Icarus 13.0.
+The [retained observation](verification/repros/wildcard_declaration_startup_verilator.json)
+records this failure; `--include-ignored` retains its assertions.
+The same startup disagreement affects the complete body in
+`latch::star_complete_declaration_startup`; its [exact source](verification/repros/star_complete_declaration_startup.sv)
+and [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
+show Verilator failing the startup assertion and Icarus completing it.
+
+Verilator 5.052 repeats activation of the self-reading latch in
+`latch::guarded_activation`, producing 3 where one `seed`/`en` change should
+produce 1. The [adapter-free reproduction](verification/repros/latch_activation.sv)
+produces 2 in Verilator and 1 in Icarus 13.0; Icarus also passes the unchanged
+shared assertions. IEEE 1800-2023 9.2.2.2.1 excludes written expressions from
+implicit sensitivity. The [retained observation](verification/repros/latch_activation_verilator.json)
+records both executions. This exact Verilator case is excluded, with its
+original assertions available through `--include-ignored`.
+
+The two pulse regressions `latch::same_activation_change_return` and
+`latch::hierarchy_same_activation_change_return` also fail to settle in
+Verilator 5.052, before reaching their timed assertions. Their unchanged
+[standalone sources](verification/repros/latch_change_return.sv) and
+[hierarchical variant](verification/repros/latch_hierarchy_change_return.sv)
+complete in Icarus 13.0. An `always_latch` excludes its written expressions
+from sensitivity (IEEE 1800-2023 9.2.2.3, 9.2.2.2.1); an `@*` procedure does
+not wait on events while executing its body (9.2.2.1, 9.4.2.2). Their own
+blocking writes therefore cannot cause endless reactivation. The
+[focused retained failures](verification/repros/latch_change_return_verilator.json)
+record both adapter and standalone nonconvergence. Only these two additional
+Verilator cases are excluded; their original assertions remain available with
+`--include-ignored`.
+
+Verilator 5.052 also wakes the task-calling `always_comb`/`always_latch`
+procedures in `latch::task_call_sensitivity` when only task-body globals change.
+IEEE 1800-2023 9.2.2.2.1 adds task argument expressions, but excludes task
+contents, from implicit sensitivity; 9.2.2.3 applies the same rule to
+`always_latch`. Icarus 13.0 passes the [unchanged shared source](verification/repros/task_call_sensitivity.sv),
+including its positive check that changing the argument does wake the procedures.
+The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
+records both executions. Only this Verilator case is excluded for this reason.
+
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
 
 The interface-array connection cases cover packed distribution, unpacked

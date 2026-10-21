@@ -189,7 +189,7 @@ fn static_comb_locals_written_on_some_paths_are_latches() {
            always_comb begin int t; if (a) t = 5; y = a ? t : 0; end
          endmodule",
     );
-    assert!(detail.contains("latch"), "{detail}");
+    assert!(detail.contains("InferredLatch"), "{detail}");
     assert_eq!(
         output(
             "module Top(input logic a, output logic [7:0] y);

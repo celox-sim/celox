@@ -339,6 +339,7 @@ mod tests {
 
     fn path(expr: crate::NodeId) -> LogicPath<u32> {
         LogicPath {
+            transparent_copy: false,
             target: LogicPathTarget::Var(VarAtomBase::new(2, 0, 7)),
             sources: HashSet::default(),
             previous_sources: HashSet::default(),

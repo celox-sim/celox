@@ -38,8 +38,11 @@ fn native_procedure_kind_drives_actual_comb_collection_and_metadata() {
     );
     let mut tree = parsed("always_comb y=a;");
     tree.declarations.procedures[0].kind = ProcedureKind::AlwaysLatch;
-    let error = Source::from_syntax(&tree).unwrap_err();
-    assert!(error.to_string().contains("always_latch process"));
+    let source = Source::from_syntax(&tree).unwrap();
+    assert_eq!(
+        source.modules()[0].comb_processes()[0].kind(),
+        CombProcessKind::AlwaysLatch
+    );
 }
 #[test]
 fn native_procedure_body_ids_seed_initial_comb_and_repeating_processes() {
@@ -202,7 +205,10 @@ fn native_process_restrictions_apply_only_to_active_generate_items() {
 fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
     for (process, expected) in [
         ("final begin end", "final construct"),
-        ("always_latch begin end", "always_latch process"),
+        (
+            "always_latch begin int y;y<=1;end",
+            "nonblocking assignment inside always_latch",
+        ),
         (
             "always_comb begin int y;y<=1;end",
             "nonblocking assignment inside always_comb",
@@ -224,7 +230,10 @@ fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
 fn unconverted_checker_processes_retain_existing_restriction_diagnostics() {
     for (process, expected) in [
         ("final begin end", "final construct"),
-        ("always_latch begin end", "always_latch process"),
+        (
+            "always_latch begin int y;y<=1;end",
+            "nonblocking assignment inside always_latch",
+        ),
     ] {
         let tree = parse_source(
             &format!("module M;checker C;{process} endchecker endmodule"),

@@ -2,10 +2,12 @@ mod concat;
 mod cost;
 mod count_idioms;
 mod loops;
+mod mask_constants;
 mod mux;
 mod or_scan;
 mod slices;
 mod types;
+mod worklist;
 
 use super::*;
 use crate::SLTNodeArena;

@@ -226,8 +226,36 @@ impl<'a> ProcModule<'a> {
         false
     }
 
+    /// Task bodies do not contribute to an implicit always_comb/latch
+    /// sensitivity list. Preserve their procedural activation instead of
+    /// turning their body reads into symbolic combinational dependencies.
+    pub fn calls_task(&self, body: &[sv::ir::Stmt]) -> bool {
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        let mut visited = HashSet::default();
+        while let Some((callee, args)) = calls.pop() {
+            let sv::ir::Callee::Subroutine(name) = callee else {
+                continue;
+            };
+            if let Some(subroutine) = self.subroutine(&name) {
+                if subroutine.is_task {
+                    return true;
+                }
+                default_calls(subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Syntactic implicit sensitivity, including branches that constant folding
-    /// will remove. `always @*` sees arguments; `always_comb` also sees bodies.
+    /// will remove. `always @*` sees arguments; `always_comb` also sees function bodies.
     pub fn implicit_reads(
         &self,
         body: &[sv::ir::Stmt],
@@ -253,7 +281,10 @@ impl<'a> ProcModule<'a> {
                                 exprs.extend(param.default.clone());
                             }
                         }
-                        if include_functions && visited.insert(name.clone()) {
+                        // IEEE 1800-2023 9.2.2.2.1 includes function bodies,
+                        // but only the argument expressions of task calls.
+                        if include_functions && !subroutine.is_task && visited.insert(name.clone())
+                        {
                             statements(m, &subroutine.body, true, visited, reads);
                             statements(m, &subroutine.sensitivity_body, true, visited, reads);
                         }
@@ -278,12 +309,16 @@ impl<'a> ProcModule<'a> {
                     .and_then(|(msb, lsb)| {
                         packed_expr_select_offsets(base, msb, lsb, m.variables, m.name_to_id)
                     });
-                    if let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
+                    // @* adds variable identifiers (9.4.2.2), whereas
+                    // always_comb/latch uses longest static prefixes
+                    // (9.2.2.2.1), including constant selected ranges.
+                    if include_functions
+                        && let (Expr::Ident(name), Some((msb, lsb))) = (&**base, selected)
                         && let Some(id) = m.id(name).filter(|id| !m.is_hidden(*id))
                     {
                         reads.insert(VarAtomBase::new(id, lsb.min(msb), lsb.max(msb)));
                     } else {
-                        // A dynamic select's longest static prefix is its base.
+                        // Dynamic selects and wildcard controls include the base.
                         exprs.push((**base).clone());
                     }
                     exprs.extend(expr_from_const_expr(msb));

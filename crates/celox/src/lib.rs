@@ -217,7 +217,8 @@ pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
 pub use simulator::{
-    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies,
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
+    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
 };
 #[cfg(feature = "systemverilog")]
 pub use simulator::{

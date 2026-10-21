@@ -7,6 +7,7 @@
 
 pub mod artifact;
 pub mod assembly;
+mod comb_startup;
 pub mod flattening;
 pub mod parallel;
 pub mod pow;

@@ -3,6 +3,8 @@ mod arena;
 mod effect;
 mod expr;
 mod recover_unrolled;
+pub(crate) use recover_unrolled::proves_combinational;
+pub(crate) mod sensitivity;
 mod state;
 
 pub(crate) mod node {
@@ -319,6 +321,7 @@ pub fn parse_comb_with_loop_recovery(
                 };
 
                 paths.push(LogicPath::<VarId> {
+                    transparent_copy: false,
                     target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
                     previous_sources: sources

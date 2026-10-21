@@ -23,6 +23,7 @@ impl<B: SimBackend> SimulationState<B> {
             last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
+            declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
         }
@@ -59,6 +60,7 @@ impl<B: SimBackend> SimulationState<B> {
             .clone_from(&snapshot.last_clock_unknown);
         self.process_wakeups.clone_from(&snapshot.process_wakeups);
         self.process_state.clone_from(&snapshot.process_state);
+        self.declarations_pending = snapshot.declarations_pending;
         self.host_pending = snapshot.host_pending;
         self.finished = snapshot.finished;
         self.stopped = false;
@@ -185,6 +187,15 @@ impl<B: SimBackend> SimulationState<B> {
             .map(|(process, time)| Reverse((time, process)))
             .collect();
         self.process_state = parts.process_state;
+        self.declarations_pending = self
+            .process_wakeups
+            .iter()
+            .any(|Reverse((_, index))| self.model.processes[*index].is_initializer)
+            || self
+                .process_state
+                .ready
+                .iter()
+                .any(|&index| self.model.processes[index].is_initializer);
         self.host_pending = parts.host_pending;
         self.finished = parts.finished;
         self.stopped = false;
@@ -201,6 +212,7 @@ pub struct SimulationSnapshot<B: SimBackend> {
     last_clock_unknown: BitSet,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
+    declarations_pending: bool,
     host_pending: bool,
     finished: bool,
 }
@@ -215,6 +227,7 @@ impl<B: SimBackend> Clone for SimulationSnapshot<B> {
             last_clock_unknown: self.last_clock_unknown.clone(),
             process_wakeups: self.process_wakeups.clone(),
             process_state: self.process_state.clone(),
+            declarations_pending: self.declarations_pending,
             host_pending: self.host_pending,
             finished: self.finished,
         }

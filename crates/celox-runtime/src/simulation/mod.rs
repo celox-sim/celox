@@ -98,6 +98,8 @@ pub struct SimulationState<B: SimBackend> {
     model: ResolvedSchedule<B>,
     process_wakeups: BinaryHeap<ProcessWakeup>,
     process_state: ProcessState,
+    declaration_processes: Vec<usize>,
+    declarations_pending: bool,
     /// The host changed state that the next step must settle at the
     /// current time, including before a suspended process resumes.
     host_pending: bool,
@@ -140,6 +142,13 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             ..ProcessState::default()
         };
+        let declaration_processes: Vec<_> = model
+            .processes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, process)| process.is_initializer.then_some(index))
+            .collect();
+        let declarations_pending = !declaration_processes.is_empty();
         let mut state = Self {
             scheduler: Scheduler::new(),
             last_clock_values: BitSet::with_capacity(backend.num_events()),
@@ -150,6 +159,8 @@ impl<B: SimBackend> SimulationState<B> {
                 .collect(),
             model,
             process_state,
+            declaration_processes,
+            declarations_pending,
             host_pending: false,
             finished: false,
             stopped: false,
@@ -272,7 +283,7 @@ impl<B: SimBackend> SimulationState<B> {
     /// Whether the simulation is suspended in the middle of a time slot, so
     /// that its scheduling state cannot be captured.
     pub fn is_suspended(&self) -> bool {
-        self.suspended.is_some()
+        self.suspended.is_some() || (self.stopped && self.declarations_pending)
     }
 
     /// Settle externally driven state against the previous edge baseline even

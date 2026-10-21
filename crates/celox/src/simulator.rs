@@ -18,7 +18,10 @@ mod state_file;
 pub use builder::NativeCompilation;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions, TierPromotion};
-pub use builder::{compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_file_dependencies};
+pub use builder::{
+    compile_frontend_to_sir, compile_to_sir, compile_to_sir_with_diagnostic_policy,
+    compile_to_sir_with_file_dependencies, compile_to_sir_with_latch_policy,
+};
 #[cfg(feature = "systemverilog")]
 pub use builder::{
     compile_mixed_to_sir, compile_mixed_to_sir_with_file_dependencies, compile_sv_to_sir,
@@ -32,6 +35,7 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 
 #[cfg(feature = "host-runtime")]
 mod host {
+    mod declaration;
     mod file_io;
     use super::*;
     use std::sync::Arc;
@@ -124,6 +128,9 @@ mod host {
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) sv_vcd: SvVcdControl,
         pub(crate) dirty: bool,
+        /// Static declaration kernels may stop before wildcard baselines are
+        /// armed. Host reads and event drains must not settle comb meanwhile.
+        pub(crate) declaration_phase: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
         pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
@@ -818,6 +825,7 @@ mod host {
                 vcd_writer: None,
                 sv_vcd: SvVcdControl::default(),
                 dirty: false,
+                declaration_phase: false,
                 warnings,
                 testbench_strings: Default::default(),
                 file_io: Default::default(),
@@ -1421,7 +1429,7 @@ mod host {
         }
 
         pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
-            if self.frozen {
+            if self.frozen || self.declaration_phase {
                 return Ok(());
             }
             let (result, events) = self.eval_comb_capturing_events();
@@ -1447,6 +1455,11 @@ mod host {
         fn eval_comb_capturing_events(
             &mut self,
         ) -> (Result<(), RuntimeErrorCode>, Vec<RawRuntimeEvent>) {
+            // Event-drain writes use this entry directly instead of the
+            // checked facade. Leave observers and runtime events untouched.
+            if self.declaration_phase {
+                return (Ok(()), Vec::new());
+            }
             if self.program.runtime_schema.runtime_event_sites.is_empty() {
                 return (self.backend.eval_comb(), Vec::new());
             }

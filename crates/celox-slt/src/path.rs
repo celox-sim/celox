@@ -9,6 +9,15 @@ use crate::{HashMap, HashSet, NodeId, SLTNodeArena, SLTNodeFactsError};
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LogicPathId(pub usize);
 
+/// Initial sensitivity snapshots for a process which waits before executing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CombStartup<A> {
+    pub initialized: A,
+    /// Logical source range and the hidden slot which retains its last value.
+    pub inputs: Vec<(VarAtomBase<A>, A)>,
+    pub counters: Vec<(A, A)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "A: Serialize + std::hash::Hash + Eq",
@@ -21,6 +30,9 @@ pub enum LogicPathTarget<A: Hash + Eq + Clone> {
     Process {
         process: A,
         after_initials: bool,
+        /// Source ranges and occurrence counters used by the activation guard.
+        sensitivity_counters: Vec<(VarAtomBase<A>, A)>,
+        startup: Option<CombStartup<A>>,
         target: VarAtomBase<A>,
         unit: Box<celox_sir::ExecutionUnit<A>>,
     },
@@ -65,6 +77,9 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     /// Semantic combinational process which produced this range definition.
     ///
     pub target: LogicPathTarget<A>,
+    /// A continuous wire or port connection, rather than a procedural copy.
+    #[serde(default)]
+    pub transparent_copy: bool,
     pub sources: HashSet<VarAtomBase<A>>,
     pub previous_sources: HashSet<VarAtomBase<A>>,
     /// Sources used to compute a dynamic address.  These remain ordinary
@@ -106,11 +121,44 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             LogicPathTarget::Process {
                 process,
                 after_initials,
+                sensitivity_counters,
+                startup,
                 target,
                 unit,
             } => LogicPathTarget::Process {
                 process: f(process),
                 after_initials: *after_initials,
+                sensitivity_counters: sensitivity_counters
+                    .iter()
+                    .map(|(source, counter)| {
+                        (
+                            VarAtomBase::new(f(&source.id), source.access.lsb, source.access.msb),
+                            f(counter),
+                        )
+                    })
+                    .collect(),
+                startup: startup.as_ref().map(|startup| CombStartup {
+                    initialized: f(&startup.initialized),
+                    counters: startup
+                        .counters
+                        .iter()
+                        .map(|(counter, saved)| (f(counter), f(saved)))
+                        .collect(),
+                    inputs: startup
+                        .inputs
+                        .iter()
+                        .map(|(source, saved)| {
+                            (
+                                VarAtomBase::new(
+                                    f(&source.id),
+                                    source.access.lsb,
+                                    source.access.msb,
+                                ),
+                                f(saved),
+                            )
+                        })
+                        .collect(),
+                }),
                 target: VarAtomBase::new(f(&target.id), target.access.lsb, target.access.msb),
                 unit: Box::new((**unit).clone().into_map_addr(&mut |addr| f(&addr))),
             },
@@ -177,6 +225,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             .map_addr(self.expr, arena, target_arena, cache, f)?;
 
         Ok(LogicPath {
+            transparent_copy: self.transparent_copy,
             target,
             sources: self
                 .sources
