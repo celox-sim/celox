@@ -60,14 +60,21 @@ The second line keeps stacks on the `Depends-On:` chain that the merge queue
 orders, rather than GitHub-native stacks, which block GitHub's classic merge
 endpoint.
 
+The rules below apply to Mergify-managed stacks. For ordinary pull requests,
+including Renovate PRs, push fixes to the existing PR branch with `git push`.
+Do not require converting an ordinary PR into a stack or asking for a workflow
+exception. A request to push authorizes the appropriate push command for the
+existing workflow. Prefer adding a fix commit to an ordinary PR over rewriting
+its published history.
+
 - One commit is one pull request. Its subject becomes the PR title and its body
   the PR description, so every commit subject must satisfy the PR title rules
   below, and its type must not exceed the release impact of the change.
 - Every commit must build and pass its checks on its own; put each fix in the
   commit that needs it rather than in a later commit.
 - Create a stack with `mergify stack new <type>/<name>` from an up-to-date
-  `master`. Publish with `mergify stack push`, never `git push`, and only when
-  pushing was requested.
+  `master`. Publish stacks with `mergify stack push` so their PRs and dependency
+  metadata stay synchronized, and only when pushing was requested.
 - Revise commits instead of adding fix-up commits: `git commit --amend` for the
   top commit; `mergify stack edit <sha>`, `fixup`, `squash`, `reword`, `move`,
   `reorder`, or `drop` for others. Never use `git rebase -i`. Before rewriting
