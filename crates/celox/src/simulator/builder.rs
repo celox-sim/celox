@@ -1081,6 +1081,7 @@ pub fn compile_sv_to_sir(
         &crate::DiagnosticPolicy::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         &[],
+        &[],
     )
 }
 
@@ -1110,7 +1111,24 @@ fn compile_sv_to_sir_with_layout_mode(
     diagnostic_policy: &crate::DiagnosticPolicy,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     force_signals: &[String],
+    sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let mut parameters = param_overrides
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                celox_frontend_sv::analyzer_ir::ConstExpr::Literal(value.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (name, literal) in sv_param_literals {
+        let value = celox_frontend_sv::analyzer_typecheck::parse_parameter_literal(literal)
+            .ok_or_else(|| {
+                crate::CodegenError::message(format!("invalid SV parameter literal `{literal}`"))
+            })?;
+        parameters.push((name.clone(), value));
+    }
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let mut build_config = BuildConfig::from(&metadata.build);
     if let Some(clock_type) = clock_type {
@@ -1124,7 +1142,7 @@ fn compile_sv_to_sir_with_layout_mode(
     let sir = parser::parse_sv(
         sources,
         top,
-        param_overrides,
+        &parameters,
         &build_config,
         ignored_loops,
         true_loops,
@@ -1366,7 +1384,14 @@ fn compile_hdl_to_sir_with_layout_mode(
     allow_always_ff_function_effects: bool,
     file_dependencies: &celox_frontend_veryl::FileDependencyCollector,
     force_signals: &[String],
+    sv_param_literals: &[(String, String)],
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    if !sv_param_literals.is_empty() && (!sources.is_empty() || sv_sources.is_empty()) {
+        return Err(crate::CodegenError::message(
+            "parameter literals require pure SystemVerilog sources",
+        )
+        .into());
+    }
     if !force_signals.is_empty() && !sources.is_empty() {
         return Err(crate::CodegenError::message(
             "force_signals currently require pure SystemVerilog sources",
@@ -1438,6 +1463,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             diagnostic_policy,
             layout_mode,
             force_signals,
+            sv_param_literals,
         ),
         (false, false) => compile_mixed_to_sir_with_layout_mode(
             sources,
@@ -1804,6 +1830,7 @@ mod host {
         clock_type: Option<ClockType>,
         reset_type: Option<ResetType>,
         param_overrides: Vec<(String, u64)>,
+        sv_param_literals: Vec<(String, String)>,
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
@@ -1885,7 +1912,19 @@ mod host {
 
         /// Override a top-level module parameter value.
         pub fn param(mut self, name: &str, value: u64) -> Self {
+            self.sv_param_literals.retain(|(key, _)| key != name);
             self.param_overrides.push((name.to_string(), value));
+            self
+        }
+
+        /// Override a pure SV top parameter with a literal, such as `-8`,
+        /// `8'hff`, `'1`, or `"XILINX"`. The literal's width and signedness
+        /// are preserved. Invalid literals are reported when building.
+        pub fn param_literal(mut self, name: &str, literal: &str) -> Self {
+            self.param_overrides.retain(|(key, _)| key != name);
+            self.sv_param_literals.retain(|(key, _)| key != name);
+            self.sv_param_literals
+                .push((name.to_string(), literal.to_string()));
             self
         }
 
@@ -2332,6 +2371,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2353,6 +2393,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2375,6 +2416,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2402,6 +2444,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -2428,6 +2471,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
@@ -2455,6 +2499,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
@@ -2509,7 +2554,13 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let compiled = if let Some(artifact) = &self.frontend_artifact {
+            let compiled = if !self.sv_param_literals.is_empty() && self.frontend_artifact.is_some()
+            {
+                Err(crate::CodegenError::message(
+                    "parameter literals require pure SystemVerilog sources",
+                )
+                .into())
+            } else if let Some(artifact) = &self.frontend_artifact {
                 if self.sources.is_empty() {
                     compile_frontend_to_sir_with_layout_mode(
                         artifact,
@@ -2568,6 +2619,7 @@ mod host {
                     self.options.allow_always_ff_function_effects,
                     &self.file_dependencies,
                     &self.options.signal_access.force_signals,
+                    &self.sv_param_literals,
                 )
             };
             let (program, mut warnings) = compiled
@@ -3162,23 +3214,52 @@ mod host {
                 layout_mode
             };
             let injected_manifests = self.injected_components.manifests();
-            let program_res = if let Some(artifact) = &self.frontend_artifact {
-                if self.sources.is_empty() {
-                    compile_frontend_to_sir_with_layout_mode(
-                        artifact,
-                        &self.ignored_loops,
-                        &self.true_loops,
-                        self.options.four_state,
-                        &self.options.trace,
-                        Some(&mut trace),
-                        &self.options.optimize_options,
-                        &self.options.diagnostics,
-                        layout_mode,
+            let program_res =
+                if !self.sv_param_literals.is_empty() && self.frontend_artifact.is_some() {
+                    Err(crate::CodegenError::message(
+                        "parameter literals require pure SystemVerilog sources",
                     )
+                    .into())
+                } else if let Some(artifact) = &self.frontend_artifact {
+                    if self.sources.is_empty() {
+                        compile_frontend_to_sir_with_layout_mode(
+                            artifact,
+                            &self.ignored_loops,
+                            &self.true_loops,
+                            self.options.four_state,
+                            &self.options.trace,
+                            Some(&mut trace),
+                            &self.options.optimize_options,
+                            &self.options.diagnostics,
+                            layout_mode,
+                        )
+                    } else {
+                        compile_frontend_testbench_to_sir_with_layout_mode(
+                            artifact,
+                            &self.sources,
+                            self.top,
+                            &self.ignored_loops,
+                            &self.true_loops,
+                            self.options.four_state,
+                            &self.options.trace,
+                            Some(&mut trace),
+                            self.metadata,
+                            self.clock_type,
+                            self.reset_type,
+                            &self.options.optimize_options,
+                            &self.options.diagnostics,
+                            &self.options.diagnostic_policy,
+                            &injected_manifests,
+                            layout_mode,
+                            !self.options.native_force_support,
+                            self.options.allow_always_ff_function_effects,
+                            &self.file_dependencies,
+                        )
+                    }
                 } else {
-                    compile_frontend_testbench_to_sir_with_layout_mode(
-                        artifact,
+                    compile_hdl_to_sir_with_layout_mode(
                         &self.sources,
+                        &self.sv_sources,
                         self.top,
                         &self.ignored_loops,
                         &self.true_loops,
@@ -3188,6 +3269,7 @@ mod host {
                         self.metadata,
                         self.clock_type,
                         self.reset_type,
+                        &self.param_overrides,
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         &self.options.diagnostic_policy,
@@ -3196,33 +3278,10 @@ mod host {
                         !self.options.native_force_support,
                         self.options.allow_always_ff_function_effects,
                         &self.file_dependencies,
+                        &self.options.signal_access.force_signals,
+                        &self.sv_param_literals,
                     )
-                }
-            } else {
-                compile_hdl_to_sir_with_layout_mode(
-                    &self.sources,
-                    &self.sv_sources,
-                    self.top,
-                    &self.ignored_loops,
-                    &self.true_loops,
-                    self.options.four_state,
-                    &self.options.trace,
-                    Some(&mut trace),
-                    self.metadata,
-                    self.clock_type,
-                    self.reset_type,
-                    &self.param_overrides,
-                    &self.options.optimize_options,
-                    &self.options.diagnostics,
-                    &self.options.diagnostic_policy,
-                    &injected_manifests,
-                    layout_mode,
-                    !self.options.native_force_support,
-                    self.options.allow_always_ff_function_effects,
-                    &self.file_dependencies,
-                    &self.options.signal_access.force_signals,
-                )
-            };
+                };
 
             let program_res = program_res
                 .map_err(|error| error.apply_diagnostic_policy(&self.options.diagnostic_policy));
@@ -3336,6 +3395,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -3357,6 +3417,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: None,
@@ -3380,6 +3441,7 @@ mod host {
                 clock_type: None,
                 reset_type: None,
                 param_overrides: Vec::new(),
+                sv_param_literals: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),

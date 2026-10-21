@@ -18,6 +18,12 @@ pub(super) struct DesignArgs {
     /// Override a compilation diagnostic: CODE=allow|warn|error (repeatable).
     #[arg(long = "diagnostic", value_name = "CODE=LEVEL")]
     diagnostics: Vec<String>,
+    /// Use two-state simulation, resolving X/Z to zero.
+    #[arg(long, conflicts_with = "four_state")]
+    two_state: bool,
+    /// Use four-state simulation, overriding the project (default: two-state).
+    #[arg(long)]
+    four_state: bool,
     /// Optimization level: O0, O1, O2 (default: project setting or O2 for run, O1 for vpi build).
     #[arg(short = 'O', long, value_parser = super::parse_opt_level)]
     opt_level: Option<celox::OptLevel>,
@@ -56,7 +62,7 @@ pub(super) struct DesignArgs {
     /// SystemVerilog macro, NAME or NAME=VALUE (repeatable; last value wins).
     #[arg(short = 'D', long = "define", value_name = "NAME[=VALUE]")]
     defines: Vec<String>,
-    /// Override a numeric top parameter (repeatable; last value wins).
+    /// Override a top parameter with an integer or SV literal (repeatable; last value wins).
     #[arg(
         short = 'G',
         long = "parameter",
@@ -95,6 +101,7 @@ struct Manifest {
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
+    four_state: Option<bool>,
     live_signals: Option<Vec<String>>,
     force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
@@ -127,6 +134,7 @@ struct Target {
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
+    four_state: Option<bool>,
     live_signals: Option<Vec<String>>,
     force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
@@ -140,8 +148,10 @@ pub(super) struct Design {
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
     pub parameters: BTreeMap<String, u64>,
+    sv_parameters: BTreeMap<String, String>,
     pub top: String,
     pub opt_level: Option<celox::OptLevel>,
+    pub four_state: Option<bool>,
     pub signal_access: celox::SignalAccessOptions,
     pub max_steps: Option<u64>,
 }
@@ -275,6 +285,7 @@ impl DesignArgs {
                 design.signal_access.force_signals =
                     config.force_signals.clone().unwrap_or_default();
                 design.max_steps = config.max_steps;
+                design.four_state = config.four_state;
                 if let Some(target) = selected {
                     design.extend_parameters(&target.parameters)?;
                     design.diagnostics.0.extend(target.diagnostics.0.clone());
@@ -296,6 +307,7 @@ impl DesignArgs {
                         design.signal_access.force_signals.clone_from(paths);
                     }
                     design.max_steps = target.max_steps.or(design.max_steps);
+                    design.four_state = target.four_state.or(design.four_state);
                 }
                 design.opt_level = opt_level
                     .map(|value| {
@@ -322,6 +334,12 @@ impl DesignArgs {
             }
         }));
         design.opt_level = self.opt_level.or(design.opt_level);
+        if self.two_state {
+            design.four_state = Some(false);
+        }
+        if self.four_state {
+            design.four_state = Some(true);
+        }
         if self.no_live_signals {
             design.signal_access.live_signals.clear();
         } else if !self.live_signals.is_empty() {
@@ -359,7 +377,7 @@ impl DesignArgs {
             let (name, value) = parameter
                 .split_once('=')
                 .ok_or_else(|| format!("invalid parameter `{parameter}`: expected NAME=VALUE"))?;
-            design.set_parameter(name, parse_parameter_value(value)?)?;
+            design.set_parameter_text(name, value, false)?;
         }
         if let Some(top) = self.top {
             design.top = top;
@@ -372,6 +390,9 @@ impl DesignArgs {
         if design.top.trim().is_empty() {
             return Err("provide --top MODULE or set top in celox.toml".to_string());
         }
+        if !design.is_sv() && !design.sv_parameters.is_empty() {
+            return Err("SV parameter literals require .sv/.v sources".to_string());
+        }
         if !design.is_sv() && (!design.include_dirs.is_empty() || !design.defines.is_empty()) {
             return Err(
                 "include directories and defines require SystemVerilog sources".to_string(),
@@ -381,12 +402,13 @@ impl DesignArgs {
     }
 }
 
-/// TOML integers cover ordinary values; strings also permit radix prefixes
-/// and the full unsigned 64-bit range supported by SimulatorBuilder::param.
+/// Preserve ordinary integer settings while admitting signed SV literals and
+/// textual parameters without losing their width or signedness.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ParameterValue {
     Integer(u64),
+    Signed(i64),
     String(String),
 }
 
@@ -424,6 +446,9 @@ impl Design {
         for (name, value) in &self.parameters {
             builder = builder.param(name, *value);
         }
+        for (name, literal) in &self.sv_parameters {
+            builder = builder.param_literal(name, literal);
+        }
         builder
     }
 
@@ -432,16 +457,25 @@ impl Design {
         parameters: &BTreeMap<String, ParameterValue>,
     ) -> Result<(), String> {
         for (name, value) in parameters {
-            let value = match value {
-                ParameterValue::Integer(value) => *value,
-                ParameterValue::String(value) => parse_parameter_value(value)?,
-            };
-            self.set_parameter(name, value)?;
+            match value {
+                ParameterValue::Integer(value) => self.set_parameter(name, *value)?,
+                ParameterValue::Signed(value) => {
+                    self.set_parameter_text(name, &value.to_string(), false)?
+                }
+                ParameterValue::String(value) => self.set_parameter_text(name, value, true)?,
+            }
         }
         Ok(())
     }
 
     fn set_parameter(&mut self, name: &str, value: u64) -> Result<(), String> {
+        Self::validate_parameter_name(name)?;
+        self.sv_parameters.remove(name);
+        self.parameters.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    fn validate_parameter_name(name: &str) -> Result<(), String> {
         if name.is_empty()
             || !name.bytes().enumerate().all(|(index, byte)| {
                 byte == b'_'
@@ -451,8 +485,58 @@ impl Design {
         {
             return Err(format!("invalid top parameter name `{name}`"));
         }
-        self.parameters.insert(name.to_string(), value);
         Ok(())
+    }
+
+    fn set_parameter_text(
+        &mut self,
+        name: &str,
+        text: &str,
+        bare_string: bool,
+    ) -> Result<(), String> {
+        if let Ok(value) = parse_parameter_value(text) {
+            return self.set_parameter(name, value);
+        }
+        #[cfg(feature = "systemverilog")]
+        {
+            let literal = if celox_sv_analyzer::typecheck::parse_parameter_literal(text).is_some() {
+                text.to_string()
+            } else if bare_string {
+                // TOML strings are ordinary string values unless they spell a
+                // numeric literal. Encode bytes using SV's escape rules.
+                let mut quoted = String::from("\"");
+                for byte in text.bytes() {
+                    match byte {
+                        b'"' => quoted.push_str("\\\""),
+                        b'\\' => quoted.push_str("\\\\"),
+                        b'\n' => quoted.push_str("\\n"),
+                        b'\t' => quoted.push_str("\\t"),
+                        32..=126 => quoted.push(char::from(byte)),
+                        0..=127 => quoted.push_str(&format!("\\{byte:03o}")),
+                        _ => return Err(format!("non-ASCII string parameter `{name}`")),
+                    }
+                }
+                quoted.push('"');
+                quoted
+            } else {
+                return Err(format!(
+                    "invalid parameter value `{text}`: expected an unsigned 64-bit integer or SV literal"
+                ));
+            };
+            // Reuse the name validation and remove whichever representation a
+            // lower-precedence project or target setting used.
+            Self::validate_parameter_name(name)?;
+            self.parameters.remove(name);
+            self.sv_parameters.insert(name.to_string(), literal);
+            Ok(())
+        }
+        #[cfg(not(feature = "systemverilog"))]
+        {
+            let _ = (name, bare_string);
+            Err(format!(
+                "invalid parameter value `{text}`: SV literals require the systemverilog feature"
+            ))
+        }
     }
 
     pub fn is_sv(&self) -> bool {
