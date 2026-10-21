@@ -287,6 +287,55 @@ impl ProcessKernelBuilder {
         Ok(())
     }
 
+    /// A nonblocking update of `site` with two paths that a load of the
+    /// one-bit variable `switch` selects. With the switch set, the value
+    /// `lower` computes is staged as [`Self::nonblocking`] does for a site
+    /// with a `pending` flag. Otherwise the kernel returns
+    /// [`ProcessStatus::Nba`] at once, for a site whose value object already
+    /// holds the value. A frontend emits both before the whole design shows
+    /// which one may be used; assembly keeps one
+    /// (`crate::symbolic::artifact::NbaSwitch`).
+    pub fn nonblocking_switched<E: From<ProcessKernelError>>(
+        &mut self,
+        index: u32,
+        site: &NbaSite<SourceVarId>,
+        switch: SourceVarId,
+        lower: impl FnOnce(
+            &mut SIRBuilder<RegionedSourceAddr>,
+        ) -> Result<(RegisterId, Option<RegisterId>), E>,
+    ) -> Result<(), E> {
+        assert!(
+            site.pending.is_some(),
+            "a switched nonblocking site has a pending flag"
+        );
+        let on = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Load(
+            on,
+            stable(switch),
+            SIROffset::Static(0),
+            1,
+        ));
+        let staged = self.builder.new_block();
+        let queued = self.builder.new_block();
+        let join = self.builder.new_block();
+        self.builder.seal_block(SIRTerminator::Branch {
+            cond: on,
+            true_block: (staged, Vec::new()),
+            false_block: (queued, Vec::new()),
+        });
+        self.builder.switch_to_block(staged);
+        self.nonblocking(index, site, lower)?;
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.builder.switch_to_block(queued);
+        self.store_delay_constant(u64::from(index));
+        self.suspend(ProcessStatus::Nba)?;
+        self.builder
+            .seal_block(SIRTerminator::Jump(join, Vec::new()));
+        self.builder.switch_to_block(join);
+        Ok(())
+    }
+
     /// End the simulation. No block is open afterwards.
     pub fn finish(&mut self) {
         self.wait_site = None;
