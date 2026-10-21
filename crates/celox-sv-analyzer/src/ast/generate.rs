@@ -1066,6 +1066,11 @@ impl<'a> Elaborator<'a, '_> {
                         &self.tree.state,
                         &scope.parameters,
                         &base,
+                        &pending
+                            .iter()
+                            .flatten()
+                            .map(|(name, _, _, _)| name.clone())
+                            .collect::<Vec<_>>(),
                     );
                     let mut types = parameter_types_from_const_env(&base);
                     let mut next = index;
