@@ -66,6 +66,7 @@ fn pattern_value(
         let element = VariableDimensions {
             real: false,
             string: false,
+            class: None,
             unpacked: rest.to_vec(),
             ..shape.clone()
         };

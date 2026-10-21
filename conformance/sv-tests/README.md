@@ -141,6 +141,19 @@ The full pinned run reviewed all 2,054 rows, with 496 passing cases in 2state
 and 498 in 4state; no passing case regresses. The existing scanf probes retain
 their verdicts because their other unsupported constructs remain unchanged.
 
+Classes update fourteen reviewed expectation rows: both state modes for
+`8.4--instantiation`, `8.5--properties`, `8.6--methods`, `8.12--assignment`,
+`8.24--out_of_block_methods`, `8.26.5--implemented_class_handle` and
+`6.20.6--const` change from fail to pass. The simulated cases were run and their
+values checked, including the shared object behind two handles in
+`8.12--assignment`. Full official runs at the pinned revision report 524 passing
+cases in 2state and 526 in 4state. No passing case regresses: classes that are
+declared but never constructed, interface classes and pure virtual methods are
+not lowered. `8.7--constructor` keeps failing because it initializes an
+implicitly static procedural variable without the `static` keyword, which IEEE
+1800-2023 6.21 requires. Inheritance with constructors, `super`, static members,
+virtual dispatch and parameterized classes stay unsupported.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.

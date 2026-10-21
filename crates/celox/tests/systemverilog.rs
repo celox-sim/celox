@@ -102,6 +102,8 @@ macro_rules! sv_backends {
 mod always_comb;
 #[path = "frontends/systemverilog/binary_file_io.rs"]
 mod binary_file_io;
+#[path = "frontends/systemverilog/class.rs"]
+mod class;
 #[path = "frontends/systemverilog/edges.rs"]
 mod edges;
 #[path = "frontends/systemverilog/file_core.rs"]

@@ -7,9 +7,9 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 1,
-    "mismatch": 14,
+    "mismatch": 15,
     "emission_error": 0,
-    "compile_error": 107,
+    "compile_error": 112,
     "runtime_error": 7,
     "unsupported": 0,
     "ignored": 0
@@ -1221,6 +1221,54 @@
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:8: error: Method compare is not a string method.\n<case>/source_0.sv:8: error: Object celox_suite_tb.dut.s has no method \"compare(...)\".\n<case>/source_0.sv:9: error: Method icompare is not a string method.\n<case>/source_0.sv:9: error: Object celox_suite_tb.dut.s has no method \"icompare(...)\".\n<case>/source_0.sv:11: error: Method toupper is not a string method.\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.s has no method \"toupper(...)\".\n<case>/source_0.sv:11: error: Method tolower is not a string method.\n<case>/source_0.sv:11: error: Object celox_suite_tb.dut.s has no method \"tolower(...)\".\n4 error(s) during elaboration.\n",
       "expectation": "Simulation",
       "name": "string::methods",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:5: sorry: External methods are not yet supported.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: I give up on this function definition.\n",
+      "expectation": "Simulation",
+      "name": "class::extern_methods_and_tasks",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 139; see <case>/build.log\nSegmentation fault (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::implicit_constructors_and_this",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:6: assert: dup_expr.cc:209: failed assertion 0\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::objects_referring_to_objects",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "class::objects_survive_heap_collections at 145:3: expect_output: expected [91, 105, 110, 110, 101, 114, 93, 32, 91, 50, 57, 57, 57, 93, 32, 51, 48, 48, 48, 10], got [91, 32, 93, 32, 91, 50, 57, 57, 57, 93, 32, 51, 48, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "class::objects_survive_heap_collections",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:12: error: Can't find task itoa in class Named\n<case>/source_0.sv:12: error: Enable of unknown task ``n.name.itoa''.\n<case>/source_0.sv:14: error: Can't find task putc in class Named\n<case>/source_0.sv:14: error: Enable of unknown task ``n.name.putc''.\n<case>/source_0.sv:15: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:15:      : method path: name.len\n<case>/source_0.sv:15: error: Object celox_suite_tb.dut.n has no method \"name.len(...)\".\n<case>/source_0.sv:15: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:15:      : method path: name.toupper\n<case>/source_0.sv:15: error: Object celox_suite_tb.dut.n has no method \"name.toupper(...)\".\n6 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::string_methods_on_properties",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\nSORRY: Compare class handles not implemented\nerror: Code generation had 1 error(s).\n",
+      "expectation": "Simulation",
+      "name": "class::inherited_properties_and_methods",
       "phase": "compile",
       "status": "compile_error"
     }

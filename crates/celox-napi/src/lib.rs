@@ -1052,7 +1052,10 @@ impl HandleBackend {
         }
     }
 
-    fn save_state_file(&self, schema: &celox::StateSchema) -> celox::StateFile {
+    fn save_state_file(
+        &self,
+        schema: &celox::StateSchema,
+    ) -> std::result::Result<celox::StateFile, celox::StateError> {
         match self {
             Self::Default(backend) => schema.capture(backend),
             Self::Tiered(backend) => schema.capture(backend.as_ref()),
@@ -1709,7 +1712,10 @@ impl NativeSimulatorHandle {
             .ok_or_else(|| Error::from_reason("Simulator has been disposed"))?;
         b.eval_comb()
             .map_err(|e| napi_runtime_error(&runtime_errors, e))?;
-        state_file_bytes(&b.save_state_file(&self.state_schema))
+        let file = b
+            .save_state_file(&self.state_schema)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        state_file_bytes(&file)
     }
 
     /// Load state file bytes, matching objects by path, and settle

@@ -7,8 +7,8 @@ pub use crate::procedural::{
     CaseKind, CaseLabel, EventEdge, LoopKind, ParamDirection, SourceSpan, StmtBase, SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, MemoryFormat, Radix, Severity, StringOp, SystemFunction, SystemTask,
-    VcdTask,
+    ArrayQuery, Callee, HandleProperty, MemoryFormat, ObjectField, ObjectOp, Radix, Severity,
+    StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -619,11 +619,17 @@ pub struct Type {
     packed_ranges: Vec<PackedRange>,
     unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
+    class: Option<String>,
 }
 
 impl Type {
     pub fn kind(&self) -> TypeKind {
         self.kind
+    }
+
+    /// The class of an object handle type.
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 
     pub fn is_signed(&self) -> bool {
@@ -683,6 +689,8 @@ pub enum TypeKind {
     Shortreal,
     /// IEEE 1800-2023 6.16: a dynamically sized string, held as a heap handle.
     String,
+    /// IEEE 1800-2023 8.4: a handle of a class object.
+    Object,
     Bit,
     Logic,
     Reg,
@@ -696,6 +704,7 @@ impl Type {
     ) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
+        let class = r#type.class().map(str::to_owned);
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             kind,
@@ -703,6 +712,7 @@ impl Type {
             packed_ranges,
             unpacked_ranges,
             resolved_width,
+            class,
         }
     }
 }
@@ -747,6 +757,7 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Real => TypeKind::Real,
             ast::TypeKind::Shortreal => TypeKind::Shortreal,
             ast::TypeKind::String => TypeKind::String,
+            ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,

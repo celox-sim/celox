@@ -19,10 +19,21 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..
-        } => dimensions
-            .functions
-            .get(name)
-            .is_some_and(|function| function.return_string),
+        } => {
+            dimensions
+                .functions
+                .get(name)
+                .is_some_and(|function| function.return_string)
+                || dimensions
+                    .function_return_types
+                    .get(name)
+                    .is_some_and(|metadata| metadata.string)
+        }
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => matches!(**op, crate::system_functions::ObjectOp::Load(field)
+            if field.handle == Some(crate::system_functions::HandleProperty::String)),
         Expr::Mux {
             then_expr,
             else_expr,
@@ -114,24 +125,38 @@ pub(in crate::ast) fn operands(
 /// Whether native expression `id` has type `string`, judged before it is
 /// bound: a string variable, or a method of a string value that returns one.
 pub(in crate::ast) fn native_string(
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
-        ExprKind::Name(name) => dimensions
-            .get(&instances::normalize_identifier(&name.spelling))
-            .is_some_and(|ty| ty.string),
-        ExprKind::Call { expression, .. } => {
-            method(*expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+        ExprKind::Name(name)
+            if dimensions
+                .get(&instances::normalize_identifier(&name.spelling))
+                .is_some() =>
+        {
+            dimensions
+                .get(&instances::normalize_identifier(&name.spelling))
+                .is_some_and(|ty| ty.string)
         }
-        _ => false,
+        ExprKind::Call { expression, .. } => {
+            method(tree, *expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+        }
+        // A string property of a class object.
+        _ => objects::property(tree, id, native, dimensions)
+            .ok()
+            .flatten()
+            .is_some_and(|(property, _)| {
+                property.field.handle == Some(crate::system_functions::HandleProperty::String)
+            }),
     }
 }
 
 /// The string method that native callee expression `id` names, with the
 /// expression it is called on.
 pub(in crate::ast) fn method(
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -144,7 +169,7 @@ pub(in crate::ast) fn method(
     else {
         return None;
     };
-    if separator != "." || !native_string(*expression, native, dimensions) {
+    if separator != "." || !native_string(tree, *expression, native, dimensions) {
         return None;
     }
     let (op, _) = StringOp::method(&name.spelling)?;

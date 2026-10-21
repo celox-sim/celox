@@ -218,6 +218,7 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
         // The time slot is over: no kernel runs, and its updates are in
         // state memory.
+        self.take_heap_fault().map_err(Halt::Error)?;
         self.heap_safepoint();
         self.start_sv_vcd(timestamp).map_err(|error| {
             Halt::Error(RuntimeErrorCode::Runtime {

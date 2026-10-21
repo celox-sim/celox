@@ -70,11 +70,16 @@ impl<'a> ProcModule<'a> {
                 .name_to_id
                 .get(name)
                 .and_then(|id| self.variables.get(id))
-                .is_some_and(|variable| variable.string),
+                .is_some_and(|variable| variable.value_kind == celox_design::ValueKind::StrRef),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::String(op),
                 ..
             } => op.returns_string(),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => matches!(**op, sv::ir::ObjectOp::Load(field)
+                if field.handle == Some(sv::ir::HandleProperty::String)),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
                 ..
@@ -248,7 +253,7 @@ impl<'a> ProcModule<'a> {
                     continue;
                 }
                 // String operations use the simulator's heap.
-                sv::ir::Callee::String(_) => return true,
+                sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             if let Some(subroutine) = self.subroutine(&name) {
@@ -741,7 +746,7 @@ impl<'a> ProcModule<'a> {
             SvVariable {
                 float: None,
 
-                string: false,
+                value_kind: celox_design::ValueKind::Bits,
                 path: vec![name.clone()],
                 width: width.max(1),
                 signed,
@@ -811,7 +816,7 @@ impl<'a> ProcModule<'a> {
         let variable = SvVariable {
             float: None,
 
-            string: false,
+            value_kind: celox_design::ValueKind::Bits,
             path,
             width: 1,
             signed: false,
@@ -882,7 +887,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
-            sv::ir::Callee::String(_) => true,
+            sv::ir::Callee::String(_) | sv::ir::Callee::Object(_) => true,
             sv::ir::Callee::Subroutine(name) => {
                 self.subroutines.contains_key(name) || self.dpi_imports.contains_key(name)
             }
@@ -1274,7 +1279,7 @@ pub(super) fn register_locals(
             SvVariable {
                 float: type_info.float,
 
-                string: type_info.string,
+                value_kind: type_info.value_kind,
                 path: vec![local.source_name.clone()],
                 width: type_info.width,
                 signed: type_info.signed,
