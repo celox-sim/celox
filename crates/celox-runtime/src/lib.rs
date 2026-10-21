@@ -9,6 +9,7 @@ pub mod file_io;
 pub mod parallel;
 pub mod plusargs;
 mod reflection;
+pub mod scan;
 mod schedule;
 pub mod scheduler;
 mod simulation;

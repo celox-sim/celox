@@ -5988,6 +5988,8 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Fgetc
         | SystemFunction::Ungetc
         | SystemFunction::Feof
+        | SystemFunction::Sscanf
+        | SystemFunction::Fscanf
         | SystemFunction::Timeunit
         | SystemFunction::Timeprecision
         | SystemFunction::Isunbounded

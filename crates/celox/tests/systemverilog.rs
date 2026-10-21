@@ -130,6 +130,8 @@ mod packed_structs;
 mod procedural;
 #[path = "frontends/systemverilog/review_regressions.rs"]
 mod review_regressions;
+#[path = "frontends/systemverilog/scan.rs"]
+mod scan;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]

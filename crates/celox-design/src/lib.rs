@@ -302,6 +302,7 @@ pub enum HostRequestKind {
     Plusargs,
     FileIo,
     Vcd,
+    Scan,
 }
 
 impl HostRequestKind {
@@ -311,6 +312,7 @@ impl HostRequestKind {
             Self::Plusargs => 1u64,
             Self::FileIo => 2,
             Self::Vcd => 3,
+            Self::Scan => 4,
         };
         (family << 32) | site as u64
     }
@@ -321,6 +323,7 @@ impl HostRequestKind {
             1 => Self::Plusargs,
             2 => Self::FileIo,
             3 => Self::Vcd,
+            4 => Self::Scan,
             _ => return None,
         };
         Some((family, request as u32))
@@ -1452,6 +1455,7 @@ mod tests {
             HostRequestKind::Plusargs,
             HostRequestKind::FileIo,
             HostRequestKind::Vcd,
+            HostRequestKind::Scan,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -1460,7 +1464,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 4u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 5u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(

@@ -140,6 +140,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
             }
             celox_design::HostRequestKind::FileIo => self.run_file_io_request(request, timestamp),
             celox_design::HostRequestKind::Vcd => self.run_vcd_request(request, timestamp),
+            celox_design::HostRequestKind::Scan => self.run_scan_request(request, timestamp),
         }
     }
 }
