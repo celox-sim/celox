@@ -53,6 +53,13 @@ enum Job {
         loops: Vec<(String, i128, i128)>,
         start: usize,
     },
+    /// The end of the statement an `@*` controls, which starts at `start`
+    /// of the output; `sensitivity` is where its constant-folded branches
+    /// start in the builder's sensitivity body.
+    ImplicitEvent {
+        start: usize,
+        sensitivity: usize,
+    },
     AssertionThen {
         condition: Expr,
         keyword: String,
@@ -211,8 +218,15 @@ impl BodyBuilder<'_, '_, '_> {
                         jobs.push(Job::Enter(*body));
                     }
                     StatementKind::Timing { control, body } => {
-                        let timing = self.native_timing_control(*control)?;
-                        output.push(timing);
+                        if self.implicit_event_control(*control)? {
+                            jobs.push(Job::ImplicitEvent {
+                                start: output.len(),
+                                sensitivity: self.sensitivity_body.len(),
+                            });
+                        } else {
+                            let timing = self.native_timing_control(*control)?;
+                            output.push(timing);
+                        }
                         jobs.push(Job::Enter(*body));
                     }
                     // Explicit typed assignments/calls/assertions/unsupported
@@ -243,6 +257,13 @@ impl BodyBuilder<'_, '_, '_> {
                     _ => output.extend(self.native_statement_leaf(&native.statement(id).kind)?),
                 },
                 Job::EndScope => self.pop_scope(),
+                Job::ImplicitEvent { start, sensitivity } => {
+                    let wait = timing::implicit_event(
+                        &output[start..],
+                        &self.sensitivity_body[sensitivity..],
+                    );
+                    output.insert(start, wait);
+                }
                 Job::AssertionThen {
                     condition,
                     keyword,

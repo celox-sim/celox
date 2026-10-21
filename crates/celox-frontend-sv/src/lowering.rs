@@ -59,6 +59,9 @@ pub enum FrontendError {
 // from the source-facing hierarchy. The runtime image records their addresses.
 const FORCE_ENABLE: &str = "@force-enable:";
 const FORCE_VALUE: &str = "@force-value:";
+/// The prefix of the variables `$event[k]` that hold the value of an event
+/// expression, and of their copies of process-local operands.
+const EVENT_PREFIX: &str = "$event[";
 
 #[derive(Clone)]
 struct SvVariable {
@@ -104,9 +107,14 @@ impl SvVariable {
     }
 
     /// A hidden variable other than the time slot, whose value the lowered
-    /// code computes. The time slot is state the scheduler writes.
+    /// code computes. The time slot is state the scheduler writes, and an
+    /// event expression's variables are state its process and its
+    /// continuous assignment share.
     fn is_scratch(&self) -> bool {
-        self.hidden && self.path != [TIME_SLOT] && self.force_control.is_none()
+        self.hidden
+            && self.path != [TIME_SLOT]
+            && self.force_control.is_none()
+            && !self.path[0].starts_with(EVENT_PREFIX)
     }
 }
 
@@ -125,6 +133,9 @@ pub(crate) struct LoweredSvModule {
     package_variables: Vec<(SourceVarId, String, String)>,
     /// The hidden `(copy, signal)` event copies of [`FfEventVars`].
     event_copies: Vec<(SourceVarId, SourceVarId)>,
+    /// The continuous assignments of the event expressions the processes
+    /// wait on, by their hidden target `$event[k]`.
+    event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
 }
 
 #[derive(Clone)]
@@ -1472,6 +1483,7 @@ fn prepare_external_hierarchy_collecting(
             package_variables: Vec::new(),
             // The foreign module's own combinational blocks carry its copies.
             event_copies: Vec::new(),
+            event_assignments: Vec::new(),
         }
     };
     let foreign_modules: HashMap<_, _> = foreign
@@ -2682,7 +2694,7 @@ fn lower_module_with_overrides(
     };
     mark_ff_event_domains(&event_vars, &mut variables);
 
-    let (initial_values, processes, wait_sites, nba_sites, host_request_sites) =
+    let (initial_values, processes, wait_sites, nba_sites, host_request_sites, event_assignments) =
         lower_initial_processes(
             module,
             &mut variables,
@@ -2806,6 +2818,7 @@ fn lower_module_with_overrides(
         instances,
         package_variables,
         event_copies: event_vars.copies,
+        event_assignments,
     })
 }
 
@@ -3187,6 +3200,9 @@ pub(crate) fn attach_instance_glue(
                 .insert(*id, pm.variables[id].to_symbolic_variable());
         }
     }
+    // An event expression is one more continuous assignment to a hidden
+    // buffer the processes watch.
+    port_assignments.extend(lowered.event_assignments.iter().cloned());
     let (comb_blocks, arena, created, comb_observers, comb_sites) = lower_comb_processes(
         &lowered.source,
         &port_assignments,
@@ -3529,11 +3545,12 @@ fn lower_initial_processes(
         Vec<WaitSite<SourceVarId>>,
         Vec<NbaSite<SourceVarId>>,
         Vec<celox_design::HostRequestSite<SourceVarId>>,
+        Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
     ),
     sv::AnalyzerError,
 > {
     if module.initial_processes().is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok(Default::default());
     }
     let mut values = Vec::new();
     let mut runtime = Vec::new();
@@ -3588,7 +3605,14 @@ fn lower_initial_processes(
         }
     }
     if runtime.is_empty() {
-        return Ok((values, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            values,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 
     let mut next_id = SourceVarId(
@@ -3686,6 +3710,7 @@ fn lower_initial_processes(
         wait_sites,
         nba_sites,
         host_request_sites,
+        std::mem::take(&mut pm.event_assignments),
     ))
 }
 
