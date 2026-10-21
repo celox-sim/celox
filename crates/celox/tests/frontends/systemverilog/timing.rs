@@ -81,6 +81,8 @@ timed_cases! {
     fn blocking_ff_clock_edges_trigger_their_domains_before_inactive_work = "timing::blocking_ff_clock_edges_trigger_their_domains_before_inactive_work";
     fn nonblocking_assignments_in_processes_update_in_the_nba_region = "timing::nonblocking_assignments_in_processes_update_in_the_nba_region";
     fn staged_nonblocking_updates_keep_their_order = "timing::staged_nonblocking_updates_keep_their_order";
+    fn narrow_nonblocking_updates_keep_the_other_bits = "timing::narrow_nonblocking_updates_keep_the_other_bits";
+    fn four_state_nonblocking_updates_keep_unknown_bits = "timing::four_state_nonblocking_updates_keep_unknown_bits";
     fn nonblocking_ff_stores_remain_pending_during_inactive_work = "timing::nonblocking_ff_stores_remain_pending_during_inactive_work";
     fn mixed_ff_stores_keep_their_active_and_nba_values = "timing::mixed_ff_stores_keep_their_active_and_nba_values";
     fn printed_finish_notice_is_design_output = "timing::printed_finish_notice_is_design_output";
@@ -550,4 +552,39 @@ fn nonblocking_sites_stage_only_unobserved_targets_with_one_writer() {
     assert_eq!(sim.get(sim.signal("stim")), 9u8.into());
     assert_eq!(sim.get(sim.signal("r")), 6u8.into());
     assert_eq!(sim.get(sim.signal("hits")), 2u8.into());
+}
+
+/// The narrow updates case covers staged and queued sites alike.
+#[test]
+fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
+    let design = celox_test_suite::sv::cases()
+        .find(|case| case.name == "timing::narrow_nonblocking_updates_keep_the_other_bits")
+        .unwrap()
+        .design();
+    let sources = design
+        .sources
+        .iter()
+        .map(|source| (source.text.as_str(), source.path.as_path()))
+        .collect::<Vec<_>>();
+    let simulator = celox::Simulator::from_sv_sources(sources, &design.top)
+        .build()
+        .unwrap();
+    let program = simulator.program();
+    let staged = |name: &str| {
+        let target = program.get_addr(&[], &[name]).unwrap();
+        let sites = program
+            .runtime_schema
+            .nba_sites
+            .iter()
+            .filter(|site| site.target == target)
+            .collect::<Vec<_>>();
+        assert!(!sites.is_empty(), "{name}");
+        sites.iter().all(|site| site.pending.is_some())
+    };
+    for name in ["p", "w", "x"] {
+        assert!(staged(name), "{name} stages its update");
+    }
+    for name in ["q", "v", "y"] {
+        assert!(!staged(name), "{name} queues its updates");
+    }
 }
