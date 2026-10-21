@@ -83,9 +83,13 @@ impl DiagnosticPolicy {
     }
 
     #[cfg(feature = "systemverilog")]
-    pub(crate) fn sv_options(&self) -> celox_frontend_sv::AnalysisOptions {
+    pub(crate) fn sv_options(
+        &self,
+        timescale: Option<crate::SvTimescale>,
+    ) -> celox_frontend_sv::AnalysisOptions {
         celox_frontend_sv::AnalysisOptions {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
+            default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),
         }
     }
 

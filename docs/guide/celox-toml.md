@@ -129,6 +129,21 @@ The Vite plugin picks up `test_veryl/` automatically and generates type definiti
 - The Vite plugin regenerates types for test sources on hot reload, just like for production sources.
 - `[simulation]` settings apply to every `Simulation.fromProject` / `Simulation.create` call within the project. A per-call `{ maxSteps }` option always takes precedence over the `celox.toml` value.
 
+
+### CLI SystemVerilog timing
+
+For `celox run` and `celox vpi build`, set `timescale = "1ns/1fs"` at the
+manifest root or in `[targets.NAME]`. `--timescale 1ns/1fs` overrides the selected
+target, which overrides the root setting. The default remains `1ns/1ps`.
+
+This sets the default time unit and precision for scopes without source timing
+declarations. The configured precision also contributes to the global scheduler
+resolution, so cocotb can schedule femtosecond clock periods even when an SV
+module declares `1ns/1ps`. Explicit `timeunit`, `timeprecision`, and `` `timescale ``
+settings retain their scope units and delay rounding. The global resolution is
+the finest configured or declared precision. Values use magnitudes 1, 10, or 100
+and units `s`, `ms`, `us`, `ns`, `ps`, or `fs`; precision cannot be coarser than unit.
+
 ### `[diagnostics]`
 
 Override individual compilation diagnostics by their displayed code:

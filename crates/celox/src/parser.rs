@@ -590,6 +590,7 @@ pub fn parse_sv(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -610,7 +611,7 @@ pub fn parse_sv(
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
         warnings,
-        diagnostic_policy.sv_options(),
+        diagnostic_policy.sv_options(sv_timescale),
         force_signals,
     )
     .map_err(|error| match error {
@@ -685,6 +686,7 @@ pub fn parse_mixed(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -834,7 +836,7 @@ pub fn parse_mixed(
                 sv_top_parameters,
                 &requests,
                 &mut warnings,
-                diagnostic_policy.sv_options(),
+                diagnostic_policy.sv_options(sv_timescale),
             );
         let external = match external {
             Ok(external) => external,
