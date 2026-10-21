@@ -2215,6 +2215,7 @@ pub enum CombProcessKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    always_ff: bool,
     suspendable: bool,
     creation_order: usize,
     events: Vec<FfEvent>,
@@ -2222,6 +2223,10 @@ pub struct FfProcess {
 }
 
 impl FfProcess {
+    pub fn is_always_ff(&self) -> bool {
+        self.always_ff
+    }
+
     /// Position among the elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -2229,6 +2234,7 @@ impl FfProcess {
 
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            always_ff: false,
             suspendable: false,
             creation_order: 0,
             events,

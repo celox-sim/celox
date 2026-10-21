@@ -71,7 +71,10 @@ impl DiagnosticPolicy {
 
     pub(crate) fn level(&self, code: &str) -> DiagnosticLevel {
         self.0.get(code).copied().unwrap_or(
-            if matches!(code, "mixed_timescale" | "unpacked_port_default") {
+            if matches!(
+                code,
+                "mixed_timescale" | "unpacked_port_default" | "multiple_always_ff_drivers"
+            ) {
                 DiagnosticLevel::Error
             } else {
                 DiagnosticLevel::Warn

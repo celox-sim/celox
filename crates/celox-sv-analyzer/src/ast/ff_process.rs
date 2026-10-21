@@ -78,6 +78,7 @@ fn ff_process_from_procedure(
     }
     Ok((!events.is_empty()).then(|| {
         let mut process = FfProcess::new(events, body);
+        process.always_ff = procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysFf;
         process.suspendable = procedure.kind == celox_sv_syntax::ProcedureKind::Always;
         process
     }))
