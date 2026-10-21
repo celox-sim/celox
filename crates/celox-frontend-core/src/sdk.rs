@@ -1058,6 +1058,7 @@ impl HiddenObjects<'_> {
                         PortTypeKind::Bit
                     },
                     array_dims: Vec::new(),
+                    value_kind: Default::default(),
                 },
                 unpacked_ranges: Vec::new(),
                 packed_dims: vec![width],
@@ -1817,6 +1818,7 @@ pub fn lower_frontend_artifact(
                         kind,
                         type_kind,
                         array_dims: Vec::new(),
+                        value_kind: Default::default(),
                     },
                     unpacked_ranges: Vec::new(),
                     packed_dims: vec![signal.value_type().width()],

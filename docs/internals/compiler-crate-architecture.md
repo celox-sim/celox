@@ -186,6 +186,7 @@ for.
 | `celox-backend-x86` | x86 MIR, instruction selection, target allocation policy, and machine-code emission | Frontend or runtime policy |
 | `celox-backend-cranelift` | Cranelift translation and JIT construction | Frontend or x86-specific MIR |
 | `celox-backend-wasm` | WebAssembly module generation | Host runtime behavior |
+| `celox-heap` | Dynamic values referenced by handles from state memory, and their collection | Root discovery, layouts, or scheduling |
 | `celox-testbench` | Source-independent testbench bytecode and values | Veryl AST traversal or simulator memory ownership |
 | `celox-runtime` | Events, timed scheduling, VCD output, testbench execution, and backend contracts | Frontend, SIR optimization, or concrete backend internals |
 | `celox` | Public API, compilation orchestration, and backend selection | New reusable compiler algorithms |

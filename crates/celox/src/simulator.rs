@@ -2,6 +2,8 @@ mod builder;
 #[cfg(feature = "host-runtime")]
 mod checkpoint;
 mod error;
+#[cfg(feature = "host-runtime")]
+mod heap;
 #[cfg(feature = "systemverilog")]
 pub(crate) mod mixed;
 #[cfg(feature = "host-runtime")]
@@ -114,8 +116,10 @@ mod host {
     /// cross-codegen builds or unsupported hosts.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
-        /// Dynamic testbench strings, keyed by the bound variable location.
-        pub(crate) testbench_strings: celox_testbench::TestbenchStrings,
+        /// Dynamic values that handle slots in state memory refer to.
+        pub(crate) heap: celox_heap::Heap,
+        /// Byte offsets of every handle slot in state memory.
+        pub(super) handle_slots: std::sync::OnceLock<Arc<[usize]>>,
         file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
@@ -819,7 +823,8 @@ mod host {
                 sv_vcd: SvVcdControl::default(),
                 dirty: false,
                 warnings,
-                testbench_strings: Default::default(),
+                heap: Default::default(),
+                handle_slots: Default::default(),
                 file_io: Default::default(),
                 pending_host_events: Default::default(),
                 components: Default::default(),
@@ -2154,6 +2159,16 @@ mod host {
                     .iter()
                     .filter_map(|address| self.program.design.variable(address))
                     .filter(|variable| instance.resolves_path_to(&variable.path, variable.address))
+                    // A handle slot holds a heap reference, not a value to
+                    // show; strings have no VCD representation yet.
+                    .filter(|variable| {
+                        !self
+                            .program
+                            .design
+                            .state_objects
+                            .get(&variable.address)
+                            .is_some_and(|metadata| metadata.value_kind.is_handle())
+                    })
                     .collect();
                 sorted_vars.sort_by(|a, b| a.path.cmp(&b.path));
 
