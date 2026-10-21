@@ -1736,3 +1736,30 @@
   (top Top)
   (assert_eq enumeration 10)
   (assert_eq width 10))
+
+(case runtime_indexed_bases_preserve_numeric_and_type_casts
+  (source "runtime_indexed_cast.sv" #"
+    module Top(input logic [63:0] data, input logic [1:0] offset,
+               input logic [3:0] index,
+               output logic [31:0] y, output logic [3:0] narrowed,
+               output logic [3:0] typed, output logic [63:0] written);
+        typedef logic [2:0] index_t;
+        assign y = data[3'(4-offset)*8 +: 32];
+        assign narrowed = data[2'(index) +: 4];
+        assign typed = data[index_t'(index) +: 4];
+        always_comb begin
+            written = data;
+            written[3'(4-offset)*8 +: 8] = 8'hff;
+        end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set data 0x0123456789abcdef))
+  (for offset_value (range 0 4)
+    (modify (set offset offset_value))
+    (assert_eq y (& (>> 0x0123456789abcdef (* (- 4 offset_value) 8)) 0xffffffff))
+    (assert_eq written (| 0x0123456789abcdef (<< 0xff (* (- 4 offset_value) 8)))))
+  (for index_value (range 0 16)
+    (modify (set index index_value))
+    (assert_eq narrowed (& (>> 0x0123456789abcdef (& index_value 3)) 15))
+    (assert_eq typed (& (>> 0x0123456789abcdef (& index_value 7)) 15))))

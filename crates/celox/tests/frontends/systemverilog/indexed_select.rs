@@ -128,6 +128,10 @@ sv_backends! {
         assert_eq!(sim.get(sim.signal("narrow")), 0x1bu8.into());
     }
 
+    fn runtime_indexed_bases_preserve_numeric_and_type_casts(sim) {
+        @case "indexed_select::runtime_indexed_bases_preserve_numeric_and_type_casts";
+    }
+
     fn indexed_select_preserves_selected_and_cast_bases(sim) {
         @case "indexed_select::indexed_select_preserves_selected_and_cast_bases";
     }
