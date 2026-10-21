@@ -400,10 +400,10 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
         let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base);
+        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base, &[]);
         // The same contents at a different address deliberately select the
         // former copy-and-mask path, providing an independent width context.
-        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
+        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base, &[]);
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
         for id in tree.body_membership().unwrap() {
             if !matches!(
@@ -534,8 +534,8 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
         let copied_base = base.clone();
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base);
-        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base);
+        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base, &[]);
+        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base, &[]);
         for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
@@ -565,7 +565,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut copied_env,
             )
             .unwrap();
-            let rebuilt = ParameterEnvironment::new(state, &borrowed, &base);
+            let rebuilt = ParameterEnvironment::new(state, &borrowed, &base, &[]);
             assert_eq!(
                 borrowed_env.has_inherited_literal_shadow,
                 rebuilt.has_inherited_literal_shadow
@@ -1415,4 +1415,72 @@ fn unbased_parameter_overrides_fill_declared_width_before_dependent_parameters()
             assert_eq!(values["NEGATIVE"], i128::from(signed < 0));
         }
     }
+}
+
+#[test]
+fn inherited_alias_prefixes_bind_once_without_copying_declaration_environments() {
+    for count in [16, 64, 256] {
+        let mut code = String::from("module Top;\n");
+        for index in 0..count {
+            writeln!(code, "localparam logic [31:0] A{index}=EXTERNAL + {index};").unwrap();
+        }
+        code.push_str("endmodule");
+        let tree = crate::source_tree::parse_scope_fixture(&code, Path::new("inherited_prefix.sv"))
+            .unwrap();
+        let tree = AnalysisContext::unspecialized(&tree);
+        let mut base = HashMap::from_iter([("EXTERNAL".into(), 16)]);
+        insert_parameter_type_markers(
+            &mut base,
+            "EXTERNAL",
+            ExprType {
+                width: 32,
+                signed: false,
+            },
+        );
+        PARAMETER_BINDINGS.with(|count| count.set(0));
+        DECLARATION_ENV_COPIES.with(|count| count.set(0));
+        let parameters =
+            parameters_from_scope(&tree, &HashMap::default(), &base, &HashMap::default()).unwrap();
+        assert_eq!(PARAMETER_BINDINGS.with(|count| count.get()), count);
+        assert_eq!(DECLARATION_ENV_COPIES.with(|count| count.get()), 0);
+        for (index, parameter) in parameters.iter().enumerate() {
+            assert_eq!(
+                parameter.resolved_value(
+                    &tree.state,
+                    &base,
+                    &parameter_types_from_const_env(&base)
+                ),
+                Some(16 + index as i128)
+            );
+        }
+    }
+}
+
+#[test]
+fn inherited_evaluation_masks_pending_local_names_and_their_type_markers() {
+    let mut base = HashMap::from_iter([("EXTERNAL".into(), 8), ("LOCAL".into(), 99)]);
+    insert_parameter_type_markers(
+        &mut base,
+        "LOCAL",
+        ExprType {
+            width: 4,
+            signed: false,
+        },
+    );
+    let state = AnalysisState::default();
+    let mut environment =
+        ParameterEnvironment::new(&state, &[], &base, &["LOCAL".into(), "ALIAS".into()]);
+    let alias = Parameter::new(
+        "ALIAS".into(),
+        Some(ConstExpr::Ident("LOCAL".into())),
+        None,
+        None,
+        false,
+        false,
+        true,
+    );
+    environment.append(&state, &alias);
+    assert!(!environment.values.contains_key("ALIAS"));
+    assert!(!environment.types.contains_key("LOCAL"));
+    assert_eq!(environment.bindings.get("EXTERNAL"), Some(&8));
 }
