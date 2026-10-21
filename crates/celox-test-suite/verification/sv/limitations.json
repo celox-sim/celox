@@ -605,6 +605,7 @@
       "verification/sv/limitations/icarus.json",
       "verification/sv/limitations/interface-array-ports-icarus.json",
       "verification/sv/limitations/implicit-interface-ports-icarus.json",
+      "verification/repros/sv_mixed_interface_connections_icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -619,10 +620,47 @@
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
         "interfaces::infers_directions_of_ports_without_modport",
+        "interfaces::mixes_module_contracts_with_local_interface_connections",
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
         "interfaces::reads_undriven_interface_members_as_unknown",
         "interfaces::rewrites_nested_references_and_keeps_declaration_functions",
         "interfaces::runs_interface_processes_once_per_array_element"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_multidimensional_interface_connections",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a four-bit actual connected to a 2x2 interface instance array with scalar ports, requiring only 1 or 2 bits instead of 1 or 4. IEEE 1800-2023 23.3.3.5 distributes packed actuals across all instance dimensions, rightmost dimension first. Celox passes the unchanged shared assertions; Icarus separately rejects multidimensional instance arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_interface_array_connections_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "interfaces::distributes_multidimensional_connections_to_interface_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_interface_array_connections",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects unpacked actuals distributed across interface instances (Array inputs needs an array index), aborts on interface array ports (assertion prts.size()==1), and rejects multidimensional instance arrays explicitly. IEEE 1800-2023 23.3.3.5 permits these connections. Verilator passes both unpacked cases; Celox passes all three.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_interface_array_connections_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "interfaces::distributes_array_port_connections_to_interface_arrays",
+        "interfaces::distributes_multidimensional_connections_to_interface_arrays",
+        "interfaces::distributes_unpacked_connections_to_interface_arrays"
       ]
     }
   },

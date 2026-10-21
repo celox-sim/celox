@@ -5266,6 +5266,38 @@ fn native_interface_array_ports_reject_incompatible_shapes() {
 }
 
 #[test]
+fn rejects_mismatched_interface_array_connection_widths_and_shapes() {
+    for declaration in [
+        "logic [2:0] value; I lanes[1:0](.value(value));",
+        "logic [0:0] value [3]; I lanes[1:0](.value(value));",
+        "logic value [1][2]; I lanes[1:0](.value(value));",
+    ] {
+        let text = format!(
+            "interface I(input logic value); endinterface module Top; {declaration} endmodule"
+        );
+        let parsed =
+            ParsedSource::parse(&text, Path::new("invalid-interface-array-connection.sv")).unwrap();
+        let packages = ParsedSource::analyze_packages(&[&parsed]).unwrap();
+        let error = parsed
+            .analyze_module(
+                "Top",
+                &HashMap::default(),
+                &[],
+                &[],
+                &ModuleInterfaces::default(),
+                &packages,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("interface array connection shape/width"),
+            "{declaration}: {error}"
+        );
+    }
+}
+
+#[test]
 fn native_interface_port_views_do_not_repeat_instance_initializers() {
     let module = native_interface_module(
         "interface I; logic [7:0] x = 8'd42; endinterface module M(I p, output logic [7:0] y); assign y = p.x; endmodule",
