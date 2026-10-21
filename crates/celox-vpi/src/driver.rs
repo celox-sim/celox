@@ -60,7 +60,10 @@ pub fn compile_native_image_with_diagnostics(
         policy,
         celox::OptLevel::O0,
         celox::SignalAccessOptions::default(),
-        true,
+        CompileMode {
+            legacy_force: true,
+            four_state: true,
+        },
         &BTreeMap::new(),
     )
 }
@@ -85,7 +88,36 @@ pub fn compile_native_image_with_parameters(
     access: celox::SignalAccessOptions,
     parameters: &BTreeMap<String, u64>,
 ) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
-    compile_native_image_configured(source, top, policy, level, access, false, parameters)
+    compile_native_image_with_state(source, top, policy, level, access, parameters, true)
+}
+
+/// Compile numeric parameters with an explicit four-state simulation mode.
+pub fn compile_native_image_with_state(
+    source: &Path,
+    top: &str,
+    policy: DiagnosticPolicy,
+    level: celox::OptLevel,
+    access: celox::SignalAccessOptions,
+    parameters: &BTreeMap<String, u64>,
+    four_state: bool,
+) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
+    compile_native_image_configured(
+        source,
+        top,
+        policy,
+        level,
+        access,
+        CompileMode {
+            legacy_force: false,
+            four_state,
+        },
+        parameters,
+    )
+}
+
+struct CompileMode {
+    legacy_force: bool,
+    four_state: bool,
 }
 
 fn compile_native_image_configured(
@@ -94,7 +126,7 @@ fn compile_native_image_configured(
     policy: DiagnosticPolicy,
     level: celox::OptLevel,
     access: celox::SignalAccessOptions,
-    legacy_force: bool,
+    mode: CompileMode,
     parameters: &BTreeMap<String, u64>,
 ) -> Result<(NativeProgramImage, Vec<CompilationWarning>), String> {
     let compiled = if let Ok(metadata_path) = Metadata::search_from(source) {
@@ -118,8 +150,8 @@ fn compile_native_image_configured(
         let builder = Simulator::from_sources(source_refs, top)
             .with_metadata(metadata)
             .diagnostic_policy(policy.clone())
-            .four_state(true)
-            .native_force_support(legacy_force)
+            .four_state(mode.four_state)
+            .native_force_support(mode.legacy_force)
             .signal_access(access.clone())
             .opt_level(level);
         parameters
@@ -133,8 +165,8 @@ fn compile_native_image_configured(
             .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
         let builder = Simulator::from_sources(vec![(contents.as_str(), source)], top)
             .diagnostic_policy(policy.clone())
-            .four_state(true)
-            .native_force_support(legacy_force)
+            .four_state(mode.four_state)
+            .native_force_support(mode.legacy_force)
             .signal_access(access.clone())
             .opt_level(level);
         parameters

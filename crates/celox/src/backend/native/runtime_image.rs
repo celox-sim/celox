@@ -108,6 +108,11 @@ impl NativeProgramInstance {
         self.shared.program_image().time_precision()
     }
 
+    /// Whether the attached image executes with four-state values.
+    pub fn four_state(&self) -> bool {
+        self.shared.program_image().four_state()
+    }
+
     /// Elaborated hierarchy and signal metadata embedded by the compiler.
     pub fn reflection(&self) -> &DesignReflection {
         self.shared.program_image().reflection()
