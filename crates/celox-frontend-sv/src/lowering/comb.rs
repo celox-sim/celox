@@ -609,6 +609,100 @@ impl<'p, 'a> Comb<'p, 'a> {
         self.m.expr_signed(expr)
     }
 
+    /// Replace bits absorbed by a constant zero mask by literal zeros before
+    /// dependency analysis (IEEE 1800-2023 Table 11-11, including X/Z inputs).
+    fn masked_and_operand(
+        &mut self,
+        store: &Store,
+        operand: NodeId,
+        constant: NodeId,
+    ) -> Result<Option<Value>, sv::AnalyzerError> {
+        let Some((value, mask, width)) = slt_const4(self.arena, &mut self.consts, constant) else {
+            return Ok(None);
+        };
+        if self.width(operand) != width {
+            return Ok(None);
+        }
+        self.masked_input(store, operand, &(value | mask))
+    }
+
+    fn masked_input(
+        &mut self,
+        store: &Store,
+        node: NodeId,
+        active: &BigUint,
+    ) -> Result<Option<Value>, sv::AnalyzerError> {
+        if active.is_zero() {
+            return Ok(Some((
+                self.constant(0, self.width(node))?,
+                Sources::default(),
+            )));
+        }
+        match self.arena.get(node).clone() {
+            SLTNode::Constant(..) => Ok(Some((node, Sources::default()))),
+            SLTNode::Input {
+                variable,
+                index,
+                access,
+                ..
+            } if index.is_empty() => {
+                let mut sources = Sources::default();
+                let mut parts = Vec::new();
+                let width = access.msb - access.lsb + 1;
+                let mut bit = 0;
+                while bit < width {
+                    let selected = active.bit(bit as u64);
+                    let first = bit;
+                    while bit < width && active.bit(bit as u64) == selected {
+                        bit += 1;
+                    }
+                    let part = if selected {
+                        let (part, read_sources) = self.read(
+                            store,
+                            variable,
+                            BitAccess::new(access.lsb + first, access.lsb + bit - 1),
+                        )?;
+                        sources.extend(read_sources);
+                        part
+                    } else {
+                        self.constant(0, bit - first)?
+                    };
+                    parts.push((part, bit - first));
+                }
+                Ok(Some((self.concat_lsb_first(parts)?, sources)))
+            }
+            SLTNode::Concat(parts) => {
+                let mut sources = Sources::default();
+                let mut replacement = Vec::new();
+                let mut offset = 0usize;
+                for (part, width) in parts.into_iter().rev() {
+                    let selected =
+                        (active >> offset) & ((BigUint::from(1u8) << width) - BigUint::from(1u8));
+                    if self.width(part) != width {
+                        return Ok(None);
+                    }
+                    let Some((part, part_sources)) = self.masked_input(store, part, &selected)?
+                    else {
+                        return Ok(None);
+                    };
+                    sources.extend(part_sources);
+                    replacement.push((part, width));
+                    offset += width;
+                }
+                Ok(Some((self.concat_lsb_first(replacement)?, sources)))
+            }
+            SLTNode::Slice { expr, access } => {
+                let Some((expr, sources)) =
+                    self.masked_input(store, expr, &(active << access.lsb))?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((self.slice(expr, access)?, sources)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Rewrite the module-state reads of a freshly lowered tree to the values
     /// the store holds.
     fn resolve(
@@ -722,8 +816,26 @@ impl<'p, 'a> Comb<'p, 'a> {
             }
             SLTNode::Constant(..) => (node, Sources::default()),
             SLTNode::Binary(left, op, right) => {
-                let (l, mut sources) = self.resolve(store, left, memo)?;
-                let (r, r_sources) = self.resolve(store, right, memo)?;
+                let (mut l, mut sources) = self.resolve(store, left, memo)?;
+                let (mut r, mut r_sources) = self.resolve(store, right, memo)?;
+                if op == BinaryOp::And
+                    && !(node_is_signed(self.arena, l) && node_is_signed(self.arena, r))
+                {
+                    // A procedural observer still wakes on the original reads,
+                    // even when a masked bit cannot affect the assigned value.
+                    self.effect_sensitivity.extend(sources.iter().copied());
+                    self.effect_sensitivity.extend(r_sources.iter().copied());
+                    if let Some((masked, read_sources)) = self.masked_and_operand(store, left, r)? {
+                        l = masked;
+                        sources = read_sources;
+                    }
+                    if let Some((masked, read_sources)) =
+                        self.masked_and_operand(store, right, l)?
+                    {
+                        r = masked;
+                        r_sources = read_sources;
+                    }
+                }
                 sources.extend(r_sources);
                 let rebuilt = if l == left && r == right {
                     node
@@ -1502,7 +1614,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             Target::Static { access, .. } => access.msb - access.lsb + 1,
             Target::Dynamic { width, .. } => *width,
         };
-        if self.continuous && matches!(target, Target::Dynamic { .. }) {
+        if self.continuous
+            && matches!(&target, Target::Dynamic { id, .. } if !self.m.is_hidden(*id))
+        {
             return Err(unsupported(format!(
                 "combinational assignment target `{}` at a run-time position",
                 lhs.name()
@@ -3461,7 +3575,12 @@ impl<'p, 'a> Comb<'p, 'a> {
                     .is_ok_and(|parts| parts.iter().all(|(value, _)| value.is_some()))
             });
             if !defined {
-                return Err(unsupported("latch inference inside always_comb"));
+                return Err(unsupported(format!(
+                    "latch inference inside always_comb for `{}` (bits {}:{})",
+                    self.m.var(id).path.join("."),
+                    access.msb,
+                    access.lsb
+                )));
             }
         }
         let mut written: Vec<SourceVarId> = store
@@ -3502,7 +3621,10 @@ impl<'p, 'a> Comb<'p, 'a> {
                     .iter()
                     .any(|source| source.id == id && source.access.overlaps(&target))
                 {
-                    return Err(unsupported("latch inference inside always_comb"));
+                    return Err(unsupported(format!(
+                        "latch inference inside always_comb for `{}` (self dependency at bits {msb}:{lsb})",
+                        self.m.var(id).path.join(".")
+                    )));
                 }
                 let previous_sources = sources
                     .iter()

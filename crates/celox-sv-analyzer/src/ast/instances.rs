@@ -86,12 +86,13 @@ fn instances_from_native_declaration(
                 const_env,
                 &parameter_types_from_const_env(const_env),
             );
-            let value = expr_to_const(
+            let value = expr_to_index_const(
                 &syntax_tree.state,
                 substitute_expr_idents(
                     const_expr_to_expr(value),
                     &packed_dimensions.parameter_values,
                 ),
+                packed_dimensions,
             )
             .ok_or_else(|| {
                 AnalyzerError::Unsupported(format!(

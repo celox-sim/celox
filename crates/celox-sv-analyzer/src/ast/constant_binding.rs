@@ -247,6 +247,22 @@ fn bind_in_context(
                         base = *expression;
                     }
                     if let ExprKind::Name(name) = &native.expression(base).kind {
+                        // Override expressions retain symbolic values, but a packed
+                        // element still has its declared width and coordinates.
+                        // The symbolic context deliberately has no numeric env.
+                        let name_key = instances::normalize_identifier(&name.spelling);
+                        if dimensions.const_env.is_empty()
+                            && query_dimensions.get(&name_key).is_some_and(|shape| {
+                                shape.packed.len() > 1 || !shape.unpacked.is_empty()
+                            })
+                        {
+                            let value = indexed_expression(id, native, tree, query_dimensions)?;
+                            values.push(
+                                expr_to_index_const(&tree.state, value, query_dimensions)
+                                    .ok_or_else(|| unsupported("parameter selection shape"))?,
+                            );
+                            continue;
+                        }
                         indices.reverse();
                         jobs.push(Job::Select(
                             instances::normalize_identifier(&name.spelling),

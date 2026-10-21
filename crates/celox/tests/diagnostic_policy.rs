@@ -176,3 +176,41 @@ mod sv {
         );
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn overlapping_always_ff_memories_require_explicit_relaxation() {
+    const SOURCE: &str = r#"module Top(input bit a, b, input bit[1:0] x, y,
+      output wire[7:0] q);
+      logic[7:0] mem[4];
+      always_ff @(posedge a) mem[x] <= 8'h12;
+      always_ff @(posedge b) mem[y] <= 8'h34;
+      assign q=mem[0];
+    endmodule"#;
+    let build = |level| {
+        celox::Simulation::from_sv_sources(
+            vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
+            "Top",
+        )
+        .diagnostic_policy(policy("multiple_always_ff_drivers", level))
+        .build_cranelift()
+    };
+    let error = build(DiagnosticLevel::Error).err().unwrap().to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+    for level in [DiagnosticLevel::Warn, DiagnosticLevel::Allow] {
+        let sim = build(level).unwrap();
+        assert_eq!(
+            sim.warnings().len(),
+            usize::from(level == DiagnosticLevel::Warn)
+        );
+    }
+    let error = celox::Simulation::from_sv_sources(
+        vec![(SOURCE, std::path::Path::new("shared_ff_memory.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("multiple variable drivers"), "{error}");
+}
