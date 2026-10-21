@@ -1428,7 +1428,7 @@ pub(crate) fn generated_time_declarations(
     sources: &[(&str, &std::path::Path)],
     roots: Option<&[&str]>,
 ) -> Result<String, AnalyzerError> {
-    timescales::generated_source_declarations(sources, roots, false)
+    timescales::generated_source_declarations(sources, roots, crate::AnalysisOptions::default())
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;

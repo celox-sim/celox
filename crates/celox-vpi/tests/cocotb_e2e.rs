@@ -102,7 +102,27 @@ fn cocotb_observes_edges_before_nonblocking_updates() {
     check_cocotb_native_design(&["edge_phase.sv"], "test_edge_phase", "edge_precedes_nba");
 }
 
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_accepts_femtosecond_clock_periods() {
+    check_cocotb_native_design_with_options(
+        &["edge_phase.sv"],
+        "test_fs_clock",
+        "femtosecond_clock",
+        &["--timescale", "1ns/1fs"],
+    );
+}
+
 fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
+    check_cocotb_native_design_with_options(source, module, filter, &[]);
+}
+
+fn check_cocotb_native_design_with_options(
+    source: &[&str],
+    module: &str,
+    filter: &str,
+    options: &[&str],
+) {
     let python = env::var_os("CELOX_COCOTB_PYTHON")
         .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
@@ -115,6 +135,7 @@ fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
         .arg("vpi")
         .arg("build")
         .args(source.iter().map(|path| fixture.join(path)))
+        .args(options)
         .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
