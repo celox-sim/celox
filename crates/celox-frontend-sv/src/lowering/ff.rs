@@ -397,7 +397,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         expr: &sv::ir::Expr,
     ) -> Result<(RegisterId, Option<bool>), sv::AnalyzerError> {
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(expr, None, &mut arena)?;
+        let node = self.expr_slt(
+            &floating::condition(expr, self.m.variables, self.m.name_to_id),
+            None,
+            &mut arena,
+        )?;
         let truth = slt_truth(&mut arena, node)?;
         let constant = slt_bool(&arena, &mut ConstCache::default(), truth);
         Ok((self.lower_slt(&arena, truth)?, constant))
@@ -406,7 +410,11 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Whether an expression is not logically false, as a one-bit register.
     fn eval_not_false(&mut self, expr: &sv::ir::Expr) -> Result<RegisterId, sv::AnalyzerError> {
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(expr, None, &mut arena)?;
+        let node = self.expr_slt(
+            &floating::condition(expr, self.m.variables, self.m.name_to_id),
+            None,
+            &mut arena,
+        )?;
         let not_false = slt_not_false(&mut arena, node)?;
         self.lower_slt(&arena, not_false)
     }
@@ -942,6 +950,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (width, signed, is_4state) = self.m.type_shape(&r#type)?;
                 let result = self.call(name, &args, arg_order)?;
                 let (temp, temp_name) = self.m.temp("call", width, signed, is_4state);
+                self.m.variables.get_mut(&temp).unwrap().float = match r#type.kind() {
+                    sv::ir::TypeKind::Real => Some(celox_sir::FloatPrecision::F64),
+                    sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
+                    _ => None,
+                };
                 let Some(result) = result else {
                     return Err(unsupported(format!(
                         "void function `{name}` used as a value"
@@ -1214,6 +1227,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             let (id, _) = self.m.temp("vcd_argument", width, signed, is_4state);
             self.store(id, SIROffset::Static(0), width, reg);
             values.push(HostRequestValue {
+                float_precision: None,
                 id,
                 width,
                 signed,
@@ -1806,6 +1820,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut results = Vec::new();
         let (ret_id, ret_name) = self.m.temp("plusargs_result", 32, true, false);
         results.push(HostRequestValue {
+            float_precision: None,
             id: ret_id,
             width: 32,
             signed: true,
@@ -1823,6 +1838,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .ok_or_else(|| unsupported("integral plusargs destination"))?;
             let (id, result) = self.host_hidden("plusargs_value", &captured, width, false, true)?;
             results.push(HostRequestValue {
+                float_precision: None,
                 id,
                 width,
                 signed: false,
@@ -1843,6 +1859,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             requires_timed_simulation: false,
             operation: u32::from(value_query),
             args: vec![HostRequestValue {
+                float_precision: None,
                 id: query_id,
                 width,
                 signed: false,
@@ -1938,10 +1955,42 @@ impl<'p, 'a> Ff<'p, 'a> {
     ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
+        let owned_rhs = if self.m.calls(rhs) {
+            self.hoist(rhs)?
+        } else {
+            rhs.clone()
+        };
+        let rhs = &owned_rhs;
         let width = self.lvalue_width(&lhs)?;
         let signed = self.expr_signed(rhs);
         let mut arena = SLTNodeArena::new();
-        let node = self.expr_slt(rhs, Some((width, signed)), &mut arena)?;
+        let from = floating::precision(rhs, self.m.variables, self.m.name_to_id);
+        let target_var = self.m.id(lhs.name()).map(|id| self.m.var(id));
+        let to = target_var.and_then(|v| v.float);
+        let target_signed = target_var.is_some_and(|v| v.signed);
+        let node = self.expr_slt(
+            rhs,
+            if from.is_some() || to.is_some() {
+                None
+            } else {
+                Some((width, signed))
+            },
+            &mut arena,
+        )?;
+        let node = floating::convert(
+            &mut arena,
+            node,
+            from,
+            to,
+            width,
+            if from.is_none() {
+                signed
+            } else {
+                target_signed
+            },
+            true,
+        )
+        .ok_or_else(|| unsupported("real assignment conversion"))?;
         self.write(&lhs, &mut arena, node, signed, rhs)
     }
 
@@ -2661,16 +2710,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             None
         };
-        let (template, values) = system_task_template(&kind, args);
+        let (template, values) = system_task_template(self.m, &kind, args);
         let mut regs = Vec::with_capacity(values.len());
         let mut arg_widths = Vec::with_capacity(values.len());
         let mut arg_signed = Vec::with_capacity(values.len());
         let mut arg_is_string = Vec::with_capacity(values.len());
+        let mut arg_float_precision = Vec::with_capacity(values.len());
         for value in &values {
             match value {
                 sv::ir::SystemTaskArg::Expr(expr) => {
-                    let signed = self.expr_signed(expr);
-                    let reg = self.eval(expr, None)?;
+                    let expr = if self.m.calls(expr) {
+                        self.hoist(expr)?
+                    } else {
+                        expr.clone()
+                    };
+                    let signed = self.expr_signed(&expr);
+                    arg_float_precision.push(floating::precision(
+                        &expr,
+                        self.m.variables,
+                        self.m.name_to_id,
+                    ));
+                    let reg = self.eval(&expr, None)?;
                     arg_widths.push(self.b.register(&reg).width());
                     arg_signed.push(signed);
                     arg_is_string.push(false);
@@ -2687,6 +2747,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     arg_widths.push(width);
                     arg_signed.push(false);
                     arg_is_string.push(true);
+                    arg_float_precision.push(None);
                     regs.push(reg);
                 }
                 sv::ir::SystemTaskArg::Empty => {
@@ -2726,6 +2787,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             arg_widths,
             arg_signed,
             arg_is_string,
+            arg_float_precision,
         });
         self.b.emit(SIRInstruction::RuntimeEvent {
             site_id,
@@ -3257,10 +3319,39 @@ impl<'p, 'a> Ff<'p, 'a> {
                         param.source_name
                     ))
                 })?;
+                let actual = if self.m.calls(&actual) {
+                    self.hoist(&actual)?
+                } else {
+                    actual
+                };
                 let width = self.m.var(id).width;
                 let signed = self.expr_signed(&actual);
+                let from = floating::precision(&actual, self.m.variables, self.m.name_to_id);
+                let to = self.m.var(id).float;
                 let mut arena = SLTNodeArena::new();
-                let node = self.expr_slt(&actual, Some((width, signed)), &mut arena)?;
+                let node = self.expr_slt(
+                    &actual,
+                    if from.is_some() || to.is_some() {
+                        None
+                    } else {
+                        Some((width, signed))
+                    },
+                    &mut arena,
+                )?;
+                let node = floating::convert(
+                    &mut arena,
+                    node,
+                    from,
+                    to,
+                    width,
+                    if from.is_none() {
+                        signed
+                    } else {
+                        self.m.var(id).signed
+                    },
+                    true,
+                )
+                .ok_or_else(|| unsupported("real argument conversion"))?;
                 let mut node =
                     coerce_node_width(&mut arena, node, Some(width), signed).map_err(slt_error)?;
                 if !self.m.var(id).is_4state {

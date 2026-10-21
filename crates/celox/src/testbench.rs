@@ -151,6 +151,7 @@ fn format_assert_arg<B: SimBackend>(
             width,
             signed: arg.signed,
             is_string: arg.is_string,
+            float_precision: arg.float_precision,
         },
         spec,
         field,
@@ -166,7 +167,18 @@ fn render_assert_message<B: SimBackend>(
         None => None,
         Some(AssertMessage::DynamicArgs(args)) => Some(
             args.iter()
-                .map(|arg| format_assert_arg(sim, arg, 'x', FieldSpec::default()))
+                .map(|arg| {
+                    format_assert_arg(
+                        sim,
+                        arg,
+                        if arg.float_precision.is_some() {
+                            'g'
+                        } else {
+                            'x'
+                        },
+                        FieldSpec::default(),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(&b' '),
         ),
@@ -192,7 +204,7 @@ fn render_assert_message<B: SimBackend>(
                         };
                         match spec {
                             'h' | 'H' | 'x' | 'X' | 'd' | 'D' | 'i' | 'I' | 'o' | 'O' | 'b'
-                            | 'B' | 'c' | 'C' | 's' | 'S' => {
+                            | 'B' | 'c' | 'C' | 's' | 'S' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
                                 if let Some(arg) = args.get(arg_idx) {
                                     rendered.extend_from_slice(&format_assert_arg(
                                         sim, arg, spec, field,

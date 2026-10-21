@@ -560,6 +560,10 @@ impl<'a> FfParser<'a> {
                 .iter()
                 .map(|arg| arg.0.comptime().expr_context.signed)
                 .collect(),
+            arg_float_precision: value_args
+                .iter()
+                .map(|arg| crate::float::precision(crate::float::type_of(&arg.0)))
+                .collect(),
             arg_is_string: value_args
                 .iter()
                 .map(|arg| arg.0.comptime().r#type.is_string())

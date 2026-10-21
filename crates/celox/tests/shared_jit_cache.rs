@@ -655,6 +655,25 @@ fn native_program_image_rejects_corrupt_appended_payload() {
     );
 }
 
+/// Version 20 requires the runtime-resolved floating-point helper table prefix.
+#[test]
+fn native_program_image_rejects_v19_before_loading_float_helper_abi() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&19u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(19))
+    ));
+}
+
 /// Version 17 adds synchronous host requests to the runtime metadata.
 #[test]
 fn native_program_image_rejects_v16_before_decoding_host_request_schema() {

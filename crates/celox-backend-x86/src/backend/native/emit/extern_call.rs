@@ -144,10 +144,12 @@ pub(super) fn emit_call_extern(
         rax,
         qword_ptr(rbx + celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i32),
     )?;
-    asm.mov(
-        rax,
-        qword_ptr(rax + i32::try_from(u64::from(func) * 8).expect("extern function index")),
-    )?;
+    let offset = if func == celox_sir::float::FLOAT_HELPER_ID {
+        -8
+    } else {
+        i32::try_from(u64::from(func) * 8).expect("extern function index")
+    };
+    asm.mov(rax, qword_ptr(rax + offset))?;
     asm.call(rax)?;
     asm.add(rsp, frame)?;
     asm.mov(qword_ptr(rbx + (area + CALL_AREA_RESULT)), rax)?;

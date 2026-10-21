@@ -132,10 +132,14 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             port.name().to_string(),
             VariableDimensions {
                 randomizable: !port.r#type().is_enum && port.randomizable,
+                real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
-                is_2state: port.r#type().kind() == TypeKind::Bit,
+                is_2state: matches!(
+                    port.r#type().kind(),
+                    TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal
+                ),
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
             },
@@ -146,10 +150,14 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             signal.name().to_string(),
             VariableDimensions {
                 randomizable: !signal.r#type().is_enum && !signal.is_net() && !signal.is_const,
+                real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
-                is_2state: signal.r#type().kind() == TypeKind::Bit,
+                is_2state: matches!(
+                    signal.r#type().kind(),
+                    TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal
+                ),
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,
             },
@@ -510,6 +518,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                 parameter.name.clone(),
                 VariableDimensions {
                     randomizable: true,
+                    real: false,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),

@@ -2558,6 +2558,24 @@ impl NativeSimulatorHandle {
         self.total_size
     }
 
+    /// Evaluate an internal floating-point operation for generated WASM modules.
+    #[napi]
+    pub fn evaluate_float(&self, lhs: BigInt, rhs: BigInt, code: BigInt) -> BigInt {
+        fn bits(value: BigInt) -> u64 {
+            let word = value.words.first().copied().unwrap_or(0);
+            if value.sign_bit {
+                word.wrapping_neg()
+            } else {
+                word
+            }
+        }
+        napi_bigint(celox::wasm_codegen::evaluate_float(
+            bits(lhs),
+            bits(rhs),
+            bits(code),
+        ))
+    }
+
     /// Returns the WASM module bytes for eval_comb (combinational logic evaluation).
     #[napi]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
@@ -3136,7 +3154,6 @@ unsafe impl Send for NapiInjectedHandler {}
 #[cfg(not(target_arch = "wasm32"))]
 unsafe impl Sync for NapiInjectedHandler {}
 
-#[cfg(not(target_arch = "wasm32"))]
 fn napi_bigint(value: u64) -> BigInt {
     BigInt {
         sign_bit: false,

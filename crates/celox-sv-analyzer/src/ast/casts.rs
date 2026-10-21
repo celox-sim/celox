@@ -26,6 +26,9 @@ pub(super) fn expr_type_from_type(
 
 #[derive(Clone, Copy)]
 pub(super) enum RuntimeCastTarget {
+    Real {
+        short: bool,
+    },
     Zero(ExprType),
     Signing(bool),
     Integral {
@@ -50,6 +53,24 @@ pub(super) fn runtime_cast_target_expr(
 ) -> Converted<Expr> {
     let const_env = &packed_dimensions.const_env;
     let (target, numeric_size, two_state) = match target {
+        RuntimeCastTarget::Real { short } => {
+            let call = |function, value| Expr::Call {
+                callee: Callee::System(function),
+                args: vec![Some(value)],
+                arg_order: Vec::new(),
+            };
+            return Ok(if short {
+                call(
+                    SystemFunction::Bitstoshortreal,
+                    call(SystemFunction::Shortrealtobits, expr),
+                )
+            } else {
+                call(
+                    SystemFunction::Bitstoreal,
+                    call(SystemFunction::Realtobits, expr),
+                )
+            });
+        }
         RuntimeCastTarget::Zero(target) => {
             return Ok(Expr::Resize {
                 expr: Box::new(expr),
@@ -107,6 +128,63 @@ pub(super) fn cast_constant_target(
     target: RuntimeCastTarget,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
+    if let RuntimeCastTarget::Real { short } = target {
+        let kind = if short {
+            TypeKind::Shortreal
+        } else {
+            TypeKind::Real
+        };
+        return expr_to_const(
+            state,
+            parameters::real_literal(&operand, kind, const_env, &HashMap::default())?,
+        );
+    }
+    fn contains_real(expr: &ConstExpr) -> bool {
+        match expr {
+            ConstExpr::Literal(text) => {
+                text.contains(['.', 'e', 'E']) && text.replace('_', "").parse::<f64>().is_ok()
+            }
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => contains_real(expr),
+            ConstExpr::Binary { left, right, .. } => contains_real(left) || contains_real(right),
+            _ => false,
+        }
+    }
+    if contains_real(&operand) {
+        let Expr::Literal(text) =
+            parameters::real_literal(&operand, TypeKind::Real, const_env, &HashMap::default())?
+        else {
+            return None;
+        };
+        let value = text.parse::<f64>().ok()?.round();
+        let (width, signed) = match target {
+            RuntimeCastTarget::Integral {
+                target,
+                numeric_size,
+                ..
+            } => (target.width, numeric_size || target.signed),
+            RuntimeCastTarget::Zero(target) => (target.width, target.signed),
+            RuntimeCastTarget::Signing(_) | RuntimeCastTarget::Real { .. } => return None,
+        };
+        if width == 0 || width > 128 {
+            return None;
+        }
+        let magnitude = (value.abs() % 2.0f64.powi(width as i32)) as u128;
+        let bits = if value.is_sign_negative() {
+            0u128.wrapping_sub(magnitude)
+        } else {
+            magnitude
+        };
+        let bits = if width == 128 {
+            bits
+        } else {
+            bits & ((1u128 << width) - 1)
+        };
+        return Some(ConstExpr::Literal(format_typed_parameter_literal(
+            bits as i128,
+            width,
+            signed,
+        )));
+    }
     let parameter_types = parameter_types_from_const_env(const_env);
     let operand_type = infer_const_expr_type(&operand, &parameter_types)?;
     let literal = if let ConstExpr::Literal(literal) = &operand {
@@ -133,6 +211,7 @@ pub(super) fn cast_constant_target(
         })?
     };
     let (target_type, numeric_size, two_state) = match target {
+        RuntimeCastTarget::Real { .. } => return None,
         RuntimeCastTarget::Signing(signed) => (
             ExprType {
                 width: literal.width,

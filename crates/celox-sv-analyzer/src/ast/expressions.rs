@@ -131,7 +131,13 @@ pub(super) fn numeric_system_function(
                 signed: function == SystemFunction::Signed,
             })
         }
-        SystemFunction::Clog2
+        SystemFunction::Rtoi
+        | SystemFunction::Itor
+        | SystemFunction::Realtobits
+        | SystemFunction::Bitstoreal
+        | SystemFunction::Shortrealtobits
+        | SystemFunction::Bitstoshortreal
+        | SystemFunction::Clog2
         | SystemFunction::Countones
         | SystemFunction::Onehot
         | SystemFunction::Onehot0

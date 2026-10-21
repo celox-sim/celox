@@ -91,6 +91,23 @@ export function isWasmHandle(handle: unknown): boolean {
 // Bridge
 // ---------------------------------------------------------------------------
 
+/** Supply the same FP evaluator as the compiler that generated the module. */
+function wasmImports(raw: RawWasmSimulatorHandle, memory: WebAssembly.Memory) {
+	return {
+		env: {
+			memory,
+			celox_extern_4294967295(lhs: bigint, rhs: bigint, code: bigint): bigint {
+				if (!raw.evaluateFloat) {
+					throw new Error(
+						"This floating-point design requires an addon with evaluateFloat support",
+					);
+				}
+				return raw.evaluateFloat(lhs, rhs, code);
+			},
+		},
+	};
+}
+
 /** Checkpoint of a bridge-driven simulator: a copy of its design state. */
 interface WasmCheckpoint {
 	readonly stateSize: number;
@@ -163,7 +180,7 @@ function wasmEdgeRunner(
 		try {
 			const bytes = new Uint8Array(raw.eventPhaseWasmBytes(name, kind));
 			const module = new WebAssembly.Module(bytes);
-			return run(new WebAssembly.Instance(module, { env: { memory } }));
+			return run(new WebAssembly.Instance(module, wasmImports(raw, memory)));
 		} catch {
 			return undefined;
 		}
@@ -222,9 +239,10 @@ export function createWasmSimulatorBridge(
 	// Compile and instantiate comb WASM module (synchronous)
 	const combBytes = new Uint8Array(raw.combWasmBytes());
 	const combModule = new WebAssembly.Module(combBytes);
-	const combInstance = new WebAssembly.Instance(combModule, {
-		env: { memory },
-	});
+	const combInstance = new WebAssembly.Instance(
+		combModule,
+		wasmImports(raw, memory),
+	);
 
 	// Parse events and instantiate per-event WASM modules
 	const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -234,7 +252,7 @@ export function createWasmSimulatorBridge(
 		const bytes = eventBytes(raw, name);
 		if (!bytes) continue;
 		const mod = new WebAssembly.Module(bytes);
-		const inst = new WebAssembly.Instance(mod, { env: { memory } });
+		const inst = new WebAssembly.Instance(mod, wasmImports(raw, memory));
 		eventInstances.set(id, inst);
 	}
 
@@ -300,9 +318,10 @@ export async function createWasmSimulatorBridgeAsync(
 	// Compile comb module
 	const combBytes = new Uint8Array(raw.combWasmBytes());
 	const combModule = await WebAssembly.compile(combBytes);
-	const combInstance = await WebAssembly.instantiate(combModule, {
-		env: { memory },
-	});
+	const combInstance = await WebAssembly.instantiate(
+		combModule,
+		wasmImports(raw, memory),
+	);
 
 	// Parse events and compile per-event modules
 	const events: Record<string, number> = JSON.parse(raw.eventsJson);
@@ -314,7 +333,7 @@ export async function createWasmSimulatorBridgeAsync(
 			const bytes = eventBytes(raw, name);
 			if (!bytes) return;
 			const mod = await WebAssembly.compile(bytes);
-			const inst = await WebAssembly.instantiate(mod, { env: { memory } });
+			const inst = await WebAssembly.instantiate(mod, wasmImports(raw, memory));
 			eventInstances.set(id, inst);
 		}),
 	);

@@ -7,7 +7,7 @@ SUITE_BIN = ROOT/'../../../target/debug/lydite-celox-suite'
 # Veryl language restrictions, suite features the proof backend lacks, and
 # known Celox frontend failures that Celox's own tests also ignore, and
 # constructs the Celox frontend reports as typed Unsupported errors.
-EXCEPTION_KINDS = {'veryl_language_restriction', 'unsupported_by_proof_backend', 'known_celox_failure', 'celox_unsupported'}
+EXCEPTION_KINDS = {'veryl_language_restriction', 'unsupported_by_proof_backend', 'known_celox_failure', 'celox_unsupported', 'proof_backend_unsupported'}
 class GateError(ValueError): pass
 def require(test,message):
  if not test: raise GateError(message)
@@ -66,7 +66,7 @@ def collect(raw,listed,exceptions,raw_exit):
   root=raw/name.replace('::','__');dirs=sorted(root.glob('design-*'))
   require(len(dirs)==row['designs'],name+': missing/extra designs')
   require(dirs or exception,name+': no design was compiled')
-  designs=[];all_reads=0;unsupported_designs=0
+  designs=[];all_reads=0;unsupported_designs=0;proof_unsupported_designs=0
   for design in dirs:
    record=read(design/'backend-result.json');rejected=record['compilation_rejected']
    diag=diagnostic_identity(record['diagnostic'])
@@ -76,6 +76,12 @@ def collect(raw,listed,exceptions,raw_exit):
     require(not rejected and record['status']=='failed' and record['reads']==0 and diag is not None,name+': malformed frontend Unsupported record')
     require(not (design/'proof').exists(),name+': unsupported design unexpectedly reached proof execution')
     unsupported_designs+=1
+   if record.get('proof_backend_unsupported',False):
+    require(exception is not None and exception['kind']=='proof_backend_unsupported',name+': proof-model refusal needs a reviewed proof_backend_unsupported exception')
+    require(not rejected and record['status']=='failed' and record['reads']==0 and diag is not None and diag['stage']=='proof_backend',name+': malformed proof-model refusal record')
+    require(record['error']=='proof backend unsupported: floating-point SIR operations',name+': unexpected proof-model refusal')
+    require(not (design/'proof').exists(),name+': unsupported design unexpectedly reached proof execution')
+    proof_unsupported_designs+=1
    if exception is None:
     rejection_expected=meta['expectation']=='CompilationError'
     require(record['status']==('failed' if rejection_expected else 'passed'),name+': backend close verdict')
@@ -89,6 +95,8 @@ def collect(raw,listed,exceptions,raw_exit):
     count,controlled=check_queries(name,design,record);queries_total+=count;totals['negative_controls']+=controlled
    all_reads+=record['reads']
    designs.append({key:record[key] for key in ('design_sha256','protocol_sha256','reads','commands','operations')}|{'diagnostic':diag})
+  if exception and exception['kind']=='proof_backend_unsupported':
+   require(proof_unsupported_designs>0,name+': proof_backend_unsupported exception without a typed proof-model refusal')
   if exception and exception['kind']=='celox_unsupported':
    require(unsupported_designs>0,name+': celox_unsupported exception without a frontend Unsupported design')
   disposition=exception['kind'] if exception else 'expected_compilation_rejection' if meta['expectation']=='CompilationError' else 'observation_verified' if all_reads else 'smoke_only'

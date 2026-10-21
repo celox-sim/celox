@@ -1,4 +1,5 @@
 mod bit_count;
+mod floating;
 mod memory;
 mod packed;
 mod selection;

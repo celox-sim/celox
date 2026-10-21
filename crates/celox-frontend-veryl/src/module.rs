@@ -1095,7 +1095,14 @@ impl<'a> ModuleParser<'a> {
                 let ((node, sources), _bounds) = eval_assignment_expression_effectful(
                     self.module,
                     &mut connection_store,
-                    expression,
+                    &crate::float::converted(
+                        expression,
+                        &child_module
+                            .variables
+                            .get(&child_port_id)
+                            .expect("resolved child input")
+                            .r#type,
+                    ),
                     &mut self.arena,
                     expression_width,
                 )?;
@@ -1302,7 +1309,16 @@ impl<'a> ModuleParser<'a> {
                 let geometry = select_geometry(self.module, dst.id, &dst.index, &dst.select)?;
                 let prefix_access =
                     eval_var_select_with_geometry(&dst.index, &dst.select, &geometry)?;
-                let part_width = geometry.selected_width;
+                let conversion = if output.dst.len() == 1 && child_elements == 1 {
+                    crate::float::conversion(&child_port.r#type, &dst.comptime.r#type)
+                } else {
+                    None
+                };
+                let part_width = if conversion.is_some() {
+                    width
+                } else {
+                    geometry.selected_width
+                };
 
                 // Extract this part from rhs_node
                 let slice_end = current_offset.checked_add(part_width).ok_or_else(|| {
@@ -1342,6 +1358,16 @@ impl<'a> ModuleParser<'a> {
                         expr: preview_rhs_node,
                         access: slice_access,
                     })?
+                };
+                let rhs_part = if let Some(op) = conversion {
+                    glue_arena.alloc(SLTNode::Unary(op, rhs_part))?
+                } else {
+                    rhs_part
+                };
+                let preview_rhs_part = if let Some(op) = conversion {
+                    destination_arena.alloc(SLTNode::Unary(op, preview_rhs_part))?
+                } else {
+                    preview_rhs_part
                 };
                 let preview_rhs_sources: HashSet<_> = std::iter::once(VarAtomBase::new(
                     child_port_id,

@@ -140,6 +140,7 @@ impl Value {
                 .and_then(|n| usize::try_from(n).ok())
                 .ok_or_else(|| unsupported("pattern target array size"))?;
             let shape = VariableDimensions {
+                real: false,
                 unpacked: rest.to_vec(),
                 ..shape.clone()
             };
@@ -189,6 +190,7 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    real: false,
                     unpacked: rest.to_vec(),
                     ..shape.clone()
                 };
@@ -227,6 +229,7 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    real: false,
                     packed: rest.to_vec(),
                     signed: shape.signed_element_depth == Some(1),
                     signed_element_depth: shape
@@ -251,6 +254,7 @@ impl BoundPattern {
                 .ok_or_else(|| unsupported("pattern target width"))?;
             shapes = vec![
                 VariableDimensions {
+                    real: false,
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,

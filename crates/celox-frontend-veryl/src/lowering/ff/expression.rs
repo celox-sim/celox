@@ -3752,8 +3752,13 @@ impl<'a> FfParser<'a> {
             .map(|dst| get_access_width(self.module, dst.id, &dst.index, &dst.select))
             .sum::<Result<usize, ParserError>>()?;
 
+        let expression = assign_statement
+            .dst
+            .first()
+            .map(|dst| crate::float::converted(&assign_statement.expr, &dst.comptime.r#type))
+            .unwrap_or(std::borrow::Cow::Borrowed(&assign_statement.expr));
         self.parse_expression(
-            &assign_statement.expr,
+            &expression,
             targets,
             domain,
             convert,
@@ -5222,6 +5227,11 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
+        let context = if crate::float::precision(crate::float::type_of(expr)).is_some() {
+            None
+        } else {
+            context
+        };
         let context_width = context.map(|context| context.width);
         if let Some(bound_reg) = self
             .get_bound_function_expression_value(expr.token_range())
@@ -5240,7 +5250,10 @@ impl<'a> FfParser<'a> {
         // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.
         if !matches!(expr, Expression::Term(_)) {
             let ct = expr.comptime();
-            if ct.is_const {
+            if ct.is_const
+                && !crate::float::needs_numeric_lowering(expr)
+                && crate::float::type_of(expr).kind == ct.r#type.kind
+            {
                 if let Some((celox_value, mask_xz, width, _)) =
                     celox_value_from_comptime_in_context(ct, context_width)
                 {
@@ -5267,18 +5280,106 @@ impl<'a> FfParser<'a> {
                 )?;
             }
             Expression::Binary(left, op, right, _) => {
+                if *op == Op::As {
+                    if let Some(op) = crate::float::conversion(
+                        crate::float::type_of(left),
+                        crate::float::type_of(expr),
+                    ) {
+                        self.parse_expression_in_context(
+                            left, targets, domain, convert, sources, ir_builder, None,
+                        )?;
+                        let source = self.stack.pop_back().unwrap();
+                        let result = ir_builder.alloc_bit(
+                            crate::float::type_of(expr).total_width().unwrap(),
+                            expr.comptime().r#type.signed,
+                        );
+                        ir_builder.emit(SIRInstruction::Unary(result, op, source));
+                        self.stack.push_back(result);
+                        return Ok(());
+                    }
+                } else if crate::float::precision(crate::float::type_of(left)).is_some()
+                    || crate::float::precision(crate::float::type_of(right)).is_some()
+                {
+                    let target = if matches!(
+                        crate::float::precision(crate::float::type_of(left)),
+                        Some(celox_design::FloatPrecision::F64)
+                    ) {
+                        crate::float::type_of(left)
+                    } else if crate::float::precision(crate::float::type_of(right)).is_some() {
+                        crate::float::type_of(right)
+                    } else {
+                        crate::float::type_of(left)
+                    };
+                    let precision = crate::float::precision(target).unwrap();
+                    self.parse_expression_in_context(
+                        &crate::float::converted(left, target),
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                        None,
+                    )?;
+                    let left = self.stack.pop_back().unwrap();
+                    self.parse_expression_in_context(
+                        &crate::float::converted(right, target),
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                        None,
+                    )?;
+                    let right = self.stack.pop_back().unwrap();
+                    let result = ir_builder
+                        .alloc_bit(crate::float::type_of(expr).total_width().unwrap(), false);
+                    ir_builder.emit(SIRInstruction::Binary(
+                        result,
+                        left,
+                        BinaryOp::Float {
+                            op: crate::float::binary(*op).expect("validated float operator"),
+                            precision,
+                        },
+                        right,
+                    ));
+                    self.stack.push_back(result);
+                    return Ok(());
+                }
                 self.parse_binary(
                     op, left, right, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Unary(op, expr, _) => {
+                if let Some(precision) = crate::float::precision(crate::float::type_of(expr)) {
+                    self.parse_expression_in_context(
+                        expr, targets, domain, convert, sources, ir_builder, None,
+                    )?;
+                    if *op == Op::Sub {
+                        let source = self.stack.pop_back().unwrap();
+                        let result = ir_builder
+                            .alloc_bit(crate::float::type_of(expr).total_width().unwrap(), false);
+                        ir_builder.emit(SIRInstruction::Unary(
+                            result,
+                            UnaryOp::Float {
+                                op: celox_design::FloatUnaryOp::Neg,
+                                precision,
+                            },
+                            source,
+                        ));
+                        self.stack.push_back(result);
+                    }
+                    return Ok(());
+                }
                 self.parse_unary(
                     op, expr, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Ternary(cond, then, els, _) => {
+                let target_type = crate::float::type_of(expr);
+                let then = crate::float::converted(then, target_type);
+                let els = crate::float::converted(els, target_type);
                 self.parse_ternary(
-                    cond, then, els, targets, domain, convert, sources, ir_builder, context,
+                    cond, &then, &els, targets, domain, convert, sources, ir_builder, context,
                 )?;
             }
             Expression::Concatenation(exprs, _) => {

@@ -3347,6 +3347,7 @@ fn proof_node_signed(
                 Rule::Known(*signed)
             }
             SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::Float { .. } => Rule::Known(false),
                 BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::EqCase
@@ -3374,6 +3375,9 @@ fn proof_node_signed(
                 | BinaryOp::Or
                 | BinaryOp::Xor => Rule::Both(*lhs, *rhs),
             },
+            SLTNode::Unary(UnaryOp::Float { op, .. }, _) => {
+                Rule::Known(matches!(op, celox_design::FloatUnaryOp::ToSigned { .. }))
+            }
             SLTNode::Unary(
                 UnaryOp::LogicNot
                 | UnaryOp::And
@@ -3516,6 +3520,7 @@ fn specialized_binary_result_signed(
     rhs: &SpecializedConstant,
 ) -> bool {
     match op {
+        BinaryOp::Float { .. } => false,
         BinaryOp::Eq
         | BinaryOp::Ne
         | BinaryOp::EqCase
@@ -3547,6 +3552,7 @@ fn specialized_binary_result_signed(
 
 fn specialized_unary_result_signed(op: UnaryOp, inner: &SpecializedConstant) -> bool {
     match op {
+        UnaryOp::Float { op, .. } => matches!(op, celox_design::FloatUnaryOp::ToSigned { .. }),
         UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => inner.signed,
         UnaryOp::LogicNot
         | UnaryOp::And
@@ -3670,6 +3676,12 @@ fn specialize_binary_constant(
     let comparison_lhs = extend_comparison(lhs)?;
     let comparison_rhs = extend_comparison(rhs)?;
     let value = match op {
+        BinaryOp::Float { op, precision } => BigUint::from(celox_design::eval_float_binary(
+            op,
+            precision,
+            lhs.value.to_u64()?,
+            rhs.value.to_u64()?,
+        )),
         BinaryOp::Add => (&lhs.value + &rhs.value) & &mask,
         BinaryOp::Sub => {
             let modulus = BigUint::from(1u8) << result_width;
@@ -3825,6 +3837,11 @@ fn specialize_unary_constant(
         return None;
     }
     let value = match op {
+        UnaryOp::Float { op, precision } => BigUint::from(celox_design::eval_float_unary(
+            op,
+            precision,
+            inner.value.to_u64()?,
+        )),
         UnaryOp::Ident | UnaryOp::ToTwoState => inner.value.clone(),
         UnaryOp::Minus => {
             let modulus = BigUint::from(1u8) << result_width;

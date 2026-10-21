@@ -36,6 +36,24 @@ impl<B: SimBackend> Backend for CeloxBackend<B> {
         self.0.eval_comb().map_err(Into::into)
     }
 
+    fn take_output(&mut self) -> Result<Vec<u8>> {
+        let mut output = Vec::new();
+        for event in self.0.drain_runtime_events() {
+            match event {
+                celox::RuntimeEvent::Display { message } => {
+                    output.extend_from_slice(&message);
+                    output.push(b'\n');
+                }
+                celox::RuntimeEvent::Write { message } => output.extend_from_slice(&message),
+                celox::RuntimeEvent::Missed { count } => {
+                    return Err(format!("{count} runtime events were missed").into());
+                }
+                _ => (),
+            }
+        }
+        Ok(output)
+    }
+
     fn run_testbench(&mut self) -> Result<()> {
         let program = celox::testbench::compile_initial_testbench(&self.0)
             .ok_or("testbench program was not compiled")?;

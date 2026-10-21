@@ -69,10 +69,14 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
         randomizable: !r#type.is_enum,
+        real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
-        is_2state: r#type.kind() == TypeKind::Bit,
+        is_2state: matches!(
+            r#type.kind(),
+            TypeKind::Bit | TypeKind::Real | TypeKind::Shortreal
+        ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
     }

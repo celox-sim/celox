@@ -135,13 +135,26 @@ pub(super) fn assignment_op_expr(
         "^" => BinaryOp::BitXor,
         _ => return Err(operator()),
     };
-    Ok(guard_zero_divisions(
-        state,
-        Expr::Binary {
-            left: Box::new(expr_from_lvalue(state, lhs, packed_dimensions)),
+    let left = expr_from_lvalue(state, lhs, packed_dimensions);
+    if (expression_binding::real_value(&left, packed_dimensions)
+        || expression_binding::real_value(&rhs, packed_dimensions))
+        && !matches!(
             op,
-            right: Box::new(rhs),
-        },
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+        )
+    {
+        return Err(unsupported("assignment operator on a real operand"));
+    }
+    Ok(expression_binding::remove_real_division_guards(
+        guard_zero_divisions(
+            state,
+            Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(rhs),
+            },
+        ),
+        packed_dimensions,
     ))
 }
 

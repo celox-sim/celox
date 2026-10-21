@@ -1836,7 +1836,7 @@ mod tests {
             module Top();
                 if (1) begin : g
                     localparam A=B, B=A;
-                    localparam real R=1.0;
+                    localparam chandle R=null;
                 end
             endmodule
         "#,

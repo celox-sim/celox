@@ -6,9 +6,20 @@ impl Ff<'_, '_> {
         &mut self,
         arg: &sv::ir::SystemTaskArg<sv::ir::Expr>,
     ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {
-        let (reg, signed, is_string) = match arg {
+        let (reg, signed, is_string, float_precision) = match arg {
             sv::ir::SystemTaskArg::Expr(expr) => {
-                (self.eval(expr, None)?, self.expr_signed(expr), false)
+                let expr = if self.m.calls(expr) {
+                    self.hoist(expr)?
+                } else {
+                    expr.clone()
+                };
+                let precision = floating::precision(&expr, self.m.variables, self.m.name_to_id);
+                (
+                    self.eval(&expr, None)?,
+                    self.expr_signed(&expr),
+                    false,
+                    precision,
+                )
             }
             sv::ir::SystemTaskArg::Str(text) => {
                 let bytes = unescape(text).into_bytes();
@@ -17,7 +28,7 @@ impl Ff<'_, '_> {
                     reg,
                     SIRValue::new(BigUint::from_bytes_be(&bytes)),
                 ));
-                (reg, false, true)
+                (reg, false, true, None)
             }
             _ => return Err(unsupported("empty file I/O argument")),
         };
@@ -30,6 +41,7 @@ impl Ff<'_, '_> {
             width,
             signed,
             is_string,
+            float_precision,
         })
     }
 
@@ -81,6 +93,7 @@ impl Ff<'_, '_> {
                 width: 32,
                 signed: false,
                 is_string: false,
+                float_precision: None,
             }],
             Vec::new(),
         )?;
@@ -104,7 +117,7 @@ impl Ff<'_, '_> {
             SystemTask::Fdisplay(radix) | SystemTask::Fwrite(radix) => {
                 let descriptor = self.file_io_arg(&args[0])?;
                 let kind = SystemTaskKind::Print(RuntimeEventKind::Write, radix.letter());
-                let (template, args) = system_task_template(&kind, &args[1..]);
+                let (template, args) = system_task_template(self.m, &kind, &args[1..]);
                 let mut values = vec![descriptor];
                 for arg in &args {
                     values.push(self.file_io_arg(arg)?);

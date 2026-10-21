@@ -95,6 +95,7 @@ impl SLTToSIRLowerer {
                     let lhs = child(*lhs);
                     let rhs = child(*rhs);
                     match op {
+                        BinaryOp::Float { .. } => ZeroControllerFacts::default(),
                         BinaryOp::And | BinaryOp::LogicAnd | BinaryOp::Mul => {
                             Self::zero_from_either(&lhs, &rhs)
                         }
@@ -125,6 +126,7 @@ impl SLTToSIRLowerer {
                     }
                 }
                 SLTNode::Unary(op, inner) => match op {
+                    UnaryOp::Float { .. } => ZeroControllerFacts::default(),
                     UnaryOp::Ident
                     | UnaryOp::ToTwoState
                     | UnaryOp::Minus
