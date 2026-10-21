@@ -119,7 +119,11 @@ pub(super) fn apply_parameter_overrides(
     }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
-            parameter.value = Some(value.clone());
+            parameter.value = normalize_unbased_unsized_parameter_value(
+                Some(value.clone()),
+                parameter.declared_width(),
+                parameter.declared_signed(),
+            );
         }
     }
     Ok(())
@@ -433,7 +437,6 @@ pub(super) fn parameters_from_native_with_environment(
         } else {
             None
         };
-        value = normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
         // Apply overrides as each declaration is collected so later
         // parameter initializers (including casts) are evaluated from the
         // specialized values rather than defaults that will be replaced
@@ -441,6 +444,7 @@ pub(super) fn parameters_from_native_with_environment(
         if !is_local && let Some(override_value) = parameter_overrides.get(&name) {
             value = Some(override_value.clone());
         }
+        value = normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
         if value
             .as_ref()
             .is_some_and(|expression| is_unbounded(expression, const_env))
