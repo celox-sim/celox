@@ -8,6 +8,9 @@ impl<B: SimBackend> Simulator<B> {
         site: &HostRequestSite<SignalRef>,
         timestamp: u64,
     ) -> Result<(), Halt> {
+        if site.operation == 13 {
+            return self.run_fread_request(site);
+        }
         let error = |message: String| {
             Halt::Error(SimulatorErrorCode::Runtime {
                 message,
@@ -124,6 +127,69 @@ impl<B: SimBackend> Simulator<B> {
                     self.queue_host_runtime_event(format, args);
                 }
                 write_result.map_err(|err| error(format!("file output: {err}")))?;
+            }
+            6 => {
+                let descriptor = if site.args.is_empty() {
+                    None
+                } else {
+                    Some(number(0)?)
+                };
+                self.file_io
+                    .flush(descriptor)
+                    .map_err(|err| error(format!("$fflush: {err}")))?;
+            }
+            7..=12 => {
+                let descriptor = number(usize::from(site.operation == 11))?;
+                let code: i32 = match site.operation {
+                    7 => self
+                        .file_io
+                        .tell(descriptor)
+                        .ok()
+                        .and_then(|position| i32::try_from(position).ok())
+                        .unwrap_or(-1),
+                    8 => {
+                        let offset = number(1)? as i32;
+                        let operation = number(2)? as i32;
+                        if self
+                            .file_io
+                            .seek(descriptor, i64::from(offset), operation)
+                            .is_ok()
+                        {
+                            0
+                        } else {
+                            -1
+                        }
+                    }
+                    9 => {
+                        if self.file_io.rewind(descriptor).is_ok() {
+                            0
+                        } else {
+                            -1
+                        }
+                    }
+                    10 => self
+                        .file_io
+                        .read_byte(descriptor)
+                        .ok()
+                        .flatten()
+                        .map_or(-1, i32::from),
+                    11 => {
+                        let character = number(0)?;
+                        if character != u32::MAX
+                            && self
+                                .file_io
+                                .unread_byte(descriptor, character as u8)
+                                .is_ok()
+                        {
+                            0
+                        } else {
+                            -1
+                        }
+                    }
+                    12 => i32::from(self.file_io.eof(descriptor).unwrap_or(false)),
+                    _ => unreachable!(),
+                };
+                self.backend.set(site.results[0].id, code);
             }
             4 | 5 => {
                 let path = string(0)?;

@@ -10,6 +10,7 @@
 //! four-state semantics identical to the combinational lowering.
 
 mod file_io;
+mod fread;
 
 use super::procedural::*;
 use super::*;
@@ -835,6 +836,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
+                args,
+                ..
+            } => self.fread(args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Ftell
+                        | sv::ir::SystemFunction::Fseek
+                        | sv::ir::SystemFunction::Rewind
+                        | sv::ir::SystemFunction::Fgetc
+                        | sv::ir::SystemFunction::Ungetc
+                        | sv::ir::SystemFunction::Feof),
+                    ),
+                args,
+                ..
+            } => self.file_function(*function, args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
@@ -2631,6 +2650,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         if matches!(
             task,
             sv::ir::SystemTask::Fclose
+                | sv::ir::SystemTask::Fflush
                 | sv::ir::SystemTask::Fdisplay(_)
                 | sv::ir::SystemTask::Fwrite(_)
                 | sv::ir::SystemTask::Writemem(_)

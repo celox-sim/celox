@@ -126,7 +126,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$realtime` in an expression or `$fgetc`, is
+  `$realtime` in an expression or `$fgets`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -369,6 +369,33 @@ are absolute array indices. An address directive outside the requested range
 is an error. Without directives, a word-count mismatch is a compilation
 warning (`Simulator::warnings()`): excess words are ignored, and missing words
 leave memory unchanged.
+
+### Binary input
+
+`$fread` reads big-endian bytes into a packed integral destination or a
+one-dimensional static integral memory (IEEE 1800-2023 21.3.4.4). Memory reads
+start at the lowest index by default and proceed through increasing indices;
+optional start and count operands select the range. Packed destinations ignore
+those operands. Partial reads preserve bits that received no input, including
+X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
+
+### Byte input and file positioning
+
+`$fgetc(fd)` returns the next byte as an integer from 0 to 255, or -1 on EOF
+or error. `$ungetc(character, fd)` pushes back one byte without modifying the
+file and returns zero, or -1 on error. One byte of pushback is supported.
+`$feof(fd)` tests whether a previous read detected EOF; reading the final byte
+alone does not set it. Successful pushback and repositioning clear EOF.
+
+`$ftell(fd)` returns the logical byte position, accounting for pushback, or -1
+on error. `$fseek(fd, offset, operation)` accepts signed 32-bit offsets relative
+to the start (0), current position (1), or end (2). `$rewind(fd)` seeks to the
+start. Both positioning functions return zero on success or -1 on error;
+successful seeks discard pushback. Position results beyond signed 32-bit range
+return -1. `$fflush(fd_or_mcd)` flushes selected output channels; `$fflush()`
+flushes all open files. Invalid flush descriptors produce a runtime error.
+These operations run in timed `Simulation` processes and use file descriptors
+for input and positioning; multichannel descriptors support output and flush.
 
 ### Runtime file output
 
