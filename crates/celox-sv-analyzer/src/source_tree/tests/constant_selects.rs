@@ -82,9 +82,20 @@ fn native_lightweight_value_indices_drive_instance_overrides() {
     let value = module.instances()[0].parameter_overrides()[0]
         .value()
         .unwrap();
-    let ConstExpr::Select { bit, .. } = value else {
-        panic!("{value:?}")
+    let bit = match value {
+        ConstExpr::Select { bit, .. } => bit,
+        ConstExpr::SelectRange {
+            msb,
+            lsb,
+            signed: false,
+            ..
+        } if msb == lsb => lsb,
+        _ => panic!("{value:?}"),
     };
+    assert_eq!(
+        crate::typecheck::eval_const_expr(&value.clone().into(), &HashMap::default()),
+        Some(1)
+    );
     assert!(matches!(
         bit.as_ref(),
         ConstExpr::Binary {

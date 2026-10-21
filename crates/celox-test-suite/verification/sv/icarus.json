@@ -1,5 +1,6 @@
 {
   "case_files": [
+    "icarus/aggregate_regressions.json",
     "icarus/always_comb.json",
     "icarus/generate.json",
     "icarus/hierarchy.json",

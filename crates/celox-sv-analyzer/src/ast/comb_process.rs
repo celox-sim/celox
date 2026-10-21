@@ -61,31 +61,19 @@ fn comb_processes_from_item(
 ) -> Result<(), AnalyzerError> {
     match &syntax_tree.declarations().body_item(item.id).kind {
         celox_sv_syntax::BodyItemKind::Assign(id) => {
-            processes.extend(
-                continuous_assignments(
-                    syntax_tree.declarations().assign_statement(*id),
-                    syntax_tree,
-                    packed_dimensions,
-                )?
-                .into_iter()
-                .map(|assignment| {
-                    substitute_assignment_constants_with_parameter_literals(
-                        &syntax_tree.state,
-                        assignment,
-                        const_env,
-                        parameter_literals,
-                    )
-                })
-                .map(|assignment| {
-                    CombProcess::new(
-                        CombProcessKind::ContinuousAssign,
-                        condition
-                            .clone()
-                            .map(|condition| substitute_const_expr_constants(condition, const_env)),
-                        vec![assignment],
-                    )
-                }),
-            );
+            for mut process in continuous_assignments(
+                syntax_tree.declarations().assign_statement(*id),
+                syntax_tree,
+                packed_dimensions,
+            )? {
+                process.condition = condition.clone();
+                processes.push(substitute_process_constants_with_parameter_literals(
+                    &syntax_tree.state,
+                    process,
+                    const_env,
+                    parameter_literals,
+                ));
+            }
         }
         celox_sv_syntax::BodyItemKind::Procedure(id) => {
             let local_packed_dimensions =
@@ -190,7 +178,7 @@ fn continuous_assignments(
     native: &celox_sv_syntax::AssignSyntax,
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
-) -> Converted<Vec<Assignment>> {
+) -> Converted<Vec<CombProcess>> {
     if native.assignments.is_empty() {
         return Err(AnalyzerError::Parse(
             "native continuous assignment has no operands".into(),
@@ -216,6 +204,39 @@ fn continuous_assignments(
         .assignments
         .iter()
         .map(|assignment| {
+            let native_tree = tree.declarations();
+            if matches!(
+                native_tree.expression(assignment.left).kind,
+                celox_sv_syntax::ExprKind::Concatenation(_)
+            ) {
+                let mut pending = vec![assignment.left];
+                let mut parts = Vec::new();
+                while let Some(id) = pending.pop() {
+                    if let celox_sv_syntax::ExprKind::Concatenation(items) =
+                        &native_tree.expression(id).kind
+                    {
+                        pending.extend(items.iter().rev().copied());
+                    } else {
+                        parts.push(expression_binding::net_lvalue(
+                            id,
+                            native_tree,
+                            tree,
+                            dimensions,
+                        )?);
+                    }
+                }
+                let rhs =
+                    expression_binding::value(assignment.right, native_tree, tree, dimensions)?;
+                return Ok(CombProcess::procedural(
+                    CombProcessKind::ContinuousAssign,
+                    None,
+                    vec![Stmt::AssignConcat {
+                        parts,
+                        rhs,
+                        nonblocking: false,
+                    }],
+                ));
+            }
             if let Some(shape) = array_compatibility::native_unpacked_shape(
                 assignment.left,
                 tree.declarations(),
@@ -254,7 +275,11 @@ fn continuous_assignments(
             } else {
                 rhs
             };
-            Ok(Assignment::new(lhs, rhs))
+            Ok(CombProcess::new(
+                CombProcessKind::ContinuousAssign,
+                None,
+                vec![Assignment::new(lhs, rhs)],
+            ))
         })
         .collect()
 }

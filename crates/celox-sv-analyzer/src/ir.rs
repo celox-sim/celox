@@ -958,12 +958,18 @@ pub enum CombProcessKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    always_ff: bool,
     creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
 }
 
 impl FfProcess {
+    /// Whether the source used the restricted always_ff procedure.
+    pub fn is_always_ff(&self) -> bool {
+        self.always_ff
+    }
+
     /// Position among elaborated module items, shared across process kinds.
     pub fn creation_order(&self) -> usize {
         self.creation_order
@@ -971,6 +977,7 @@ impl FfProcess {
 
     pub(crate) fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            always_ff: false,
             creation_order: 0,
             events,
             body,
@@ -1370,6 +1377,7 @@ impl From<ast::FfProcess> for FfProcess {
                 .map(|stmt| stmt.map(&mut Into::into, &mut Into::into))
                 .collect(),
         );
+        result.always_ff = process.is_always_ff();
         result.creation_order = process.creation_order();
         result
     }

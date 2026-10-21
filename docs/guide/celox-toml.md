@@ -154,6 +154,13 @@ explicit settings remain effective, and the global precision includes default
 scopes. Syntax errors, unsupported constructs and invalid precision declarations
 remain errors.
 
+`multiple_always_ff_drivers` defaults to `error` for shared memories written by
+an `always_ff` and another edge process (IEEE 1800-2023 §9.2.2.4). With `warn`
+or `allow`, Celox stages their nonblocking writes in sparse next-state storage
+and commits dirty chunks. Ordinary `always` procedures can share a memory
+without this diagnostic. Simultaneous
+writes to the same bits from different processes have no portable ordering.
+
 Project simulator constructors load this table alongside `Veryl.toml`. Native
 compilation also supports standalone SystemVerilog projects:
 
