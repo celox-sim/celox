@@ -64,6 +64,8 @@ pub enum SystemFunction {
     ValuePlusargs,
     /// `$urandom` (18.13.1).
     Urandom,
+    /// Scope randomization of packed variables, without constraints (18.12).
+    ScopeRandomize,
     /// `$urandom_range` (18.13.2).
     UrandomRange,
     /// `$fopen` (21.3.1).
@@ -86,7 +88,7 @@ impl SystemFunction {
         matches!(self, Self::Fopen | Self::TestPlusargs | Self::ValuePlusargs)
     }
 
-    /// The name, with its leading `$`.
+    /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
             Self::Time => "$time",
@@ -116,6 +118,7 @@ impl SystemFunction {
             Self::TestPlusargs => "$test$plusargs",
             Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
+            Self::ScopeRandomize => "std::randomize",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
         }
@@ -154,6 +157,7 @@ impl SystemFunction {
                 | Self::Urandom
                 | Self::Fopen
                 | Self::UrandomRange
+                | Self::ScopeRandomize
         )
     }
 
@@ -167,7 +171,8 @@ impl SystemFunction {
     /// Whether the call writes argument `position` back, as `$random(seed)`
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
-        (matches!(self, Self::Random | Self::DistUniform) && position == 0)
+        self == Self::ScopeRandomize
+            || (matches!(self, Self::Random | Self::DistUniform) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
     }
 
@@ -181,7 +186,8 @@ impl SystemFunction {
             | Self::Timeprecision
             | Self::Clog2
             | Self::Countbits
-            | Self::Countones => Some((32, true)),
+            | Self::Countones
+            | Self::ScopeRandomize => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
             Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
                 Some((32, true))

@@ -367,6 +367,62 @@ pub(in crate::ast) fn bind_value(
                         expression,
                         arguments: args,
                     } => {
+                        if matches!(
+                            call_name(&tree.state, *expression, native).as_deref(),
+                            Some("randomize" | "std::randomize")
+                        ) {
+                            if args
+                                .iter()
+                                .any(|arg| arg.name.is_some() || arg.value.is_none())
+                            {
+                                return Err(unsupported(
+                                    "scope randomize requires positional variable identifiers",
+                                ));
+                            }
+                            let actuals =
+                                args.iter().filter_map(|arg| arg.value).collect::<Vec<_>>();
+                            for &actual in &actuals {
+                                let ExprKind::Name(name) = &native.expression(actual).kind else {
+                                    return Err(unsupported(
+                                        "scope randomize requires whole packed variable identifiers",
+                                    ));
+                                };
+                                let name = instances::normalize_identifier(&name.spelling);
+                                let shape = dimensions
+                                    .get(&name)
+                                    .ok_or_else(|| unsupported("scope randomize variable"))?;
+                                if !shape.unpacked.is_empty() || !shape.randomizable {
+                                    return Err(unsupported(
+                                        "scope randomize requires a packed non-enum variable",
+                                    ));
+                                }
+                                if !expressions::query_actual_is_writable(
+                                    &Expr::Ident(name),
+                                    dimensions,
+                                ) {
+                                    return Err(unsupported(
+                                        "scope randomize argument is not writable",
+                                    ));
+                                }
+                            }
+                            jobs.push(Job::Finish(
+                                Finish::Call {
+                                    name: "std::randomize".into(),
+                                    args: actuals.iter().copied().map(Some).collect(),
+                                    order: Vec::new(),
+                                    system: Some(SystemFunction::ScopeRandomize),
+                                },
+                                actuals.len(),
+                                scope.clone(),
+                            ));
+                            jobs.extend(
+                                actuals
+                                    .into_iter()
+                                    .rev()
+                                    .map(|id| Job::Enter(id, None, scope.clone())),
+                            );
+                            continue;
+                        }
                         let name = bound_callable_name(tree, *expression, native, dimensions)?
                             .ok_or_else(|| unsupported("method or randomize call"))?;
                         if name.starts_with('$') && !name.contains("::") {
@@ -727,6 +783,7 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::ValuePlusargs
                                     | SystemFunction::Fopen
                                     | SystemFunction::UrandomRange
+                                    | SystemFunction::ScopeRandomize
                             ) {
                                 for (position, arg) in operands.iter().enumerate() {
                                     if expr_static_width(&tree.state, arg, dimensions).is_none()

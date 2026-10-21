@@ -77,6 +77,7 @@ pub(in crate::ast) fn bind_in(
                             jobs.push(Job::Enter(*base));
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
+                            ty.is_enum = true;
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
                         }
@@ -147,6 +148,7 @@ pub(in crate::ast) fn bind_in(
                 let mut outer = ranges;
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
+                ty.is_enum = true;
                 values.push(ty);
             }
             Job::Aggregate {

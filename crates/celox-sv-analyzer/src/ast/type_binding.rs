@@ -82,7 +82,9 @@ pub(super) fn local_signals(
             base.clone(),
             constant_binding::bind_unpacked_ranges(&variable.dimensions, tree, &context)?,
         );
-        signals.push(Signal::new(name, ty));
+        let mut signal = Signal::new(name, ty);
+        signal.is_const = declaration.constant;
+        signals.push(signal);
     }
     Ok(signals)
 }

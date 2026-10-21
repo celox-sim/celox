@@ -490,6 +490,7 @@ fn pattern_items(
             0,
             count as i128 - 1,
             VariableDimensions {
+                randomizable: true,
                 packed: Vec::new(),
                 unpacked: Vec::new(),
                 members: Vec::new(),
