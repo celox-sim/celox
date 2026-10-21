@@ -1,0 +1,10 @@
+Revision history for #1664:
+
+rev 4 (content) 2026-10-21 02:59 UTC
+rev 3 (content) 2026-10-21 01:55 UTC
+rev 2 (content) 2026-10-21 01:04 UTC — Update retained sv-tests expectations for all six Annex N distributions in both state modes, using the official CI report.
+rev 1 (initial) 2026-10-21 01:04 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1664,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7558620ba009449d9c3e68bec995e51c92822ad9","timestamp_iso":"2026-10-21T01:04:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7558620ba009449d9c3e68bec995e51c92822ad9","new_sha":"dcde6bab9a9fd191db69a7f31ec7b030edde6450","timestamp_iso":"2026-10-21T01:04:15Z","reason":"Update retained sv-tests expectations for all six Annex N distributions in both state modes, using the official CI report.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7558620ba009449d9c3e68bec995e51c92822ad9...dcde6bab9a9fd191db69a7f31ec7b030edde6450"},{"number":3,"change_type":"content","old_sha":"dcde6bab9a9fd191db69a7f31ec7b030edde6450","new_sha":"abf5463d04459f199be1890531f132cf97b39fc2","timestamp_iso":"2026-10-21T01:55:00Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/dcde6bab9a9fd191db69a7f31ec7b030edde6450...abf5463d04459f199be1890531f132cf97b39fc2"},{"number":4,"change_type":"content","old_sha":"abf5463d04459f199be1890531f132cf97b39fc2","new_sha":"5bdfc3ae9afb716836451287b589b971ece5fca7","timestamp_iso":"2026-10-21T02:59:12Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/abf5463d04459f199be1890531f132cf97b39fc2...5bdfc3ae9afb716836451287b589b971ece5fca7"}]} -->
+
+Rebase dependent distribution stage onto latest master and preserve native format compatibility.
