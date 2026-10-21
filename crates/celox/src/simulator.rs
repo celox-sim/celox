@@ -38,6 +38,7 @@ mod host {
     mod declaration;
     mod file_io;
     mod fread;
+    mod scan;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

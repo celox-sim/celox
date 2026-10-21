@@ -862,6 +862,8 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::Fgetc
                                     | SystemFunction::Ungetc
                                     | SystemFunction::Feof
+                                    | SystemFunction::Sscanf
+                                    | SystemFunction::Fscanf
                                     | SystemFunction::UrandomRange
                                     | SystemFunction::ScopeRandomize
                             ) {

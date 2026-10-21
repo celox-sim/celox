@@ -1736,6 +1736,16 @@ mod host {
         }
         if program
             .runtime_schema
+            .host_request_sites
+            .iter()
+            .any(|site| site.kind == celox_design::HostRequestKind::Scan)
+        {
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::Runtime {
+                message:"formatted input requires Simulation; Simulator does not execute initial process kernels".into(),signals:Vec::new(),
+            }));
+        }
+        if program
+            .runtime_schema
             .processes
             .iter()
             .any(|slots| slots.requires_timed_simulation)
