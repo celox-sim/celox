@@ -149,7 +149,15 @@ pub(super) fn parameters_from_native(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
-    let mut environment = ParameterEnvironment::new(&syntax_tree.state, parameters, base_const_env);
+    let mut environment = ParameterEnvironment::new(
+        &syntax_tree.state,
+        parameters,
+        base_const_env,
+        &authored
+            .iter()
+            .map(|parameter| instances::normalize_identifier(&parameter.name.spelling))
+            .collect::<Vec<_>>(),
+    );
     parameters_from_native_with_environment(
         authored,
         syntax_tree,
@@ -168,6 +176,9 @@ pub(super) fn parameters_from_native(
 pub(super) struct ParameterEnvironment<'a> {
     base: &'a HashMap<String, i128>,
     values: HashMap<String, i128>,
+    // Evaluation sees inherited constants except declarations of this scope.
+    // Keep it incremental, while `values` remains the local prefix projection.
+    bindings: HashMap<String, i128>,
     types: HashMap<String, ExprType>,
     constants: HashMap<String, i128>,
     // Only a nonnumeric prefix binding with an inherited numeric value makes
@@ -184,12 +195,42 @@ impl<'a> ParameterEnvironment<'a> {
         state: &AnalysisState,
         parameters: &[Parameter],
         base: &'a HashMap<String, i128>,
+        shadowed: &[String],
     ) -> Self {
+        let shadowed: HashSet<&str> = shadowed
+            .iter()
+            .map(String::as_str)
+            .chain(parameters.iter().map(Parameter::name))
+            .collect();
+        let mut bindings = base.clone();
+        for name in &shadowed {
+            for key in binding_keys(name, &bindings, 0) {
+                bindings.remove(&key);
+            }
+        }
         let mut values = HashMap::default();
-        let mut types = HashMap::default();
-        let mut literals = HashMap::default();
+        let mut types = parameter_types_from_const_env(&bindings);
+        let mut literals = scope::imported(state)
+            .parameter_values
+            .iter()
+            .filter(|(name, value)| {
+                let mut literal = *value;
+                while let Expr::Resize { expr, .. } = literal {
+                    literal = expr;
+                }
+                matches!(literal, Expr::Literal(_))
+                    && !bindings.contains_key(*name)
+                    && !shadowed.contains(name.as_str())
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
         for parameter in parameters {
-            bind_parameter(state, &mut values, &mut types, &mut literals, parameter);
+            bind_parameter(state, &mut bindings, &mut types, &mut literals, parameter);
+            for key in binding_keys(parameter.name(), &bindings, parameter.packed_ranges.len()) {
+                if let Some(value) = bindings.get(&key) {
+                    values.insert(key, *value);
+                }
+            }
         }
         let mut constants = base.clone();
         let has_inherited_literal_shadow = parameters.iter().any(|parameter| {
@@ -204,6 +245,7 @@ impl<'a> ParameterEnvironment<'a> {
         Self {
             base,
             values,
+            bindings,
             types,
             constants,
             has_inherited_literal_shadow,
@@ -214,11 +256,27 @@ impl<'a> ParameterEnvironment<'a> {
     fn append(&mut self, state: &AnalysisState, parameter: &Parameter) {
         let bound = bind_parameter(
             state,
-            &mut self.values,
+            &mut self.bindings,
             &mut self.types,
             &mut self.literals,
             parameter,
         );
+        for key in binding_keys(
+            parameter.name(),
+            &self.values,
+            parameter.packed_ranges.len(),
+        ) {
+            self.values.remove(&key);
+        }
+        for key in binding_keys(
+            parameter.name(),
+            &self.bindings,
+            parameter.packed_ranges.len(),
+        ) {
+            if let Some(value) = self.bindings.get(&key) {
+                self.values.insert(key, *value);
+            }
+        }
         for key in binding_keys(
             parameter.name(),
             &self.constants,
