@@ -1,0 +1,134 @@
+(group floating_point (category operators))
+
+(case arithmetic_and_rounding
+  (source "float.veryl" #"
+module Top(a: input i32, b: input i32, sum: output i32, diff: output i32,
+           product: output i32, quotient: output i32, negative: output i32,
+           lt: output logic, eq: output logic) {
+    var x: f64; var y: f64;
+    assign x = a as f64;
+    assign y = b as f64;
+    assign sum = (x + y) as i32;
+    assign diff = (x - y) as i32;
+    assign product = (x * y) as i32;
+    assign quotient = (x / y) as i32;
+    assign negative = (-x) as i32;
+    assign lt = x <: y;
+    assign eq = x == y;
+}
+"#)
+  (top Top)
+  (modify (set a 7) (set b 2))
+  (assert_eq sum 9) (assert_eq diff 5) (assert_eq product 14)
+  (assert_eq quotient 4) (assert_eq negative 0xfffffff9)
+  (assert_eq lt 0) (assert_eq eq 0)
+  (modify (set a 0xfffffff9) (set b 2))
+  (assert_eq sum 0xfffffffb) (assert_eq diff 0xfffffff7)
+  (assert_eq product 0xfffffff2) (assert_eq quotient 0xfffffffc)
+  (assert_eq negative 7) (assert_eq lt 1)
+  (modify (set a 2) (set b 2))
+  (assert_eq eq 1))
+
+(case f32_precision_and_conversion
+  (source "float.veryl" #"
+module Top(a: input u32, narrow: output u32, wide: output u32, promoted: output u32) {
+    var x: f32; var y: f64;
+    assign x = a as f32;
+    assign y = a as f64;
+    assign narrow = (x + (1 as f32)) as u32;
+    assign wide = (y + 1.0) as u32;
+    assign promoted = ((x as f64) + 1.0) as u32;
+}
+"#)
+  (top Top)
+  (modify (set a 16777216))
+  (assert_eq narrow 16777216)
+  (assert_eq wide 16777217)
+  (assert_eq promoted 16777217)
+  (modify (set a 7))
+  (assert_eq narrow 8) (assert_eq wide 8) (assert_eq promoted 8))
+
+(case sequential_float
+  (source "float.veryl" #"
+module Top(clk: input clock, a: input i32, result: output i32, less: output logic) {
+    var q: f64;
+    always_ff (clk) {
+        q = (a as f64) / 2.0;
+        less = (a as f64) <: 0.5;
+    }
+    assign result = q as i32;
+}
+"#)
+  (top Top)
+  (modify (set a 3)) (tick clk)
+  (assert_eq result 2) (assert_eq less 0)
+  (modify (set a 0xfffffffd)) (tick clk)
+  (assert_eq result 0xfffffffe) (assert_eq less 1))
+
+(case scalar_port_and_function_conversions
+  (source "float.veryl" #"
+module Child(a: input f64, q: output f64) {
+    function increment(x: input f64) -> f64 { return x + 0.5; }
+    assign q = increment(a);
+}
+module Top(a: input i32, q: output i32, function_result: output i32) {
+    inst child: Child(a: a, q: q);
+    function promote(x: input f64) -> f64 { return x + 0.5; }
+    assign function_result = promote(a) as i32;
+}
+"#)
+  (top Top)
+  (modify (set a 3))
+  (assert_eq q 4) (assert_eq function_result 4)
+  (modify (set a 0xfffffffd))
+  (assert_eq q 0xfffffffd) (assert_eq function_result 0xfffffffd))
+
+(case unknown_integer_conversion
+  (four_state)
+  (source "float.veryl" #"
+module Top(a: input logic<8>, q: output u32, narrow: output u32) {
+    assign q = (a as f64) as u32;
+    assign narrow = (a as f32) as u32;
+}
+"#)
+  (top Top)
+  (modify (set a (fourstate 0xaf 0x0f)))
+  (assert_eq q 0xa0) (assert_eq narrow 0xa0)
+  (modify (set a (fourstate 0xa0 0x0f)))
+  (assert_eq q 0xa0) (assert_eq narrow 0xa0)
+  (modify (set a (fourstate 0xff 0xff)))
+  (assert_eq q 0) (assert_eq narrow 0))
+
+(case formatted_display_and_write
+  (source "float.veryl" #"
+module Top(clk: input clock, a: input i32) {
+    always_ff (clk) {
+        $display("wide=%0.2f narrow=%0.2f", (a as f64) / 2.0, a as f32);
+        $write("negative=%0.2f", -(a as f64));
+    }
+}
+"#)
+  (top Top)
+  (modify (set a 3))
+  (tick clk)
+  (expect_output "wide=1.50 narrow=3.00\nnegative=-3.00"))
+
+(case integral_constants_from_float
+  (source "float.veryl" #"
+module Literal(y: output i32) {
+    const I: i32 = (-2.25 as f32) as i32;
+    assign y = I;
+}
+module Top(direct: output i32, named: output i32, arithmetic: output i32) {
+    const F: f32 = -2.25 as f32;
+    const N: i32 = F as i32;
+    const A: i32 = N + 5;
+    inst literal: Literal(y: direct);
+    assign named = N;
+    assign arithmetic = A;
+}
+"#)
+  (top Top)
+  (assert_eq direct 0xfffffffe)
+  (assert_eq named 0xfffffffe)
+  (assert_eq arithmetic 3))

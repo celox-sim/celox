@@ -71,6 +71,7 @@ impl<B: SimBackend> Simulator<B> {
                         width: arg.width,
                         signed: arg.signed,
                         is_string: arg.is_string,
+                        float_precision: arg.float_precision,
                     })
                     .collect();
                 let process = &self.program.runtime_schema.processes[site.process];
@@ -99,6 +100,7 @@ impl<B: SimBackend> Simulator<B> {
                     arg_widths: Vec::new(),
                     arg_signed: Vec::new(),
                     arg_is_string: Vec::new(),
+                    arg_float_precision: Vec::new(),
                 };
                 let mut message = render_runtime_event_message(
                     &format,
@@ -189,6 +191,7 @@ impl<B: SimBackend> Simulator<B> {
                         width,
                         signed: false,
                         is_string: false,
+                        float_precision: None,
                     }),
                 )
                 .map_err(|err| error(format!("$writemem: {err}")))?;

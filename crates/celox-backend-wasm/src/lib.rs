@@ -7,6 +7,8 @@
 //! RegisterId → WASM local (i64 for ≤64-bit; multiple i64 locals for wide values).
 //! Block control flow is implemented via `loop` + `block` + `br_table`.
 
+pub use celox_sir::float::evaluate as evaluate_float;
+
 use wasm_encoder::{
     CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
     Instruction, MemoryType, Module, TypeSection, ValType,
@@ -227,6 +229,18 @@ impl ExternImports {
             .flat_map(|unit| unit.blocks.values())
             .flat_map(|block| &block.instructions)
         {
+            let helper = match instruction {
+                SIRInstruction::Binary(_, _, BinaryOp::Float { op, precision }, _) => {
+                    float_needs_helper(celox_sir::float::binary_code(*op, *precision))
+                }
+                SIRInstruction::Unary(_, UnaryOp::Float { op, precision }, _) => {
+                    float_needs_helper(celox_sir::float::unary_code(*op, *precision))
+                }
+                _ => false,
+            };
+            if helper {
+                arities.insert(celox_sir::float::FLOAT_HELPER_ID, 3);
+            }
             if let SIRInstruction::ExternCall { func, args, .. } = instruction {
                 let arity = *arities.entry(*func).or_insert(args.len());
                 assert_eq!(
@@ -526,10 +540,34 @@ fn compile_instruction(
             compile_imm(dst, val, unit, four_state, &*locals, instrs);
         }
         SIRInstruction::Binary(dst, lhs, op, rhs) => {
-            compile_binary(dst, lhs, op, rhs, unit, four_state, &mut *locals, instrs);
+            if let BinaryOp::Float { op, precision } = op {
+                compile_float(
+                    *dst,
+                    *lhs,
+                    Some(*rhs),
+                    celox_sir::float::binary_code(*op, *precision),
+                    externs,
+                    locals,
+                    instrs,
+                );
+            } else {
+                compile_binary(dst, lhs, op, rhs, unit, four_state, &mut *locals, instrs);
+            }
         }
         SIRInstruction::Unary(dst, op, src) => {
-            compile_unary(dst, op, src, unit, four_state, locals, instrs);
+            if let UnaryOp::Float { op, precision } = op {
+                compile_float(
+                    *dst,
+                    *src,
+                    None,
+                    celox_sir::float::unary_code(*op, *precision),
+                    externs,
+                    locals,
+                    instrs,
+                );
+            } else {
+                compile_unary(dst, op, src, unit, four_state, locals, instrs);
+            }
         }
         SIRInstruction::Load(dst, addr, offset, op_width) => {
             compile_load(
@@ -1582,6 +1620,9 @@ fn compile_binary_narrow(
     instrs.push(Instruction::LocalGet(r.value_idx));
 
     match op {
+        BinaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         BinaryOp::Add => instrs.push(Instruction::I64Add),
         BinaryOp::Sub => instrs.push(Instruction::I64Sub),
         BinaryOp::Mul => instrs.push(Instruction::I64Mul),
@@ -1902,6 +1943,9 @@ fn compile_binary_wide(
     }
 
     match op {
+        BinaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         // 1. Chunk-wise bitwise ops
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
             for c in 0..d_chunks {
@@ -3478,6 +3522,9 @@ fn compile_unary(
     let s_width = unit.register_map[src].width();
 
     match op {
+        UnaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         UnaryOp::Ident | UnaryOp::ToTwoState => {
             for c in 0..d.num_chunks {
                 emit_wide_get_chunk(instrs, &s, c);
@@ -3693,6 +3740,9 @@ fn compile_unary_mask(
     };
 
     match op {
+        UnaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         UnaryOp::Ident | UnaryOp::BitNot => {
             for c in 0..dst.num_chunks {
                 if c < src.num_chunks {
@@ -6174,6 +6224,224 @@ fn emit_trigger_detection(
     instrs.push(Instruction::End); // end if
 }
 
+fn float_needs_helper(code: u64) -> bool {
+    matches!(code & 255, 4 | 5)
+}
+fn compile_float(
+    dst: RegisterId,
+    lhs: RegisterId,
+    rhs: Option<RegisterId>,
+    code: u64,
+    externs: &ExternImports,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let op = code & 255;
+    let f64 = code & 256 != 0;
+    let d = locals.reg_map[&dst].clone();
+    instrs.push(Instruction::LocalGet(locals.reg_map[&lhs].value_idx));
+    if matches!(code & 255, 34 | 35) {
+        if let Some(mask) = locals.reg_map[&lhs].mask_idx {
+            instrs.extend([
+                Instruction::LocalGet(mask),
+                Instruction::I64Const(-1),
+                Instruction::I64Xor,
+                Instruction::I64And,
+            ]);
+        }
+    }
+
+    if float_needs_helper(code) {
+        if let Some(rhs) = rhs {
+            instrs.push(Instruction::LocalGet(locals.reg_map[&rhs].value_idx));
+        } else {
+            instrs.push(Instruction::I64Const(0));
+        }
+        instrs.push(Instruction::I64Const(code as i64));
+        instrs.push(Instruction::Call(
+            externs.function_index(celox_sir::float::FLOAT_HELPER_ID),
+        ));
+    } else if matches!(op, 34 | 35) {
+        let width = (code >> 16) as usize;
+        if width < 64 {
+            if op == 34 {
+                instrs.extend([
+                    Instruction::I64Const((64 - width) as i64),
+                    Instruction::I64Shl,
+                    Instruction::I64Const((64 - width) as i64),
+                    Instruction::I64ShrS,
+                ]);
+            } else {
+                instrs.extend([
+                    Instruction::I64Const(((1u64 << width) - 1) as i64),
+                    Instruction::I64And,
+                ]);
+            }
+        }
+        instrs.push(match (f64, op == 34) {
+            (false, true) => Instruction::F32ConvertI64S,
+            (false, false) => Instruction::F32ConvertI64U,
+            (true, true) => Instruction::F64ConvertI64S,
+            (true, false) => Instruction::F64ConvertI64U,
+        });
+        if f64 {
+            instrs.push(Instruction::I64ReinterpretF64);
+        } else {
+            instrs.extend([Instruction::I32ReinterpretF32, Instruction::I64ExtendI32U]);
+        }
+    } else if matches!(op, 36 | 37) {
+        compile_float_to_integer(lhs, code, locals, instrs);
+    } else {
+        if f64 {
+            instrs.push(Instruction::F64ReinterpretI64);
+        } else {
+            instrs.extend([Instruction::I32WrapI64, Instruction::F32ReinterpretI32]);
+        }
+        if let Some(rhs) = rhs {
+            instrs.push(Instruction::LocalGet(locals.reg_map[&rhs].value_idx));
+            if f64 {
+                instrs.push(Instruction::F64ReinterpretI64);
+            } else {
+                instrs.extend([Instruction::I32WrapI64, Instruction::F32ReinterpretI32]);
+            }
+        }
+        let instruction = match (f64, op) {
+            (false, 0) => Some(Instruction::F32Add),
+            (false, 1) => Some(Instruction::F32Sub),
+            (false, 2) => Some(Instruction::F32Mul),
+            (false, 3) => Some(Instruction::F32Div),
+            (true, 0) => Some(Instruction::F64Add),
+            (true, 1) => Some(Instruction::F64Sub),
+            (true, 2) => Some(Instruction::F64Mul),
+            (true, 3) => Some(Instruction::F64Div),
+            (false, 6) => Some(Instruction::F32Eq),
+            (false, 7) => Some(Instruction::F32Ne),
+            (false, 8) => Some(Instruction::F32Lt),
+            (false, 9) => Some(Instruction::F32Le),
+            (false, 10) => Some(Instruction::F32Gt),
+            (false, 11) => Some(Instruction::F32Ge),
+            (true, 6) => Some(Instruction::F64Eq),
+            (true, 7) => Some(Instruction::F64Ne),
+            (true, 8) => Some(Instruction::F64Lt),
+            (true, 9) => Some(Instruction::F64Le),
+            (true, 10) => Some(Instruction::F64Gt),
+            (true, 11) => Some(Instruction::F64Ge),
+            (false, 32) => Some(Instruction::F32Neg),
+            (true, 32) => Some(Instruction::F64Neg),
+            (false, 33) => {
+                instrs.push(Instruction::F32Const(0.0.into()));
+                Some(Instruction::F32Ne)
+            }
+            (true, 33) => {
+                instrs.push(Instruction::F64Const(0.0.into()));
+                Some(Instruction::F64Ne)
+            }
+            (true, 38) => Some(Instruction::F32DemoteF64),
+            (false, 39) => Some(Instruction::F64PromoteF32),
+            (false, 38) | (true, 39) => None,
+            _ => unreachable!("known floating operation"),
+        };
+        if let Some(instruction) = instruction {
+            instrs.push(instruction);
+        }
+        if matches!(op, 6..=11 | 33) {
+            instrs.push(Instruction::I64ExtendI32U);
+        } else if op == 38 || (!f64 && op != 39) {
+            instrs.extend([Instruction::I32ReinterpretF32, Instruction::I64ExtendI32U]);
+        } else {
+            instrs.push(Instruction::I64ReinterpretF64);
+        }
+    }
+    instrs.push(Instruction::LocalSet(d.value_idx));
+    if let Some(mask) = d.mask_idx {
+        instrs.push(Instruction::I64Const(0));
+        instrs.push(Instruction::LocalSet(mask));
+    }
+}
+
+/// Reduce a rounded floating value modulo 2^64 before converting it. Scaling
+/// by a power of two keeps the remainder exact for representable IEEE values;
+/// saturating conversion maps the NaN remainder of infinity/NaN to known zero.
+fn compile_float_to_integer(
+    lhs: RegisterId,
+    code: u64,
+    locals: &mut LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let abs = locals.alloc(1);
+    let truncated = locals.alloc(1);
+    let rounded = locals.alloc(1);
+    let magnitude = locals.alloc(1);
+    let f64 = code & 256 != 0;
+    if f64 {
+        instrs.push(Instruction::F64ReinterpretI64);
+    } else {
+        instrs.extend([
+            Instruction::I32WrapI64,
+            Instruction::F32ReinterpretI32,
+            Instruction::F64PromoteF32,
+        ]);
+    }
+    instrs.extend([
+        Instruction::F64Abs,
+        Instruction::I64ReinterpretF64,
+        Instruction::LocalSet(abs),
+        Instruction::LocalGet(abs),
+        Instruction::F64ReinterpretI64,
+        Instruction::F64Trunc,
+        Instruction::I64ReinterpretF64,
+        Instruction::LocalSet(truncated),
+        Instruction::LocalGet(truncated),
+        Instruction::F64ReinterpretI64,
+    ]);
+    if code & 512 != 0 {
+        instrs.extend([
+            Instruction::LocalGet(abs),
+            Instruction::F64ReinterpretI64,
+            Instruction::LocalGet(truncated),
+            Instruction::F64ReinterpretI64,
+            Instruction::F64Sub,
+            Instruction::F64Const(0.5.into()),
+            Instruction::F64Ge,
+            Instruction::F64ConvertI32U,
+            Instruction::F64Add,
+        ]);
+    }
+    instrs.extend([
+        Instruction::I64ReinterpretF64,
+        Instruction::LocalSet(rounded),
+        Instruction::LocalGet(rounded),
+        Instruction::F64ReinterpretI64,
+        Instruction::LocalGet(rounded),
+        Instruction::F64ReinterpretI64,
+        Instruction::F64Const(18_446_744_073_709_551_616.0.into()),
+        Instruction::F64Div,
+        Instruction::F64Floor,
+        Instruction::F64Const(18_446_744_073_709_551_616.0.into()),
+        Instruction::F64Mul,
+        Instruction::F64Sub,
+        Instruction::I64TruncSatF64U,
+        Instruction::LocalSet(magnitude),
+        Instruction::I64Const(0),
+        Instruction::LocalGet(magnitude),
+        Instruction::I64Sub,
+        Instruction::LocalGet(magnitude),
+        Instruction::LocalGet(locals.reg_map[&lhs].value_idx),
+        Instruction::I64Const((1u64 << if f64 { 63 } else { 31 }) as i64),
+        Instruction::I64And,
+        Instruction::I64Const(0),
+        Instruction::I64Ne,
+        Instruction::Select,
+    ]);
+    let width = (code >> 16) as usize;
+    if width < 64 {
+        instrs.extend([
+            Instruction::I64Const(((1u64 << width) - 1) as i64),
+            Instruction::I64And,
+        ]);
+    }
+}
+
 #[cfg(test)]
 mod bit_count_tests {
     mod slice_tests;
@@ -6349,6 +6617,234 @@ mod bit_count_tests {
             .expect("find Wasm entry point");
         assert_eq!(run.call(&mut store, ()).expect("execute Wasm"), 0);
         memory.data(&store).to_vec()
+    }
+
+    #[test]
+    fn float_integer_conversions_are_portable_without_host_imports() {
+        use celox_sir::{FloatPrecision as P, FloatUnaryOp as U};
+        let double_round = (1u64 << 63) + (1u64 << 39) + 1;
+        assert_ne!(
+            (double_round as f32).to_bits(),
+            ((double_round as f64) as f32).to_bits()
+        );
+        for four_state in [false, true] {
+            let mut cases = Vec::new();
+            for p in [P::F32, P::F64] {
+                for width in [1, 3, 8, 32, 64] {
+                    for value in [0, 1, u64::MAX, double_round, 1u64 << 63] {
+                        for op in [U::FromSigned { width }, U::FromUnsigned { width }] {
+                            let mask = if four_state { value & 0x24 } else { 0 };
+                            cases.push((op, p, width, value, mask));
+                        }
+                    }
+                }
+                let encode = |x: f64| {
+                    if p == P::F32 {
+                        (x as f32).to_bits() as u64
+                    } else {
+                        x.to_bits()
+                    }
+                };
+                let half = encode(0.5);
+                let mut inputs = [
+                    0.0,
+                    -0.0,
+                    0.5,
+                    -0.5,
+                    1.5,
+                    -1.5,
+                    1.75,
+                    -1.75,
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::MAX,
+                    -f64::MAX,
+                    9_223_372_036_854_775_808.0,
+                    18_446_744_073_709_551_616.0,
+                    18_446_744_073_709_555_712.0,
+                    -18_446_744_073_709_555_712.0,
+                ]
+                .into_iter()
+                .map(encode)
+                .collect::<Vec<_>>();
+                inputs.extend([
+                    half - 1,
+                    half + 1,
+                    if p == P::F32 {
+                        f32::MAX.to_bits() as u64
+                    } else {
+                        f64::MAX.to_bits()
+                    },
+                ]);
+                for width in [1, 3, 8, 32, 64] {
+                    for round in [false, true] {
+                        for &value in &inputs {
+                            for op in [U::ToSigned { width, round }, U::ToUnsigned { width, round }]
+                            {
+                                cases.push((op, p, p.width(), value, 0));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut register_map = HashMap::default();
+            let mut instructions = Vec::new();
+            let mut expected = Vec::new();
+            for (index, (op, p, width, value, mask)) in cases.into_iter().enumerate() {
+                let source = RegisterId(index * 2);
+                let dst = RegisterId(index * 2 + 1);
+                let float_op = UnaryOp::Float { op, precision: p };
+                let result_width = float_op.result_width(width);
+                let integer_input = matches!(op, U::FromSigned { .. } | U::FromUnsigned { .. });
+                let width_mask = if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                let value = value & width_mask;
+                let mask = mask & width_mask;
+                register_map.insert(
+                    source,
+                    if four_state && integer_input {
+                        RegisterType::Logic { width }
+                    } else {
+                        RegisterType::Bit {
+                            width,
+                            signed: false,
+                        }
+                    },
+                );
+                register_map.insert(
+                    dst,
+                    RegisterType::Bit {
+                        width: result_width,
+                        signed: false,
+                    },
+                );
+                instructions.push(SIRInstruction::Imm(
+                    source,
+                    if four_state && integer_input {
+                        SIRValue::new_four_state(value, mask)
+                    } else {
+                        SIRValue::new(value)
+                    },
+                ));
+                instructions.push(SIRInstruction::Unary(dst, float_op, source));
+                instructions.push(SIRInstruction::Store(
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                    SIROffset::Static(index * 64),
+                    result_width,
+                    dst,
+                    vec![],
+                    vec![],
+                ));
+                expected.push((
+                    result_width,
+                    celox_design::eval_float_unary(op, p, value & !mask),
+                ));
+            }
+            let block = BasicBlock {
+                id: BlockId(0),
+                params: vec![],
+                instructions,
+                terminator: SIRTerminator::Return,
+            };
+            let unit = ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: std::iter::once((BlockId(0), block)).collect(),
+                register_map,
+            };
+            unit.verify();
+            let layout = layout(expected.len() * 64, four_state);
+            // run_wasm binds only memory, so this also rejects accidental helper imports.
+            let output = run_wasm(&unit, &layout, four_state);
+            for (index, (width, value)) in expected.into_iter().enumerate() {
+                assert_eq!(
+                    read_bits_at(&output, OUTPUT_OFFSET, index * 64, width),
+                    BigUint::from(value),
+                    "case {index}, four_state={four_state}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn float_native_arithmetic_preserves_ieee_bits() {
+        use celox_sir::{FloatBinaryOp as F, FloatPrecision as P};
+        for precision in [P::F32, P::F64] {
+            for four_state in [false, true] {
+                for (op, a, b, expected) in [
+                    (F::Add, 1.25, 2.5, 3.75),
+                    (F::Div, 1.0, 0.0, f64::INFINITY),
+                    (F::Mul, -0.0, 2.0, -0.0),
+                ] {
+                    let bits = |x: f64| {
+                        if precision == P::F32 {
+                            (x as f32).to_bits() as u64
+                        } else {
+                            x.to_bits()
+                        }
+                    };
+                    let width = precision.width();
+                    let register_map = (0..3)
+                        .map(|i| {
+                            (
+                                RegisterId(i),
+                                RegisterType::Bit {
+                                    width,
+                                    signed: false,
+                                },
+                            )
+                        })
+                        .collect();
+                    let block = BasicBlock {
+                        id: BlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                RegisterId(0),
+                                SIRValue::new(BigUint::from(bits(a))),
+                            ),
+                            SIRInstruction::Imm(
+                                RegisterId(1),
+                                SIRValue::new(BigUint::from(bits(b))),
+                            ),
+                            SIRInstruction::Binary(
+                                RegisterId(2),
+                                RegisterId(0),
+                                BinaryOp::Float { op, precision },
+                                RegisterId(1),
+                            ),
+                            SIRInstruction::Store(
+                                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address()),
+                                SIROffset::Static(0),
+                                width,
+                                RegisterId(2),
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    };
+                    let unit = ExecutionUnit {
+                        entry_block_id: BlockId(0),
+                        blocks: std::iter::once((BlockId(0), block)).collect(),
+                        register_map,
+                    };
+                    let layout = layout(width, four_state);
+                    for output in [
+                        run_cranelift(&unit, &layout, four_state),
+                        run_wasm(&unit, &layout, four_state),
+                    ] {
+                        assert_eq!(
+                            read_bits_at(&output, OUTPUT_OFFSET, 0, width),
+                            BigUint::from(bits(expected))
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn read_bits_at(memory: &[u8], base_offset: usize, bit_offset: usize, width: usize) -> BigUint {

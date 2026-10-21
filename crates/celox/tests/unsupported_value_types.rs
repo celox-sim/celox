@@ -1,6 +1,4 @@
-//! Non-constant `string` values in RTL and operations on f32/f64 values are
-//! rejected until Celox represents them (#1400, #1401). Constants folded by
-//! the analyzer and plain floating-point copies keep working.
+//! Unsupported string/float diagnostics and regressions for supported scalar floats.
 use celox::{ParserError, Simulator, SimulatorErrorKind};
 
 #[track_caller]
@@ -22,7 +20,6 @@ fn assert_unsupported(code: &str, issue: u32, feature: &str) {
 }
 
 const STRING: u32 = 1400;
-const FLOAT: u32 = 1401;
 
 #[test]
 fn rtl_string_variable_assignment_is_rejected() {
@@ -128,107 +125,53 @@ fn testbench_strings_are_accepted() {
 }
 
 #[test]
-fn rtl_float_arithmetic_is_rejected() {
-    assert_unsupported(
+fn scalar_float_operations_are_supported() {
+    let mut sim = Simulator::builder(
         r#"
-        module Top (a: input f64, b: input f64, c: output f64) {
-            assign c = a + b;
+        module Top (a: input f64, b: input f32, sum: output f64,
+                    equal: output logic, rounded: output u32, constant: output f64) {
+            assign sum = a + (b as f64);
+            assign equal = a == 1.5;
+            assign rounded = a as u32;
+            assign constant = 3;
         }
         "#,
-        FLOAT,
-        "floating-point operation",
-    );
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(a, 1.5f64.to_bits());
+        io.set(b, 2.25f32.to_bits());
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("sum")), 3.75f64.to_bits().into());
+    assert_eq!(sim.get(sim.signal("equal")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("rounded")), 2u32.into());
+    assert_eq!(sim.get(sim.signal("constant")), 3.0f64.to_bits().into());
 }
 
 #[test]
-fn rtl_float_comparison_is_rejected() {
-    assert_unsupported(
+fn integer_connected_to_float_input_is_converted() {
+    let mut sim = Simulator::builder(
         r#"
-        module Top (a: input f64, o: output logic) {
-            assign o = a == 1.0;
-        }
+        module Child (i: input f64, o: output f64) { assign o = i; }
+        module Top (a: input u32, o: output f64) { inst u: Child (i: a, o); }
         "#,
-        FLOAT,
-        "floating-point operation",
-    );
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 3u32)).unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 3.0f64.to_bits().into());
 }
 
 #[test]
-fn float_to_integer_cast_is_rejected() {
-    assert_unsupported(
-        r#"
-        module Top (a: input f64, o: output u32) {
-            assign o = a as u32;
-        }
-        "#,
-        FLOAT,
-        "floating-point conversion",
-    );
-}
-
-#[test]
-fn f32_to_f64_cast_is_rejected() {
-    assert_unsupported(
-        r#"
-        module Top (a: input f32, o: output f64) {
-            assign o = a as f64;
-        }
-        "#,
-        FLOAT,
-        "floating-point conversion",
-    );
-}
-
-#[test]
-fn implicit_integer_to_float_assignment_is_rejected() {
-    // Even a constant is stored as its integer bits, not as 3.0.
-    assert_unsupported(
-        r#"
-        module Top (o: output f64) {
-            assign o = 3;
-        }
-        "#,
-        FLOAT,
-        "floating-point conversion",
-    );
-}
-
-#[test]
-fn float_port_connected_to_integer_is_rejected() {
-    assert_unsupported(
-        r#"
-        module Child (i: input f64, o: output f64) {
-            assign o = i;
-        }
-        module Top (a: input u32, o: output f64) {
-            inst u: Child (i: a, o);
-        }
-        "#,
-        FLOAT,
-        "floating-point conversion",
-    );
-}
-
-#[test]
-fn ff_float_condition_is_rejected() {
-    assert_unsupported(
-        r#"
-        module Top (clk: input clock, a: input f64, o: output logic) {
-            always_ff (clk) {
-                if a <: 0.5 {
-                    o = 1;
-                }
-            }
-        }
-        "#,
-        FLOAT,
-        "floating-point operation",
-    );
-}
-
-#[test]
-fn testbench_float_arithmetic_is_rejected() {
-    assert_unsupported(
+fn testbench_float_arithmetic_is_supported() {
+    let result = Simulator::builder(
         r#"
         #[test(Top)]
         module Top {
@@ -237,31 +180,39 @@ fn testbench_float_arithmetic_is_rejected() {
             initial {
                 a = 1.5;
                 c = a * 2.0;
+                $assert(c == 3.0);
                 $finish();
             }
         }
         "#,
-        FLOAT,
-        "floating-point operation",
-    );
+        "Top",
+    )
+    .run_test_detailed()
+    .unwrap();
+    assert!(result.passed);
 }
 
 #[test]
-fn float_display_is_rejected() {
-    assert_unsupported(
+fn float_display_renders_numeric_values() {
+    let mut sim = Simulator::builder(
         r#"
-        #[test(Top)]
-        module Top {
-            var a: f64;
-            initial {
-                a = 1.5;
-                $display("%f", a);
-                $finish();
-            }
+        module Top(clk: input clock, a: input f64) {
+            always_ff (clk) { $display("%f", a); }
         }
         "#,
-        FLOAT,
-        "floating-point formatting",
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let a = sim.signal("a");
+    let clk = sim.event("clk");
+    sim.modify(|io| io.set(a, 1.5f64.to_bits())).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: b"1.500000".to_vec()
+        }]
     );
 }
 

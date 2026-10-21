@@ -185,6 +185,7 @@ impl SLTToSIRLowerer {
     fn binary_operation_cost(op: BinaryOp, width: usize) -> u128 {
         let chunks = Self::chunks(width);
         match op {
+            BinaryOp::Float { .. } => 12 * chunks,
             BinaryOp::And
             | BinaryOp::Or
             | BinaryOp::Xor

@@ -202,6 +202,7 @@ pub(super) fn branchified_instruction_cost(
                     .max(register_width(*rhs)),
             );
             match op {
+                crate::ir::BinaryOp::Float { .. } => 32,
                 crate::ir::BinaryOp::And
                 | crate::ir::BinaryOp::Or
                 | crate::ir::BinaryOp::Xor

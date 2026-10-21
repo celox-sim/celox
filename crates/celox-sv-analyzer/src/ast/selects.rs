@@ -1103,6 +1103,13 @@ fn fold_parameter_selection(
     assignment_width: Option<usize>,
 ) -> Converted<ConstExpr> {
     let expression = substitute_indexed_parameter_values(state, expression, dimensions);
+    if let Expr::Literal(text) = &expression
+        && text.contains(['.', 'e', 'E'])
+        && text.parse::<f64>().is_ok()
+    {
+        return Ok(ConstExpr::Literal(text.clone()));
+    }
+
     let types = parameter_types_from_const_env(&dimensions.const_env);
     let integral_types = types
         .iter()

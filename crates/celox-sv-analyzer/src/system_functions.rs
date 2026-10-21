@@ -18,6 +18,12 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    Rtoi,
+    Itor,
+    Realtobits,
+    Bitstoreal,
+    Shortrealtobits,
+    Bitstoshortreal,
     /// `$time` (20.3.1).
     Time,
     /// `$stime` (20.3.2).
@@ -91,6 +97,12 @@ impl SystemFunction {
     /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Rtoi => "$rtoi",
+            Self::Itor => "$itor",
+            Self::Realtobits => "$realtobits",
+            Self::Bitstoreal => "$bitstoreal",
+            Self::Shortrealtobits => "$shortrealtobits",
+            Self::Bitstoshortreal => "$bitstoshortreal",
             Self::Time => "$time",
             Self::Stime => "$stime",
             Self::Timeunit => "$timeunit",
@@ -193,6 +205,9 @@ impl SystemFunction {
                 Some((32, true))
             }
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
+            Self::Rtoi => Some((32, true)),
+            Self::Itor | Self::Bitstoreal | Self::Realtobits => Some((64, false)),
+            Self::Shortrealtobits | Self::Bitstoshortreal => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
@@ -550,12 +565,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Timeunit, 0, Some(1)),
     function(SystemFunction::Timeprecision, 0, Some(1)),
     // 20.5 Conversion functions
-    unsupported("$rtoi", Function),
-    unsupported("$itor", Function),
-    unsupported("$realtobits", Function),
-    unsupported("$bitstoreal", Function),
-    unsupported("$shortrealtobits", Function),
-    unsupported("$bitstoshortreal", Function),
+    function(SystemFunction::Rtoi, 1, Some(1)),
+    function(SystemFunction::Itor, 1, Some(1)),
+    function(SystemFunction::Realtobits, 1, Some(1)),
+    function(SystemFunction::Bitstoreal, 1, Some(1)),
+    function(SystemFunction::Shortrealtobits, 1, Some(1)),
+    function(SystemFunction::Bitstoshortreal, 1, Some(1)),
     // 11.7 Signed expressions
     function(SystemFunction::Signed, 1, Some(1)),
     function(SystemFunction::Unsigned, 1, Some(1)),

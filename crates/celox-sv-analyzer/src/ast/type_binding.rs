@@ -229,6 +229,8 @@ pub(super) fn alias_base_type(
 /// Builtin integral identity/width without syntax or aggregate layout.
 pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
     let (kind, width, signed) = match name {
+        "real" | "realtime" => (TypeKind::Real, Some(64), true),
+        "shortreal" => (TypeKind::Shortreal, Some(32), true),
         "bit" => (TypeKind::Bit, None, false),
         "logic" => (TypeKind::Logic, None, false),
         "reg" => (TypeKind::Reg, None, false),

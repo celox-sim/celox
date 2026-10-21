@@ -374,6 +374,7 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 write!(f, "n{}:", lhs.0)?;
                 arena.get(*lhs).fmt_expression(f, arena)?;
                 let op_str = match op {
+                    celox_design::BinaryOp::Float { .. } => "float",
                     celox_design::BinaryOp::Add => "+",
                     celox_design::BinaryOp::Sub => "-",
                     celox_design::BinaryOp::Mul => "*",
@@ -405,6 +406,7 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
             }
             SLTNode::Unary(op, inner) => {
                 let op_str = match op {
+                    celox_design::UnaryOp::Float { .. } => "float",
                     celox_design::UnaryOp::Ident => "",
                     celox_design::UnaryOp::ToTwoState => "2state",
                     celox_design::UnaryOp::Minus => "-",

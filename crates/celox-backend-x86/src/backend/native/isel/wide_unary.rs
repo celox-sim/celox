@@ -15,6 +15,9 @@ pub(super) fn lower_wide_unary(
     let n_chunks = ISelContext::num_chunks(d_width.max(src_width));
 
     match op {
+        UnaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         UnaryOp::BitNot => {
             let src_chunks = ctx.get_wide_chunks(&src, block);
             let mut dst_chunks = Vec::with_capacity(n_chunks);

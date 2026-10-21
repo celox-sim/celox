@@ -210,6 +210,27 @@ impl CompiledExpr {
                 stack.push(eval_binop(l, *op, r));
                 *pc += 1;
             }
+            TbOpcode::FloatBinary { op, precision } => {
+                let r = stack.pop().unwrap_or(TestbenchValue::U64(0));
+                let l = stack.pop().unwrap_or(TestbenchValue::U64(0));
+                stack.push(TestbenchValue::U64(celox_design::eval_float_binary(
+                    *op,
+                    *precision,
+                    l.to_u64(),
+                    r.to_u64(),
+                )));
+                *pc += 1;
+            }
+            TbOpcode::FloatUnary { op, precision } => {
+                if let Some(top) = stack.last_mut() {
+                    *top = TestbenchValue::U64(celox_design::eval_float_unary(
+                        *op,
+                        *precision,
+                        top.to_u64(),
+                    ));
+                }
+                *pc += 1;
+            }
             TbOpcode::TypedBinOp {
                 op,
                 lhs_width,
@@ -974,5 +995,44 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
         Op::LogicAnd => ((*l != BigUint::ZERO) && (*r != BigUint::ZERO)) as u64,
         Op::LogicOr => ((*l != BigUint::ZERO) || (*r != BigUint::ZERO)) as u64,
         _ => unreachable!("operator is not testbench comparison plumbing: {op:?}"),
+    }
+}
+
+#[cfg(test)]
+mod float_tests {
+    use super::*;
+    use celox_design::{FloatBinaryOp, FloatPrecision, FloatUnaryOp};
+
+    #[test]
+    fn floating_bytecode_keeps_precision_and_numeric_conversions() {
+        for (precision, expected) in [
+            (FloatPrecision::F32, 16777216),
+            (FloatPrecision::F64, 16777217),
+        ] {
+            let expression = CompiledExpr::new(ExprBytecode::new(vec![
+                TbOpcode::ConstU64(16777216),
+                TbOpcode::FloatUnary {
+                    op: FloatUnaryOp::FromUnsigned { width: 32 },
+                    precision,
+                },
+                TbOpcode::ConstU64(1),
+                TbOpcode::FloatUnary {
+                    op: FloatUnaryOp::FromUnsigned { width: 32 },
+                    precision,
+                },
+                TbOpcode::FloatBinary {
+                    op: FloatBinaryOp::Add,
+                    precision,
+                },
+                TbOpcode::FloatUnary {
+                    op: FloatUnaryOp::ToUnsigned {
+                        width: 32,
+                        round: true,
+                    },
+                    precision,
+                },
+            ]));
+            assert_eq!(expression.eval_u64(std::ptr::null_mut()), expected);
+        }
     }
 }

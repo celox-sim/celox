@@ -112,7 +112,12 @@ pub(super) fn emit_call_extern(
         celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET as i64,
         OpSize::S64,
     );
-    emit_load_at(ops, SCRATCH1, SCRATCH1, i64::from(func) * 8, OpSize::S64);
+    let offset = if func == celox_sir::float::FLOAT_HELPER_ID {
+        -8
+    } else {
+        i64::from(func) * 8
+    };
+    emit_load_at(ops, SCRATCH1, SCRATCH1, offset, OpSize::S64);
     dynasm!(ops ; .arch aarch64 ; blr x17);
 
     // The result interferes with every value live across the call, so the

@@ -150,6 +150,8 @@ export interface WasmFrontendSimulatorHandle
 	extends FrontendSimulatorHandleMetadata {
 	initialMemoryBytes(): Uint8Array | number[];
 	combWasmBytes(): Uint8Array | number[];
+	/** Internal floating-point helper for generated simulation modules. */
+	evaluateFloat?(lhs: bigint, rhs: bigint, code: bigint): bigint;
 	eventWasmBytes(name: string): Uint8Array | number[];
 	/**
 	 * Per event name, the derived domains its ticks and edges run, as JSON.
