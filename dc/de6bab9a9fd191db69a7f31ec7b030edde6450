@@ -4,3 +4,5 @@ rev 2 (content) 2026-10-21 01:04 UTC — Update retained sv-tests expectations f
 rev 1 (initial) 2026-10-21 01:04 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":1664,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7558620ba009449d9c3e68bec995e51c92822ad9","timestamp_iso":"2026-10-21T01:04:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7558620ba009449d9c3e68bec995e51c92822ad9","new_sha":"dcde6bab9a9fd191db69a7f31ec7b030edde6450","timestamp_iso":"2026-10-21T01:04:15Z","reason":"Update retained sv-tests expectations for all six Annex N distributions in both state modes, using the official CI report.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7558620ba009449d9c3e68bec995e51c92822ad9...dcde6bab9a9fd191db69a7f31ec7b030edde6450"}]} -->
+
+Rebase dependent stack member after resolving master conflicts in the file I/O layer.
