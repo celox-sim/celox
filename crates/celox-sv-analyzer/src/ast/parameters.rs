@@ -806,7 +806,7 @@ pub(super) fn parameter_element_literal(
     };
     let element_width = width_from(indices.len())?;
     let total_width = width_from(0)?;
-    if total_width > 127 {
+    if total_width > 128 {
         return None;
     }
     let signed = env
@@ -826,8 +826,15 @@ pub(super) fn parameter_element_literal(
         let from_right = usize::try_from(index.abs_diff(right)).ok()?;
         offset = offset.checked_add(from_right.checked_mul(width_from(position + 1)?)?)?;
     }
-    let value = *env.get(name)? as u128 & ((1u128 << total_width) - 1);
-    let element = (value >> offset) & ((1u128 << element_width) - 1);
+    let mask = |width| {
+        if width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        }
+    };
+    let value = *env.get(name)? as u128 & mask(total_width);
+    let element = (value >> offset) & mask(element_width);
     Some(format!(
         "{element_width}'{signing}b{element:0element_width$b}"
     ))
@@ -879,9 +886,25 @@ pub(super) fn enum_member_constants_from_scope(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
+    let items = syntax_tree.body_membership()?;
+    enum_member_constants_from_items(
+        syntax_tree,
+        &items,
+        base_const_env,
+        type_aliases,
+        parameter_overrides,
+    )
+}
+
+pub(super) fn enum_member_constants_from_items(
+    syntax_tree: &AnalysisContext<'_>,
+    declarations: &[celox_sv_syntax::BodyItemId],
+    base_const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+    parameter_overrides: &HashMap<String, ConstExpr>,
+) -> Result<EnumMemberConstants, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataTypeKind, TypeAliasTarget};
     let native = syntax_tree.declarations();
-    let declarations = syntax_tree.body_membership()?;
     let enum_type = |id| {
         let BodyItemKind::TypeAlias(alias) = native.body_item(id).kind else {
             return None;
@@ -899,7 +922,7 @@ pub(super) fn enum_member_constants_from_scope(
     let mut resolved_type_aliases = type_aliases.clone();
     let mut parameters = Vec::new();
     let no_overrides = HashMap::default();
-    for id in declarations {
+    for &id in declarations {
         if let BodyItemKind::Parameter(_) = native.body_item(id).kind {
             let authored = ownership::body(id, syntax_tree)?;
             let local = authored.first().is_some_and(|parameter| parameter.local);
@@ -917,7 +940,12 @@ pub(super) fn enum_member_constants_from_scope(
                 },
             )?;
             extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
-            resolved_type_aliases = type_aliases_from_scope_with_env(syntax_tree, &eval_env)?;
+            resolved_type_aliases = types::type_aliases_from_body_with_env(
+                syntax_tree,
+                declarations,
+                &eval_env,
+                &resolved_type_aliases,
+            )?;
             continue;
         }
         let Some(id) = enum_type(id) else {
@@ -1006,7 +1034,12 @@ pub(super) fn enum_member_constants_from_scope(
         // A later typedef may use a cast or range that depends on this
         // enum's members. Rebuild aliases from the enriched environment
         // before resolving a subsequent enum base through that typedef.
-        resolved_type_aliases = type_aliases_from_scope_with_env(syntax_tree, &eval_env)?;
+        resolved_type_aliases = types::type_aliases_from_body_with_env(
+            syntax_tree,
+            declarations,
+            &eval_env,
+            &resolved_type_aliases,
+        )?;
     }
     Ok(constants)
 }

@@ -411,16 +411,37 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			// Split off query string (e.g. "?dse=preserveAllPorts")
 			const [rawPath, queryStr] = source.split("?", 2);
 			if (source.startsWith("\0")) return;
-			if (queryStr === PROJECT_QUERY || queryStr === WATCH_QUERY) {
-				const id = normalizePath(source);
-				resolvedIds.add(id);
-				return id;
-			}
-			if (!rawPath!.endsWith(".veryl")) return;
+			const generatedQuery =
+				queryStr === PROJECT_QUERY || queryStr === WATCH_QUERY;
+			if (!generatedQuery && !rawPath!.endsWith(".veryl")) return;
 
 			// Resolve to absolute path
 			let absPath: string;
-			if (isAbsolute(rawPath!)) {
+			if (rawPath!.startsWith("/@fs/")) {
+				// Vite uses /@fs/ for files outside its root. Keep POSIX roots
+				// and Windows drive letters when decoding that URL namespace.
+				const file = normalizePath(rawPath!.slice("/@fs/".length));
+				absPath =
+					file.startsWith("/") || /^[A-Z]:/i.test(file) ? file : `/${file}`;
+			} else if (
+				rawPath!.startsWith("/") &&
+				(!normalizePath(rawPath!).startsWith(projectPrefix) ||
+					!existsSync(rawPath!))
+			) {
+				// Keep existing canonical project files, but a matching prefix alone
+				// does not make a cached URL absolute. Root other URLs at Vite's
+				// root even when an unrelated host file exists.
+				const rooted = resolve(viteConfig.root, `.${rawPath}`);
+				// Optional configuration still has a canonical watch identity when
+				// absent. Returning its cached URL (e.g. /celox.toml) would lose the
+				// project directory and, on Windows, the drive letter.
+				const optionalConfig =
+					queryStr === WATCH_QUERY &&
+					CONFIG_FILES.some(
+						(name) => projectFile(name) === normalizePath(rooted),
+					);
+				absPath = existsSync(rooted) || optionalConfig ? rooted : rawPath!;
+			} else if (isAbsolute(rawPath!)) {
 				absPath = rawPath!;
 			} else if (importer) {
 				absPath = resolve(dirname(importer.split("?", 1)[0]!), rawPath!);
@@ -430,8 +451,8 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 
 			absPath = normalizePath(absPath);
 
-			// Only handle .veryl files that exist
-			if (!existsSync(absPath)) return;
+			// Generated watch modules may refer to optional configuration files.
+			if (!generatedQuery && !existsSync(absPath)) return;
 
 			// Preserve the real file identity so Vite/Vitest can trace changes.
 			const id = absPath + (queryStr ? `?${queryStr}` : "");

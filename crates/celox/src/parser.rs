@@ -589,15 +589,17 @@ pub fn parse_sv(
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
     warnings: &mut Vec<celox_frontend_sv::FrontendWarning>,
+    force_signals: &[String],
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
-    let scheduled = celox_frontend_sv::schedule_sources(
+    let scheduled = celox_frontend_sv::schedule_sources_with_force_signals(
         sources,
         top,
         parameter_overrides,
@@ -608,6 +610,8 @@ pub fn parse_sv(
         &frontend_trace_options,
         trace.is_some().then_some(&mut frontend_trace),
         warnings,
+        diagnostic_policy.sv_options(),
+        force_signals,
     )
     .map_err(|error| match error {
         celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
@@ -680,6 +684,7 @@ pub fn parse_mixed(
     trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    diagnostic_policy: &crate::DiagnosticPolicy,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -818,17 +823,19 @@ pub fn parse_mixed(
                 signatures.insert(key, signature.clone());
                 Ok(signature)
             };
-        let external = celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver(
-            &borrowed_sources,
-            &external_roots,
-            &foreign,
-            foreign_declarations,
-            four_state,
-            Some(&mut resolver),
-            sv_top_parameters,
-            &requests,
-            &mut warnings,
-        );
+        let external =
+            celox_frontend_sv::prepare_external_hierarchy_with_foreign_resolver_with_options(
+                &borrowed_sources,
+                &external_roots,
+                &foreign,
+                foreign_declarations,
+                four_state,
+                Some(&mut resolver),
+                sv_top_parameters,
+                &requests,
+                &mut warnings,
+                diagnostic_policy.sv_options(),
+            );
         let external = match external {
             Ok(external) => external,
             Err(error) => {

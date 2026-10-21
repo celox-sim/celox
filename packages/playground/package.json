@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "node test/generate-sidecars.mjs && tsc -p .",
-    "test:vite-components": "vitest run test/vite-plugin-cache.test.ts test/generated-dts.test.ts test/vite-assertion-bytes.test.ts test/vite-plugin-cache-real.test.ts test/vite-plugin-watch.test.ts test/sidecar-orphans.test.ts test/sidecar-lock.test.ts && vitest run --config test/fixtures/injected-components/vitest.config.ts && node test/fixtures/injected-components/dependency-e2e.mjs && node test/fixtures/source-watch/watch-e2e.mjs && node test/fixtures/source-watch/build-watch-e2e.mjs && node test/fixtures/source-watch/component-watch-e2e.mjs",
+    "test:vite-components": "vitest run test/vite-plugin-cache.test.ts test/generated-dts.test.ts test/vite-assertion-bytes.test.ts test/vite-plugin-cache-real.test.ts test/vite-plugin-watch.test.ts test/sidecar-orphans.test.ts test/sidecar-lock.test.ts && node test/fixtures/injected-components/cache-e2e.mjs && node test/fixtures/injected-components/dependency-e2e.mjs && node test/fixtures/source-watch/watch-e2e.mjs && node test/fixtures/source-watch/build-watch-e2e.mjs && node test/fixtures/source-watch/component-watch-e2e.mjs",
     "test:lsp-components": "pnpm run test:vite-components && node test/fixtures/injected-components/lsp-e2e.mjs",
     "test:e2e": "pnpm run build && playwright test",
     "test:watch": "vitest",

@@ -360,6 +360,7 @@ run_in_heliodor() {
 ensure_results_schema "$integration_results/results.tsv"
 HELIODOR_COMPILE_ONLY=0
 CELOX_OPT_LEVEL=O2
+HELIODOR_CELOX_THREADS=4
 HELIODOR_CELOX_BUILD_CACHE_DIR="$TMP/build-cache"
 CELOX_SIR_PASS_OVERRIDES="-branchify_mux +gvn"
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
@@ -462,11 +463,19 @@ assert_eq "$(awk -F '\t' 'NR == 8 { print $10 }' "$integration_results/results.t
 assert_eq "$(awk -F '\t' 'NR == 8 { print $11 }' "$integration_results/results.tsv")" NA \
     "run_one Veryl CLI execute elapsed"
 
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_tiered status=pass elapsed_ns=48'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_THREADS test=integration_tiered threads=4\nCELOX_TEST_TIMING test=integration_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_tiered status=pass elapsed_ns=48'
 run_one celox-tiered integration_tiered >/dev/null \
     || fail "run_one rejected a fixture tiered pass"
 [[ " ${FIXTURE_RUN_ARGS[*]} " == *" --backend tiered "* ]] \
     || fail "tiered runner did not select the tiered backend"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --threads 4 "* ]] \
+    || fail "tiered runner did not request parallel execution"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" run "* && " ${FIXTURE_RUN_ARGS[*]} " == *" --top integration_tiered "* ]] \
+    || fail "tiered runner did not use the normal CLI"
+for flag in --report --unlimited --require-compiled; do
+    [[ " ${FIXTURE_RUN_ARGS[*]} " == *" $flag "* ]] \
+        || fail "tiered runner omitted $flag"
+done
 assert_eq "$(awk -F '\t' 'NR == 9 { print $1 }' "$integration_results/results.tsv")" \
     celox-tiered "run_one tiered runner name"
 assert_eq "$(awk -F '\t' 'NR == 9 { print $12 }' "$integration_results/results.tsv")" NA \
@@ -486,13 +495,15 @@ assert_eq "$(awk -F '\t' 'NR == 10 { print $1 }' "$integration_results/results.t
 # host-qemu mode. Native host codegen is handled separately by run_one.
 HELIODOR_CELOX_NATIVE_IMAGE_MODE=host-qemu
 CELOX_EXECUTION_PREFIX=(qemu-aarch64 -L /fixture-sysroot)
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_qemu_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_qemu_tiered status=pass elapsed_ns=48'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_THREADS test=integration_qemu_tiered threads=4\nCELOX_TEST_TIMING test=integration_qemu_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=integration_qemu_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=integration_qemu_tiered status=pass elapsed_ns=48'
 run_one celox-tiered integration_qemu_tiered >/dev/null \
     || fail "run_one rejected a host-qemu tiered fixture"
 assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "tiered execution prefix command"
 assert_eq "${FIXTURE_RUN_ARGS[1]}" -L "tiered execution prefix option"
 assert_eq "${FIXTURE_RUN_ARGS[2]}" /fixture-sysroot "tiered execution prefix argument"
 assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "tiered target runner"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --threads 4 "* ]] \
+    || fail "ARM tiered runner did not request parallel execution"
 
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_qemu_interpreter compile_ns=8 execute_ns=55 jit_execute_ns=NA\nCELOX_TEST_RESULT test=integration_qemu_interpreter status=pass elapsed_ns=65'
 run_one celox-interpreter integration_qemu_interpreter >/dev/null \
@@ -501,6 +512,36 @@ assert_eq "${FIXTURE_RUN_ARGS[0]}" qemu-aarch64 "interpreter execution prefix co
 assert_eq "${FIXTURE_RUN_ARGS[3]}" "$CELOX_RUNNER_BIN" "interpreter target runner"
 HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
 CELOX_EXECUTION_PREFIX=()
+
+# A successful result without the requested thread count cannot be published.
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=tiered_threads compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TEST_RESULT test=tiered_threads status=pass elapsed_ns=48'
+for marker in "" "CELOX_TEST_THREADS test=tiered_threads threads=2"; do
+    (
+        FIXTURE_RESULT_LINE="$marker"$'\n'"$FIXTURE_RESULT_LINE"
+        if run_one celox-tiered tiered_threads >/dev/null 2>&1; then
+            fail "tiered accepted a missing or incorrect thread count"
+        fi
+        assert_eq "$(tail -n 1 "$integration_results/results.tsv" | cut -f 6)" invalid \
+            "tiered thread mismatch must invalidate the result"
+    )
+done
+(
+    HELIODOR_CELOX_THREADS=1
+    run_one celox-tiered tiered_threads >/dev/null \
+        || fail "tiered rejected explicit sequential execution"
+    [[ " ${FIXTURE_RUN_ARGS[*]} " == *" --threads 1 "* ]] \
+        || fail "tiered did not honor the sequential override"
+)
+for invalid_threads in 0 -1 invalid; do
+    (
+        HELIODOR_RUNNERS=celox-tiered
+        HELIODOR_CELOX_THREADS="$invalid_threads"
+        prepare() { fail "invalid thread count reached benchmark preparation"; }
+        status=0
+        run_all >/dev/null 2>&1 || status=$?
+        assert_eq "$status" 2 "invalid tiered thread count"
+    )
+done
 
 previous_cache="$FIXTURE_AOT_CACHE_DIR"
 FIXTURE_RESULT_LINE=$'VERYL_TEST_CONFIG test=integration_veryl_tiered backend=cc aot_c_async=true compile_only=false\nVERYL_TEST_TIMING test=integration_veryl_tiered compile_ns=8 execute_ns=50\nVERYL_TIERED_STATS test=integration_veryl_tiered compiled_dispatches=100 fallback_dispatches=200\nVERYL_TEST_RESULT test=integration_veryl_tiered status=pass elapsed_ns=59'
@@ -552,7 +593,7 @@ fi
     HELIODOR_PUBLISH_ARCH=x86_64
     HELIODOR_COMPILE_ONLY=0
     HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
-    FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=publish_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=publish_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=publish_tiered status=pass elapsed_ns=48'
+    FIXTURE_RESULT_LINE=$'CELOX_TEST_THREADS test=publish_tiered threads=4\nCELOX_TEST_TIMING test=publish_tiered compile_ns=12 execute_ns=34 jit_execute_ns=NA\nCELOX_TIERED_STATS test=publish_tiered tier=compiled promotion=promoted interpreted_evaluations=10 compiled_evaluations=20 promoted_after_interpreted_evaluations=10 promotion_elapsed_ns=15 safe_point_polls=11 split_apply_deferrals=0 threshold_deferrals=0\nCELOX_TEST_RESULT test=publish_tiered status=pass elapsed_ns=48'
     run_one celox-tiered publish_tiered >/dev/null \
         || fail "publishing rejected a completed tiered run"
     FIXTURE_RESULT_LINE="${FIXTURE_RESULT_LINE/compiled_evaluations=20/compiled_evaluations=0}"

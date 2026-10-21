@@ -10,6 +10,7 @@ use super::*;
 mod assertions;
 mod control;
 mod foreach;
+pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
     CaseItemBase, CaseKind, CaseLabel, EventEdge, EventItemBase, LoopKind, ParamDirection,
@@ -60,6 +61,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
+    task_timing: bool,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
@@ -119,6 +121,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let automatic = state.automatic;
         Self {
             automatic,
+            task_timing: false,
             sensitivity_body: Vec::new(),
             tree,
             dims: dims.clone(),
@@ -567,8 +570,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
 
     /// Timing controls suspend the process that executes them: an
     /// `initial` or `always` process. An `always_comb` or `always_ff` body
-    /// and a function may not suspend; subroutines with timing controls are
-    /// not lowered yet.
+    /// and a function may not suspend. A task suspends its caller.
     fn allow_timing(&self, construct: &'static str) -> Result<(), AnalyzerError> {
         match self.body {
             system_functions::Body::Initial => Ok(()),
@@ -576,6 +578,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 construct,
                 context: "an always_comb or always_ff body",
             }),
+            system_functions::Body::Subroutine if self.task_timing => Ok(()),
             system_functions::Body::Subroutine => {
                 Err(unsupported(format!("{construct} in a subroutine")))
             }
@@ -840,11 +843,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         };
         let args = arguments
             .iter()
-            .map(|arg| {
+            .enumerate()
+            .map(|(index, arg)| {
                 let Some(id) = arg.value else {
                     return Ok(SystemTaskArg::Empty);
                 };
-                if let celox_sv_syntax::ExprKind::Literal(text) = &declarations.expression(id).kind
+                if matches!(task, SystemTask::Vcd(system_functions::VcdTask::Vars)) && index > 0 {
+                    let text = dump_selection_name(
+                        id,
+                        self.tree,
+                        &self.dims,
+                        &|value| self.rename_const(value),
+                        &|name| {
+                            self.scopes
+                                .iter()
+                                .any(|scope| scope.entries.iter().any(|entry| entry.source == name))
+                        },
+                    )?;
+                    return Ok(SystemTaskArg::Str(text));
+                }
+                // Filenames use the normal packed-string expression binder,
+                // including octal/hex escapes and multiline literal delimiters.
+                if !matches!(task, SystemTask::Vcd(system_functions::VcdTask::File))
+                    && let celox_sv_syntax::ExprKind::Literal(text) =
+                        &declarations.expression(id).kind
                     && let Some(text) = text
                         .strip_prefix('"')
                         .and_then(|text| text.strip_suffix('"'))
@@ -1318,6 +1340,8 @@ pub(super) fn lower_subroutine(
         state,
         system_functions::Body::Subroutine,
     );
+    builder.task_timing = native.kind == celox_sv_syntax::SubroutineKind::Task;
+    let first_local = builder.state.locals.len();
     builder.automatic = match native.lifetime.as_deref() {
         Some("automatic") => true,
         Some("static") => false,
@@ -1364,6 +1388,7 @@ pub(super) fn lower_subroutine(
     let return_var = return_type
         .as_ref()
         .map(|r#type| builder.declare(&name, r#type.clone()));
+    let parameter_locals_end = builder.state.locals.len();
     let body = builder.native_body(&native.items, &native.authored_statements)?;
     builder.pop_scope();
     let statics: HashSet<String> = builder
@@ -1385,6 +1410,18 @@ pub(super) fn lower_subroutine(
     let mut subroutine = Subroutine {
         name: item.name(&name),
         is_task: native.kind == celox_sv_syntax::SubroutineKind::Task,
+        automatic_locals: builder.state.locals[first_local..]
+            .iter()
+            .enumerate()
+            .filter(|(index, local)| {
+                if first_local + index < parameter_locals_end {
+                    builder.automatic
+                } else {
+                    !statics.contains(&local.name)
+                }
+            })
+            .map(|(_, local)| local.name.clone())
+            .collect(),
         return_type: return_type.map(|r#type| {
             crate::ir::Type::from_ast(
                 scoped_type(r#type, declaration_env),
@@ -1421,11 +1458,19 @@ pub(super) fn lower_subroutine(
     lifetimes::check_subroutine_statics(
         &tree.state,
         &subroutine,
+        &builder.dims.const_env,
+        builder.state.locals,
         &statics,
         builder.state.subroutine_directions,
     )?;
     if !builder.automatic {
-        lifetimes::check_static_result(&subroutine, builder.state.subroutine_directions)?;
+        lifetimes::check_static_result(
+            &tree.state,
+            &builder.dims.const_env,
+            builder.state.locals,
+            &subroutine,
+            builder.state.subroutine_directions,
+        )?;
     }
     Ok(subroutine)
 }
@@ -1655,4 +1700,125 @@ pub(super) fn source_span(
         }
     }
     result
+}
+
+fn dump_selection_name(
+    id: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    rename: &dyn Fn(&mut ConstExpr),
+    is_local: &dyn Fn(&str) -> bool,
+) -> Result<String, AnalyzerError> {
+    // Preserve identifier/index boundaries in host metadata. A normalized
+    // escaped identifier can itself contain '.', '::', or '[0]'. NUL cannot
+    // occur in an authored identifier, so it separates these components.
+    fn append(
+        id: celox_sv_syntax::ExprId,
+        tree: &AnalysisContext<'_>,
+        dimensions: &PackedDimensions,
+        rename: &dyn Fn(&mut ConstExpr),
+        kind: &mut &'static str,
+        fields: &mut Vec<String>,
+    ) -> Result<(), AnalyzerError> {
+        use celox_sv_syntax::{DimensionKind, ExprKind};
+        match &tree.declarations().expression(id).kind {
+            ExprKind::Name(name) if name.spelling == "$root" => {
+                *kind = "absolute";
+            }
+            ExprKind::Name(name) => {
+                fields.extend([
+                    "name".into(),
+                    instances::normalize_identifier(&name.spelling),
+                ]);
+            }
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." || separator == "::" => {
+                append(*expression, tree, dimensions, rename, kind, fields)?;
+                if separator == "::" {
+                    *kind = "package";
+                }
+                fields.extend([
+                    "name".into(),
+                    instances::normalize_identifier(&name.spelling),
+                ]);
+            }
+            ExprKind::Select {
+                expression,
+                dimension,
+            } => {
+                let DimensionKind::Index(index) = &dimension.kind else {
+                    return Err(unsupported(
+                        "$dumpvars hierarchy selection requires a single constant index",
+                    ));
+                };
+                append(*expression, tree, dimensions, rename, kind, fields)?;
+                let mut value = constant_binding::bind(*index, tree, dimensions)?
+                    .ok_or_else(|| unsupported("$dumpvars hierarchy index must be constant"))?;
+                rename(&mut value);
+                let index = eval_ast_const_expr(&tree.state, &value, &dimensions.const_env)
+                    .ok_or_else(|| {
+                        unsupported("$dumpvars hierarchy index must be a known constant integer")
+                    })?;
+                fields.extend(["index".into(), index.to_string()]);
+            }
+            _ => {
+                return Err(unsupported(
+                    "$dumpvars selection must be a module or variable name",
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut kind = "relative";
+    let mut fields = Vec::new();
+    append(id, tree, dimensions, rename, &mut kind, &mut fields)?;
+    // Imports bind declarations, not a module-local spelling. Nested procedural
+    // declarations shadow these aliases just as they do for value expressions.
+    if kind == "relative" && fields.len() == 2 && !is_local(&fields[1]) {
+        let symbols = scope::imported(&tree.state);
+        if let Some(target) = symbols.aliases.get(&fields[1])
+            && let Some((package, name)) = symbols
+                .state_signals
+                .iter()
+                .find(|signal| signal.name() == target)
+                .and_then(|signal| signal.package_variable())
+        {
+            kind = "package";
+            fields = vec!["name".into(), package.into(), "name".into(), name.into()];
+        } else if let Ok(unit) = tree.root_unit()
+            && unit.kind == celox_sv_syntax::UnitKind::Package
+            && packages::package_variables(&unit.name.spelling, tree)?.contains(&fields[1])
+        {
+            // A package subroutine is later instantiated at its caller, but
+            // its unqualified package references retain their lexical owner.
+            kind = "package";
+            fields = vec![
+                "name".into(),
+                instances::normalize_identifier(&unit.name.spelling),
+                "name".into(),
+                fields[1].clone(),
+            ];
+        }
+    }
+    if fields.is_empty() {
+        return Err(unsupported(
+            "$dumpvars selection must name a module or variable",
+        ));
+    }
+    // A lexical declaration wins over a root module with the same spelling.
+    // Keep that decision in metadata: the runtime cannot recover lexical
+    // binding from an already flattened path or the top module's name.
+    if kind == "relative"
+        && (is_local(&fields[1]) || imports::scope_names(tree)?.contains(&fields[1]))
+    {
+        kind = "local";
+    }
+    Ok(std::iter::once("celox.dump.path.v1".to_string())
+        .chain(std::iter::once(kind.to_string()))
+        .chain(fields)
+        .collect::<Vec<_>>()
+        .join("\0"))
 }

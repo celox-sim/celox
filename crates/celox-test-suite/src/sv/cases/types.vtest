@@ -277,3 +277,80 @@
             "#)
   (top Top)
   (expect reject))
+
+(case constant_functions_in_unpacked_dimensions
+  ; IEEE 1800-2023 7.4.2 and 13.4.3: fixed unpacked bounds may
+  ; call module-local or package constant functions.
+  (source "constant_function_dimensions.sv" #"
+    package Sizes;
+      function automatic int count(input int n); return n * 10; endfunction
+    endpackage
+    module Top(output int sized_count, ranged_count, imported_count, qualified_count,
+               inner_count, negative_left, negative_right);
+      import Sizes::*;
+      function automatic int f(input int n); return n * 10; endfunction
+      logic [7:0] sized [f(1)];
+      logic [7:0] ranged [0:f(2)-1];
+      logic [7:0] imported [count(3)];
+      logic [7:0] qualified [Sizes::count(4)];
+      logic [7:0] matrix [f(1)][Sizes::count(1)];
+      logic [7:0] negative [f(-1):f(-1)+2];
+      assign sized_count = $size(sized);
+      assign ranged_count = $size(ranged);
+      assign imported_count = $size(imported);
+      assign qualified_count = $size(qualified);
+      assign inner_count = $size(matrix, 2);
+      assign negative_left = $left(negative);
+      assign negative_right = $right(negative);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq sized_count 10)
+  (assert_eq ranged_count 20)
+  (assert_eq imported_count 30)
+  (assert_eq qualified_count 40)
+  (assert_eq inner_count 10)
+  (assert_eq negative_left (trunc 32 -10))
+  (assert_eq negative_right (trunc 32 -8)))
+
+(case constant_functions_in_unpacked_port_dimensions
+  ; Each instance must resolve bounds with its own parameter values.
+  ; The loop body cannot be replaced by a single declaration expression.
+  (source "constant_function_port_dimensions.sv" #"
+    module Sub #(parameter int N = 2)(output logic [7:0] values [extent(N)],
+                                     output int count, left_bound, right_bound);
+      function automatic int extent(input int n);
+        int total;
+        total = 0;
+        for (int i = 0; i < n; i++) total = total + 2;
+        return total;
+      endfunction
+      always_comb begin
+        for (int i = 0; i < extent(N); i++) values[i] = N * 10 + i;
+      end
+      assign count = $size(values);
+      assign left_bound = $left(values);
+      assign right_bound = $right(values);
+    endmodule
+    module Top(output logic [7:0] small_last, large_last,
+               output int small_count, large_count, small_left, large_right);
+      logic [7:0] small_values [2];
+      logic [7:0] large_values [6];
+      int unused_small_right, unused_large_left;
+      Sub #(.N(1)) small_inst(.values(small_values), .count(small_count),
+                        .left_bound(small_left), .right_bound(unused_small_right));
+      Sub #(.N(3)) large_inst(.values(large_values), .count(large_count),
+                        .left_bound(unused_large_left), .right_bound(large_right));
+      assign small_last = small_values[1];
+      assign large_last = large_values[5];
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq small_last 11)
+  (assert_eq large_last 35)
+  (assert_eq small_count 2)
+  (assert_eq large_count 6)
+  (assert_eq small_left 0)
+  (assert_eq large_right 5))

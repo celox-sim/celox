@@ -138,7 +138,7 @@ mod selects;
 mod shared_map;
 mod statements;
 mod subroutine_owners;
-mod timescales;
+pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
 mod validation;
@@ -1232,6 +1232,12 @@ impl Module {
                 }
             }
         }
+        procedural::timed_tasks::classify(
+            subroutines.iter().chain(imported.subroutines.iter()),
+            &comb_processes,
+            &mut ff_processes,
+            &mut initial_processes,
+        )?;
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -1422,7 +1428,7 @@ pub(crate) fn generated_time_declarations(
     sources: &[(&str, &std::path::Path)],
     roots: Option<&[&str]>,
 ) -> Result<String, AnalyzerError> {
-    timescales::generated_source_declarations(sources, roots)
+    timescales::generated_source_declarations(sources, roots, false)
 }
 
 const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
@@ -1607,6 +1613,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    default: Option<ConstExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1665,6 +1672,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            default: None,
         }
     }
 
@@ -1682,6 +1690,15 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
+        self.default = default;
+        self
+    }
+
+    pub fn default(&self) -> Option<&ConstExpr> {
+        self.default.as_ref()
     }
 }
 
@@ -2190,6 +2207,7 @@ pub enum CombProcessKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfProcess {
+    suspendable: bool,
     creation_order: usize,
     events: Vec<FfEvent>,
     body: Vec<Stmt>,
@@ -2203,6 +2221,7 @@ impl FfProcess {
 
     fn new(events: Vec<FfEvent>, body: Vec<Stmt>) -> Self {
         Self {
+            suspendable: false,
             creation_order: 0,
             events,
             body,

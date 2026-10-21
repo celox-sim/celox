@@ -8,7 +8,7 @@ use std::{
 use celox::NativeProgramImage;
 use celox_frontend_veryl::FileDependency;
 
-use super::{CeloxHeliodorError, Options};
+use super::{Options, RunError};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedFileDependency {
@@ -93,7 +93,7 @@ pub(super) fn write_relative_image(
     image: &NativeProgramImage,
     root: &Path,
     output: &Path,
-) -> Result<(), CeloxHeliodorError> {
+) -> Result<(), RunError> {
     let mut image = image.clone();
     image.try_map_paths(|path| relative_path(path, root))?;
     image.write_container(output)?;
@@ -267,7 +267,7 @@ impl BuildCache {
         opts: &Options,
         sources: &[(String, PathBuf)],
         metadata: &veryl_metadata::Metadata,
-    ) -> Result<Self, CeloxHeliodorError> {
+    ) -> Result<Self, RunError> {
         // Source loading deliberately excludes dependency discovery. Resolve
         // the same namespaces and properties as the compiler before hashing.
         let mut metadata = metadata.clone();
@@ -299,6 +299,14 @@ impl BuildCache {
                 .as_encoded_bytes(),
         );
         field(&mut hash, opts.test.as_bytes());
+        field(
+            &mut hash,
+            format!(
+                "{:?}:{:?}:{:?}",
+                opts.design.parameters, opts.design.diagnostics, opts.design.signal_access
+            )
+            .as_bytes(),
+        );
         field(
             &mut hash,
             format!(
@@ -387,7 +395,7 @@ impl BuildCache {
         }
     }
 
-    fn try_load(&self) -> Result<Option<NativeProgramImage>, CeloxHeliodorError> {
+    fn try_load(&self) -> Result<Option<NativeProgramImage>, RunError> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -439,7 +447,7 @@ impl BuildCache {
         &self,
         image: &NativeProgramImage,
         dependencies: &[FileDependency],
-    ) -> Result<(), CeloxHeliodorError> {
+    ) -> Result<(), RunError> {
         let dependencies = dependencies
             .iter()
             .map(|dependency| {

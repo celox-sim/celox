@@ -33,6 +33,7 @@ pub(super) struct ProcModule<'a> {
     /// Number of extern calls lowered so far.
     pub extern_calls: usize,
     pub four_state: bool,
+    pub forceable: HashMap<SourceVarId, (SourceVarId, SourceVarId)>,
     /// Hidden variables created while lowering, for the caller to publish.
     pub created: Vec<SourceVarId>,
     temp_counter: usize,
@@ -108,26 +109,26 @@ impl<'a> ProcModule<'a> {
             let bounds: Option<Vec<_>> = r#type
                 .unpacked_ranges()
                 .iter()
-                .map(|range| {
-                    Some((
-                        sv::typecheck::eval_const_expr_with_types(
-                            range.left(),
-                            constants,
-                            parameter_types,
-                        )?,
-                        sv::typecheck::eval_const_expr_with_types(
-                            range.right(),
-                            constants,
-                            parameter_types,
-                        )?,
-                    ))
-                })
+                .map(|range| super::unpacked_range_bounds(range, constants, parameter_types))
                 .collect();
             if let Some(bounds) = bounds.filter(|bounds| !bounds.is_empty()) {
                 unpacked_bounds.insert(id, bounds);
             }
         }
+        let forceable = variables
+            .iter()
+            .filter_map(|(&enabled, var)| {
+                let (target, true) = var.force_control? else {
+                    return None;
+                };
+                let value = variables.iter().find_map(|(&id, var)| {
+                    (var.force_control == Some((target, false))).then_some(id)
+                })?;
+                Some((target, (enabled, value)))
+            })
+            .collect();
         Self {
+            forceable,
             variables,
             name_to_id,
             next_id,
@@ -469,6 +470,23 @@ impl<'a> ProcModule<'a> {
         self.warnings.push((kind, site.cloned()));
     }
 
+    pub fn file_memory_shape(
+        &self,
+        id: SourceVarId,
+    ) -> Result<(i128, i128, usize), sv::AnalyzerError> {
+        let Some(bounds) = self.unpacked_bounds.get(&id) else {
+            return Err(unsupported("$writemem requires a static unpacked array"));
+        };
+        let Some(width) = unpacked_element_width(self.var(id)) else {
+            return Err(unsupported("$writemem packed element type"));
+        };
+        let (left, right) = match bounds.as_slice() {
+            [bound] => *bound,
+            _ => (0, (self.var(id).width / width) as i128 - 1),
+        };
+        Ok((left, right, width))
+    }
+
     /// Register a runtime event site and return its local number.
     pub fn event_site(&mut self, site: RuntimeEventSite) -> u32 {
         self.runtime_event_sites.push(site);
@@ -496,6 +514,10 @@ impl<'a> ProcModule<'a> {
 
     pub fn id(&self, name: &str) -> Option<SourceVarId> {
         self.name_to_id.get(name).copied()
+    }
+
+    pub fn force_controls(&self, id: SourceVarId) -> Option<(SourceVarId, SourceVarId)> {
+        self.forceable.get(&id).copied()
     }
 
     pub fn var(&self, id: SourceVarId) -> &SvVariable {
@@ -552,6 +574,7 @@ impl<'a> ProcModule<'a> {
                 },
                 source: None,
                 hidden: true,
+                force_control: None,
             },
         );
         self.name_to_id.insert(name, id);
@@ -613,6 +636,7 @@ impl<'a> ProcModule<'a> {
             type_kind: source.type_kind,
             source: None,
             hidden: true,
+            force_control: None,
         };
         let id = next_var_id(&mut self.next_id);
         self.variables.insert(id, variable);
@@ -888,7 +912,14 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Fatal => SystemTaskKind::Fatal,
         SystemTask::Assert => SystemTaskKind::Assertion(RuntimeEventKind::AssertFatal),
         SystemTask::AssertContinue => SystemTaskKind::Assertion(RuntimeEventKind::AssertContinue),
-        SystemTask::Readmem(_) | SystemTask::Printtimescale | SystemTask::Exit => return None,
+        SystemTask::Readmem(_)
+        | SystemTask::Writemem(_)
+        | SystemTask::Fclose
+        | SystemTask::Fdisplay(_)
+        | SystemTask::Fwrite(_)
+        | SystemTask::Printtimescale
+        | SystemTask::Exit
+        | SystemTask::Vcd(_) => return None,
     })
 }
 
@@ -1007,6 +1038,7 @@ pub(super) fn register_locals(
                 type_kind: type_info.type_kind,
                 source: None,
                 hidden: true,
+                force_control: None,
             },
         );
         name_to_id.insert(local.name.clone(), id);

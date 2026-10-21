@@ -1706,6 +1706,7 @@ fn lower_processes(
     for (index, process) in artifact.processes().iter().enumerate() {
         let name = |slot: &str| vec![format!("$process[{index}]"), slot.to_string()];
         let slots = ProcessSlots {
+            requires_timed_simulation: false,
             resume: lowering
                 .hidden
                 .declare(name("resume"), PROCESS_RESUME_WIDTH, false),
@@ -1924,6 +1925,7 @@ pub fn lower_frontend_artifact(
         counter_slots,
         wait_sites,
         nba_sites,
+        host_request_sites: Vec::new(),
         time_slot: None,
     };
     let symbolic = SymbolicRtl {

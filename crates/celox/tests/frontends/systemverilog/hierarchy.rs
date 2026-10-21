@@ -1,6 +1,34 @@
 use super::*;
 
 sv_backends! {
+    fn sized_parameter_actuals_follow_parent_specialization(sim) {
+        @case "hierarchy::sized_parameter_actuals_follow_parent_specialization";
+    }
+
+    fn generated_parameter_part_select_actuals(sim) {
+        @case "hierarchy::generated_parameter_part_select_actuals";
+    }
+
+    fn conditional_parameter_actuals_follow_parent_specialization(sim) {
+        @case "hierarchy::conditional_parameter_actuals_follow_parent_specialization";
+    }
+
+    fn concatenated_parameter_actuals_use_each_parent_specialization(sim) {
+        @case "hierarchy::concatenated_parameter_actuals_use_each_parent_specialization";
+    }
+
+    fn input_port_defaults_use_child_scope_and_only_omitted_connections(sim) {
+        @case "hierarchy::input_port_defaults_use_child_scope_and_only_omitted_connections";
+    }
+
+    fn bits_query_parameter_overrides_follow_caller_specialization(sim) {
+        @case "hierarchy::bits_query_parameter_overrides_follow_caller_specialization";
+    }
+
+    fn bits_query_parameter_overrides(sim) {
+        @case "hierarchy::bits_query_parameter_overrides";
+    }
+
     fn parameter_patterns_keep_original_declarations_and_isolated_bindings(sim) { @case "hierarchy::parameter_patterns_keep_original_declarations_and_isolated_bindings"; }
     fn parameter_patterns_preserve_enclosing_expressions(sim) { @case "hierarchy::parameter_patterns_preserve_enclosing_expressions"; }
     fn widens_small_parameters_preserving_four_state_bits(sim) {

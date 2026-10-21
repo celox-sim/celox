@@ -3516,7 +3516,7 @@ fn rejects_unimplemented_timing_constructs() {
         ),
         ("logic a, y; always_latch y = a;", "always_latch process"),
         (
-            "task automatic t; #1; endtask",
+            "function void t(); #1; endfunction",
             "delay control in a subroutine",
         ),
     ] {
@@ -6007,4 +6007,222 @@ fn native_system_task_arguments_preserve_strings_omissions_and_query_operands() 
         let source = format!("module Top; initial begin {call} end endmodule");
         assert!(analyze_source(&source, Path::new("named_system_task.sv")).is_err());
     }
+}
+
+#[test]
+fn timed_task_calls_require_a_suspendable_context() {
+    for caller in [
+        "always_comb outer();",
+        "always @* outer();",
+        "always_ff @(posedge clk) outer();",
+        "function void f(); outer(); endfunction initial f();",
+    ] {
+        let source = format!(
+            "module Top(input bit clk); task automatic pause(); #1; endtask task automatic outer(); pause(); endtask {caller} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("timed_task_context.sv"))
+            .expect_err("a timed task cannot suspend this caller");
+        assert!(
+            error.to_string().contains("timed task call"),
+            "{caller}: {error}"
+        );
+    }
+}
+
+#[test]
+fn timed_tasks_reject_static_locals_instead_of_reinitializing_them() {
+    for declaration in [
+        "task t; int saved = 1; #1; saved = 2; endtask",
+        "task automatic t; static int saved = 1; #1; saved = 2; endtask",
+    ] {
+        let source = format!("module Top; {declaration} initial t(); endmodule");
+        let error = analyze_source(&source, Path::new("timed_static.sv"))
+            .expect_err("static local storage across timed calls is not lowered yet");
+        assert!(
+            error.to_string().contains("static local in a timed task"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn functions_still_reject_direct_timing_controls() {
+    for statement in ["#1;", "@(posedge clk);", "wait (clk);"] {
+        let source = format!(
+            "module Top(input bit clk); function void f(); {statement} endfunction initial f(); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("function_timing.sv"))
+            .expect_err("functions cannot suspend");
+        assert!(error.to_string().contains("in a subroutine"), "{error}");
+    }
+}
+
+#[test]
+fn timed_tasks_reject_nonblocking_updates_to_automatic_storage() {
+    let source = "module Top; task automatic t(output int result); #1; result <= 1; endtask int q; initial t(q); endmodule";
+    let error = analyze_source(source, Path::new("automatic_task_nba.sv"))
+        .expect_err("NBA cannot outlive automatic task storage (IEEE 1800-2023 13.3.2)");
+    assert!(
+        error.to_string().contains("automatic task variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn timed_tasks_reject_automatic_nbas_in_untimed_callees() {
+    for assignment in ["x <= 1;", "{x, y} <= 64'd1;", "if (q == 0) x <= 1;"] {
+        let source = format!(
+            r#"
+            module Top;
+                int q, r;
+                task automatic leaf(output int x, output int y);
+                    {assignment}
+                    y = 0;
+                endtask
+                task automatic middle(output int x, output int y);
+                    leaf(x, y);
+                endtask
+                task automatic outer();
+                    #1;
+                    middle(q, r);
+                endtask
+                initial outer();
+            endmodule
+        "#
+        );
+        let error = analyze_source(&source, Path::new("untimed_callee_nba.sv"))
+            .expect_err("untimed callees cannot enqueue updates to automatic storage");
+        assert!(
+            error.to_string().contains("automatic task variable"),
+            "{assignment}: {error}"
+        );
+    }
+}
+
+#[test]
+fn untimed_tasks_also_reject_nbas_to_automatic_locals() {
+    let source = "module Top; task automatic t(); int saved[2]; saved[0] <= 1; endtask initial t(); endmodule";
+    let error = analyze_source(source, Path::new("untimed_automatic_local_nba.sv"))
+        .expect_err("the automatic-storage restriction does not depend on suspension");
+    assert!(
+        error.to_string().contains("automatic task variable"),
+        "{error}"
+    );
+}
+
+#[test]
+fn untimed_callees_may_schedule_nbas_to_module_storage() {
+    let source = r#"
+        module Top;
+            int q, r;
+            task automatic leaf(output int x);
+                q <= 1;
+                x = 7;
+            endtask
+            task automatic outer(); #1; leaf(r); endtask
+            initial outer();
+        endmodule
+    "#;
+    analyze_source(source, Path::new("callee_module_nba.sv"))
+        .expect("module storage outlives the automatic task activation");
+}
+
+#[test]
+fn automatic_task_nbas_are_illegal_even_in_folded_branches() {
+    for statement in [
+        "if (0) x <= 1;",
+        "if (1) ; else {x, y} <= 64'd1;",
+        "if (0) begin if (1) x <= 1; end",
+    ] {
+        let source = format!(
+            "module Top; int q, r; task automatic t(output int x, output int y); {statement} endtask initial t(q, r); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("folded_automatic_nba.sv"))
+            .expect_err("automatic NBA legality is independent of reachability");
+        assert!(
+            error.to_string().contains("automatic task variable"),
+            "{error}"
+        );
+    }
+    analyze_source(
+        "module Top; task automatic t; if (0) #1; endtask always_comb t(); endmodule",
+        Path::new("folded_timing.sv"),
+    )
+    .expect("unreachable timing must not make a combinational task suspend");
+}
+
+#[test]
+fn scoped_timed_task_static_formals_require_shared_storage() {
+    for scope in ["package p;", ""] {
+        let end_scope = if scope.is_empty() { "" } else { "endpackage" };
+        let call = if scope.is_empty() { "t(q)" } else { "p::t(q)" };
+        for lifetime in ["", "automatic"] {
+            let source = format!(
+                "{scope} task {lifetime} t(input int x); #1; endtask {end_scope} module Top; int q; initial {call}; endmodule"
+            );
+            let result = analyze_source(&source, Path::new("scoped_timed_task.sv"));
+            if lifetime.is_empty() {
+                let error = result.expect_err("scoped static formals are not shared yet");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("static arguments in a package or compilation-unit timed task"),
+                    "{error}"
+                );
+            } else {
+                result.expect("scoped automatic tasks have per-activation storage");
+            }
+        }
+    }
+}
+
+#[test]
+fn unpacked_constant_function_bounds_survive_analysis_without_losing_the_contract() {
+    let ir = analyze_source(
+        r#"
+        module Top #(parameter int N = 3);
+          function automatic int extent(input int n); return n * 2; endfunction
+          logic [7:0] memory [extent(N)];
+        endmodule
+        "#,
+        Path::new("unpacked-constant-function-bounds.sv"),
+    )
+    .unwrap();
+    let ty = ir.modules()[0]
+        .signals()
+        .iter()
+        .find(|signal| signal.name() == "memory")
+        .unwrap()
+        .r#type();
+    let range = &ty.unpacked_ranges()[0];
+    assert_eq!(range.resolved_bounds(), Some((0, 5)));
+    assert_eq!(ty.resolved_width(), Some(48));
+    // Call expressions must remain symbolic for interface declaration
+    // contracts, even though lowering no longer owns their function bodies.
+    assert!(typecheck::eval_const_expr(range.right(), &HashMap::default()).is_none());
+}
+
+#[test]
+fn time_literal_delays_reject_scheduler_overflow() {
+    let error = analyze_source(
+        "module Top; timeunit 1s / 1fs; initial #18446744073709551616s; endmodule",
+        Path::new("overflow_delay.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("scheduler range"), "{error}");
+}
+
+#[test]
+fn time_literal_delays_accept_numeric_separators() {
+    let source = "module Top; timeunit 1ns / 1ps; initial #1_000ps; endmodule";
+    let ir = analyze_source(source, Path::new("separated_time.sv")).unwrap();
+    let ir::Stmt::Delay {
+        amount,
+        ticks_per_unit,
+    } = &ir.modules()[0].initial_processes()[0].body()[0]
+    else {
+        panic!("delay");
+    };
+    assert_eq!(*ticks_per_unit, 1);
+    assert!(matches!(amount, ir::Expr::Literal(value) if value == "64'd1000"));
 }

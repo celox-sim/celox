@@ -24,6 +24,9 @@ pub struct Packages {
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
+    /// All interface declaration names, including unsupported non-ANSI bodies.
+    /// Namespace validation must not depend on sources selected for binding.
+    pub(crate) interface_names: HashSet<String>,
     /// Original syntax shared with interface instances; never generated source.
     pub(crate) interface_sources: HashMap<String, (std::rc::Rc<SyntaxTree>, PathBuf)>,
     pub(super) timescales: Arc<timescales::Timescales>,
@@ -125,7 +128,7 @@ impl Packages {
     }
 
     pub(crate) fn with_warnings(mut self, warnings: Vec<super::warnings::AnalyzerWarning>) -> Self {
-        self.warnings = warnings;
+        super::warnings::append(&mut self.warnings, warnings);
         self
     }
 
@@ -194,11 +197,19 @@ impl Packages {
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
     ) -> Result<Self, AnalyzerError> {
+        Self::analyze_with_options(trees, roots, false)
+    }
+
+    pub(crate) fn analyze_with_options(
+        trees: &[(&SyntaxTree, &Path)],
+        roots: Option<&[&str]>,
+        allow_mixed_timescales: bool,
+    ) -> Result<Self, AnalyzerError> {
         let mut warnings = Vec::new();
         for (tree, _) in trees {
             super::warnings::append(&mut warnings, super::warnings::packages(tree));
         }
-        match Self::analyze_with_roots_impl(trees, roots) {
+        match Self::analyze_with_roots_impl(trees, roots, allow_mixed_timescales) {
             Ok(packages) => Ok(packages.with_warnings(warnings)),
             Err(error) => Err(error.with_warnings(warnings)),
         }
@@ -207,14 +218,22 @@ impl Packages {
     fn analyze_with_roots_impl(
         trees: &[(&SyntaxTree, &Path)],
         roots: Option<&[&str]>,
+        allow_mixed_timescales: bool,
     ) -> Result<Self, AnalyzerError> {
-        let mut timescales = timescales::Timescales::collect(trees)?;
+        let mut timescales =
+            timescales::Timescales::collect_with_options(trees, allow_mixed_timescales)?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
+        let mixed_timescales = timescales.has_mixed_timescales();
         let timescales = Arc::new(timescales);
         let state = std::rc::Rc::new(AnalysisState::default());
         let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+        if mixed_timescales {
+            packages
+                .warnings
+                .push(super::warnings::AnalyzerWarning::MixedTimescale);
+        }
         packages.call_sites = state.next_call_site.clone();
         let units: Vec<_> = trees
             .iter()
@@ -341,7 +360,10 @@ impl Packages {
 /// The variables package `name` declares: each is one object, shared by
 /// every module that uses it (IEEE 1800-2023 26.2). Constant variables are
 /// left out; they are copied like parameters. Package nets are rejected.
-fn package_variables(name: &str, tree: &SyntaxTree) -> Result<HashSet<String>, AnalyzerError> {
+pub(super) fn package_variables(
+    name: &str,
+    tree: &SyntaxTree,
+) -> Result<HashSet<String>, AnalyzerError> {
     use celox_sv_syntax::{BodyItemKind, DataDeclaration};
     let native = tree.declarations();
     let mut variables = HashSet::default();

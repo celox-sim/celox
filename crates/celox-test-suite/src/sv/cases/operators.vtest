@@ -937,6 +937,105 @@
   (modify (set a 0b10))
   (assert_eq y 0xaa))
 
+(case forwards_replicated_parameter_values
+  (source "replicated_parameter.sv" #"
+        module Child #(parameter P=0)(output logic [63:0] y);
+            assign y=P;
+        endmodule
+        module Top #(parameter N=2, parameter P={N{32'h12345678}})(
+            output logic [63:0] y);
+            Child #(.P(P)) child(.y(y));
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq y 0x1234567812345678))
+
+(case size_casts_resolve_generated_locals_and_parameter_expressions
+  (source "scoped_cast.sv" #"
+        module Child #(parameter N=2, parameter signed S=-3)(input logic [7:0] bus_data,
+            input logic select, input logic [7:0] data,
+            output logic [15:0] y, signed_value, unsigned_value);
+            if (N>1) begin : g
+                logic [7:0] saved;
+                assign saved=data;
+                assign y=16'(select ? saved : bus_data);
+                assign signed_value=16'(S+1);
+                assign unsigned_value=16'(8'(8'(N)-8'd3));
+            end
+        endmodule
+        module Top(input logic select, input logic [7:0] data,
+            output logic [15:0] y, signed_value, unsigned_value);
+            Child child(8'h80, select, data, y, signed_value, unsigned_value);
+        endmodule
+    "#)
+  (top Top)
+  (modify (set select 0) (set data 0xf1))
+  (assert_eq y 0x80)
+  (assert_eq signed_value 0xfffe)
+  (assert_eq unsigned_value 0xff)
+  (modify (set select 1))
+  (assert_eq y 0xf1))
+
+(case parameter_size_casts_in_generate_conditions
+  (source "generate_cast.sv" #"
+        module Top #(parameter W=3, parameter MASK=3'b100)(
+            output logic [7:0] y, output logic signed_test, output logic guard);
+            if ((W'(MASK) & {W{1'b1}}) == 0) assign y=8'h11;
+            else assign y=8'hab;
+            if (W'(-1) < 0) assign signed_test=1'b1;
+            else assign signed_test=1'b0;
+            if ((0 || 0) && (W'(MASK) & {W{1'b1}}) == 0) assign guard=1'b0;
+            else assign guard=1'b1;
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq y 0xab)
+  (assert_eq signed_test 1)
+  (assert_eq guard 1))
+
+(case zero_count_replications_preserve_concat_bits
+  (source "zero_replication.sv" #"
+        module Top #(parameter PAD=0)(input logic [3:0] a,
+            output logic [7:0] front, middle, back);
+            assign front = {{PAD{1'bx}}, a, 4'h5};
+            assign middle = {4'ha, {PAD{1'bz}}, a};
+            assign back = {a, 4'hc, {PAD{1'b1}}};
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 9))
+  (assert_eq front 0x95)
+  (assert_eq middle 0xa9)
+  (assert_eq back 0x9c)
+  (modify (set a 3))
+  (assert_eq front 0x35)
+  (assert_eq middle 0xa3)
+  (assert_eq back 0x3c))
+
+(case zero_count_replications_preserve_unknown_bits
+  (four_state)
+  (source "zero_replication.sv" #"
+        module Top #(parameter PAD=0)(input logic [3:0] a,
+            output logic [7:0] front, middle, back);
+            assign front = {{PAD{1'bx}}, a, 4'h5};
+            assign middle = {4'ha, {PAD{1'bz}}, a};
+            assign back = {a, 4'hc, {PAD{1'b1}}};
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 9))
+  (assert_eq front 0x95)
+  (assert_eq middle 0xa9)
+  (assert_eq back 0x9c)
+  (modify (set a 3))
+  (assert_eq front 0x35)
+  (assert_eq middle 0xa3)
+  (assert_eq back 0x3c)
+  (modify (set a (fourstate 0xa 0x5)))
+  (assert_eq front (fourstate 0xa5 0x50))
+  (assert_eq middle (fourstate 0xaa 0x05))
+  (assert_eq back (fourstate 0xac 0x50)))
+
 (case preserves_unknown_complement_and_converts_bit_function_arguments
   (four_state)
   (source "four_state_unary.sv" #"
@@ -1500,3 +1599,19 @@ endmodule
   (modify (set row 5) (set col 3))
   (assert_eq selected 0x38)
   (assert_eq bit_value 1))
+
+(case wide_reduction_and_respects_partial_storage_words
+  (source "partial_reduction.sv" #"
+    module Top(input logic [980:0] a, output logic all_set);
+      assign all_set = &a;
+    endmodule
+  "#)
+  (top Top)
+  (let ones (- (<< 1 981) 1))
+  (modify (set a ones))
+  (assert_eq all_set 1)
+  (for bit (range 0 981)
+    (modify (set a (^ ones (<< 1 bit))))
+    (assert_eq all_set 0 "each declared bit contributes, including the partial last word"))
+  (modify (set a ones))
+  (assert_eq all_set 1))

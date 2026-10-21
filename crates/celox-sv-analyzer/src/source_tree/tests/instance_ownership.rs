@@ -423,7 +423,6 @@ mod parameter_tests {
     #[test]
     fn native_override_special_forms_preserve_existing_diagnostics() {
         for (value, diagnostic) in [
-            ("1?2:3", "parameter override expression"),
             ("1:2:3", "mintypmax expression"),
             ("1 inside {1,2}", "parameter override expression"),
         ] {

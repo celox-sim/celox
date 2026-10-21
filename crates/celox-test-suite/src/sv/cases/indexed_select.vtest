@@ -1667,3 +1667,72 @@
     (assert_eq wrapped (& (>> by_index (* next 8)) 255))
     (tick clk)
     (assert_eq registered value)))
+
+(case procedural_loop_writes_memory_word_part_selects
+  (source "memory_byte_enables.sv" #"
+        module Top #(parameter BYTE_W=8)(input logic clk, rst, input logic [1:0] addr, strobe,
+            input logic [15:0] data, output logic [15:0] q, ascending_q);
+            logic [15:0] mem[0:3];
+            logic [0:15] ascending_mem[3:0];
+            always_ff @(posedge clk) begin
+                if (rst) begin
+                    for (integer i=0; i<4; i=i+1) begin
+                        mem[i] <= 0;
+                        ascending_mem[i] <= 0;
+                    end
+                end else begin
+                    for (integer i=0; i<2; i=i+1) begin
+                        if (strobe[i]) begin
+                            mem[addr][BYTE_W*i +: BYTE_W] <= data[BYTE_W*i +: BYTE_W];
+                            ascending_mem[addr][2*BYTE_W-1-BYTE_W*i -: BYTE_W] <= data[BYTE_W*i +: BYTE_W];
+                        end
+                    end
+                end
+            end
+            assign q=mem[addr];
+            assign ascending_q=ascending_mem[addr];
+        endmodule
+    "#)
+  (top Top)
+  (modify (set rst 1) (set addr 0) (set strobe 0) (set data 0))
+  (tick clk)
+  (assert_eq q 0)
+  (assert_eq ascending_q 0)
+  (modify (set rst 0) (set strobe 3) (set data 0x1234))
+  (tick clk)
+  (assert_eq q 0x1234)
+  (assert_eq ascending_q 0x1234)
+  (modify (set addr 1) (set strobe 1) (set data 0xabcd))
+  (tick clk)
+  (assert_eq q 0x00cd)
+  (assert_eq ascending_q 0x00cd)
+  (modify (set strobe 2) (set data 0x5678))
+  (tick clk)
+  (assert_eq q 0x56cd)
+  (assert_eq ascending_q 0x56cd)
+  (modify (set strobe 0) (set data 0xffff))
+  (tick clk)
+  (assert_eq q 0x56cd)
+  (assert_eq ascending_q 0x56cd)
+  (modify (set addr 0))
+  (assert_eq q 0x1234)
+  (assert_eq ascending_q 0x1234)
+  (modify (set addr 2))
+  (assert_eq q 0)
+  (assert_eq ascending_q 0))
+
+(case indexed_selections_in_constant_declaration_contexts
+  (source "declaration_select.sv" #"
+    module Top(output logic [3:0] enumeration, output logic [31:0] width);
+      localparam logic [7:0] P=8'hab;
+      logic [P[4 +: 4]-1:0] y;
+      typedef enum logic [3:0] { E=P[4 +: 4] } nibble;
+      nibble state;
+      assign state=E;
+      assign enumeration=state;
+      assign width=$bits(y);
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq enumeration 10)
+  (assert_eq width 10))

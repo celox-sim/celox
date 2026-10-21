@@ -292,7 +292,10 @@ pub(super) fn run() -> bool {
         }
         iterations += 1;
         if iterations > 1_000_000 {
-            fail("VPI callback scheduler exceeded 1000000 iterations".to_string());
+            fail(
+                "VPI callback scheduler exceeded 1000000 iterations without advancing time"
+                    .to_string(),
+            );
             break;
         }
 
@@ -362,7 +365,14 @@ pub(super) fn run() -> bool {
         let Some(next_time) = next_time else {
             break;
         };
-        with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.time = next_time));
+        with_host(|host| {
+            borrow_cell_mut(&host.callbacks, |state| {
+                if next_time > state.time {
+                    iterations = 0;
+                }
+                state.time = next_time;
+            })
+        });
         fire_all(CB_NEXT_SIM_TIME);
         if !finish_requested() {
             super::flush_pending_writes();

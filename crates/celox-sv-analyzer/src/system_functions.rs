@@ -56,10 +56,18 @@ pub enum SystemFunction {
     Isunknown,
     /// `$random` (20.14.1), with the algorithm of Annex N.
     Random,
+    /// `$dist_uniform` (20.14.2).
+    DistUniform,
+    /// Command-line prefix query (21.6).
+    TestPlusargs,
+    /// Command-line value query (21.6).
+    ValuePlusargs,
     /// `$urandom` (18.13.1).
     Urandom,
     /// `$urandom_range` (18.13.2).
     UrandomRange,
+    /// `$fopen` (21.3.1).
+    Fopen,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -73,6 +81,11 @@ pub enum ArrayQuery {
 }
 
 impl SystemFunction {
+    /// Calls that return through the timed scheduler's host boundary.
+    pub fn is_host_request(self) -> bool {
+        matches!(self, Self::Fopen | Self::TestPlusargs | Self::ValuePlusargs)
+    }
+
     /// The name, with its leading `$`.
     pub const fn name(self) -> &'static str {
         match self {
@@ -99,8 +112,12 @@ impl SystemFunction {
             Self::Onehot0 => "$onehot0",
             Self::Isunknown => "$isunknown",
             Self::Random => "$random",
+            Self::DistUniform => "$dist_uniform",
+            Self::TestPlusargs => "$test$plusargs",
+            Self::ValuePlusargs => "$value$plusargs",
             Self::Urandom => "$urandom",
             Self::UrandomRange => "$urandom_range",
+            Self::Fopen => "$fopen",
         }
     }
 
@@ -128,7 +145,16 @@ impl SystemFunction {
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice.
     pub fn is_effectful(self) -> bool {
-        matches!(self, Self::Random | Self::Urandom | Self::UrandomRange)
+        matches!(
+            self,
+            Self::Random
+                | Self::DistUniform
+                | Self::TestPlusargs
+                | Self::ValuePlusargs
+                | Self::Urandom
+                | Self::Fopen
+                | Self::UrandomRange
+        )
     }
 
     /// Whether a call reads the state of the simulation: it has an effect,
@@ -141,7 +167,8 @@ impl SystemFunction {
     /// Whether the call writes argument `position` back, as `$random(seed)`
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
-        self == Self::Random && position == 0
+        (matches!(self, Self::Random | Self::DistUniform) && position == 0)
+            || (self == Self::ValuePlusargs && position == 1)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -156,8 +183,10 @@ impl SystemFunction {
             | Self::Countbits
             | Self::Countones => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
-            Self::Random => Some((32, true)),
-            Self::Urandom | Self::UrandomRange | Self::Stime => Some((32, false)),
+            Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
+                Some((32, true))
+            }
+            Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Time => Some((64, false)),
             Self::Signed
             | Self::Unsigned
@@ -200,11 +229,31 @@ pub enum SystemTask {
     Write(Radix),
     /// `$readmemb` and `$readmemh` (21.4).
     Readmem(MemoryFormat),
+    /// Value change dump controls (21.7.1).
+    Vcd(VcdTask),
+    /// File output tasks (21.3).
+    Fclose,
+    Fdisplay(Radix),
+    Fwrite(Radix),
+    /// Memory snapshot output (21.5).
+    Writemem(MemoryFormat),
     /// Veryl's immediate assertions, emitted into SystemVerilog as calls of
     /// `$assert(condition, message...)`, which ends the simulation when the
     /// condition fails, and `$assert_continue`, which reports and continues.
     Assert,
     AssertContinue,
+}
+
+/// Four-state VCD control system tasks (IEEE 1800-2023 21.7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VcdTask {
+    File,
+    Vars,
+    Flush,
+    On,
+    Off,
+    All,
+    Limit,
 }
 
 /// The severity of `$error`, `$warning` and `$info`.
@@ -254,6 +303,14 @@ impl Radix {
 }
 
 impl SystemTask {
+    /// Tasks executed synchronously by the timed simulation host.
+    pub fn is_host_request(self) -> bool {
+        matches!(
+            self,
+            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_) | Self::Vcd(_)
+        )
+    }
+
     /// The name, with its leading `$`.
     pub const fn name(self) -> &'static str {
         use Radix::{Binary, Decimal, Hexadecimal, Octal};
@@ -274,8 +331,26 @@ impl SystemTask {
             Self::Write(Binary) => "$writeb",
             Self::Write(Octal) => "$writeo",
             Self::Write(Hexadecimal) => "$writeh",
+            Self::Fclose => "$fclose",
+            Self::Fdisplay(Decimal) => "$fdisplay",
+            Self::Fdisplay(Binary) => "$fdisplayb",
+            Self::Fdisplay(Octal) => "$fdisplayo",
+            Self::Fdisplay(Hexadecimal) => "$fdisplayh",
+            Self::Fwrite(Decimal) => "$fwrite",
+            Self::Fwrite(Binary) => "$fwriteb",
+            Self::Fwrite(Octal) => "$fwriteo",
+            Self::Fwrite(Hexadecimal) => "$fwriteh",
+            Self::Writemem(MemoryFormat::Binary) => "$writememb",
+            Self::Writemem(MemoryFormat::Hexadecimal) => "$writememh",
             Self::Readmem(MemoryFormat::Binary) => "$readmemb",
             Self::Readmem(MemoryFormat::Hexadecimal) => "$readmemh",
+            Self::Vcd(VcdTask::File) => "$dumpfile",
+            Self::Vcd(VcdTask::Vars) => "$dumpvars",
+            Self::Vcd(VcdTask::Flush) => "$dumpflush",
+            Self::Vcd(VcdTask::On) => "$dumpon",
+            Self::Vcd(VcdTask::Off) => "$dumpoff",
+            Self::Vcd(VcdTask::All) => "$dumpall",
+            Self::Vcd(VcdTask::Limit) => "$dumplimit",
             Self::Assert => "$assert",
             Self::AssertContinue => "$assert_continue",
         }
@@ -586,7 +661,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$load_coverage_db", Task),
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
-    unsupported("$dist_uniform", Function),
+    function(SystemFunction::DistUniform, 3, Some(3)),
     unsupported("$dist_normal", Function),
     unsupported("$dist_exponential", Function),
     unsupported("$dist_poisson", Function),
@@ -679,16 +754,56 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$monitoron", Task),
     unsupported("$monitoroff", Task),
     // 21.3 File input/output system tasks and system functions
-    unsupported("$fopen", Function),
-    unsupported("$fclose", Task),
-    unsupported("$fdisplay", Task),
-    unsupported("$fdisplayb", Task),
-    unsupported("$fdisplayo", Task),
-    unsupported("$fdisplayh", Task),
-    unsupported("$fwrite", Task),
-    unsupported("$fwriteb", Task),
-    unsupported("$fwriteo", Task),
-    unsupported("$fwriteh", Task),
+    function(SystemFunction::Fopen, 1, Some(2)),
+    task(SystemTask::Fclose, ProceduralAndInitial, 1, Some(1)),
+    task(
+        SystemTask::Fdisplay(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fdisplay(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fwrite(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
     unsupported("$fstrobe", Task),
     unsupported("$fstrobeb", Task),
     unsupported("$fstrobeo", Task),
@@ -729,19 +844,64 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         Some(4),
     ),
     // 21.5 Writing memory array data to a file
-    unsupported("$writememb", Task),
-    unsupported("$writememh", Task),
+    task(
+        SystemTask::Writemem(MemoryFormat::Binary),
+        ProceduralAndInitial,
+        2,
+        Some(4),
+    ),
+    task(
+        SystemTask::Writemem(MemoryFormat::Hexadecimal),
+        ProceduralAndInitial,
+        2,
+        Some(4),
+    ),
     // 21.6 Command line input
-    unsupported("$test$plusargs", Function),
-    unsupported("$value$plusargs", Function),
+    function(SystemFunction::TestPlusargs, 1, Some(1)),
+    function(SystemFunction::ValuePlusargs, 2, Some(2)),
     // 21.7 Value change dump (VCD) files
-    unsupported("$dumpfile", Task),
-    unsupported("$dumpvars", Task),
-    unsupported("$dumpoff", Task),
-    unsupported("$dumpon", Task),
-    unsupported("$dumpall", Task),
-    unsupported("$dumplimit", Task),
-    unsupported("$dumpflush", Task),
+    task(
+        SystemTask::Vcd(VcdTask::File),
+        ProceduralAndInitial,
+        0,
+        Some(1),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Vars),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Off),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::On),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::All),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Limit),
+        ProceduralAndInitial,
+        1,
+        Some(1),
+    ),
+    task(
+        SystemTask::Vcd(VcdTask::Flush),
+        ProceduralAndInitial,
+        0,
+        Some(0),
+    ),
     unsupported("$dumpports", Task),
     unsupported("$dumpportsoff", Task),
     unsupported("$dumpportson", Task),

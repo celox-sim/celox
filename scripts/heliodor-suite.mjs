@@ -18,8 +18,8 @@ export const workloads = [
   "test_soc_71v_linux_boot",
 ];
 export const runners = ["veryl-cc-sync", "celox", "celox-tiered", "veryl-cc-tiered"];
-// Multi-threaded Celox runs only on SMP workloads, in its own group so the
-// existing comparison groups keep their time budgets.
+// The synchronous multi-threaded Celox runner runs only on SMP workloads,
+// in its own group so the existing comparison groups keep their time budgets.
 export const parallelRunner = "celox-parallel";
 export const allRunners = [...runners, parallelRunner];
 const isSmp = test => /_smp_linux_boot_\d+hart$/.test(test);

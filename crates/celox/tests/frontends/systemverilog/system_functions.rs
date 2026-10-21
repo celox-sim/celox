@@ -431,6 +431,21 @@ sv_backends! {
         }
     }
 
+    fn packed_string_literals_preserve_bytes_and_unsignedness(sim) {
+        @case "random_plusargs::packed_string_literals_preserve_bytes_and_unsignedness";
+    }
+    fn dist_uniform_converts_wide_and_signed_seeds_to_int_formals(sim) {
+        @case "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals";
+    }
+    fn dist_uniform_bounds_seed_and_replay(sim) {
+        @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
+    }
+    fn dist_uniform_reference_sequence(sim) {
+        @case "random_plusargs::dist_uniform_reference_sequence";
+    }
+    fn plusargs_absent_preserves_destination(sim) {
+        @case "random_plusargs::plusargs_absent_preserves_destination";
+    }
     fn urandom_reseeds_and_shares_the_calling_process_stream(sim) {
         @case "system_functions::urandom_reseeds_and_shares_the_calling_process_stream";
     }
@@ -1782,9 +1797,9 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system function `$fopen`",
+            "system function `$fgetc`",
             r#"module Top(input logic a, output logic y);
-                always_comb begin $fopen("x.txt"); y = a; end
+                always_comb begin $fgetc(0); y = a; end
             endmodule"#,
         ),
         (
@@ -1795,8 +1810,8 @@ fn reports_where_a_known_system_function_is_not_supported() {
             endmodule",
         ),
         (
-            "system task `$dumpvars`",
-            "module Top(output logic y); initial $dumpvars; assign y = 0; endmodule",
+            "system task `$dumpports`",
+            "module Top(output logic y); initial $dumpports; assign y = 0; endmodule",
         ),
         (
             "system task `$stacktrace`",

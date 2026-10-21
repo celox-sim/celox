@@ -14,14 +14,11 @@ arm64-codegen = ["celox/arm64-codegen"]
 x86_64-codegen = ["celox/x86_64-codegen"]
 
 [dependencies]
-blake3          = "1.8"
 celox           = { path = "../celox" }
-celox-frontend-veryl = { path = "../celox-frontend-veryl" }
 clap            = { workspace = true }
 fxhash          = { workspace = true }
 libc            = { workspace = true }
 object          = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
-pathdiff        = "0.2"
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 tempfile        = { workspace = true }

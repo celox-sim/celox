@@ -225,12 +225,12 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
         "array",
         &mut dims,
     )?;
-    // For enum-typed variables, the width Shape is empty but the actual
-    // bit width is encoded in the TypeKind. Use kind.width() as the
-    // base scalar width when the explicit width shape is absent.
+    // Enums and aggregates encode their packed width in TypeKind rather
+    // than the width Shape. Even a one-bit struct/union needs that dimension:
+    // Veryl represents member access as a select into the packed aggregate.
     if width.is_empty() {
         if let Some(kind_width) = var_type.kind.width()
-            && kind_width > 1
+            && (kind_width > 1 || (kind_width == 1 && var_type.is_struct_union()))
         {
             dims.push(kind_width);
         }

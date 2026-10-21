@@ -107,6 +107,7 @@ pub(super) struct Timescales {
     instantiated: HashSet<String>,
     roots: Option<HashSet<String>>,
     specified: [u8; 2],
+    allow_mixed_timescales: bool,
 }
 
 /// Time-query state owned by one analysis, shared explicitly by nested scopes.
@@ -360,16 +361,18 @@ fn time_declarations(unit: Option<i32>, precision: Option<i32>) -> String {
 pub(crate) fn generated_source_declarations(
     sources: &[(&str, &Path)],
     roots: Option<&[&str]>,
+    allow_mixed_timescales: bool,
 ) -> Converted<String> {
     let trees = sources
         .iter()
         .map(|(code, path)| crate::source_tree::parse_source(code, path).map(|tree| (tree, *path)))
         .collect::<Converted<Vec<_>>>()?;
-    let mut scales = Timescales::collect(
+    let mut scales = Timescales::collect_with_options(
         &trees
             .iter()
             .map(|(tree, path)| (tree, *path))
             .collect::<Vec<_>>(),
+        allow_mixed_timescales,
     )?;
     if let Some(roots) = roots {
         scales.select_roots(roots);
@@ -497,6 +500,10 @@ fn design_path(
 }
 
 impl Timescales {
+    pub(super) fn has_mixed_timescales(&self) -> bool {
+        self.specified.contains(&3)
+    }
+
     pub(super) fn scope_scale(&self, name: &str) -> Option<(i32, i32)> {
         let scope = self
             .definitions
@@ -509,12 +516,13 @@ impl Timescales {
         self.precision.unwrap_or(DEFAULT.precision)
     }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
-        let local = Self::collect(&[(tree, Path::new(""))])?;
+        let local =
+            Self::collect_with_options(&[(tree, Path::new(""))], self.allow_mixed_timescales)?;
         let specified = [
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
         ];
-        if specified.contains(&3) {
+        if specified.contains(&3) && !self.allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
@@ -567,10 +575,21 @@ impl Timescales {
         ))
     }
 
+    #[cfg(test)]
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
+        Self::collect_with_options(trees, false)
+    }
+
+    pub(super) fn collect_with_options(
+        trees: &[(&SyntaxTree, &Path)],
+        allow_mixed_timescales: bool,
+    ) -> Converted<Self> {
         #[cfg(test)]
         COLLECTIONS.with(|count| count.set(count.get() + 1));
-        let mut design = Self::default();
+        let mut design = Self {
+            allow_mixed_timescales,
+            ..Self::default()
+        };
         // Each bit records whether a design element uses a default (1) or an
         // explicit/inherited setting (2), independently for unit and precision.
         let mut specified = [0u8; 2];
@@ -698,6 +717,11 @@ impl Timescales {
                     unit: declarations[i].0.unwrap_or(inherited.unit),
                     precision: declarations[i].1.unwrap_or(inherited.precision),
                 };
+                // Relaxed designs may mix explicit precision with the default.
+                // Both contribute to the global simulation precision.
+                let precision = scopes[i].scale.precision;
+                design.precision =
+                    Some(design.precision.map_or(precision, |old| old.min(precision)));
                 if scopes[i].scale.precision > scopes[i].scale.unit {
                     return Err(unsupported("timeprecision coarser than timeunit"));
                 }
@@ -716,7 +740,7 @@ impl Timescales {
                 }),
             );
         }
-        if specified.contains(&3) {
+        if specified.contains(&3) && !allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
@@ -995,6 +1019,63 @@ pub(super) fn time_divisor(
             &design.units[&source],
         ))
     }
+}
+
+/// A standalone time literal used as a delay: round at the declaring
+/// scope's precision before converting to global scheduler ticks (3.14.1).
+pub(super) fn delay_literal(
+    node: celox_sv_syntax::ExprId,
+    text: &str,
+    tree: &AnalysisContext<'_>,
+) -> Converted<Option<u64>> {
+    let Some((number, exponent)) = [
+        ("fs", -15),
+        ("ps", -12),
+        ("ns", -9),
+        ("us", -6),
+        ("ms", -3),
+        ("s", 0),
+    ]
+    .into_iter()
+    .find_map(|(suffix, exponent)| text.strip_suffix(suffix).map(|n| (n, exponent))) else {
+        return Ok(None);
+    };
+    let context = tree.state.timescales.design.borrow();
+    let source = key(tree);
+    let extended = (!context.design.units.contains_key(&source))
+        .then(|| context.design.including_tree(tree))
+        .transpose()?;
+    let design = extended.as_ref().unwrap_or(&context.design);
+    let unit = &design.units[&source];
+    let at = tree.declarations().expression(node).tokens.start;
+    let scale =
+        scope_at(&unit.scopes, &unit.parents, at).map_or(unit.scale, |i| unit.scopes[i].scale);
+    let global_precision = design
+        .precision
+        .unwrap_or(DEFAULT.precision)
+        .min(scale.precision);
+    let number = number.replace('_', "");
+    let fraction = number
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let digits = number.replace('.', "");
+    let coefficient = digits
+        .parse::<num_bigint::BigUint>()
+        .map_err(|_| unsupported("time literal delay"))?;
+    let power = exponent
+        - scale.precision
+        - i32::try_from(fraction).map_err(|_| unsupported("time literal delay"))?;
+    let precision_units = if power >= 0 {
+        coefficient * num_bigint::BigUint::from(10u8).pow(power as u32)
+    } else {
+        let divisor = num_bigint::BigUint::from(10u8).pow(power.unsigned_abs());
+        (coefficient + (&divisor / 2u8)) / divisor
+    };
+    let ticks = precision_units
+        * num_bigint::BigUint::from(10u8).pow((scale.precision - global_precision) as u32);
+    Ok(Some(u64::try_from(ticks).map_err(|_| {
+        unsupported("time literal delay exceeds scheduler range")
+    })?))
 }
 
 #[cfg(test)]

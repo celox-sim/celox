@@ -143,10 +143,19 @@ Linux バージョンはシミュレーション内で起動するゲストの�
 | 両アーキテクチャの 8 hart | バックエンドごとに別ジョブ |
 | すべての SMP 構成（2・4・8 hart） | `celox-parallel` の 1 ジョブを追加 |
 
+Celoxの計測は通常の`celox run --report --unlimited`を使います。
+既定は2値で、ベンチ専用のCelox実行バイナリはビルドしません。
+
 `celox-parallel` は native バックエンドを[並列シミュレーション](../guide/parallel-simulation.md)で
-実行し、ホストの vCPU ごとに 1 スレッドを使います（`HELIODOR_CELOX_THREADS`、既定値は `nproc`）。
+実行し、ホストの vCPU ごとに 1 スレッドを使います（`HELIODOR_CELOX_THREADS`、既定値は `nproc` を2〜64に収めた値）。
 別ジョブにすることで、比較グループの実行時間の上限は変わりません。ダッシュボードでは
 シングルスレッドの native 実行と並べて「multi-threaded」として表示します。
+
+`celox-tiered` も AArch64・x86-64 の両方で `HELIODOR_CELOX_THREADS` を使います。
+インタープリターで実行を始め、コンパイル完了後に並列実行を有効にした native カーネルへ移行します。
+並列化の効果が小さい処理には、スケジューラーが逐次カーネルを選ぶことがあります。
+従来のシングルスレッド設定で測定する場合は `HELIODOR_CELOX_THREADS=1` を指定してください。
+過去の tiered 計測はシミュレーションを1スレッドで実行していたため、履歴との比較ではこの違いに注意してください。
 
 直近の完走結果では、8 hart の合計は x86-64 で 10〜13 時間、AArch64 で 17〜18 時間です。
 AArch64 の 4 hart も合計 5〜7 時間なので、同じ実行方式のペアに分け、ビルド時間を確保しつつ

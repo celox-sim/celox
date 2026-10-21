@@ -52,19 +52,28 @@ fn bound_query_type(
     packed_dimensions: &PackedDimensions,
     const_env: &HashMap<String, i128>,
 ) -> Option<ExprType> {
-    let signed = expr_signedness_with_return_types(
-        expression,
-        &SizeQuerySignedness {
-            dimensions: packed_dimensions,
-            const_env,
-        },
-        &HashMap::default(),
-        &packed_dimensions.function_return_types,
-    )?;
+    let signed = expression_signedness(expression, packed_dimensions, const_env)?;
     Some(ExprType {
         width: width.max(1),
         signed,
     })
+}
+
+/// Resolve signedness recursively from lexical declarations and parameter types.
+pub(super) fn expression_signedness(
+    expression: &Expr,
+    dimensions: &PackedDimensions,
+    const_env: &HashMap<String, i128>,
+) -> Option<bool> {
+    expr_signedness_with_return_types(
+        expression,
+        &SizeQuerySignedness {
+            dimensions,
+            const_env,
+        },
+        &dimensions.functions,
+        &dimensions.function_return_types,
+    )
 }
 
 /// The same precedence as the former eagerly collected signedness table,
@@ -82,7 +91,9 @@ impl Signedness for SizeQuerySignedness<'_> {
         if let Some(signed) = self.const_env.get(&variable_signed_marker(name)) {
             return Some(*signed != 0);
         }
-        parameter_type_from_const_env(self.const_env, name).map(|ty| ty.signed)
+        parameter_type_from_const_env(self.const_env, name)
+            .map(|ty| ty.signed)
+            .or_else(|| self.const_env.contains_key(name).then_some(true))
     }
 }
 

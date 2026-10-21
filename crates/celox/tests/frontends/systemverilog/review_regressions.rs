@@ -5827,9 +5827,9 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "ANSI port default value",
+            "default value on a non-input port",
             r#"
-            module Top(input wire a = 1'b1, output wire y); assign y = a; endmodule
+            module Top(input wire a, output wire y = 1'b1); assign y = a; endmodule
         "#,
         ),
         (
@@ -8565,4 +8565,132 @@ fn rejects_invalid_implicit_named_interface_connections() {
         let error = cranelift_build_error(source);
         assert!(error.contains(expected), "expected {expected}: {error}");
     }
+}
+
+#[test]
+fn timed_task_edge_processes_preserve_driver_checks() {
+    for (body, expected) in [
+        (
+            "always @(posedge clk) begin pause(); a = 1; end",
+            "write to input port `a`",
+        ),
+        (
+            "always @(posedge clk) begin pause(); q = a; end assign q = a;",
+            "multiple variable drivers for `q`",
+        ),
+        (
+            "always @(posedge clk) begin pause(); q = a; end always_ff @(posedge clk) q <= a;",
+            "multiple variable drivers for `q`",
+        ),
+        (
+            "always @(posedge clk) begin pause(); q = a; end always @(negedge clk) begin pause(); q = a; end",
+            "multiple variable drivers for `q`",
+        ),
+        (
+            "always @(posedge clk) copy(q); assign q = a;",
+            "multiple variable drivers for `q`",
+        ),
+    ] {
+        let source = format!(
+            r#"
+            module Top(input bit clk, a, output var bit q);
+                task automatic pause; #1; endtask
+                task automatic copy(output bit x); #1; x = 1; endtask
+                {body}
+            endmodule
+        "#
+        );
+        let error = cranelift_build_error(&source);
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn timed_task_edge_processes_allow_initialization_and_disjoint_drivers() {
+    let source = r#"
+        module Top(input bit clk, a, output var bit [1:0] q);
+            task automatic pause; #1; endtask
+            initial q = 0;
+            always @(posedge clk) begin pause(); q[0] = a; end
+            always @(negedge clk) begin pause(); q[1] = a; end
+        endmodule
+    "#;
+    Simulator::from_sv_sources(
+        vec![(source, Path::new("disjoint_timed_drivers.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .expect("distinct bits retain distinct drivers; initialization is allowed");
+}
+
+#[test]
+fn waits_on_static_task_arguments_are_rejected_instead_of_missing_wakeups() {
+    for condition in ["x", "ready(x)"] {
+        let source = format!(
+            r#"
+            module Top;
+                function automatic bit ready(input int value); return value != 0; endfunction
+                task t(input int x); wait ({condition}); endtask
+                initial t(0);
+                initial begin #1; t(1); end
+            endmodule
+        "#
+        );
+        let error = cranelift_build_error(&source);
+        assert!(
+            error.contains("wait condition reading a static task argument"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn waits_on_automatic_task_arguments_still_compile() {
+    let source = r#"
+        module Top(input bit go);
+            task automatic t(input int x); wait (x || go); endtask
+            initial t(0);
+        endmodule
+    "#;
+    Simulator::from_sv_sources(vec![(source, Path::new("automatic_wait.sv"))], "Top")
+        .build_cranelift()
+        .expect("automatic arguments are private; visible go supplies the wakeup");
+}
+
+#[test]
+fn timed_task_edge_drivers_are_checked_against_child_outputs() {
+    let error = cranelift_build_error(
+        r#"
+        module Child(output var bit q); assign q = 1; endmodule
+        module Top(input bit clk, output var bit q);
+            task automatic pause; #1; endtask
+            Child child(q);
+            always @(posedge clk) begin pause(); q = 0; end
+        endmodule
+    "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn timed_task_edge_drivers_of_package_variables_are_checked_across_instances() {
+    let error = cranelift_build_error(
+        r#"
+        package p; bit q; endpackage
+        module Child(input bit clk);
+            task automatic pause; #1; endtask
+            always @(posedge clk) begin pause(); p::q = 1; end
+        endmodule
+        module Top(input bit clk);
+            Child first(clk), second(clk);
+        endmodule
+    "#,
+    );
+    assert!(
+        error.contains("multiple drivers of package variable `p::q`"),
+        "{error}"
+    );
 }

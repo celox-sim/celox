@@ -345,6 +345,13 @@ records the native-runner result; the case stays enabled on all Celox backends.
 
 ## SystemVerilog suite
 
+The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
+Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
+seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
+20.14.2 permits an integral seed variable. The unchanged case passes Celox's
+backends; the source and observed failures are retained in
+[`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
+
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so.
 
 The `indexed_select::constant_part_select_indices_of_concatenations` case also
@@ -362,6 +369,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 
 | Group | Stage | Tool | Cases | Reason |
 | --- | --- | --- | ---: | --- |
+| `sv_icarus_automatic_task_arrays` | execute | icarus | 1 | Icarus 13.0 shares an automatic task's unpacked local array across overlapping calls. IEEE 1800-2023 13.3.1–13.3.2 require separate storage for each activation. The [pre-exclusion result](verification/repros/sv_timed_task_arrays_icarus.json) retains the first call returning 31 instead of 11. The scalar activation case remains enabled for Icarus. |
 | `sv_icarus_genvar_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for `$dimensions` of a generated loop index's implicit integer localparam; IEEE 1800-2023 27.4 and 20.7 require one packed dimension. Celox and Verilator pass the unchanged assertions. The [standalone reproducer and pre-exclusion result](verification/repros/sv_genvar_dimensions.json) retain the observed disagreement. |
 | `sv_icarus_constant_array_queries` | compile | icarus | 1 | Icarus 13.0 rejects array queries of variables in constant expressions and typedef operands; IEEE 1800-2023 20.7 permits them. Verilator passes. |
 | `sv_icarus_runtime_array_queries` | execute | icarus | 1 | Icarus 13.0 aborts on a runtime dimension argument. A standalone reproducer also rejects an integer variable as the dimension. IEEE 1800-2023 20.7 permits querying fixed-size dimensions with runtime expressions. |

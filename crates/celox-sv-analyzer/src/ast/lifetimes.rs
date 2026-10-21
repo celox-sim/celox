@@ -11,6 +11,7 @@
 //! locals of subroutines that keep their value are not supported.
 
 use super::*;
+mod bit_result;
 
 /// The argument directions of each subroutine, by the names calls use.
 pub(super) type Directions = HashMap<String, Vec<crate::procedural::ParamDirection>>;
@@ -129,6 +130,8 @@ fn keep_in<T>(
 pub(super) fn check_subroutine_statics(
     state: &AnalysisState,
     subroutine: &Subroutine,
+    constants: &HashMap<String, i128>,
+    locals: &[LocalVariable],
     statics: &HashSet<String>,
     directions: &Directions,
 ) -> Result<(), AnalyzerError> {
@@ -153,6 +156,18 @@ pub(super) fn check_subroutine_statics(
                 )
                 .and_then(|entry| match entry {
                     Entry::Unobserved => Ok(()),
+                    Entry::Observed
+                        if init.is_none()
+                            && bit_result::proves_local(
+                                state,
+                                name,
+                                &stmts[index + 1..],
+                                constants,
+                                locals,
+                            ) =>
+                    {
+                        Ok(())
+                    }
                     Entry::Observed => Err(AnalyzerError::Unsupported(format!(
                         "static variable `{}` of subroutine `{}` that keeps its value \
                              between calls (declare it `automatic`)",
@@ -199,6 +214,9 @@ pub(super) fn check_subroutine_statics(
 /// a static function the variable named after it is static too, so a call
 /// that does not assign it returns the result of an earlier call.
 pub(super) fn check_static_result(
+    state: &AnalysisState,
+    constants: &HashMap<String, i128>,
+    locals: &[LocalVariable],
     subroutine: &Subroutine,
     directions: &Directions,
 ) -> Result<(), AnalyzerError> {
@@ -214,6 +232,7 @@ pub(super) fn check_static_result(
     // `return value;` assigns the result as it leaves.
     match flow.block(&subroutine.body, false) {
         Ok(exits) if exits.next != Some(false) => Ok(()),
+        _ if bit_result::proves(state, subroutine, constants, locals) => Ok(()),
         _ => Err(AnalyzerError::Unsupported(format!(
             "static function `{}` whose result keeps its value between calls (assign it on \
              every path, or declare the function `automatic`)",

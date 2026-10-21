@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   batchPullRequestNumbers,
+  stackDependency,
   validateBatch,
 } from "./check-mergify-batch.mjs";
 
@@ -103,36 +104,57 @@ test("rejects source PRs with invalid titles or another target branch", async ()
   }
 });
 
-test("stack members are validated against the stack root", async () => {
-  const f = fixture();
-  const top = {
-    ...f.source,
-    head: {
-      sha: sourceSha,
-      ref: "stack/u/feat/b--2",
-      repo: { full_name: "o/r" },
-    },
-    base: { ref: "stack/u/feat/a--1" },
-    body: "Adds b.\n\nDepends-On: #12\n",
-  };
-  const bottom = {
-    ...f.source,
-    head: {
-      sha: sourceSha,
-      ref: "stack/u/feat/a--1",
-      repo: { full_name: "o/r" },
-    },
-  };
-  const api = async (path) => {
-    if (path === "/repos/o/r/pulls/12") return bottom;
-    if (path === "/repos/o/r/pulls/13") return top;
-    return f.api(path);
-  };
-  assert.deepEqual(
-    await validateBatch(f.input, api, f.commits, f.policy),
-    [12, 13],
-  );
+test("stack dependencies accept local shorthand and same-repository GitHub URLs", () => {
+  for (const body of [
+    "Depends-On: #12",
+    "Text\n\nDepends-On: https://github.com/o/r/pull/12\r\n",
+    "Depends-On: https://github.com/O/R/pull/12",
+  ])
+    assert.equal(stackDependency("o/r", body), 12);
+  for (const body of [
+    undefined,
+    "Depends-On: #0",
+    "Depends-On: #9007199254740992",
+    "Depends-On: https://github.com/other/r/pull/12",
+    "Depends-On: https://github.com/o/r/pull/12/extra",
+    "Depends-On: https://github.com.evil/o/r/pull/12",
+    "Depends-On: http://github.com/o/r/pull/12",
+    "Depends-On: #12 extra",
+  ])
+    assert.equal(stackDependency("o/r", body), null);
 });
+
+for (const dependency of ["#12", "https://github.com/o/r/pull/12"])
+  test(`stack members with ${dependency} are validated against the stack root`, async () => {
+    const f = fixture();
+    const top = {
+      ...f.source,
+      head: {
+        sha: sourceSha,
+        ref: "stack/u/feat/b--2",
+        repo: { full_name: "o/r" },
+      },
+      base: { ref: "stack/u/feat/a--1" },
+      body: `Adds b.\n\nDepends-On: ${dependency}\n`,
+    };
+    const bottom = {
+      ...f.source,
+      head: {
+        sha: sourceSha,
+        ref: "stack/u/feat/a--1",
+        repo: { full_name: "o/r" },
+      },
+    };
+    const api = async (path) => {
+      if (path === "/repos/o/r/pulls/12") return bottom;
+      if (path === "/repos/o/r/pulls/13") return top;
+      return f.api(path);
+    };
+    assert.deepEqual(
+      await validateBatch(f.input, api, f.commits, f.policy),
+      [12, 13],
+    );
+  });
 
 test("rejects stack-like PRs whose chain does not reach the batch base", async () => {
   for (const [body, below] of [

@@ -28,7 +28,7 @@ pub(super) fn value_expression(
     let mut context = dimensions.clone();
     context.const_env = HashMap::default().into();
     context.type_aliases = HashMap::default();
-    bind_in_context(root, native, tree, &context, dimensions, true)
+    bind_in_context(root, native, tree, &context, dimensions)
 }
 pub(super) fn bind(
     root: ExprId,
@@ -55,7 +55,7 @@ fn bind_in(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
-    bind_in_context(root, native, tree, dimensions, dimensions, false)
+    bind_in_context(root, native, tree, dimensions, dimensions)
 }
 fn bind_in_context(
     root: ExprId,
@@ -63,7 +63,6 @@ fn bind_in_context(
     tree: &AnalysisContext<'_>,
     dimensions: &PackedDimensions,
     query_dimensions: &PackedDimensions,
-    value_actual: bool,
 ) -> Converted<Option<ConstExpr>> {
     enum Job {
         Enter(ExprId),
@@ -123,7 +122,6 @@ fn bind_in_context(
                     jobs.push(Job::Enter(*right));
                     jobs.push(Job::Enter(*left));
                 }
-                ExprKind::Conditional { .. } if value_actual => return Ok(None),
                 ExprKind::Conditional {
                     condition,
                     then_expression,
@@ -140,7 +138,7 @@ fn bind_in_context(
                         *expression,
                         native,
                         tree,
-                        dimensions,
+                        query_dimensions,
                     ) {
                         Ok(target) => target,
                         Err(AnalyzerError::Unsupported(_)) => return Ok(None),
@@ -149,6 +147,20 @@ fn bind_in_context(
                     jobs.push(Job::Cast(target));
                     jobs.push(Job::Enter(*expression));
                 }
+                ExprKind::Concatenation(_) | ExprKind::Replication { .. } => {
+                    // Actual values retain the parent's specialization context.
+                    // The symbolic context deliberately omits its numeric env,
+                    // but a concat must be folded to a typed literal here.
+                    let expr =
+                        expression_binding::bind_value(id, native, tree, query_dimensions, None)?;
+                    let Some(value) =
+                        selects::indexed_expression_value(&tree.state, expr, query_dimensions)
+                    else {
+                        return Ok(None);
+                    };
+                    values.push(value);
+                }
+
                 ExprKind::Call {
                     expression,
                     arguments,
@@ -242,14 +254,14 @@ fn bind_in_context(
                         ));
                         jobs.extend(indices.into_iter().rev().map(Job::Enter));
                     } else {
-                        let value = match expression_binding::bind_value(
-                            id, native, tree, dimensions, None,
-                        ) {
+                        let value = match indexed_expression(id, native, tree, query_dimensions) {
                             Ok(value) => value,
                             Err(AnalyzerError::Unsupported(_)) => return Ok(None),
                             Err(error) => return Err(error),
                         };
-                        let Some(value) = expr_to_const(&tree.state, value) else {
+                        let Some(value) =
+                            selects::indexed_expression_value(&tree.state, value, query_dimensions)
+                        else {
                             return Ok(None);
                         };
                         values.push(value);
@@ -294,9 +306,12 @@ fn bind_in_context(
             },
             Job::Cast(target) => {
                 let value = values.pop().ok_or_else(disagreement)?;
-                let Some(value) =
-                    casts::cast_constant_target(&tree.state, value, target, &dimensions.const_env)
-                else {
+                let Some(value) = casts::cast_constant_target(
+                    &tree.state,
+                    value,
+                    target,
+                    &query_dimensions.const_env,
+                ) else {
                     return Ok(None);
                 };
                 values.push(value);

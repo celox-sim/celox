@@ -232,7 +232,7 @@ fn veryl_project_discovers_sibling_sources() {
 fn rejects_mixed_sources_and_veryl_without_a_testbench() {
     let output = run(&[("top.sv", ""), ("top.veryl", "")], &[]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("one .veryl"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Veryl project sources"));
     let output = run(&[("top.veryl", "module Top {}")], &[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -329,4 +329,214 @@ fn sv_stop_is_not_reported_as_successful_completion() {
         "{output:?}"
     );
     assert_eq!(output.stdout, b"before stop\n");
+}
+
+#[test]
+fn veryl_backends_share_cli_execution_and_opt_in_reports() {
+    let source =
+        "#[test(Top)] module Top { inst clk: $tb::clock_gen; initial { clk.next(4); $finish(); } }";
+    for backend in ["native", "tiered", "interpreter", "cranelift", "wasm"] {
+        for four_state in [false, true] {
+            let mut args = vec!["--backend", backend, "--threads", "2", "--report"];
+            if four_state {
+                args.push("--four-state");
+            }
+            let output = run(&[("top.veryl", source)], &args);
+            assert!(output.status.success(), "{backend}: {output:?}");
+            let report = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                report.contains(&format!(
+                    "backend={backend} opt_level=O2 four_state={four_state}"
+                )),
+                "{report}"
+            );
+            assert!(
+                report.contains("CELOX_TEST_THREADS test=Top threads=2"),
+                "{report}"
+            );
+            assert!(
+                report.contains("CELOX_TEST_RESULT test=Top status=pass"),
+                "{report}"
+            );
+        }
+    }
+    let output = run(&[("top.veryl", source)], &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_defaults_to_two_state_and_four_state_is_explicit() {
+    for (args, expected) in [(vec![], "0"), (vec!["--four-state"], "x")] {
+        let source = format!(
+            "module Top; logic value; initial begin #1; assert (value === 1'b{expected}) else $fatal(1, \"state mode\"); $finish; end endmodule"
+        );
+        let output = run(&[("top.sv", &source)], &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+}
+
+#[test]
+fn cli_compiles_images_and_loads_without_sources() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("top.veryl");
+    let image = temporary.path().join("top.image");
+    std::fs::write(
+        &source,
+        "#[test(Top)] module Top { initial { $finish(); } }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .args([
+            "run",
+            "--top",
+            "Top",
+            "--compile-only",
+            "--native-image-output",
+        ])
+        .arg(&image)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    std::fs::remove_file(source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .current_dir(temporary.path())
+        .args(["run", "--top", "Top", "--native-image-input"])
+        .arg(image)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn execution_option_conflicts_are_rejected() {
+    for args in [
+        vec!["--threads", "0"],
+        vec!["--threads", "65"],
+        vec!["--max-steps", "1", "--unlimited"],
+        vec!["--require-compiled"],
+        vec!["--report", "--require-compiled", "--backend", "native"],
+        vec!["--compile-only", "--backend", "tiered"],
+        vec![
+            "--compile-only",
+            "--dump-ir-dir",
+            "unused",
+            "--dump-ir-and-run",
+        ],
+    ] {
+        let output = run(
+            &[(
+                "top.veryl",
+                "#[test(Top)] module Top { initial { $finish(); } }",
+            )],
+            &args,
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_backends_preserve_timed_nba_execution_and_failures() {
+    let source = r#"
+        module Top;
+            logic clk = 0;
+            logic [7:0] count = 0;
+            always #5 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            initial begin
+                #16;
+                assert (count == 2) else $fatal(1, "NBA count");
+                $display("count=%0d", count);
+                $finish;
+            end
+        endmodule
+    "#;
+    for backend in ["native", "cranelift", "interpreter", "wasm", "tiered"] {
+        for four_state in [false, true] {
+            let mut args = vec!["--backend", backend, "--threads", "2"];
+            if four_state {
+                args.push("--four-state");
+            }
+            let output = run(&[("top.sv", source)], &args);
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            assert_eq!(output.stdout, b"count=2\n", "{args:?}");
+            let limited = run(
+                &[("top.sv", source)],
+                &[args.clone(), vec!["--max-steps", "1"]].concat(),
+            );
+            assert!(!limited.status.success(), "{args:?}: {limited:?}");
+            assert!(String::from_utf8_lossy(&limited.stderr).contains("exceeded --max-steps"));
+            let failing = source.replace("count == 2", "count == 3");
+            let output = run(&[("top.sv", &failing)], &args);
+            assert!(!output.status.success(), "{args:?}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("NBA count"));
+        }
+    }
+}
+
+#[test]
+fn image_reports_its_embedded_state_mode() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("top.veryl");
+    let image = temporary.path().join("top.image");
+    std::fs::write(
+        &source,
+        "#[test(Top)] module Top { initial { $finish(); } }",
+    )
+    .unwrap();
+    for four_state in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command
+            .args([
+                "run",
+                "--top",
+                "Top",
+                "--compile-only",
+                "--native-image-output",
+            ])
+            .arg(&image)
+            .arg(&source);
+        if four_state {
+            command.arg("--four-state");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command
+            .args(["run", "--top", "Top", "--report", "--native-image-input"])
+            .arg(&image);
+        if !four_state {
+            command.arg("--four-state");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("four_state={four_state}")),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn source_file_is_relative_to_celox_manifest_from_another_directory() {
+    let project = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("src/top.veryl"),
+        "#[test(Top)] module Top { initial { $finish(); } }",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("celox.toml"), "top = 'Top'\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .current_dir(elsewhere.path())
+        .args(["run", "--project"])
+        .arg(project.path().join("celox.toml"))
+        .args(["--source-file", "src/top.veryl"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
 }
