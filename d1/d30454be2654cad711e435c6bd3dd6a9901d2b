@@ -1,0 +1,1 @@
+Resolve PR #1672 conflict with master namespace validation from #1621 while preserving the full timescale analysis options.
