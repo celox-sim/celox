@@ -1,1 +1,1 @@
-Rebased on master after #1666 merged; added value_kind to the lydite wire fixture
+Add the string group to the retained Verilator/Icarus reports so the excluded string cases have their reviewed rows (retained_reports test).
