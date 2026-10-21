@@ -1,1 +1,3 @@
 Correct the BASE-R coverage statement: upstream requests 1fs precision, which the current CLI harness does not apply; gearbox cases fail at Clock construction as well as the full run timing out. Message only, source unchanged.
+
+Add the two missing retained Icarus exclusion rows required by CI, and record the completed crossbar_1s run.
