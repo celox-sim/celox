@@ -1385,3 +1385,34 @@ fn logical_type_inference_requires_operand_types_outside_bounded_proofs() {
         }),
     );
 }
+
+#[test]
+fn unbased_parameter_overrides_fill_declared_width_before_dependent_parameters() {
+    let tree = crate::source_tree::parse_scope_fixture(
+        "module Top #(parameter logic [57:0] FILL=0, \
+         parameter logic signed [57:0] SIGNED_FILL=0, \
+         parameter logic [57:0] COPY=FILL, parameter NEGATIVE=SIGNED_FILL < 0); endmodule",
+        Path::new("unbased_parameter_overrides.sv"),
+    )
+    .unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
+    for (literal, unsigned, signed) in [("'1", (1i128 << 58) - 1, -1), ("'0", 0, 0)] {
+        let overrides = ["FILL", "SIGNED_FILL"]
+            .into_iter()
+            .map(|name| (name.into(), ConstExpr::Literal(literal.into())))
+            .collect();
+        let mut parameters =
+            parameters_from_scope(&tree, &HashMap::default(), &HashMap::default(), &overrides)
+                .unwrap();
+        for reapplied in [false, true] {
+            if reapplied {
+                apply_parameter_overrides(&mut parameters, &overrides).unwrap();
+            }
+            let values = const_env_from_parameters(&tree.state, &parameters);
+            assert_eq!(values["FILL"], unsigned, "{literal}, reapplied={reapplied}");
+            assert_eq!(values["SIGNED_FILL"], signed);
+            assert_eq!(values["COPY"], unsigned);
+            assert_eq!(values["NEGATIVE"], i128::from(signed < 0));
+        }
+    }
+}

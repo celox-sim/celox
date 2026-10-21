@@ -368,12 +368,16 @@ sv_backends! {
         @setup {
             let source = r#"
                 module Top #(parameter TEXT="default", parameter NEG=0,
-                    parameter logic [11:0] FILL=0, parameter logic [3:0] UNKNOWN=0,
-                    parameter logic [64:0] WIDE=0, parameter FINAL=0)(output logic matched);
+                    parameter logic [57:0] FILL=0, parameter logic [3:0] UNKNOWN=0,
+                    parameter logic [64:0] WIDE=0, parameter FINAL=0,
+                    parameter logic [57:0] X=0, parameter logic [57:0] Z=0,
+                    parameter logic [57:0] COPY=FILL)(output logic matched);
                     assign matched=(TEXT=="XILINX") && ($bits(TEXT)==48)
                         && (NEG==-8) && (NEG<0) && ($bits(NEG)==32)
-                        && (FILL==12'hfff) && (UNKNOWN===4'b10xz)
-                        && (WIDE==65'h10000000000000001) && (FINAL==7);
+                        && (FILL==58'h3ffffffffffffff) && (UNKNOWN===4'b10xz)
+                        && (WIDE==65'h10000000000000001) && (FINAL==7)
+                        && (COPY==58'h3ffffffffffffff)
+                        && (X===58'bx) && (Z===58'bz);
                 endmodule
             "#;
         }
@@ -383,6 +387,7 @@ sv_backends! {
             .param_literal("FILL", "'1").param_literal("UNKNOWN", "4'b10xz")
             .param_literal("WIDE", "65'h10000000000000001")
             .param_literal("FINAL", "-1").param("FINAL", 7)
+            .param_literal("X", "'x").param_literal("Z", "'z")
             .four_state(true).opt_level(celox::OptLevel::O2);
         assert_eq!(sim.get(sim.signal("matched")), BigUint::from(1u8));
     }
