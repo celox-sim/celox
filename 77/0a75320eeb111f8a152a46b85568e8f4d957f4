@@ -1,6 +1,1 @@
-Revision history for #1666:
-
-rev 2 (content) 2026-10-21 00:13 UTC — Measure the pinned official sv-tests suite, record the 20 reviewed fail-to-pass rows, and reject real-valued select indices exposed by checking negative-case coverage.
-rev 1 (initial) 2026-10-21 00:13 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":1666,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b77550ab738db3efbf3186942a0914c87e984dc8","timestamp_iso":"2026-10-21T00:13:45Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b77550ab738db3efbf3186942a0914c87e984dc8","new_sha":"770a75320eeb111f8a152a46b85568e8f4d957f4","timestamp_iso":"2026-10-21T00:13:45Z","reason":"Measure the pinned official sv-tests suite, record the 20 reviewed fail-to-pass rows, and reject real-valued select indices exposed by checking negative-case coverage.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b77550ab738db3efbf3186942a0914c87e984dc8...770a75320eeb111f8a152a46b85568e8f4d957f4"}]} -->
+Sync after #1665 merged; resolve conflicts with current master while preserving FP behavior and the reviewed sv-tests gains.
