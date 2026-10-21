@@ -54,6 +54,8 @@ pub struct RuntimeVariable {
     pub var_kind: VariableKind,
     pub signed: bool,
     pub packed_dims: Vec<usize>,
+    /// Declared unpacked bounds, in storage order; empty uses zero-based dimensions.
+    pub unpacked_ranges: Vec<(i128, i128)>,
 }
 
 /// One elaborated runtime instance with direct state-address indices.
@@ -153,6 +155,7 @@ impl RuntimeDesign {
                         var_kind: info.var_kind,
                         signed: info.signed,
                         packed_dims: info.packed_dims.clone(),
+                        unpacked_ranges: info.unpacked_ranges.clone(),
                     },
                 );
             }
@@ -253,6 +256,7 @@ impl RuntimeDesign {
             signed: variable.signed,
             metadata: self.semantic.state_objects.get(address)?.clone(),
             packed_dims: variable.packed_dims.clone(),
+            unpacked_ranges: variable.unpacked_ranges.clone(),
         })
     }
 
@@ -1049,6 +1053,15 @@ impl RuntimeProgram {
                     },
                     signed: variable.signed,
                     packed_dims: variable.packed_dims.clone(),
+                    unpacked_ranges: if variable.unpacked_ranges.is_empty() {
+                        metadata
+                            .array_dims
+                            .iter()
+                            .map(|size| (0, *size as i128 - 1))
+                            .collect()
+                    } else {
+                        variable.unpacked_ranges.clone()
+                    },
                     unpacked_dims: metadata.array_dims.clone(),
                     type_kind: metadata.type_kind,
                 });
