@@ -94,7 +94,7 @@ pub(super) struct VlogStorage {
     arg_ptrs: Vec<*mut c_char>,
 }
 
-fn callback_signal(data: &VpiCbData) -> Option<celox::ReflectionSignalId> {
+fn callback_signal(data: &VpiCbData) -> Option<super::SignalSelection> {
     if data.reason != CB_VALUE_CHANGE {
         return None;
     }
@@ -626,8 +626,16 @@ pub unsafe extern "C" fn vpi_chk_error(_info: *mut VpiErrorInfo) -> i32 {
 /// # Safety
 ///
 /// A non-null `reference` must be a live handle returned by this library.
-pub unsafe extern "C" fn vpi_handle_by_index(_reference: VpiHandle, _index: i32) -> VpiHandle {
-    ptr::null_mut()
+pub unsafe extern "C" fn vpi_handle_by_index(reference: VpiHandle, index: i32) -> VpiHandle {
+    // Safety: forwarded from the caller under the VPI handle contract.
+    let Some(ObjectRef::Signal(selection)) = (unsafe { object_ref(reference) }) else {
+        return ptr::null_mut();
+    };
+    super::with_runtime(|runtime| selection.select(runtime, index))
+        .flatten()
+        .map_or(ptr::null_mut(), |selection| {
+            super::new_object_handle(ObjectRef::Signal(selection))
+        })
 }
 
 #[unsafe(no_mangle)]

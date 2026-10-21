@@ -565,6 +565,7 @@ impl<'a> ProcModule<'a> {
                 is_4state,
                 packed_ranges: vec![(i128::try_from(width.max(1)).unwrap_or(1) - 1, 0)],
                 array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
                 domain_kind: DomainKind::Other,
                 kind: VariableKind::Variable,
                 type_kind: if is_4state {
@@ -631,6 +632,7 @@ impl<'a> ProcModule<'a> {
             is_4state: source.is_4state,
             packed_ranges: vec![(0, 0)],
             array_dims: Vec::new(),
+            unpacked_ranges: Vec::new(),
             domain_kind: kind,
             kind: VariableKind::Variable,
             type_kind: source.type_kind,
@@ -1033,6 +1035,7 @@ pub(super) fn register_locals(
                 is_4state: type_info.is_4state,
                 packed_ranges: type_info.packed_ranges,
                 array_dims: type_info.array_dims,
+                unpacked_ranges: type_info.unpacked_ranges,
                 domain_kind: DomainKind::Other,
                 kind: VariableKind::Variable,
                 type_kind: type_info.type_kind,

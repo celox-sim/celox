@@ -476,6 +476,7 @@ pub fn declare_counter_slots(
                             type_kind: PortTypeKind::Bit,
                             array_dims: Vec::new(),
                         },
+                        unpacked_ranges: Vec::new(),
                         packed_dims: vec![EVENT_COUNTER_WIDTH],
                         source: None,
                         module_affiliated: false,

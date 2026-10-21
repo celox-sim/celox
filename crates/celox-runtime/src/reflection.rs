@@ -44,6 +44,7 @@ pub struct ReflectionSignal {
     pub signed: bool,
     pub packed_dims: Vec<usize>,
     pub unpacked_dims: Vec<usize>,
+    pub unpacked_ranges: Vec<(i128, i128)>,
     pub type_kind: PortTypeKind,
 }
 
@@ -124,6 +125,20 @@ impl DesignReflection {
             if self.scope(signal.parent).is_none() {
                 return Err(format!(
                     "signal `{}` has an invalid parent",
+                    signal.full_name
+                ));
+            }
+            if signal.unpacked_dims.len() != signal.unpacked_ranges.len()
+                || signal
+                    .unpacked_dims
+                    .iter()
+                    .zip(&signal.unpacked_ranges)
+                    .any(|(&size, &(left, right))| {
+                        size == 0 || left.abs_diff(right).checked_add(1) != Some(size as u128)
+                    })
+            {
+                return Err(format!(
+                    "signal `{}` has invalid unpacked bounds",
                     signal.full_name
                 ));
             }
