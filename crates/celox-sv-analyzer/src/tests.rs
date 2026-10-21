@@ -6235,6 +6235,42 @@ fn unpacked_constant_function_bounds_survive_analysis_without_losing_the_contrac
 }
 
 #[test]
+fn scope_randomize_validates_variable_arguments() {
+    for call in [
+        "randomize(value)",
+        "std::randomize(value)",
+        "std::randomize()",
+    ] {
+        let source =
+            format!("module Top; logic [2048:0] value; bit ok; initial ok = {call}; endmodule");
+        analyze_source(&source, Path::new("randomize.sv")).unwrap();
+    }
+    for (declaration, call) in [
+        ("bit value;", "randomize(1)"),
+        ("bit value;", "randomize(value[0])"),
+        ("bit value;", "randomize({value})"),
+        ("bit value;", "randomize(.value(value))"),
+        ("bit value;", "randomize(value,)"),
+        ("localparam value = 1;", "randomize(value)"),
+        ("bit value[2];", "randomize(value)"),
+        ("wire value;", "randomize(value)"),
+        ("const bit value = 1;", "randomize(value)"),
+        ("enum bit [1:0] {A=0, B=3} value;", "randomize(value)"),
+        (
+            "typedef enum bit [1:0] {A=0, B=3} E; E value;",
+            "std::randomize(value)",
+        ),
+        ("bit value;", "std::randomize(value) with {value == 1;}"),
+    ] {
+        let source = format!("module Top; {declaration} bit ok; initial ok = {call}; endmodule");
+        assert!(
+            analyze_source(&source, Path::new("invalid_randomize.sv")).is_err(),
+            "accepted {source}"
+        );
+    }
+}
+
+#[test]
 fn time_literal_delays_reject_scheduler_overflow() {
     let error = analyze_source(
         "module Top; timeunit 1s / 1fs; initial #18446744073709551616s; endmodule",
@@ -6257,4 +6293,23 @@ fn time_literal_delays_accept_numeric_separators() {
     };
     assert_eq!(*ticks_per_unit, 1);
     assert!(matches!(amount, ir::Expr::Literal(value) if value == "64'd1000"));
+}
+
+#[test]
+fn scope_randomize_respects_port_variable_kinds() {
+    for source in [
+        "module Top(output logic [8:0] a, b); initial void'(std::randomize(a,b)); endmodule",
+        "module Top(output var bit a); initial void'(randomize(a)); endmodule",
+    ] {
+        analyze_source(source, Path::new("randomized_output.sv")).unwrap();
+    }
+    for source in [
+        "module Top(input var bit a); initial void'(randomize(a)); endmodule",
+        "module Top(output wire logic a); initial void'(randomize(a)); endmodule",
+    ] {
+        assert!(
+            analyze_source(source, Path::new("randomized_net.sv")).is_err(),
+            "accepted {source}"
+        );
+    }
 }

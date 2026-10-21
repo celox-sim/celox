@@ -1609,6 +1609,7 @@ impl Parameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Port {
+    randomizable: bool,
     name: String,
     direction: PortDirection,
     r#type: Type,
@@ -1618,6 +1619,7 @@ pub struct Port {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
+    is_const: bool,
     name: String,
     r#type: Type,
     is_net: bool,
@@ -1631,6 +1633,7 @@ impl Signal {
             name,
             r#type,
             is_net: false,
+            is_const: false,
             package_variable: None,
         }
     }
@@ -1640,6 +1643,7 @@ impl Signal {
             name,
             r#type,
             is_net: true,
+            is_const: false,
             package_variable: None,
         }
     }
@@ -1671,6 +1675,7 @@ impl Port {
             name,
             direction,
             r#type,
+            randomizable: !is_net,
             is_net,
             default: None,
         }
@@ -1863,6 +1868,7 @@ pub enum PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Type {
+    is_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -1877,6 +1883,7 @@ pub struct Type {
 impl Type {
     fn implicit() -> Self {
         Self {
+            is_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -1889,6 +1896,7 @@ impl Type {
     fn new(kind: TypeKind) -> Self {
         Self {
             kind,
+            is_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -2567,6 +2575,7 @@ struct UnpackedDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
+    randomizable: bool,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,

@@ -131,6 +131,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
+                randomizable: !port.r#type().is_enum && port.randomizable,
                 packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
@@ -144,6 +145,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
+                randomizable: !signal.r#type().is_enum && !signal.is_net() && !signal.is_const,
                 packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
@@ -326,6 +328,7 @@ fn extend_variable_dimensions_from_const_env(
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
+            is_enum: false,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -338,6 +341,7 @@ fn extend_variable_dimensions_from_const_env(
         };
         let mut shape = procedural::dimensions_from_type(&ty);
         if let Some(existing) = context.get(name) {
+            shape.randomizable = existing.randomizable;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
@@ -505,6 +509,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
             (
                 parameter.name.clone(),
                 VariableDimensions {
+                    randomizable: true,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),

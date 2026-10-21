@@ -160,6 +160,38 @@ sv_backends! {
         assert!(sim.drain_runtime_events().is_empty());
     }
 
+    fn scope_randomize_fills_arbitrary_packed_widths(sim) {
+        @case "system_functions::scope_randomize_fills_arbitrary_packed_widths";
+    }
+
+    fn scope_randomize_obeys_control_flow_and_statement_order(sim) {
+        @case "system_functions::scope_randomize_obeys_control_flow_and_statement_order";
+    }
+
+    fn scope_randomize_preserves_four_state_storage_and_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit clk, output logic signed [2048:0] value);
+                always @(posedge clk) void'(std::randomize(value));
+            endmodule
+        "#; }
+        @build Simulator::from_sv_sources(vec![(source, Path::new("randomize_checkpoint.sv"))], "Top").four_state(true);
+        let clk = sim.event("clk");
+        let value = sim.signal("value");
+        let saved = sim.checkpoint().unwrap();
+        sim.tick(clk).unwrap();
+        let (first, mask) = sim.get_four_state(value);
+        assert_eq!(mask, 0u8.into());
+        assert!(first.bits() > 2000, "upper words must receive random bits");
+        sim.tick(clk).unwrap();
+        let second = sim.get(value);
+        assert_ne!(first, second);
+        sim.restore(&saved).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), first);
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), second);
+    }
+
     fn urandom_extends_signed_seed_values(sim) {
         @case "system_functions::urandom_extends_signed_seed_values";
     }
@@ -3048,5 +3080,42 @@ sv_backends! {
         assert_eq!(warnings.len(), 1, "{:?}", sim.warnings());
         assert_eq!(warnings[0].0, "specialized.sv");
         assert_eq!(warnings[0].1, source_line(&source, "$readmemh"));
+    }
+}
+
+#[test]
+fn scope_randomize_survives_all_optimization_levels() {
+    let source = r#"
+        module Top(input bit clk, output logic [980:0] value);
+            always @(posedge clk) void'(std::randomize(value));
+        endmodule
+    "#;
+    for level in [
+        celox::OptLevel::O0,
+        celox::OptLevel::O1,
+        celox::OptLevel::O2,
+    ] {
+        for four_state in [false, true] {
+            let mut sim = Simulator::from_sv_sources(
+                vec![(source, Path::new("randomize_optimization.sv"))],
+                "Top",
+            )
+            .opt_level(level)
+            .four_state(four_state)
+            .build_native()
+            .unwrap();
+            let value = sim.signal("value");
+            let clk = sim.event("clk");
+            let checkpoint = sim.checkpoint().unwrap();
+            sim.tick(clk).unwrap();
+            let first = sim.get(value);
+            assert!(first.bits() > 64, "{level:?} four_state={four_state}");
+            if four_state {
+                assert_eq!(sim.get_four_state(value).1, 0u8.into());
+            }
+            sim.restore(&checkpoint).unwrap();
+            sim.tick(clk).unwrap();
+            assert_eq!(sim.get(value), first, "{level:?} four_state={four_state}");
+        }
     }
 }
