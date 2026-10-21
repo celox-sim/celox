@@ -239,7 +239,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::Callee::System(function) => {
                     use sv::ir::SystemFunction;
                     match function {
-                        SystemFunction::Urandom | SystemFunction::UrandomRange => {
+                        SystemFunction::ScopeRandomize
+                        | SystemFunction::Urandom
+                        | SystemFunction::UrandomRange => {
                             self.urandom_state();
                         }
                         SystemFunction::Random if args.is_empty() => {
@@ -824,6 +826,30 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.fopen(args)?,
             Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::ScopeRandomize),
+                args,
+                ..
+            } => {
+                for arg in args.iter().flatten() {
+                    let Expr::Ident(name) = arg else {
+                        return Err(unsupported("scope randomize variable"));
+                    };
+                    let target = sv::ir::LValue::Ident(name.clone());
+                    let width = self.lvalue_width(&target)?;
+                    let mut words = Vec::with_capacity(width.div_ceil(32));
+                    for offset in (0..width).step_by(32) {
+                        words.push(Expr::Resize {
+                            expr: Box::new(self.randomize_word()?),
+                            width: (width - offset).min(32),
+                            signed: false,
+                        });
+                    }
+                    words.reverse();
+                    self.assign(&target, &Expr::Concat(words))?;
+                }
+                Expr::Literal("32'sd1".into())
+            }
+            Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Urandom),
                 args,
                 ..
@@ -1281,6 +1307,44 @@ impl<'p, 'a> Ff<'p, 'a> {
         let state = self.eval(&state, Some((33, false)))?;
         self.store(id, SIROffset::Static(0), 33, state);
         Ok(result)
+    }
+
+    /// A bijective 32-bit output permutation of the process RNG. Mixing
+    /// high bits into low bits prevents the LCG's short low-bit periods from
+    /// freezing bits when a wide variable consumes an even number of words.
+    fn randomize_word(&mut self) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        let mut word = self.urandom(None)?;
+        for (shift, multiplier) in [(16, 0x7feb352du32), (15, 0x846ca68bu32)] {
+            let mixed = Expr::Binary {
+                left: Box::new(word.clone()),
+                op: BinaryOp::BitXor,
+                right: Box::new(Expr::Binary {
+                    left: Box::new(word),
+                    op: BinaryOp::Shr,
+                    right: Box::new(Expr::Literal(shift.to_string())),
+                }),
+            };
+            word = self.hidden(
+                "randomize_mix",
+                &Expr::Binary {
+                    left: Box::new(mixed),
+                    op: BinaryOp::Mul,
+                    right: Box::new(Expr::Literal(format!("32'd{multiplier}"))),
+                },
+                false,
+            )?;
+        }
+        let mixed = Expr::Binary {
+            left: Box::new(word.clone()),
+            op: BinaryOp::BitXor,
+            right: Box::new(Expr::Binary {
+                left: Box::new(word),
+                op: BinaryOp::Shr,
+                right: Box::new(Expr::Literal("16".into())),
+            }),
+        };
+        self.hidden("randomize_word", &mixed, false)
     }
 
     /// IEEE 1800-2023 18.13.2: a number of the `$urandom` stream between the

@@ -1523,5 +1523,23 @@
         "random_plusargs::dist_uniform_converts_wide_and_signed_seeds_to_int_formals"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_scope_randomize",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects std::randomize calls with syntax errors before executing the testbench. IEEE 1800-2023 18.12 defines scope randomization of variables without requiring a class. Verilator executes both the arbitrary-width and control-flow regressions successfully.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scope_randomize_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::scope_randomize_fills_arbitrary_packed_widths",
+        "system_functions::scope_randomize_obeys_control_flow_and_statement_order"
+      ]
+    }
   }
 ]

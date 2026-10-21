@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "suite": "sv",
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "cases": [
+    {
+      "name": "system_functions::scope_randomize_fills_arbitrary_packed_widths",
+      "category": "Functions",
+      "expectation": "Simulation",
+      "status": "compile_error",
+      "phase": "compile",
+      "detail": "source_0.sv:14: syntax error\nsource_0.sv:14: error: Malformed statement",
+      "stronger_than_sv": false,
+      "tags": [],
+      "tag_reasons": {}
+    },
+    {
+      "name": "system_functions::scope_randomize_obeys_control_flow_and_statement_order",
+      "category": "Functions",
+      "expectation": "Simulation",
+      "status": "compile_error",
+      "phase": "compile",
+      "detail": "source_0.sv:7: syntax error\nsource_0.sv:7: error: Malformed statement\nsource_0.sv:13: syntax error\nsource_0.sv:13: error: Malformed statement\nsource_0.sv:13: error: Malformed conditional expression.\nsource_0.sv:16: syntax error\nsource_0.sv:16: error: Malformed statement\nsource_0.sv:17: syntax error\nsource_0.sv:17: error: Malformed statement",
+      "stronger_than_sv": false,
+      "tags": [],
+      "tag_reasons": {}
+    }
+  ],
+  "note": "Focused unexcluded compile failures of the two new scope randomize cases; native, Cranelift, Wasm and Verilator execute these cases."
+}

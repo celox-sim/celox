@@ -68,6 +68,7 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
+        randomizable: !r#type.is_enum,
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
@@ -98,6 +99,7 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
 /// The `int` type of a loop variable declared by `foreach`.
 fn int_type() -> Type {
     Type {
+        is_enum: false,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(
@@ -651,6 +653,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => None,
             };
             let name = self.declare(signal.name(), signal.r#type().clone());
+            if signal.is_const {
+                let mut shape = self.dims.get(signal.name()).unwrap().clone();
+                shape.randomizable = false;
+                self.dims.insert(signal.name().to_string(), shape);
+            }
             let automatic = match native.lifetime.as_deref() {
                 Some("automatic") => true,
                 Some("static") => false,
@@ -746,6 +753,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            if let celox_sv_syntax::ExprKind::Call { expression, .. } =
+                self.tree.declarations().expression(query_root).kind
+                && matches!(
+                    expression_binding::native_name(
+                        &self.tree.state,
+                        expression,
+                        self.tree.declarations()
+                    )
+                    .as_deref(),
+                    Some("randomize" | "std::randomize")
+                )
+            {
+                let mut call = self.native_value(query_root)?;
+                self.rename_expr(&mut call);
+                return Ok(vec![Stmt::Eval(call)]);
+            }
             if timescales::is_query(query_root, self.tree.declarations()) {
                 let value = timescales::query(query_root, self.tree)?;
                 return Ok(vec![Stmt::Eval(Expr::Literal(
