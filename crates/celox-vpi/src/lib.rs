@@ -1312,10 +1312,12 @@ pub unsafe extern "C" fn vpi_put_value(
     }
 
     let signal_info = with_runtime(|runtime| {
-        runtime
-            .reflection()
-            .signal(id)
-            .map(|signal| (signal.signal.width, signal.signal.is_4state))
+        runtime.reflection().signal(id).map(|signal| {
+            (
+                signal.signal.width,
+                signal.signal.is_4state && runtime.four_state(),
+            )
+        })
     })
     .flatten();
     let Some((width, is_4state)) = signal_info else {

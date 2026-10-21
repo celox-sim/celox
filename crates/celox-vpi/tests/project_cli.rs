@@ -583,18 +583,231 @@ fn top_parameters_reach_veryl_run_and_native_build() {
 fn invalid_parameter_assignments_are_rejected() {
     let root = tempfile::tempdir().unwrap();
     for value in [
-        "V",
-        "=1",
-        "x.y=1",
-        "V=",
-        "V=-1",
-        "V=1+2",
-        "V=18446744073709551616",
-        "V=0x",
-        "V=0b2",
-        "V=_1",
+        "V", "=1", "x.y=1", "V=", "V=--1", "V=1+2", "V=8'hG", "V=0x", "V=0b2", "V=_1",
     ] {
         let output = invoke(root.path(), &["run", "dut.sv", "--top", "Top", "-G", value]);
         rejected(&output, "parameter");
     }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
+    let root = tempfile::tempdir().unwrap();
+    let source = r#"
+        module Top #(parameter VENDOR="GENERIC", parameter NEG=3,
+            parameter logic [64:0] WIDE=0, parameter logic [11:0] FILL=0,
+            parameter logic [3:0] UNKNOWN=0)(output logic matched);
+            assign matched=(VENDOR == "XILINX") && (NEG == -8) && (NEG < 0)
+                && ($bits(NEG) == 32) && ($bits(VENDOR) == 48)
+                && (WIDE == 65'h10000000000000001) && (FILL == 12'hfff)
+                && (UNKNOWN === 4'b10xz);
+            initial begin #1; assert(matched) else $fatal(1,"literal parameter types");
+                $display("ok"); $finish; end
+        endmodule
+    "#;
+    fs::write(root.path().join("top.sv"), source).unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+        sources=["top.sv"]
+        top="Top"
+        [parameters]
+        VENDOR="GENERIC"
+        NEG=3
+        FILL=0
+        [targets.literals.parameters]
+        VENDOR="XILINX"
+        NEG=-8
+        WIDE="65'h10000000000000001"
+        FILL="'1"
+        UNKNOWN="4'b10xz"
+    "#,
+    )
+    .unwrap();
+    let output = invoke(root.path(), &["run", "--target", "literals"]);
+    success(&output);
+    assert_eq!(output.stdout, b"ok\n");
+    let args = [
+        "--target",
+        "literals",
+        "-GVENDOR=0",
+        "-GVENDOR=\"XILINX\"",
+        "-GNEG=8",
+        "-GNEG=-8",
+        "-GFILL=0",
+        "-GFILL='1",
+    ];
+    let output = invoke(root.path(), &[&["run"][..], &args].concat());
+    success(&output);
+    assert_eq!(output.stdout, b"ok\n");
+    success(&invoke(
+        root.path(),
+        &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: the CLI compiled this test's source into the image above.
+    let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    let matched = instance.signal_ref("Top.matched").unwrap();
+    assert_eq!(
+        celox::SimBackend::get_as::<u8>(instance.backend(), matched),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("top.sv")).unwrap(),
+        source
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn state_mode_merges_project_target_and_cli_for_run_and_native_build() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.sv"),
+        r#"
+        module Top(output logic[3:0] y);
+            logic[3:0] uninitialized;
+            assign y=uninitialized;
+            initial begin #1; $display("value=%b",y); $finish; end
+        endmodule
+    "#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        "sources=['top.sv']\ntop='Top'\nfour_state=true\n[targets.two]\nfour_state=false\n",
+    )
+    .unwrap();
+    for (args, expected, is_four) in [
+        (vec![], "value=xxxx\n", true),
+        (vec!["--two-state"], "value=0000\n", false),
+        (vec!["--target", "two"], "value=0000\n", false),
+        (
+            vec!["--target", "two", "--four-state"],
+            "value=xxxx\n",
+            true,
+        ),
+    ] {
+        let run = invoke(root.path(), &[&["run"][..], &args].concat());
+        success(&run);
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+        success(&invoke(
+            root.path(),
+            &[&["vpi", "build"][..], &args, &["-o", "sim"]].concat(),
+        ));
+        let bytes = fs::read(root.path().join("sim")).unwrap();
+        let image = celox::NativeProgramImage::discover_appended(&bytes)
+            .unwrap()
+            .unwrap()
+            .image;
+        // Safety: the CLI compiled this test's source into this image.
+        let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+        assert_eq!(instance.four_state(), is_four);
+        let (value, mask) = celox::SimBackend::get_four_state(
+            instance.backend(),
+            instance.signal_ref("Top.y").unwrap(),
+        );
+        assert_eq!(
+            mask.to_u64_digits(),
+            if is_four { vec![15] } else { vec![] }
+        );
+        if !is_four {
+            assert_eq!(value.to_u64_digits(), Vec::<u64>::new());
+        }
+    }
+}
+
+#[test]
+fn sv_literal_parameters_are_rejected_for_veryl_in_both_commands() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.veryl"),
+        "module Top #(param W:u32=8) (y:output logic<W>) { assign y=0; }",
+    )
+    .unwrap();
+    for prefix in [&["run"][..], &["vpi", "build"][..]] {
+        let output = invoke(
+            root.path(),
+            &[prefix, &["top.veryl", "--top", "Top", "-GW=-8"]].concat(),
+        );
+        rejected(&output, "SV parameter literals require");
+    }
+}
+
+#[test]
+fn veryl_native_images_preserve_the_selected_state_mode() {
+    for with_metadata in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("top.veryl"),
+            "module Top (y:output logic<4>) { assign y=3; }",
+        )
+        .unwrap();
+        if with_metadata {
+            fs::write(
+                root.path().join("Veryl.toml"),
+                "[project]\nname='state_mode'\nversion='0.1.0'\n",
+            )
+            .unwrap();
+        }
+        for (flag, four_state) in [("--two-state", false), ("--four-state", true)] {
+            let output = invoke(
+                root.path(),
+                &[
+                    "vpi",
+                    "build",
+                    "top.veryl",
+                    "--top",
+                    "Top",
+                    flag,
+                    "-o",
+                    "sim",
+                ],
+            );
+            success(&output);
+            let bytes = fs::read(root.path().join("sim")).unwrap();
+            let image = celox::NativeProgramImage::discover_appended(&bytes)
+                .unwrap()
+                .unwrap()
+                .image;
+            // Safety: the CLI compiled this test's source into this image.
+            let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+            assert_eq!(instance.four_state(), four_state);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.sv"),
+        r#"module Top(output logic[3:0] y);
+      logic[3:0] uninitialized;
+      assign y=uninitialized;
+      initial begin #1; $display("value=%b", y); $finish; end
+    endmodule"#,
+    )
+    .unwrap();
+    let run = invoke(root.path(), &["run", "top.sv", "--top", "Top"]);
+    success(&run);
+    assert_eq!(run.stdout, b"value=0000\n");
+    success(&invoke(
+        root.path(),
+        &["vpi", "build", "top.sv", "--top", "Top", "-o", "sim"],
+    ));
+    let bytes = fs::read(root.path().join("sim")).unwrap();
+    let image = celox::NativeProgramImage::discover_appended(&bytes)
+        .unwrap()
+        .unwrap()
+        .image;
+    // Safety: this test compiled the source into the image above.
+    let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
+    assert!(!instance.four_state());
 }
