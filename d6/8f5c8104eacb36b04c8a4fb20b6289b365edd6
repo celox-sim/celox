@@ -1,0 +1,1 @@
+Resolve new master conflicts after scalar floating-point and configurable SV timescale support; retain latch semantics and iterative expression lowering.
