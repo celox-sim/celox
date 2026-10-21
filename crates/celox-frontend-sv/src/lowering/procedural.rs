@@ -43,6 +43,9 @@ pub(super) struct ProcModule<'a> {
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     /// Runtime errors (fatal assertions) of the module, by local code.
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<SourceVarId>>,
+    /// The continuous assignments `$event[k] = expr` of the event
+    /// expressions the module's processes wait on, by target.
+    pub event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
     /// The declared bounds of each unpacked dimension, by variable.
     unpacked_bounds: HashMap<SourceVarId, Vec<(i128, i128)>>,
     /// Where the warnings found while lowering go. A process lowered more
@@ -190,6 +193,7 @@ impl<'a> ProcModule<'a> {
             capture_counter: 0,
             runtime_event_sites: Vec::new(),
             runtime_errors: HashMap::default(),
+            event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
         }
@@ -693,6 +697,47 @@ impl<'a> ProcModule<'a> {
         id
     }
 
+    /// A module-scope variable of event expression `index` with the shape
+    /// of `variable`: `$event[index]` itself for `slot == None`, otherwise
+    /// its copy `$event[index].slot`. Like a process slot it is no signal of
+    /// the design, but state that persists while processes wait.
+    pub fn event_variable(
+        &mut self,
+        index: usize,
+        slot: Option<String>,
+        variable: SvVariable,
+    ) -> (SourceVarId, String) {
+        let path: Vec<_> = std::iter::once(format!("{EVENT_PREFIX}{index}]"))
+            .chain(slot)
+            .collect();
+        let name = path.join(".");
+        let id = next_var_id(&mut self.next_id);
+        self.variables.insert(
+            id,
+            SvVariable {
+                path,
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Variable,
+                source: None,
+                hidden: true,
+                force_control: None,
+                ..variable
+            },
+        );
+        self.name_to_id.insert(name.clone(), id);
+        (id, name)
+    }
+
+    /// The index of the next event expression of the module.
+    pub fn next_event_index(&self) -> usize {
+        (0..)
+            .take_while(|index| {
+                self.name_to_id
+                    .contains_key(&format!("{EVENT_PREFIX}{index}]"))
+            })
+            .count()
+    }
+
     pub fn subroutine(&self, name: &str) -> Option<&sv::ir::Subroutine> {
         self.subroutines.get(name)
     }
@@ -805,7 +850,7 @@ impl<'a> ProcModule<'a> {
 
     /// `expr` with each user function call replaced by a literal of its
     /// return type.
-    fn typed_calls(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {
+    pub fn typed_calls(&self, expr: &sv::ir::Expr) -> sv::ir::Expr {
         use sv::ir::Expr;
         let go = |expr: &Expr| self.typed_calls(expr);
         match expr {
