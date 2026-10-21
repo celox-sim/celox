@@ -596,11 +596,11 @@ fn sv_parameter_literals_preserve_types_across_project_target_and_cli() {
     let root = tempfile::tempdir().unwrap();
     let source = r#"
         module Top #(parameter VENDOR="GENERIC", parameter NEG=3,
-            parameter logic [64:0] WIDE=0, parameter logic [11:0] FILL=0,
+            parameter logic [64:0] WIDE=0, parameter logic [57:0] FILL=0,
             parameter logic [3:0] UNKNOWN=0)(output logic matched);
             assign matched=(VENDOR == "XILINX") && (NEG == -8) && (NEG < 0)
                 && ($bits(NEG) == 32) && ($bits(VENDOR) == 48)
-                && (WIDE == 65'h10000000000000001) && (FILL == 12'hfff)
+                && (WIDE == 65'h10000000000000001) && (FILL == 58'h3ffffffffffffff)
                 && (UNKNOWN === 4'b10xz);
             initial begin #1; assert(matched) else $fatal(1,"literal parameter types");
                 $display("ok"); $finish; end
