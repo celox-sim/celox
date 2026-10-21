@@ -77,7 +77,7 @@ The main supported areas are:
 | --- | --- |
 | Design structure | Modules, hierarchy, parameters, generate blocks, packages, interfaces and modports |
 | Data | Packed vectors, multidimensional packed arrays, structs, enums and unpacked memories |
-| RTL processes | `assign`, `always_comb`, `always @*`, edge-triggered `always` and `always_ff` |
+| RTL processes | `assign`, `always_comb`, `always @*`, blocking `always_latch`, edge-triggered `always` and `always_ff` |
 | Computation | Arithmetic, selects, assignment patterns, branches, loops and functions |
 | Simulation helpers | Immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
 
@@ -90,7 +90,7 @@ ports, types, statements or system functions before porting a design.
 Common reasons a design needs changes are:
 
 - Class-based verification, concurrent assertions and tasks with timing controls.
-- Latches, multiple drivers and tri-state buses.
+- Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
 - Non-ANSI module ports, wildcard `.*` connections, gate primitives and `bind`.
 - Strings, `real`, unpacked structs and several interface features.
 

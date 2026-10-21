@@ -36,7 +36,7 @@ synthesis and is tested at the design level.
 | Area | Supported |
 | --- | --- |
 | Continuous logic | `assign`, `wire w = expr;` |
-| Combinational processes | `always_comb`, `always @*`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
+| Combinational processes | `always_comb`, `always @*`, blocking `always_latch`, block-local variables, sequential and dependent blocking assignments, reads of a variable before the process writes it (its previous value) |
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if` / `for` and `$readmemh` / `$readmemb`, defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate assertions |
@@ -106,7 +106,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Behavioral and verification constructs: `final`, intra-assignment timing controls,
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events, `fork` / `join`, concurrent assertions, `force` / `release`.
-- `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)) and incomplete combinational assignments that would infer a latch.
+- Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset. Level-sensitive sensitivity lists other than `@*` are unsupported.
+- Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port declarations ([#426](https://github.com/celox-sim/celox/issues/426)), `ref` ports
   ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
@@ -261,6 +262,34 @@ values transfer by bits, so struct member names and field divisions may differ
 in the child. Typed scalar patterns can override a parameter whose default is
 an ordinary value. Unpacked patterns retain their positional array shape.
 
+### Latches
+
+Explicit `always_latch` and ordinary `always @*` support retained blocking
+assignments. Incomplete assignments in SystemVerilog or Veryl `always_comb`
+require `inferred_latch = "warn"` or `"allow"` in the common
+[`[diagnostics]` table](./celox-toml.md#diagnostics). The default is `error`.
+The Rust `.allow_inferred_latches(true)` and JavaScript `allowInferredLatches: true`
+options remain available; an explicit diagnostic setting takes precedence.
+Latches work with ordinary `eval_comb` and with `initial` testbenches; a gate
+that remains open follows changes to its data, and a closed gate retains its
+last value. In four-state mode an uninitialized latch starts at X, and an X
+or Z procedural `if` condition does not execute the true branch.
+
+`always_comb` and `always_latch` also execute once at time zero; `always @*`
+waits for a sensitivity change, including changes caused by initial blocks or
+continuous drivers. Repeated `eval_comb` calls with unchanged sensitivity inputs
+do not execute a self-reading process again. As with
+`always_comb`, written expressions are excluded from the sensitivity of
+`always_latch` (IEEE 1800-2023 9.2.2.2 and 9.2.2.3). Cross-process feedback
+still requires the existing explicit loop configuration. The option does not
+suppress Veryl analyzer errors for explicit combinational arithmetic feedback.
+For a selected read such as `bus[0]`, `always @*` watches the whole variable,
+while `always_comb` and `always_latch` watch the longest static prefix.
+The latter include reads inside called functions; task calls contribute only
+their argument expressions (IEEE 1800-2023 9.4.2.2 and 9.2.2.2.1).
+Nonblocking latch assignments (`<=`) require NBA scheduling and remain
+unsupported, including when the inference option is enabled.
+
 ### Variable lifetimes
 
 Variable lifetimes follow IEEE 1800-2023 6.21. A variable declared in a
@@ -272,7 +301,7 @@ counts. An automatic local is initialized on every entry. A static local
 whose value on entry is never read, because every path writes it before
 reading it, behaves the same either way. Because a static local keeps its
 value, a local of `always_comb` that only some paths write is a latch, and
-is rejected like any other latch. A static local of a function or task
+requires relaxing `inferred_latch` like other inferred latches. A static local of a function or task
 that keeps its value between calls is not supported, nor is a static local
 whose initializer is not constant; declare them `automatic`. The result of
 a static function is static too, so one with a path that does not assign
