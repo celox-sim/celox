@@ -1000,6 +1000,7 @@ pub(super) fn system_task_kind(task: sv::ir::SystemTask) -> Option<SystemTaskKin
         SystemTask::Readmem(_)
         | SystemTask::Writemem(_)
         | SystemTask::Fclose
+        | SystemTask::Fflush
         | SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Printtimescale

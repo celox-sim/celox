@@ -37,6 +37,7 @@ pub use state_file::{StateError, StateMismatch, StateSchema};
 mod host {
     mod declaration;
     mod file_io;
+    mod fread;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

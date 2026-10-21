@@ -5981,6 +5981,13 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::UrandomRange
         | SystemFunction::Fopen
         | SystemFunction::ScopeRandomize
+        | SystemFunction::Fread
+        | SystemFunction::Ftell
+        | SystemFunction::Fseek
+        | SystemFunction::Rewind
+        | SystemFunction::Fgetc
+        | SystemFunction::Ungetc
+        | SystemFunction::Feof
         | SystemFunction::Timeunit
         | SystemFunction::Timeprecision
         | SystemFunction::Isunbounded

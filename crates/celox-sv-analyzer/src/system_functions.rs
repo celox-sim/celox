@@ -76,6 +76,15 @@ pub enum SystemFunction {
     UrandomRange,
     /// `$fopen` (21.3.1).
     Fopen,
+    /// Binary input into packed integers or a static memory (21.3.4.4).
+    Fread,
+    /// File position and byte input functions (21.3.4–8).
+    Ftell,
+    Fseek,
+    Rewind,
+    Fgetc,
+    Ungetc,
+    Feof,
 }
 
 /// An array query function that selects one bound of a dimension (20.7).
@@ -91,7 +100,19 @@ pub enum ArrayQuery {
 impl SystemFunction {
     /// Calls that return through the timed scheduler's host boundary.
     pub fn is_host_request(self) -> bool {
-        matches!(self, Self::Fopen | Self::TestPlusargs | Self::ValuePlusargs)
+        matches!(
+            self,
+            Self::Fopen
+                | Self::Fread
+                | Self::Ftell
+                | Self::Fseek
+                | Self::Rewind
+                | Self::Fgetc
+                | Self::Ungetc
+                | Self::Feof
+                | Self::TestPlusargs
+                | Self::ValuePlusargs
+        )
     }
 
     /// The built-in name (`$` functions or `std::randomize`).
@@ -133,6 +154,13 @@ impl SystemFunction {
             Self::ScopeRandomize => "std::randomize",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
+            Self::Fread => "$fread",
+            Self::Ftell => "$ftell",
+            Self::Fseek => "$fseek",
+            Self::Rewind => "$rewind",
+            Self::Fgetc => "$fgetc",
+            Self::Ungetc => "$ungetc",
+            Self::Feof => "$feof",
         }
     }
 
@@ -168,6 +196,13 @@ impl SystemFunction {
                 | Self::ValuePlusargs
                 | Self::Urandom
                 | Self::Fopen
+                | Self::Fread
+                | Self::Ftell
+                | Self::Fseek
+                | Self::Rewind
+                | Self::Fgetc
+                | Self::Ungetc
+                | Self::Feof
                 | Self::UrandomRange
                 | Self::ScopeRandomize
         )
@@ -186,6 +221,7 @@ impl SystemFunction {
         self == Self::ScopeRandomize
             || (matches!(self, Self::Random | Self::DistUniform) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
+            || (self == Self::Fread && position == 0)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -201,9 +237,17 @@ impl SystemFunction {
             | Self::Countones
             | Self::ScopeRandomize => Some((32, true)),
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
-            Self::Random | Self::DistUniform | Self::TestPlusargs | Self::ValuePlusargs => {
-                Some((32, true))
-            }
+            Self::Random
+            | Self::DistUniform
+            | Self::TestPlusargs
+            | Self::ValuePlusargs
+            | Self::Fread
+            | Self::Ftell
+            | Self::Fseek
+            | Self::Rewind
+            | Self::Fgetc
+            | Self::Ungetc
+            | Self::Feof => Some((32, true)),
             Self::Urandom | Self::UrandomRange | Self::Stime | Self::Fopen => Some((32, false)),
             Self::Rtoi => Some((32, true)),
             Self::Itor | Self::Bitstoreal | Self::Realtobits => Some((64, false)),
@@ -254,6 +298,8 @@ pub enum SystemTask {
     Vcd(VcdTask),
     /// File output tasks (21.3).
     Fclose,
+    /// Flush selected output files or all open files (21.3.6).
+    Fflush,
     Fdisplay(Radix),
     Fwrite(Radix),
     /// Memory snapshot output (21.5).
@@ -328,7 +374,12 @@ impl SystemTask {
     pub fn is_host_request(self) -> bool {
         matches!(
             self,
-            Self::Fclose | Self::Fdisplay(_) | Self::Fwrite(_) | Self::Writemem(_) | Self::Vcd(_)
+            Self::Fclose
+                | Self::Fflush
+                | Self::Fdisplay(_)
+                | Self::Fwrite(_)
+                | Self::Writemem(_)
+                | Self::Vcd(_)
         )
     }
 
@@ -353,6 +404,7 @@ impl SystemTask {
             Self::Write(Octal) => "$writeo",
             Self::Write(Hexadecimal) => "$writeh",
             Self::Fclose => "$fclose",
+            Self::Fflush => "$fflush",
             Self::Fdisplay(Decimal) => "$fdisplay",
             Self::Fdisplay(Binary) => "$fdisplayb",
             Self::Fdisplay(Octal) => "$fdisplayo",
@@ -839,18 +891,18 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$swriteh", Task),
     unsupported("$sformat", Task),
     unsupported("$sformatf", Function),
-    unsupported("$fgetc", Function),
-    unsupported("$ungetc", Function),
+    function(SystemFunction::Fgetc, 1, Some(1)),
+    function(SystemFunction::Ungetc, 2, Some(2)),
     unsupported("$fgets", Function),
     unsupported("$fscanf", Function),
     unsupported("$sscanf", Function),
-    unsupported("$fread", Function),
-    unsupported("$ftell", Function),
-    unsupported("$fseek", Function),
-    unsupported("$rewind", Function),
-    unsupported("$fflush", Task),
+    function(SystemFunction::Fread, 2, Some(4)),
+    function(SystemFunction::Ftell, 1, Some(1)),
+    function(SystemFunction::Fseek, 3, Some(3)),
+    function(SystemFunction::Rewind, 1, Some(1)),
+    task(SystemTask::Fflush, ProceduralAndInitial, 0, Some(1)),
     unsupported("$ferror", Function),
-    unsupported("$feof", Function),
+    function(SystemFunction::Feof, 1, Some(1)),
     // 21.4 Loading memory array data from a file
     task(
         SystemTask::Readmem(MemoryFormat::Binary),
@@ -1065,10 +1117,13 @@ pub fn check_call(
             detail: format!("expected {}, found {count}", expected_arguments(tf)),
         });
     }
-    // A function takes a value for each argument; only tasks such as
-    // `$display(a,,b)` may leave one out.
+    // Functions require values, except the optional addressing operands of
+    // `$fread` (21.3.4.4). Tasks such as `$display(a,,b)` may omit operands.
     if tf.kind != Task
-        && let Some(position) = args.iter().position(|arg| *arg == Arg::Omitted)
+        && let Some(position) = args.iter().enumerate().position(|(position, arg)| {
+            *arg == Arg::Omitted
+                && !(checked == SystemCall::Function(SystemFunction::Fread) && position >= 2)
+        })
     {
         return Err(AnalyzerError::InvalidSystemTfCall {
             name: name.to_string(),
@@ -1102,6 +1157,24 @@ fn expected_arguments(tf: &SystemTf) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fread_allows_only_optional_address_operands_to_be_omitted() {
+        use Arg::{Given, Omitted};
+        for args in [
+            vec![Given, Given, Omitted, Given],
+            vec![Given, Given, Given, Omitted],
+        ] {
+            assert_eq!(
+                check_function_call("$fread", Some(&args)).unwrap(),
+                SystemFunction::Fread
+            );
+        }
+        for args in [vec![Omitted, Given], vec![Given, Omitted]] {
+            assert!(check_function_call("$fread", Some(&args)).is_err());
+        }
+        assert!(check_function_call("$fseek", Some(&[Given, Omitted, Given])).is_err());
+    }
 
     #[test]
     fn names_are_unique_and_well_formed() {
