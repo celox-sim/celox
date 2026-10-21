@@ -64,6 +64,12 @@ pub enum SystemFunction {
     Random,
     /// `$dist_uniform` (20.14.2).
     DistUniform,
+    DistNormal,
+    DistExponential,
+    DistPoisson,
+    DistChiSquare,
+    DistT,
+    DistErlang,
 
     /// Command-line prefix query (21.6).
     TestPlusargs,
@@ -118,6 +124,12 @@ impl SystemFunction {
                 | Self::Fscanf
                 | Self::TestPlusargs
                 | Self::ValuePlusargs
+                | Self::DistNormal
+                | Self::DistExponential
+                | Self::DistPoisson
+                | Self::DistChiSquare
+                | Self::DistT
+                | Self::DistErlang
         )
     }
 
@@ -154,6 +166,12 @@ impl SystemFunction {
             Self::Isunknown => "$isunknown",
             Self::Random => "$random",
             Self::DistUniform => "$dist_uniform",
+            Self::DistNormal => "$dist_normal",
+            Self::DistExponential => "$dist_exponential",
+            Self::DistPoisson => "$dist_poisson",
+            Self::DistChiSquare => "$dist_chi_square",
+            Self::DistT => "$dist_t",
+            Self::DistErlang => "$dist_erlang",
 
             Self::TestPlusargs => "$test$plusargs",
             Self::ValuePlusargs => "$value$plusargs",
@@ -201,6 +219,12 @@ impl SystemFunction {
             self,
             Self::Random
                 | Self::DistUniform
+                | Self::DistNormal
+                | Self::DistExponential
+                | Self::DistPoisson
+                | Self::DistChiSquare
+                | Self::DistT
+                | Self::DistErlang
                 | Self::TestPlusargs
                 | Self::ValuePlusargs
                 | Self::Urandom
@@ -230,7 +254,17 @@ impl SystemFunction {
     /// updates its seed variable.
     pub fn writes_argument(self, position: usize) -> bool {
         self == Self::ScopeRandomize
-            || (matches!(self, Self::Random | Self::DistUniform) && position == 0)
+            || (matches!(
+                self,
+                Self::Random
+                    | Self::DistUniform
+                    | Self::DistNormal
+                    | Self::DistExponential
+                    | Self::DistPoisson
+                    | Self::DistChiSquare
+                    | Self::DistT
+                    | Self::DistErlang
+            ) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
             || (self == Self::Fread && position == 0)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
@@ -251,6 +285,12 @@ impl SystemFunction {
             Self::Onehot | Self::Onehot0 | Self::Isunknown | Self::Isunbounded => Some((1, false)),
             Self::Random
             | Self::DistUniform
+            | Self::DistNormal
+            | Self::DistExponential
+            | Self::DistPoisson
+            | Self::DistChiSquare
+            | Self::DistT
+            | Self::DistErlang
             | Self::TestPlusargs
             | Self::ValuePlusargs
             | Self::Fread
@@ -749,6 +789,12 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 20.14 Probabilistic distribution functions
     function(SystemFunction::Random, 0, Some(1)),
     function(SystemFunction::DistUniform, 3, Some(3)),
+    function(SystemFunction::DistNormal, 3, Some(3)),
+    function(SystemFunction::DistExponential, 2, Some(2)),
+    function(SystemFunction::DistPoisson, 2, Some(2)),
+    function(SystemFunction::DistChiSquare, 2, Some(2)),
+    function(SystemFunction::DistT, 2, Some(2)),
+    function(SystemFunction::DistErlang, 3, Some(3)),
     // 20.15 Stochastic analysis tasks and functions
     unsupported("$q_initialize", Task),
     unsupported("$q_add", Task),

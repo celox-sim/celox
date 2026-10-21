@@ -472,6 +472,15 @@ sv_backends! {
     fn dist_uniform_bounds_seed_and_replay(sim) {
         @case "random_plusargs::dist_uniform_bounds_seed_and_replay";
     }
+}
+
+sv_backends! {
+    fn distribution_annex_n_reference_values(sim) {
+        @case "distributions::annex_n_reference_values";
+    }
+    fn distribution_replay_and_normal_parameters(sim) {
+        @case "distributions::replay_and_normal_parameters";
+    }
     fn dist_uniform_reference_sequence(sim) {
         @case "random_plusargs::dist_uniform_reference_sequence";
     }

@@ -117,6 +117,12 @@ The integral file-input extension updates six expectation rows: `21.3--feof`,
 remaining file-input probes retain their measured verdicts; several still use
 unsupported `final` constructs.
 
+The six Annex N distribution probes (`20.15--dist_normal`, `dist_exponential`,
+`dist_poisson`, `dist_chi_square`, `dist_t` and `dist_erlang`) now pass simulation
+in both state modes, updating twelve more expectation rows. The scanner probes
+retain failures caused by unsupported `final` constructs or internal data types;
+no scanner expectation is changed.
+
 The report contains each case’s state mode, verdict, selected execution mode,
 tags, tool return code and path to the official log. The output directory retains
 both the official log and runner diagnostics for each case and state mode.
