@@ -466,12 +466,11 @@ fn validate_scope(
                 return Err(unsupported("mintypmax expression"));
             }
             ExprKind::Select { dimension, .. } => {
-                if let DimensionKind::Indexed { base, width, .. } = dimension.kind {
+                if let DimensionKind::Indexed { width, .. } = dimension.kind {
                     if parameter_ranges.iter().any(|range| contains(*range, dimension.tokens)) { continue; }
-                    let mut dimensions = indexed_dimensions.clone();
-                    dimensions.constant_indexed_base = true;
-                    let value = expression_binding::value(base, native, syntax_tree, &dimensions)?;
-                    selects::indexed_expression_value(&syntax_tree.state, value, &dimensions).ok_or_else(|| unsupported("index expression"))?;
+                    // IEEE 1800-2023 11.5.1 permits a variable base. Its
+                    // expression is bound after variable types are available;
+                    // only the width requires constant validation here.
                     check_indexed_width(width, syntax_tree, indexed_dimensions)?;
                 }
             }
