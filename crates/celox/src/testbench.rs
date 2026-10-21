@@ -99,18 +99,14 @@ fn eval_expr<B: SimBackend>(
 ) -> TbValue {
     let (memory, _) = sim.backend.memory_as_ptr();
     let trace = sim.backend.layout().trace.as_ref();
-    expr.eval_with_strings(
-        memory.cast_mut(),
-        &mut sim.testbench_strings,
-        |offset, len| {
-            if let Some(trace) = trace {
-                // SAFETY: bytecode is bound to this simulator's memory layout.
-                unsafe {
-                    trace.mark_range(memory.cast_mut(), offset, len);
-                }
+    expr.eval_with_heap(memory.cast_mut(), Some(&mut sim.heap), |offset, len| {
+        if let Some(trace) = trace {
+            // SAFETY: bytecode is bound to this simulator's memory layout.
+            unsafe {
+                trace.mark_range(memory.cast_mut(), offset, len);
             }
-        },
-    )
+        }
+    })
 }
 
 pub(crate) fn eval_backend_expr<B: SimBackend>(
@@ -253,12 +249,19 @@ fn sim_set_target<B: SimBackend>(
     value: TbValue,
 ) {
     if let TbValue::String(bytes) = value {
+        // A selection names a string element by its bit offset.
         let index = target.selection.as_ref().map_or(0, |selection| {
-            eval_expr(sim, &selection.offset).to_u64() as usize
+            eval_expr(sim, &selection.offset).to_u64() as usize / celox_design::HANDLE_WIDTH
         });
-        if index < target.signal.width {
-            sim.testbench_strings
-                .insert((target.signal.offset, index), bytes);
+        if index < target.signal.width / celox_design::HANDLE_WIDTH {
+            let handle = sim.heap.intern(&bytes);
+            let element = SignalRef {
+                offset: target.signal.offset + index * celox_heap::HANDLE_BYTES,
+                width: celox_design::HANDLE_WIDTH,
+                is_4state: false,
+                array_layout: None,
+            };
+            sim.set(element, handle);
         }
         return;
     }
@@ -288,6 +291,32 @@ fn sim_set_target<B: SimBackend>(
         (root & &clear_mask) | selected_value,
         root_mask & clear_mask,
     );
+}
+
+/// Collect the heap between concurrent process polls. The saved temporaries of
+/// suspended processes are outside state memory, so their handles are roots.
+fn collect_testbench_heap<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    private_signals: &[SignalRef],
+    locals: &[Vec<(BigUint, BigUint)>],
+) {
+    if !sim.heap.should_collect() {
+        return;
+    }
+    let slots = sim.handle_slots();
+    let saved_roots: Vec<celox_heap::Handle> = private_signals
+        .iter()
+        .enumerate()
+        .filter(|(_, signal)| slots.binary_search(&signal.offset).is_ok())
+        .flat_map(|(index, signal)| {
+            let elements = signal.width / celox_design::HANDLE_WIDTH;
+            locals.iter().flat_map(move |process| {
+                let digits = process[index].0.to_u32_digits();
+                (0..elements).map(move |element| digits.get(element).copied().unwrap_or(0))
+            })
+        })
+        .collect();
+    sim.maybe_collect_heap(saved_roots);
 }
 
 fn execution_random_seed(seed: Option<u64>) -> u64 {
@@ -1797,6 +1826,9 @@ fn exec_testbench<B: SimBackend>(
                 Poll::Pending => debug_assert!(wait.borrow().is_some()),
             }
         }
+        // No process is running, so every string handle is in state memory or
+        // in a suspended process's saved temporaries.
+        collect_testbench_heap(&mut sim.borrow_mut(), testbench.private_signals(), &locals);
         for wait in &waits {
             if let Some(wait) = wait.borrow().as_ref()
                 && wait.remaining != 0
@@ -1973,6 +2005,9 @@ fn exec_detailed<B: SimBackend>(
 ) -> ExecResult {
     for stmt in stmts {
         let r = exec_one_detailed(sim, stmt, ctx);
+        // Only a single process runs here, so between statements every string
+        // handle is in state memory.
+        sim.maybe_collect_heap([]);
         // Stop on control-flow transfers or hard errors. Assertion failures that
         // are allowed to continue return `Continue` and are recorded in `ctx`.
         if matches!(

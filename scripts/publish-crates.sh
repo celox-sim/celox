@@ -25,6 +25,7 @@ crates=(
   celox-frontend-sdk
   celox-macros
   celox-ts-gen
+  celox-heap
   celox-testbench
   celox-sir
   celox-state-layout

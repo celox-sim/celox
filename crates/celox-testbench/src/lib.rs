@@ -16,9 +16,6 @@ pub use format::{
 };
 pub use vm::{CompiledExpr, TestbenchValue};
 
-/// Dynamic string values, addressed by a bound variable and flattened array index.
-pub type TestbenchStrings = std::collections::BTreeMap<(usize, usize), Vec<u8>>;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
     pub address: A,
@@ -521,10 +518,14 @@ pub enum ExprOpcode<L = usize> {
         byte_size: usize,
     },
     ConstString(Vec<u8>),
+    /// Pop the bit offset of a string element within the variable at
+    /// `location`, which holds `elements` heap handles, and push its contents.
+    /// An offset past the last element reads `""`.
     LoadString {
         location: L,
         elements: usize,
     },
+    /// Pop a string and store its heap handle at `location`.
     StoreString {
         location: L,
     },
