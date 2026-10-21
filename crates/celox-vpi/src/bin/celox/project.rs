@@ -18,6 +18,9 @@ pub(super) struct DesignArgs {
     /// Override a compilation diagnostic: CODE=allow|warn|error (repeatable).
     #[arg(long = "diagnostic", value_name = "CODE=LEVEL")]
     diagnostics: Vec<String>,
+    /// Default SV UNIT/PRECISION and global scheduler resolution, e.g. 1ns/1fs.
+    #[arg(long, value_name = "UNIT/PRECISION")]
+    timescale: Option<String>,
     /// Use two-state simulation, resolving X/Z to zero.
     #[arg(long, conflicts_with = "four_state")]
     two_state: bool,
@@ -102,6 +105,7 @@ struct Manifest {
     top: Option<String>,
     opt_level: Option<String>,
     four_state: Option<bool>,
+    timescale: Option<String>,
     live_signals: Option<Vec<String>>,
     force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
@@ -135,6 +139,7 @@ struct Target {
     top: Option<String>,
     opt_level: Option<String>,
     four_state: Option<bool>,
+    timescale: Option<String>,
     live_signals: Option<Vec<String>>,
     force_signals: Option<Vec<String>>,
     max_steps: Option<u64>,
@@ -152,6 +157,7 @@ pub(super) struct Design {
     pub top: String,
     pub opt_level: Option<celox::OptLevel>,
     pub four_state: Option<bool>,
+    pub timescale: Option<celox::SvTimescale>,
     pub signal_access: celox::SignalAccessOptions,
     pub max_steps: Option<u64>,
 }
@@ -281,6 +287,7 @@ impl DesignArgs {
                 design.diagnostics = config.diagnostics.clone();
                 design.top = config.top.clone().unwrap_or_default();
                 let mut opt_level = config.opt_level.as_deref();
+                let mut timescale = config.timescale.as_deref();
                 design.signal_access.live_signals = config.live_signals.clone().unwrap_or_default();
                 design.signal_access.force_signals =
                     config.force_signals.clone().unwrap_or_default();
@@ -300,6 +307,7 @@ impl DesignArgs {
                         design.top.clone_from(top);
                     }
                     opt_level = target.opt_level.as_deref().or(opt_level);
+                    timescale = target.timescale.as_deref().or(timescale);
                     if let Some(paths) = &target.live_signals {
                         design.signal_access.live_signals.clone_from(paths);
                     }
@@ -309,6 +317,7 @@ impl DesignArgs {
                     design.max_steps = target.max_steps.or(design.max_steps);
                     design.four_state = target.four_state.or(design.four_state);
                 }
+                design.timescale = timescale.map(str::parse).transpose()?;
                 design.opt_level = opt_level
                     .map(|value| {
                         celox::OptLevel::parse(value).ok_or_else(|| {
@@ -334,6 +343,9 @@ impl DesignArgs {
             }
         }));
         design.opt_level = self.opt_level.or(design.opt_level);
+        if let Some(timescale) = self.timescale {
+            design.timescale = Some(timescale.parse()?);
+        }
         if self.two_state {
             design.four_state = Some(false);
         }
@@ -389,6 +401,9 @@ impl DesignArgs {
         }
         if design.top.trim().is_empty() {
             return Err("provide --top MODULE or set top in celox.toml".to_string());
+        }
+        if !design.is_sv() && design.timescale.is_some() {
+            return Err("timescale requires SystemVerilog sources".into());
         }
         if !design.is_sv() && !design.sv_parameters.is_empty() {
             return Err("SV parameter literals require .sv/.v sources".to_string());

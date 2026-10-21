@@ -89,7 +89,7 @@ pub fn interface_prototypes_with_options(
                 .zip(sources)
                 .map(|(file, (_, path))| (&file.syntax_tree, *path))
                 .collect::<Vec<_>>(),
-            options.allow_mixed_timescales,
+            options,
         )?)
     };
     let trees = files
@@ -97,9 +97,8 @@ pub fn interface_prototypes_with_options(
         .zip(sources)
         .map(|(file, (_, path))| (&file.syntax_tree, *path))
         .collect::<Vec<_>>();
-    let packages =
-        packages::Packages::analyze_with_options(&trees, None, options.allow_mixed_timescales)
-            .map_err(|error| error.with_warnings(source_warnings))?;
+    let packages = packages::Packages::analyze_with_options(&trees, None, options)
+        .map_err(|error| error.with_warnings(source_warnings))?;
     let package_warnings = packages.warnings().to_vec();
     let mut used_names = design
         .modules

@@ -130,8 +130,7 @@ impl ParsedSource {
                     }
                 }
             }
-            let mut packages =
-                Packages::analyze_with_options(&trees, roots, options.allow_mixed_timescales)?;
+            let mut packages = Packages::analyze_with_options(&trees, roots, options)?;
             packages.interface_names = design_units
                 .into_iter()
                 .filter_map(|(name, kind)| {

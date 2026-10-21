@@ -232,3 +232,6 @@ pub use diagnostic_policy::{DiagnosticLevel, DiagnosticPolicy};
 
 mod signal_access;
 pub use signal_access::SignalAccessOptions;
+
+mod timescale;
+pub use timescale::SvTimescale;

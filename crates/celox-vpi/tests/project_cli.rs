@@ -811,3 +811,66 @@ fn sv_cli_defaults_to_two_state_for_run_and_native_images() {
     let instance = unsafe { celox::NativeProgramInstance::from_image(image) }.unwrap();
     assert!(!instance.four_state());
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn timescale_reaches_run_and_native_images_with_target_and_cli_precedence() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("top.sv"),
+        r#"
+`timescale 1ns/1ps
+module Top(input bit clk, output bit q);
+    always_ff @(posedge clk) q <= !q;
+    initial begin
+        $display("SCALE %0d %0d", $timeprecision(), $timeprecision($root));
+        #1ns $finish;
+    end
+endmodule
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("celox.toml"),
+        r#"
+sources = ["top.sv"]
+top = "Top"
+timescale = "1ns/10fs"
+[targets.fine]
+timescale = "1ns/1fs"
+"#,
+    )
+    .unwrap();
+    for (options, precision) in [
+        (vec![], -14),
+        (vec!["--target", "fine"], -15),
+        (vec!["--target", "fine", "--timescale", "10ns/100fs"], -13),
+        (vec!["--timescale", "1ns/10ps"], -12),
+    ] {
+        let output = invoke(root.path(), &[vec!["run"], options.clone()].concat());
+        success(&output);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("SCALE -12 {precision}")),
+            "{output:?}"
+        );
+        success(&invoke(
+            root.path(),
+            &[vec!["vpi", "build", "-o", "sim"], options].concat(),
+        ));
+        let bytes = fs::read(root.path().join("sim")).unwrap();
+        // Safety: the test compiled this trusted runtime itself.
+        let instance =
+            unsafe { celox::NativeProgramInstance::from_attached_bytes(&bytes) }.unwrap();
+        assert_eq!(instance.time_precision().exponent(), precision);
+    }
+    rejected(
+        &invoke(root.path(), &["run", "--timescale", "1ps/1ns"]),
+        "invalid timescale",
+    );
+    fs::write(
+        root.path().join("celox.toml"),
+        "sources=['top.sv']\ntop='Top'\ntimescale='1ns/2fs'",
+    )
+    .unwrap();
+    rejected(&invoke(root.path(), &["run"]), "invalid timescale");
+}
