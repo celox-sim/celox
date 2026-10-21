@@ -40,6 +40,8 @@ pub enum StateError {
     /// matching code keeps compiling.
     #[error("the state of the simulation's processes could not be recorded")]
     Processes,
+    /// Not returned: state files record strings by their contents. Kept so
+    /// that matching code keeps compiling.
     #[error("state files do not support dynamic testbench strings; use a checkpoint instead")]
     TestbenchStrings,
 }
@@ -105,6 +107,9 @@ struct NamedObject {
     path: String,
     signal: SignalRef,
     role: StateRole,
+    /// Whether the elements are string handles, which a file records as
+    /// references to its strings section.
+    strings: bool,
 }
 
 /// The state objects of a built design, with the paths and roles that state
@@ -121,8 +126,22 @@ pub struct StateSchema {
 
 impl StateSchema {
     /// Save the value of every state object of `backend` as last evaluated.
+    /// String objects read as `""`; use [`Self::capture_with_heap`] for a
+    /// backend whose strings live in a heap.
     pub fn capture<B: SimBackend>(&self, backend: &B) -> StateFile {
-        let objects = self
+        self.capture_with_heap(backend, &celox_heap::Heap::new())
+    }
+
+    /// Save the value of every state object of `backend`, with the contents
+    /// of its strings from `heap`.
+    pub fn capture_with_heap<B: SimBackend>(
+        &self,
+        backend: &B,
+        heap: &celox_heap::Heap,
+    ) -> StateFile {
+        let mut strings = Vec::new();
+        let mut file_ids: HashMap<celox_heap::Handle, u32> = HashMap::default();
+        let mut objects: Vec<StateObject> = self
             .objects
             .iter()
             .map(|object| {
@@ -149,10 +168,36 @@ impl StateSchema {
                 }
             })
             .collect();
+        // Number strings by first use in path order, so equal states save
+        // equal files.
+        for (object, named) in objects.iter_mut().zip(&self.objects) {
+            if !named.strings {
+                continue;
+            }
+            for element in object
+                .value
+                .as_chunks_mut::<{ celox_heap::HANDLE_BYTES }>()
+                .0
+            {
+                let handle = celox_heap::Handle::from_le_bytes(*element);
+                let contents = heap.string(handle);
+                let id = if contents.is_empty() {
+                    0
+                } else {
+                    // Interning gives each contents one handle.
+                    *file_ids.entry(handle).or_insert_with(|| {
+                        strings.push(contents.to_vec());
+                        strings.len() as u32
+                    })
+                };
+                element.copy_from_slice(&id.to_le_bytes());
+            }
+        }
         StateFile {
             four_state: self.four_state,
             objects,
             schedule: None,
+            strings,
         }
     }
 
@@ -165,6 +210,16 @@ impl StateSchema {
     pub fn load<B: SimBackend>(
         &self,
         backend: &mut B,
+        file: &StateFile,
+    ) -> Result<(), StateMismatch> {
+        self.load_with_heap(backend, &mut celox_heap::Heap::new(), file)
+    }
+
+    /// Like [`Self::load`], creating the file's strings in `heap`.
+    pub fn load_with_heap<B: SimBackend>(
+        &self,
+        backend: &mut B,
+        heap: &mut celox_heap::Heap,
         file: &StateFile,
     ) -> Result<(), StateMismatch> {
         let saved: BTreeMap<&str, &StateObject> = file
@@ -184,7 +239,7 @@ impl StateSchema {
                 if let Some(saved) = saved.get(object.path.as_str())
                     && saved.width == object.signal.width
                 {
-                    seeds.push((object.signal, *saved));
+                    seeds.push((object, *saved));
                 }
                 continue;
             }
@@ -197,7 +252,7 @@ impl StateSchema {
                         object.signal.width,
                     ));
                 }
-                Some(saved) => writes.push((object.signal, *saved)),
+                Some(saved) => writes.push((object, *saved)),
             }
         }
         let declared: std::collections::BTreeSet<&str> = self
@@ -213,8 +268,22 @@ impl StateSchema {
         if !mismatch.is_empty() {
             return Err(mismatch);
         }
-        for (signal, object) in seeds.into_iter().chain(writes) {
-            let value = BigUint::from_bytes_le(&object.value);
+        for (named, object) in seeds.into_iter().chain(writes) {
+            let signal = named.signal;
+            let value = if named.strings {
+                let mut value = object.value.clone();
+                for element in value.as_chunks_mut::<{ celox_heap::HANDLE_BYTES }>().0 {
+                    let id = u32::from_le_bytes(*element) as usize;
+                    let contents = id
+                        .checked_sub(1)
+                        .and_then(|index| file.strings.get(index))
+                        .map_or(&[][..], Vec::as_slice);
+                    element.copy_from_slice(&heap.intern(contents).to_le_bytes());
+                }
+                BigUint::from_bytes_le(&value)
+            } else {
+                BigUint::from_bytes_le(&object.value)
+            };
             let mask = object
                 .mask
                 .as_deref()
@@ -246,9 +315,6 @@ impl<B: SimBackend> Simulator<B> {
     /// a read would return.
     pub fn save_state(&mut self) -> Result<StateFile, StateError> {
         self.check_host_checkpoint_support()?;
-        if !self.testbench_strings.is_empty() {
-            return Err(StateError::TestbenchStrings);
-        }
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
@@ -256,7 +322,9 @@ impl<B: SimBackend> Simulator<B> {
             self.eval_comb_checked().map_err(StateError::Runtime)?;
             self.dirty = false;
         }
-        Ok(self.state_schema().capture(&self.backend))
+        Ok(self
+            .state_schema()
+            .capture_with_heap(&self.backend, &self.heap))
     }
 
     /// Load the state saved in `file`, matching objects by path.
@@ -279,9 +347,6 @@ impl<B: SimBackend> Simulator<B> {
         file: &StateFile,
         time: u64,
     ) -> Result<(), StateError> {
-        if !self.testbench_strings.is_empty() {
-            return Err(StateError::TestbenchStrings);
-        }
         if !self.components.is_empty() {
             return Err(CheckpointError::ExternalComponents.into());
         }
@@ -289,7 +354,7 @@ impl<B: SimBackend> Simulator<B> {
         // combinational loop), so keep the current state to return to.
         let previous = self.checkpoint()?;
         self.state_schema()
-            .load(&mut self.backend, file)
+            .load_with_heap(&mut self.backend, &mut self.heap, file)
             .map_err(StateError::Mismatch)?;
         for address in &self.program.runtime_schema.time_slots {
             self.backend.set(
@@ -355,6 +420,9 @@ impl<B: SimBackend> Simulator<B> {
                     } else {
                         StateRole::State
                     },
+                    strings: self.program.design.state_objects.get(address).is_some_and(
+                        |metadata| metadata.value_kind == celox_design::ValueKind::StrRef,
+                    ),
                 });
             }
             index = end;

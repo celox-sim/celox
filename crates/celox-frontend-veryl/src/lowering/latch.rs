@@ -69,6 +69,7 @@ pub(crate) fn lower_retained_comb_process(
                     kind: DomainKind::Other,
                     type_kind: PortTypeKind::Logic,
                     array_dims: Vec::new(),
+                    value_kind: Default::default(),
                 },
                 packed_dims: Vec::new(),
                 unpacked_ranges: Vec::new(),

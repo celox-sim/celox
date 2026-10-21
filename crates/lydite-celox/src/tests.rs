@@ -462,6 +462,7 @@ fn exported_array_width_is_total_not_per_element() {
             kind: DomainKind::Other,
             type_kind: PortTypeKind::Bit,
             array_dims: array_dims.to_vec(),
+            value_kind: Default::default(),
         })
     };
     assert_eq!(shape(64, &[2]).unwrap(), (32, 2));
