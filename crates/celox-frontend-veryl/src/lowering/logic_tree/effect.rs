@@ -507,8 +507,7 @@ fn collect_function_call_effects(
             let mut collection_store = destination_store.fork();
             for expression in destination
                 .index
-                .0
-                .iter()
+                .expressions()
                 .chain(destination.select.0.iter())
             {
                 collect_and_advance_expression(
@@ -633,8 +632,7 @@ pub(super) fn destination_contains_runtime_effect(
 ) -> bool {
     destination
         .index
-        .0
-        .iter()
+        .expressions()
         .chain(destination.select.0.iter())
         .any(|expression| expression_contains_runtime_effect(module, expression))
 }
@@ -695,14 +693,12 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
         Expression::Term(factor) => match &**factor {
             Factor::FunctionCall(call) => function_call_contains_runtime_effect(module, call),
             Factor::Variable(_, index, select, _) => index
-                .0
-                .iter()
+                .expressions()
                 .chain(select.0.iter())
                 .any(|expression| expression_contains_runtime_effect(module, expression)),
             Factor::HierVariable(reference) => reference
                 .index
-                .0
-                .iter()
+                .expressions()
                 .chain(reference.select.0.iter())
                 .any(|expression| expression_contains_runtime_effect(module, expression)),
             Factor::SystemFunctionCall(call) => match &call.kind {
@@ -720,7 +716,10 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                 | SystemFunctionKind::Readmemh(_, _)
                 | SystemFunctionKind::Finish => false,
             },
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => false,
         },
         Expression::Unary(_, inner, _) => expression_contains_runtime_effect(module, inner),
         Expression::Binary(lhs, _, rhs, _) => {
@@ -923,8 +922,7 @@ fn collect_assignment_effects(
         let mut collection_store = destination_store.fork();
         for expression in destination
             .index
-            .0
-            .iter()
+            .expressions()
             .chain(destination.select.0.iter())
         {
             collect_and_advance_expression(
@@ -1114,7 +1112,7 @@ fn collect_factor_effects(
     match factor {
         Factor::Variable(_, index, select, _) => {
             let mut position_store = store.fork();
-            for expr in index.0.iter().chain(select.0.iter()) {
+            for expr in index.expressions().chain(select.0.iter()) {
                 collect_and_advance_expression(
                     module,
                     &mut position_store,
@@ -1146,7 +1144,9 @@ fn collect_factor_effects(
             }
             _ => Ok(()),
         },
-        Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        Factor::Value(_) | Factor::ResetValue(..) | Factor::Anonymous(_) | Factor::Unknown(_) => {
+            Ok(())
+        }
     }
 }
 
@@ -2578,7 +2578,7 @@ fn collect_factor_position_inputs(
                 let access = eval_var_select(module, *var_id, index, select)?;
                 out.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
             }
-            for expr in index.0.iter().chain(select.0.iter()) {
+            for expr in index.expressions().chain(select.0.iter()) {
                 collect_expression_position_inputs(module, expr, out)?;
             }
             Ok(())
@@ -2598,7 +2598,10 @@ fn collect_factor_position_inputs(
             }
             Ok(())
         }
-        Factor::SystemFunctionCall(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        Factor::SystemFunctionCall(_)
+        | Factor::ResetValue(..)
+        | Factor::Anonymous(_)
+        | Factor::Unknown(_) => Ok(()),
     }
 }
 

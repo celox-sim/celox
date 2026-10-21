@@ -713,8 +713,7 @@ fn apply_readmem_writes(
         16,
         |dst| {
             dst.index
-                .0
-                .iter()
+                .expressions()
                 .map(|index| crate::bitaccess::eval_constexpr(index)?.to_usize())
                 .collect()
         },
@@ -995,7 +994,7 @@ fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> Result<NodeId, SLT
 fn function_assigns_whole_var(assign: &AssignStatement, var_id: VarId) -> bool {
     assign.dst.len() == 1
         && assign.dst[0].id == var_id
-        && assign.dst[0].index.0.is_empty()
+        && assign.dst[0].index.indices.is_empty()
         && assign.dst[0].select.0.is_empty()
         && assign.dst[0].select.1.is_none()
 }
@@ -1890,7 +1889,7 @@ pub(crate) fn collect_written_expression(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for expression in index.0.iter().chain(select.0.iter()) {
+                for expression in index.expressions().chain(select.0.iter()) {
                     collect_written_expression(module, expression, out)?;
                 }
                 Ok(())
@@ -1906,7 +1905,10 @@ pub(crate) fn collect_written_expression(
             Factor::SystemFunctionCall(call) => {
                 collect_written_system_function_call(module, call, out)
             }
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {
@@ -2015,7 +2017,7 @@ fn collect_written_destination(
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
-    for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
+    for expression in dst.index.expressions().chain(dst.select.0.iter()) {
         collect_written_expression(module, expression, out)?;
     }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
@@ -3435,6 +3437,9 @@ fn eval_dynamic_select_offset(
     arena: &mut SLTNodeArena<VarId>,
     token: Option<&TokenRange>,
 ) -> Result<DynamicSelectOffset, ParserError> {
+    crate::bitaccess::reject_runtime_array_slice(index)?;
+    let folded = crate::bitaccess::fold_array_range(index, select)?;
+    let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
     let geometry = select_geometry(module, var_id, index, select)?;
     let array_dimension_count = module.variables[&var_id].r#type.array.iter().count();
     let array_element_width = if array_dimension_count == 0 {
@@ -3464,8 +3469,7 @@ fn eval_dynamic_select_offset(
     };
 
     for (dimension, expression) in index
-        .0
-        .iter()
+        .expressions()
         .chain(&select.0)
         .take(geometry.dimension_count)
         .enumerate()
@@ -3571,7 +3575,10 @@ fn eval_dynamic_select_offset(
                         anchor,
                         anchor,
                         0,
-                        anchor_max.is_none_or(|max| max + elements as u64 > width as u64),
+                        anchor_max.is_none_or(|max| {
+                            max.checked_add(elements as u64)
+                                .is_none_or(|end| end > width as u64)
+                        }),
                     ),
                     PartSelectGeometry::MinusColon { .. } => {
                         let decrement = elements.checked_sub(1).ok_or_else(|| {
@@ -3643,23 +3650,35 @@ fn eval_dynamic_select_offset(
                     if let Some(whole) = whole {
                         valid = Some(and_slt_condition(arena, valid, whole)?);
                     }
-                    partial = Some(DynamicPartSelect {
-                        row_offset,
-                        row_bits: width * stride,
-                        position,
-                        pad,
-                        element_bits: stride,
-                    });
+                    // A run of unpacked elements is read whole or not at all:
+                    // a packed row read across elements cannot address them.
+                    if geometry.dimension_count >= array_dimension_count {
+                        partial = Some(DynamicPartSelect {
+                            row_offset,
+                            row_bits: width * stride,
+                            position,
+                            pad,
+                            element_bits: stride,
+                        });
+                    }
                 } else if let Some(guard) = anchor_guard {
                     valid = Some(and_slt_condition(arena, valid, guard)?);
                 }
                 start
             }
         };
+        // A part select on an unpacked dimension selects whole elements.
+        let kind = if geometry.dimension_count < array_dimension_count {
+            SLTIndexKind::Unpacked {
+                element_width: array_element_width.expect("unpacked array has an element width"),
+            }
+        } else {
+            SLTIndexKind::Packed
+        };
         indices.push(SLTIndex {
             node: start,
             stride,
-            kind: SLTIndexKind::Packed,
+            kind,
         });
         let stride_node = arena.alloc(SLTNode::Constant(
             BigUint::from(stride),

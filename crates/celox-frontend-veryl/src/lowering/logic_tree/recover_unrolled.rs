@@ -125,6 +125,15 @@ fn exact_iteration_chunks(
 ) -> bool {
     let trip_count = candidate.unrolled.iterations.len();
     if trip_count < 2
+        || candidate.unrolled.iterations.iter().any(|iteration| {
+            module
+                .variables
+                .get(&iteration.loop_var)
+                .is_none_or(|variable| {
+                    variable.kind != veryl_analyzer::ir::VarKind::Const
+                        || variable.value.first().and_then(Value::to_usize) != Some(iteration.value)
+                })
+        })
         || statements.is_empty()
         || !statements.len().is_multiple_of(trip_count)
         || statements
@@ -249,8 +258,7 @@ fn collect_statement_variables(statement: &Statement, out: &mut Vec<VarId>) -> b
 
 fn collect_index_variables(index: &VarIndex, out: &mut Vec<VarId>) -> bool {
     index
-        .0
-        .iter()
+        .expressions()
         .all(|expression| collect_expression_variables(expression, out))
 }
 
@@ -273,7 +281,7 @@ fn collect_expression_variables(expression: &Expression, out: &mut Vec<VarId>) -
                 collect_index_variables(index, out) && collect_select_variables(select, out)
             }
             Factor::HierVariable(_) => false,
-            Factor::Value(_) => true,
+            Factor::Value(_) | Factor::ResetValue(..) => true,
             Factor::FunctionCall(call) if call.outputs.is_empty() => call
                 .inputs
                 .values()
@@ -452,20 +460,30 @@ fn parameterize_index(
     variants: &[&VarIndex],
     candidate: &UnrolledLoopCandidate,
 ) -> Option<bool> {
-    if variants
-        .iter()
-        .any(|variant| variant.0.len() != template.0.len())
-    {
+    if variants.iter().any(|variant| {
+        variant.indices.len() != template.indices.len()
+            || variant
+                .range
+                .as_ref()
+                .map(|range| std::mem::discriminant(&range.0))
+                != template
+                    .range
+                    .as_ref()
+                    .map(|range| std::mem::discriminant(&range.0))
+    }) {
         return None;
     }
+    let mut variant_expressions = variants
+        .iter()
+        .map(|variant| variant.expressions())
+        .collect::<Vec<_>>();
     let mut depends = false;
-    for position in 0..template.0.len() {
-        let expressions = variants
-            .iter()
-            .map(|variant| &variant.0[position])
-            .collect::<Vec<_>>();
-        depends |=
-            parameterize_expression(module, &mut template.0[position], &expressions, candidate)?;
+    for expression in template.expressions_mut() {
+        let expressions = variant_expressions
+            .iter_mut()
+            .map(|variant| variant.next())
+            .collect::<Option<Vec<_>>>()?;
+        depends |= parameterize_expression(module, expression, &expressions, candidate)?;
     }
     Some(depends)
 }
@@ -832,7 +850,7 @@ fn guard_loop_dependent_accesses(
     match expression {
         Expression::Term(factor) => match factor.as_mut() {
             Factor::Variable(_, index, select, _) => {
-                for expression in &mut index.0 {
+                for expression in index.expressions_mut() {
                     guard_access(expression, loop_var, exceptional_condition);
                 }
                 for expression in &mut select.0 {
@@ -904,7 +922,7 @@ fn remap_expression_variable(expression: &mut Expression, from: VarId, to: VarId
                 if *variable == from {
                     *variable = to;
                 }
-                for expression in &mut index.0 {
+                for expression in index.expressions_mut() {
                     remap_expression_variable(expression, from, to);
                 }
                 for expression in &mut select.0 {
@@ -1569,6 +1587,10 @@ fn parameterize_factor(
             )
         }
         Factor::HierVariable(_) => None,
+        Factor::ResetValue(kind, polarity, _) => variants
+            .iter()
+            .all(|factor| matches!(factor, Factor::ResetValue(other_kind, other_polarity, _) if kind == other_kind && polarity == other_polarity))
+            .then_some(false),
         Factor::Value(template_comptime) => {
             let values = variants
                 .iter()
@@ -3939,7 +3961,7 @@ fn rewrite_statement(statement: &mut Statement, loop_var: VarId, mode: &RewriteM
 
 fn rewrite_index(index: &mut VarIndex, loop_var: VarId, mode: &RewriteMode) -> Option<bool> {
     let mut depends = false;
-    for expression in &mut index.0 {
+    for expression in index.expressions_mut() {
         depends |= rewrite_expression(expression, loop_var, mode)?;
     }
     Some(depends)
@@ -3975,7 +3997,7 @@ fn rewrite_expression(
                 self_depends || index_depends || select_depends
             }
             Factor::HierVariable(_) => return None,
-            Factor::Value(_) => false,
+            Factor::Value(_) | Factor::ResetValue(..) => false,
             Factor::FunctionCall(call) if call.outputs.is_empty() => {
                 let mut depends = false;
                 for input in call.inputs.values_mut() {
@@ -4221,6 +4243,7 @@ mod tests {
             Analyzer::analyze_post_pass2(&ir).is_empty(),
             "post-pass2 must succeed"
         );
+        crate::lower_constant_loops(&mut ir);
         let provenance = loop_sources.match_unrolled(&ir);
         let top = resource_table::insert_str("Top");
         let module = ir

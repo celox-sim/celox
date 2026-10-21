@@ -54,12 +54,10 @@ pub(crate) fn check_module(module: &Module) -> Result<(), ParserError> {
                 };
                 for input in &x.inputs {
                     let port = child.and_then(|child| child.variables.get(&input.id));
-                    for expression in &input.exprs {
-                        if let Some(port) = port {
-                            checker.conversion(&port.r#type, expression)?;
-                        }
-                        checker.expression(expression)?;
+                    if let Some(port) = port {
+                        checker.conversion(&port.r#type, &input.expr)?;
                     }
+                    checker.expression(&input.expr)?;
                 }
                 for output in &x.outputs {
                     let port = child.and_then(|child| child.variables.get(&output.id));
@@ -214,7 +212,10 @@ impl Checker<'_> {
             Factor::HierVariable(x) => self.select(&x.index, &x.select),
             Factor::FunctionCall(call) => self.call(call),
             Factor::SystemFunctionCall(call) => self.system_call(call),
-            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+            Factor::Value(_)
+            | Factor::ResetValue(..)
+            | Factor::Anonymous(_)
+            | Factor::Unknown(_) => Ok(()),
         }
     }
 
@@ -339,7 +340,8 @@ impl Checker<'_> {
     }
 
     fn select(&mut self, index: &VarIndex, select: &VarSelect) -> Result<(), ParserError> {
-        for expression in index.0.iter().chain(&select.0) {
+        let range = index.range.as_deref().map(|(_, expression)| expression);
+        for expression in index.indices.iter().chain(range).chain(&select.0) {
             self.integral(expression, "index")?;
             self.expression(expression)?;
         }
@@ -479,6 +481,11 @@ impl Checker<'_> {
                         TbMethod::Component { args, .. } => {
                             for arg in args {
                                 self.expression(&arg.0)?;
+                            }
+                        }
+                        TbMethod::Queue { value, .. } => {
+                            if let Some(value) = value {
+                                self.expression(value)?;
                             }
                         }
                         TbMethod::RandomSeed { value } => self.expression(value)?,
