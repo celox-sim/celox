@@ -44,10 +44,12 @@ pub use parsed::ParsedSource;
 /// simulator's two-state/four-state mode is known.
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
-/// Options for recoverable language compatibility checks.
+/// Language compatibility checks and implementation-defined timing defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
+    /// Default unit/precision exponents; precision also bounds global resolution.
+    pub default_timescale: Option<(i32, i32)>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
@@ -246,7 +248,7 @@ pub fn generated_time_declarations_with_options(
     roots: Option<&[&str]>,
     options: AnalysisOptions,
 ) -> Result<String, AnalyzerError> {
-    ast::timescales::generated_source_declarations(sources, roots, options.allow_mixed_timescales)
+    ast::timescales::generated_source_declarations(sources, roots, options)
 }
 
 /// Parse and analyze a SystemVerilog source string.

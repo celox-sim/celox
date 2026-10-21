@@ -117,6 +117,21 @@ Vite プラグインは `test_veryl/` を自動的に検出し、そこで宣言
 - Vite プラグインは本番ソースと同様に、ホットリロード時にテストソースの型も再生成します。
 - `[simulation]` の設定は、プロジェクト内の `Simulation.fromProject` / `Simulation.create` 呼び出しすべてに適用されます。呼び出し時に `{ maxSteps }` を指定すると、常に `celox.toml` の値より優先されます。
 
+
+### CLI の SystemVerilog 時間設定
+
+`celox run` と `celox vpi build` では、ルートまたは `[targets.NAME]` に
+`timescale = "1ns/1fs"` を指定できます。優先順位は `--timescale 1ns/1fs`、
+選択ターゲット、ルート設定の順です。未指定時は従来どおり `1ns/1ps` です。
+
+時間宣言のないスコープの既定単位・精度を設定し、指定した精度を全体の
+スケジューラ精度にも反映します。SV モジュールが `1ns/1ps` を宣言していても、
+cocotb から fs 単位のクロックを駆動できます。明示された `timeunit`、
+`timeprecision`、`` `timescale `` によるスコープ内の単位と遅延の丸めは維持します。
+全体の精度は、設定とソース宣言のうち最も細かい値になります。値は倍率
+1・10・100 と単位 `s`・`ms`・`us`・`ns`・`ps`・`fs` を使い、精度を単位より
+粗くする指定はエラーです。
+
 ### `[diagnostics]`
 
 診断に表示されるコードを使って、コンパイル時の診断レベルを個別に変更できます。

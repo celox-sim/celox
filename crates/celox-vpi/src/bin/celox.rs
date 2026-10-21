@@ -160,6 +160,7 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .threads(arguments.execution.threads as usize)
         .opt_level(arguments.opt_level)
         .diagnostic_policy(arguments.design.diagnostics.clone())
+        .sv_timescale(arguments.design.timescale)
         .signal_access(arguments.design.signal_access.clone());
     let builder = arguments.design.apply_parameters(builder);
     let max_steps = if arguments.execution.unlimited {
@@ -405,6 +406,7 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
             let builder = celox::Simulator::from_sv_sources(refs, &design.top)
                 .four_state(design.four_state.unwrap_or(false))
                 .diagnostic_policy(design.diagnostics.clone())
+                .sv_timescale(design.timescale)
                 .signal_access(design.signal_access.clone())
                 .opt_level(design.opt_level.unwrap_or(celox::OptLevel::O1));
             let simulator = design

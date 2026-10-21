@@ -305,6 +305,7 @@ fn analyze(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
     recover_comb_loops: bool,
@@ -317,7 +318,7 @@ fn analyze(
     Vec<CompilationWarning>,
 ) {
     #[cfg(not(feature = "systemverilog"))]
-    let _ = diagnostic_policy;
+    let _ = (diagnostic_policy, sv_timescale);
     symbol_table::clear();
     attribute_table::clear();
 
@@ -399,7 +400,7 @@ fn analyze(
             sv_sources,
             Some(&references),
             &mut sv_probe_warnings,
-            diagnostic_policy.sv_options(),
+            diagnostic_policy.sv_options(sv_timescale),
         )
         .map_err(|error| match error {
             celox_frontend_sv::FrontendError::Analyzer(error) => parser::sv_analysis_error(error),
@@ -605,6 +606,7 @@ fn analyze(
                         optimize_options,
                         diagnostics,
                         diagnostic_policy,
+                        sv_timescale,
                         preserve_element_storage_layout,
                         testbench_random_seed,
                         component_libraries,
@@ -771,6 +773,7 @@ pub fn compile_to_sir_with_file_dependencies(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
+        None,
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -887,6 +890,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -920,6 +924,7 @@ fn compile_frontend_testbench_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -980,6 +985,7 @@ fn compile_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -1003,6 +1009,7 @@ fn compile_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1079,6 +1086,7 @@ pub fn compile_sv_to_sir(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
+        None,
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         &[],
         &[],
@@ -1109,6 +1117,7 @@ fn compile_sv_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     force_signals: &[String],
     sv_param_literals: &[(String, String)],
@@ -1152,6 +1161,7 @@ fn compile_sv_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         metadata.test.seed,
         component_libraries,
@@ -1259,6 +1269,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         &crate::DiagnosticPolicy::default(),
+        None,
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
         true,
@@ -1292,6 +1303,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -1315,6 +1327,7 @@ fn compile_mixed_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         diagnostic_policy,
+        sv_timescale,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         recover_comb_loops,
@@ -1378,6 +1391,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
+    sv_timescale: Option<crate::SvTimescale>,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     recover_comb_loops: bool,
@@ -1416,6 +1430,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1440,6 +1455,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1461,6 +1477,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             layout_mode,
             force_signals,
             sv_param_literals,
@@ -1481,6 +1498,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             optimize_options,
             diagnostics,
             diagnostic_policy,
+            sv_timescale,
             injected_manifests,
             layout_mode,
             recover_comb_loops,
@@ -1534,6 +1552,8 @@ mod host {
         pub trace: crate::debug::TraceOptions,
         pub diagnostics: crate::RuntimeDiagnostics,
         pub diagnostic_policy: crate::DiagnosticPolicy,
+        /// Default SystemVerilog time unit and global scheduler precision.
+        pub sv_timescale: Option<crate::SvTimescale>,
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
@@ -1793,6 +1813,7 @@ mod host {
                 trace: Default::default(),
                 diagnostics: Default::default(),
                 diagnostic_policy: Default::default(),
+                sv_timescale: None,
                 emit_triggers: false,
                 native_force_support: false,
                 signal_access: crate::SignalAccessOptions::default(),
@@ -2220,6 +2241,13 @@ mod host {
         }
 
         /// Override recoverable compilation diagnostic severities.
+        /// Set default SV timing and contribute its precision to the scheduler.
+        /// Explicit source time declarations retain their units and rounding.
+        pub fn sv_timescale(mut self, timescale: Option<crate::SvTimescale>) -> Self {
+            self.options.sv_timescale = timescale;
+            self
+        }
+
         pub fn diagnostic_policy(mut self, policy: crate::DiagnosticPolicy) -> Self {
             self.options.diagnostic_policy = policy;
             self
@@ -2589,6 +2617,7 @@ mod host {
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         &self.options.diagnostic_policy,
+                        self.options.sv_timescale,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,
@@ -2613,6 +2642,7 @@ mod host {
                     &self.options.optimize_options,
                     &self.options.diagnostics,
                     &self.options.diagnostic_policy,
+                    self.options.sv_timescale,
                     &injected_manifests,
                     layout_mode,
                     !self.options.native_force_support,
@@ -3249,6 +3279,7 @@ mod host {
                             &self.options.optimize_options,
                             &self.options.diagnostics,
                             &self.options.diagnostic_policy,
+                            self.options.sv_timescale,
                             &injected_manifests,
                             layout_mode,
                             !self.options.native_force_support,
@@ -3273,6 +3304,7 @@ mod host {
                         &self.options.optimize_options,
                         &self.options.diagnostics,
                         &self.options.diagnostic_policy,
+                        self.options.sv_timescale,
                         &injected_manifests,
                         layout_mode,
                         !self.options.native_force_support,

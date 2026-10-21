@@ -107,7 +107,7 @@ pub(super) struct Timescales {
     instantiated: HashSet<String>,
     roots: Option<HashSet<String>>,
     specified: [u8; 2],
-    allow_mixed_timescales: bool,
+    options: crate::AnalysisOptions,
 }
 
 /// Time-query state owned by one analysis, shared explicitly by nested scopes.
@@ -361,7 +361,7 @@ fn time_declarations(unit: Option<i32>, precision: Option<i32>) -> String {
 pub(crate) fn generated_source_declarations(
     sources: &[(&str, &Path)],
     roots: Option<&[&str]>,
-    allow_mixed_timescales: bool,
+    options: crate::AnalysisOptions,
 ) -> Converted<String> {
     let trees = sources
         .iter()
@@ -372,7 +372,7 @@ pub(crate) fn generated_source_declarations(
             .iter()
             .map(|(tree, path)| (tree, *path))
             .collect::<Vec<_>>(),
-        allow_mixed_timescales,
+        options,
     )?;
     if let Some(roots) = roots {
         scales.select_roots(roots);
@@ -516,13 +516,12 @@ impl Timescales {
         self.precision.unwrap_or(DEFAULT.precision)
     }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
-        let local =
-            Self::collect_with_options(&[(tree, Path::new(""))], self.allow_mixed_timescales)?;
+        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options)?;
         let specified = [
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
         ];
-        if specified.contains(&3) && !self.allow_mixed_timescales {
+        if specified.contains(&3) && !self.options.allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
@@ -577,17 +576,29 @@ impl Timescales {
 
     #[cfg(test)]
     pub(super) fn collect(trees: &[(&SyntaxTree, &Path)]) -> Converted<Self> {
-        Self::collect_with_options(trees, false)
+        Self::collect_with_options(trees, crate::AnalysisOptions::default())
     }
 
     pub(super) fn collect_with_options(
         trees: &[(&SyntaxTree, &Path)],
-        allow_mixed_timescales: bool,
+        options: crate::AnalysisOptions,
     ) -> Converted<Self> {
         #[cfg(test)]
         COLLECTIONS.with(|count| count.set(count.get() + 1));
+        let default = match options.default_timescale {
+            Some((unit, precision))
+                if (-15..=2).contains(&unit)
+                    && (-15..=2).contains(&precision)
+                    && precision <= unit =>
+            {
+                Scale { unit, precision }
+            }
+            Some(_) => return Err(unsupported("invalid default time unit or precision")),
+            None => DEFAULT,
+        };
         let mut design = Self {
-            allow_mixed_timescales,
+            precision: options.default_timescale.map(|(_, precision)| precision),
+            options,
             ..Self::default()
         };
         // Each bit records whether a design element uses a default (1) or an
@@ -686,8 +697,8 @@ impl Timescales {
             }
             directives.sort_by_key(|(at, _)| *at);
             let unit = Scale {
-                unit: unit_decl.0.unwrap_or(DEFAULT.unit),
-                precision: unit_decl.1.unwrap_or(DEFAULT.precision),
+                unit: unit_decl.0.unwrap_or(default.unit),
+                precision: unit_decl.1.unwrap_or(default.precision),
             };
             if unit.precision > unit.unit {
                 return Err(unsupported("timeprecision coarser than timeunit"));
@@ -740,7 +751,7 @@ impl Timescales {
                 }),
             );
         }
-        if specified.contains(&3) && !allow_mixed_timescales {
+        if specified.contains(&3) && !options.allow_mixed_timescales {
             return Err(unsupported(
                 "mixed explicit and default time units or precisions across design elements",
             ));
