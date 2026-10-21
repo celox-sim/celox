@@ -3088,3 +3088,69 @@ fn interface_members_are_navigable_after_native_image_round_trip() {
         }
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn two_state_image_converts_unknown_logic_deposits_and_forces() {
+    let _serial = lock_vpi();
+    let source = "module Top(input logic[3:0] a,output logic[3:0] y); assign y=a; endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("two_state.sv"))], "Top")
+            .four_state(false)
+            .native_force_support(true)
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let mut word = VpiVecVal { aval: 15, bval: 10 };
+        let input = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData { vector: &mut word },
+        };
+        let mut output = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        assert_eq!(vpi_put_value(a, &input, ptr::null(), VPI_NO_DELAY), a);
+        vpi_get_value(y, &mut output);
+        assert_eq!((*output.value.vector).aval, 5);
+        assert_eq!((*output.value.vector).bval, 0);
+        let mut force_word = VpiVecVal { aval: 15, bval: 5 };
+        let force_value = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData {
+                vector: &mut force_word,
+            },
+        };
+        assert_eq!(
+            vpi_put_value(a, &force_value, ptr::null(), VPI_FORCE_FLAG),
+            a
+        );
+        vpi_get_value(y, &mut output);
+        assert_eq!((*output.value.vector).aval, 10);
+        assert_eq!((*output.value.vector).bval, 0);
+        let mut deposited_word = VpiVecVal { aval: 15, bval: 12 };
+        let deposited_value = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData {
+                vector: &mut deposited_word,
+            },
+        };
+        assert_eq!(
+            vpi_put_value(a, &deposited_value, ptr::null(), VPI_NO_DELAY),
+            a
+        );
+        assert_eq!(vpi_put_value(a, &input, ptr::null(), VPI_RELEASE_FLAG), a);
+        vpi_get_value(y, &mut output);
+        assert_eq!((*output.value.vector).aval, 3);
+        assert_eq!((*output.value.vector).bval, 0);
+        vpi_free_object(a);
+        vpi_free_object(y);
+    }
+    clear_runtime();
+}

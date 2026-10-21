@@ -30,8 +30,9 @@ target/release/celox run src/types.sv src/Dut.sv test/Top.sv --top Top
 target/release/celox run test/Top.veryl --top Top
 ```
 
-SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い（`--four-state`でX/Zを扱う4値に切り替え）、
+SVは`.sv`または`.v`をコンパイル順に指定します。既定では2値シミュレーションを使い、
 `$finish`または実行待ちイベントがなくなるまで実行します。
+X/Zを保持する場合は`--four-state`または`celox.toml`の`four_state = true`を指定します。
 Verylはプロジェクト内の1ファイルを指定すると、`Veryl.toml`から
 ソースと依存関係を収集します。単独のVerylファイルも使用でき、Verylも既定は2値です。
 `--top`にはnative testbenchのモジュール名を指定します。
