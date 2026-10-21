@@ -74,7 +74,7 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 | --- | --- |
 | デザイン構造 | モジュール階層、パラメータ、generate、package、interface と modport |
 | データ | packed ベクタ、多次元 packed 配列、構造体、enum、unpacked メモリ |
-| RTL のプロセス | `assign`、`always_comb`、`always @*`、エッジで起動する `always` と `always_ff` |
+| RTL のプロセス | `assign`、`always_comb`、`always @*`、ブロッキング代入の `always_latch`、エッジで起動する `always` と `always_ff` |
 | 演算と制御 | 算術、部分選択、assignment pattern、分岐、ループ、関数 |
 | シミュレーション補助 | 即時アサーション、表示タスク、`$readmemh` / `$readmemb`、時刻の取得、乱数 |
 
@@ -86,7 +86,7 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 デザインの変更が必要になりやすいのは、次の機能です。
 
 - クラスを使う検証、並行アサーション、タイミング制御を持つ task。
-- ラッチ、複数ドライバ、トライステートバス。
+- ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
 - 非 ANSI モジュールポート、ワイルドカード `.*` 接続、ゲートプリミティブ、`bind`。
 - 文字列、`real`、unpacked 構造体、interface の一部の機能。
 

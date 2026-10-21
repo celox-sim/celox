@@ -324,6 +324,11 @@ export interface SimulatorOptions {
 	fourState?: boolean;
 	/** Ordered SystemVerilog plusargs; the leading + is optional. */
 	plusargs?: string[];
+	/**
+	 * Allow inferred latches in always_comb when no explicit inferred_latch
+	 * diagnostic level is set. Project diagnostics take precedence. Default: false.
+	 */
+	allowInferredLatches?: boolean;
 	/** Path to write VCD waveform output. */
 	vcd?: string;
 	/**

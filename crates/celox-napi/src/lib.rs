@@ -80,6 +80,9 @@ pub struct NapiOptions {
     pub four_state: Option<bool>,
     /// Ordered SystemVerilog command-line arguments (leading `+` optional).
     pub plusargs: Option<Vec<String>>,
+    /// Permit inferred latches when inferred_latch has no explicit diagnostic level.
+    /// Explicit project diagnostics take precedence. Default: false.
+    pub allow_inferred_latches: Option<bool>,
     pub vcd: Option<String>,
     /// Optimization level preset: "O0", "O1", or "O2".
     /// Takes precedence over `optimize` and `optimize_options`.
@@ -122,6 +125,7 @@ struct ParsedOptionsCommon {
     diagnostic_policy: celox::DiagnosticPolicy,
     four_state: bool,
     plusargs: Vec<String>,
+    allow_inferred_latches: bool,
     optimize_options: celox::OptimizeOptions,
     vcd: Option<String>,
     false_loops: Vec<(
@@ -385,6 +389,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
                 diagnostic_policy: Default::default(),
                 four_state: o.four_state.unwrap_or(false),
                 plusargs: o.plusargs.clone().unwrap_or_default(),
+                allow_inferred_latches: o.allow_inferred_latches.unwrap_or(false),
                 optimize_options,
                 vcd: o.vcd.clone(),
                 false_loops,
@@ -399,6 +404,7 @@ fn parse_options_common(options: &Option<NapiOptions>) -> Result<ParsedOptionsCo
             diagnostic_policy: Default::default(),
             four_state: false,
             plusargs: Vec::new(),
+            allow_inferred_latches: false,
             optimize_options: celox::OptimizeOptions::all(),
             vcd: None,
             false_loops: Vec::new(),
@@ -640,10 +646,13 @@ fn apply_options<'a, T>(
     mut builder: celox::SimulatorBuilder<'a, T>,
     opts: &ParsedOptions,
 ) -> celox::SimulatorBuilder<'a, T> {
-    builder = builder
-        .diagnostic_policy(opts.diagnostic_policy.clone())
-        .four_state(opts.four_state)
-        .plusargs(opts.plusargs.clone());
+    builder = builder.diagnostic_policy(
+        opts.diagnostic_policy
+            .clone()
+            .with_inferred_latches(opts.allow_inferred_latches),
+    );
+    builder = builder.four_state(opts.four_state);
+    builder = builder.plusargs(opts.plusargs.clone());
     builder = builder.optimize_options(opts.optimize_options.clone());
     builder = builder.threads(opts.optimize_options.parallel_lanes() as usize);
     builder = builder.cranelift_options(opts.cranelift_options);
@@ -792,7 +801,10 @@ fn build_cache_key(
     sorted_sources.sort_by(|a, b| a.0.cmp(&b.0));
 
     CacheKey {
-        diagnostic_policy: opts.diagnostic_policy.clone(),
+        diagnostic_policy: opts
+            .diagnostic_policy
+            .clone()
+            .with_inferred_latches(opts.allow_inferred_latches),
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
@@ -2362,7 +2374,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, warnings) = celox::compile_to_sir(
+        let (program, warnings) = celox::compile_to_sir_with_diagnostic_policy(
             &source_refs,
             &top,
             &opts
@@ -2383,6 +2395,11 @@ impl NativeSimulatorHandle {
             opts.reset_type,
             &opts.parameters,
             &opts.optimize_options,
+            &opts
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(opts.allow_inferred_latches),
+            &Default::default(),
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
@@ -2437,7 +2454,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (program, mut warnings) = celox::compile_to_sir(
+        let (program, warnings) = celox::compile_to_sir_with_diagnostic_policy(
             &source_refs,
             &top,
             &opts
@@ -2458,18 +2475,13 @@ impl NativeSimulatorHandle {
             opts.reset_type,
             &opts.parameters,
             &opts.optimize_options,
+            &opts
+                .diagnostic_policy
+                .clone()
+                .with_inferred_latches(opts.allow_inferred_latches),
+            &Default::default(),
         )
-        .map_err(|error| {
-            Error::from_reason(
-                error
-                    .apply_diagnostic_policy(&opts.diagnostic_policy)
-                    .to_string(),
-            )
-        })?;
-
-        opts.diagnostic_policy
-            .apply(&mut warnings)
-            .map_err(|error| Error::from_reason(error.to_string()))?;
+        .map_err(|error| Error::from_reason(error.to_string()))?;
         let laid_out = program.into_laid_out(opts.four_state);
         let layout = laid_out.layout();
 
@@ -3814,6 +3826,7 @@ mod tests {
                 diagnostic_policy: Default::default(),
                 four_state: false,
                 plusargs: Vec::new(),
+                allow_inferred_latches: false,
                 optimize_options: celox::OptimizeOptions::all(),
                 vcd: None,
                 false_loops: vec![],
@@ -3955,6 +3968,7 @@ mod tests {
                 vcd: Some(path.to_str().unwrap().to_owned()),
                 four_state: None,
                 plusargs: None,
+                allow_inferred_latches: None,
                 opt_level: None,
                 pass_overrides: None,
                 optimize: None,
@@ -4337,6 +4351,44 @@ mod tests {
             build_cache_key(&src, "Top", &o1, None),
             build_cache_key(&src, "Top", &o2, None),
         );
+    }
+
+    #[test]
+    fn inferred_latch_policy_differs() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let strict = default_opts();
+        let mut permissive = default_opts();
+        permissive.common.allow_inferred_latches = true;
+        assert_ne!(
+            build_cache_key(&src, "Top", &strict, None),
+            build_cache_key(&src, "Top", &permissive, None),
+        );
+    }
+
+    #[test]
+    fn inferred_latch_cache_key_uses_effective_explicit_policy() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        for level in [
+            celox::DiagnosticLevel::Error,
+            celox::DiagnosticLevel::Warn,
+            celox::DiagnosticLevel::Allow,
+        ] {
+            let mut explicit = default_opts();
+            explicit
+                .common
+                .diagnostic_policy
+                .set("inferred_latch", level);
+            let mut compatibility = default_opts();
+            compatibility
+                .common
+                .diagnostic_policy
+                .set("inferred_latch", level);
+            compatibility.common.allow_inferred_latches = true;
+            assert_eq!(
+                build_cache_key(&src, "Top", &explicit, None),
+                build_cache_key(&src, "Top", &compatibility, None),
+            );
+        }
     }
 
     #[test]
