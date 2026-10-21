@@ -3511,10 +3511,6 @@ fn rejects_unimplemented_timing_constructs() {
         ("initial begin : b disable b; end", "disable statement"),
         ("initial #1.5;", "delay value"),
         (
-            "logic a; initial @* a = 1;",
-            "`@*` event control in a process",
-        ),
-        (
             "logic a, y; always_latch y <= a;",
             "nonblocking assignment inside always_latch",
         ),
@@ -3588,6 +3584,36 @@ fn analyzes_timing_controls_in_initial_blocks() {
                 initial begin #3; @(posedge clk or negedge clk, y); @(edge clk); #(1:2:3); wait (y > 1); end\n\
                 endmodule";
     analyze_source(code, Path::new("timing.sv")).expect("timing controls in an initial block");
+}
+
+/// `@*` in a process waits on the variables its statement reads (IEEE
+/// 1800-2023 9.4.2.2): right-hand sides, conditions, arguments and
+/// left-hand-side indices, but not assignment targets or timing controls.
+#[test]
+fn implicit_event_controls_wait_on_the_reads_of_their_statement() {
+    let code = "module Top(input logic [7:0] a, b, c, d, i, output logic [7:0] y, z);\n\
+                initial forever @* begin if (c > 0) y = a; else y = b; z[i] = 1; @(d); #(d); end\n\
+                endmodule";
+    let ir = analyze_source(code, Path::new("implicit.sv")).expect("`@*` in a process");
+    let mut waits = Vec::new();
+    for process in ir.modules()[0].initial_processes() {
+        for stmt in process.body() {
+            stmt.walk(&mut |stmt| {
+                if let ir::Stmt::WaitEvent(items) = stmt {
+                    waits.push(
+                        items
+                            .iter()
+                            .map(|item| match &item.expr {
+                                ir::Expr::Ident(name) => name.clone(),
+                                expr => panic!("unexpected event expression {expr:?}"),
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            });
+        }
+    }
+    assert_eq!(waits, [vec!["c", "a", "b", "i"], vec!["d"]]);
 }
 
 #[test]

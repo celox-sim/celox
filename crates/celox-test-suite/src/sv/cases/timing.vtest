@@ -1056,3 +1056,161 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (top Top)
   (run_to_finish)
   (assert_eq count 8))
+
+(case expression_events_see_pulses_within_a_time_slot
+  ; IEEE 1800-2023 9.4.2: each change of the expression's value is an
+  ; event, also one the slot undoes before it ends. The waits begin after
+  ; time 0, where Icarus 13.0 reports an event of a new expression.
+  (source "expression_pulse.sv" #"
+    module Top(output bit [7:0] count, output bit hit);
+      bit a, b;
+      initial begin #1; forever begin @(a ^ b); count = count + 8'd1; end end
+      initial begin #1; @(a ^ b); hit = 1; end
+      initial begin #2; a = 1; #0; a = 0; #1; b = 1; a = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0)
+  (run_until 2)
+  (assert_eq count 2 "the expression rose and fell at time 2")
+  (assert_eq hit 1)
+  (run_until 3)
+  (assert_eq count 2 "a and b changed together, so a ^ b did not change"))
+
+(case real_expression_events_see_fractional_changes
+  ; IEEE 1800-2023 9.4.2: a change of a real expression's value is an
+  ; event, also one that converting the value to an integer would lose.
+  (source "real_expression_event.sv" #"
+    module Top(output bit [7:0] count);
+      real r;
+      initial begin #1; forever begin @(r * 2.0); count = count + 8'd1; end end
+      initial begin #2; r = 0.125; #1; r = 0.25; #1; r = 0.25; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 0)
+  (run_until 3)
+  (assert_eq count 2 "r * 2.0 went to 0.25 and then to 0.5")
+  (run_until 4)
+  (assert_eq count 2 "writing the same value is no change"))
+
+(case bit_select_edges_follow_the_selected_bit
+  ; Table 9-2 judges an edge on the least significant bit of the
+  ; expression: of `v[3]`, not of `v`.
+  (source "bit_select_edge.sv" #"
+    module Top(output bit [7:0] selected, whole);
+      bit [3:0] v;
+      initial forever begin @(posedge v[3]); selected = selected + 8'd1; end
+      initial forever begin @(posedge v); whole = whole + 8'd1; end
+      initial begin #1; v = 4'b1000; #1; v = 4'b0000; #1; v = 4'b1000; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq selected 1)
+  (assert_eq whole 0)
+  (run_until 3)
+  (assert_eq selected 2)
+  (assert_eq whole 0))
+
+(case part_select_events_see_pulses_of_the_selected_bits
+  (source "part_select_pulse.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] v;
+      initial forever begin @(v[2:1]); count = count + 8'd1; end
+      initial begin #1; v[1] = 1; #0; v[1] = 0; #1; v[3] = 1; v[0] = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq count 2 "v[2:1] went to 1 and back")
+  (run_until 2)
+  (assert_eq count 2 "bits outside the select are no events"))
+
+(case variable_index_events_follow_the_index
+  ; The value of `q[i]` changes when the index does, too.
+  (source "variable_index_event.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] q;
+      bit [1:0] i;
+      initial forever begin @(q[i]); count = count + 8'd1; end
+      initial begin #1; q[0] = 1; #1; i = 1; #1; q[0] = 0; #1; q[1] = 1; #1; i = 2; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq count 1)
+  (run_until 2) (assert_eq count 2 "q[1] differs from q[0]")
+  (run_until 3) (assert_eq count 2 "q[0] is not selected")
+  (run_until 4) (assert_eq count 3)
+  (run_until 5) (assert_eq count 4))
+
+(case pure_function_events_change_with_the_result
+  (source "function_event.sv" #"
+    module Top(output bit [7:0] count);
+      bit [3:0] v;
+      function automatic bit [1:0] middle(bit [3:0] x);
+        return x[2:1];
+      endfunction
+      initial begin #1; forever begin @(middle(v)); count = count + 8'd1; end end
+      initial begin #2; v = 4'b0010; #1; v = 4'b1011; #1; v = 4'b1101; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq count 1)
+  (run_until 3) (assert_eq count 1 "the result stayed 1")
+  (run_until 4) (assert_eq count 2))
+
+(case event_expressions_read_automatic_task_locals
+  ; Each call waits on `q[i]` with its own `i`, sampled when the event
+  ; control begins: the second call does not wake because `q[1]` differs
+  ; from the `q[0]` the first one waited on.
+  (source "task_local_event.sv" #"
+    module Top(output int first, second);
+      bit [3:0] q;
+      task automatic await(input int i, output int at);
+        @(q[i]);
+        at = $time;
+      endtask
+      initial begin #2; await(0, first); await(1, second); end
+      initial begin #3; q[0] = 1; #3; q[1] = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq first 3) (assert_eq second 0)
+  (run_until 5) (assert_eq second 0)
+  (run_until 6) (assert_eq second 6))
+
+(case event_controls_sample_the_expression_when_they_begin
+  ; IEEE 1800-2023 9.4.2: the process's own write before the event
+  ; control is no event of it.
+  (source "event_sample.sv" #"
+    module Top(output bit hit);
+      bit a, b;
+      initial begin #1; a = 1; @(a ^ b); hit = 1; end
+      initial begin #2; b = 1; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq hit 0)
+  (run_until 2)
+  (assert_eq hit 1))
+
+(case implicit_event_controls_in_processes_wait_on_their_reads
+  ; IEEE 1800-2023 9.4.2.2: `@*` waits on the variables the statement it
+  ; controls reads, not on those it writes.
+  (source "implicit_event.sv" #"
+    module Top(output bit [7:0] y, z, count);
+      bit [7:0] a, b;
+      initial forever @* begin y = a + b; count = count + 8'd1; end
+      always @* begin #1; z = a; end
+      initial begin #2; a = 3; #2; b = 4; end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq count 0) (assert_eq y 0)
+  (run_until 2) (assert_eq count 1) (assert_eq y 3)
+  (run_until 3) (assert_eq z 3)
+  (run_until 4) (assert_eq count 2) (assert_eq y 7) (assert_eq z 3))

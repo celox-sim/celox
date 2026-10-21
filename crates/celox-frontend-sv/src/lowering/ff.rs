@@ -4351,14 +4351,29 @@ impl Ff<'_, '_> {
     /// `@(items)` (IEEE 1800-2023 9.4.2): the process waits for an
     /// occurrence of any item, which the runtime detects on the watched
     /// signals themselves, so nothing is left to check when it resumes.
+    ///
+    /// An item other than a variable of the module is watched through the
+    /// variable `$event[k]` of a continuous assignment of the expression:
+    /// each update of its value is an occurrence, and an edge is one of the
+    /// least significant bit of the expression (Table 9-2). Before it
+    /// suspends, the process copies the process-local operands the
+    /// assignment reads and stores the expression's value, which the event
+    /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
+        let mut samples = Vec::new();
         for item in items {
-            let id = match &item.expr {
-                sv::ir::Expr::Ident(name) => self.m.id(name).filter(|&id| !self.m.is_hidden(id)),
-                _ => None,
-            }
-            .ok_or_else(|| unsupported("event expression other than a variable"))?;
+            let expr = self.propagate(&item.expr);
+            let id = match &expr {
+                sv::ir::Expr::Ident(name) => match self.m.id(name) {
+                    Some(id) if !self.m.is_hidden(id) => id,
+                    Some(_) => self.event_expression(&expr, &mut samples)?,
+                    // A constant never changes.
+                    None if self.m.constants.contains_key(name) => continue,
+                    None => return Err(unsupported(format!("event expression `{name}`"))),
+                },
+                _ => self.event_expression(&expr, &mut samples)?,
+            };
             match item.edge {
                 sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
                 sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
@@ -4368,6 +4383,9 @@ impl Ff<'_, '_> {
                     terms.push((id, CounterKind::Falls));
                 }
             }
+        }
+        for (target, value) in samples {
+            self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
         let site = self.wait_site(terms);
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
@@ -4382,6 +4400,116 @@ impl Ff<'_, '_> {
         .map_err(kernel_error)
     }
 
+    /// The variable `$event[k]` of a new event expression `expr`, with its
+    /// continuous assignment added to the module. `samples` gets the
+    /// assignments the process makes before it suspends: the copies of the
+    /// process-local operands, then `$event[k]` itself.
+    fn event_expression(
+        &mut self,
+        expr: &sv::ir::Expr,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        if let Some(name) = impure_call(self.m, expr) {
+            return Err(unsupported(format!(
+                "impure call `{name}` in an event expression"
+            )));
+        }
+        // A real expression keeps its payload bits, so a change too small
+        // to survive an integer conversion still wakes the process.
+        let float = self.m.expr_float_precision(expr);
+        let width = match float {
+            Some(celox_sir::FloatPrecision::F64) => 64,
+            Some(celox_sir::FloatPrecision::F32) => 32,
+            None => sv_expr_natural_width(
+                &self.m.typed_calls(expr),
+                self.m.variables,
+                self.m.name_to_id,
+                self.m.constants,
+                self.m.parameter_types,
+            )
+            .ok_or_else(|| unsupported("event expression of unknown width"))?,
+        };
+        let signed = self.expr_signed(expr);
+        let mut names = HashSet::default();
+        expr_idents(expr, &mut names);
+        let mut locals: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| {
+                let id = self.m.id(&name)?;
+                self.m.is_hidden(id).then_some((name, id))
+            })
+            .collect();
+        locals.sort_unstable();
+        // Another call can copy a new argument into a static formal while
+        // the process waits, which a copy taken now would not see.
+        if locals.iter().any(|&(_, id)| self.is_static_task_formal(id)) {
+            return Err(unsupported(
+                "event expression reading a static task argument",
+            ));
+        }
+        let index = self.m.next_event_index();
+        let (event, event_name) = self.m.event_variable(
+            index,
+            None,
+            SvVariable {
+                float,
+                path: Vec::new(),
+                width,
+                signed,
+                is_4state: float.is_none(),
+                packed_ranges: vec![(width as i128 - 1, 0)],
+                array_dims: Vec::new(),
+                unpacked_ranges: Vec::new(),
+                domain_kind: DomainKind::Other,
+                kind: VariableKind::Variable,
+                type_kind: if float.is_some() {
+                    PortTypeKind::Bit
+                } else {
+                    PortTypeKind::Logic
+                },
+                source: None,
+                hidden: true,
+                force_control: None,
+            },
+        );
+        let mut renames = HashMap::default();
+        for (position, (name, id)) in locals.into_iter().enumerate() {
+            let variable = self.m.var(id).clone();
+            let (copy, copy_name) =
+                self.m
+                    .event_variable(index, Some(format!("arg[{position}]")), variable);
+            if let Some(width) = self.element_widths.get(&stable(id)).copied() {
+                self.element_widths.insert(stable(copy), width);
+                self.element_widths.insert(working(copy), width);
+            }
+            samples.push((copy_name.clone(), sv::ir::Expr::Ident(name.clone())));
+            renames.insert(name, copy_name);
+        }
+        let value = rename_idents(expr, &renames);
+        samples.push((event_name.clone(), value.clone()));
+        self.m.event_assignments.push((
+            event,
+            vec![sv::ir::Stmt::Assign {
+                lhs: sv::ir::LValue::Ident(event_name),
+                rhs: value,
+                nonblocking: false,
+            }],
+        ));
+        Ok(event)
+    }
+
+    /// Whether `id` is a static formal of a task, which keeps one
+    /// module-wide address for every call.
+    fn is_static_task_formal(&self, id: SourceVarId) -> bool {
+        self.m.subroutines.values().any(|subroutine| {
+            subroutine.is_task
+                && subroutine.params.iter().any(|param| {
+                    !subroutine.automatic_locals.contains(&param.name)
+                        && self.m.id(&param.name) == Some(id)
+                })
+        })
+    }
+
     /// `wait (condition)` (IEEE 1800-2023 9.4.3): the process goes on at once
     /// if the condition holds, and otherwise checks it again whenever a
     /// variable it reads changes.
@@ -4393,16 +4521,10 @@ impl Ff<'_, '_> {
         // in, but hidden local storage has no observable change counters yet.
         // Do not compile a wait that would silently miss that wakeup, including
         // dependencies read indirectly by a function in the condition.
-        if self.m.subroutines.values().any(|subroutine| {
-            subroutine.is_task
-                && subroutine.params.iter().any(|param| {
-                    !subroutine.automatic_locals.contains(&param.name)
-                        && names.iter().any(|name| {
-                            self.m.id(name).is_some_and(|id| {
-                                self.m.is_hidden(id) && Some(id) == self.m.id(&param.name)
-                            })
-                        })
-                })
+        if names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.m.is_hidden(id) && self.is_static_task_formal(id))
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
@@ -4550,6 +4672,226 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
                 }
             });
         }
+    }
+}
+
+/// The name of a call in `expr` that has an effect or reads the state of the
+/// simulation, directly or through the functions it calls: an event
+/// expression must be a value of the variables it reads.
+fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut pending = vec![expr.clone()];
+    let mut visited = HashSet::default();
+    while let Some(expr) = pending.pop() {
+        let callees = std::cell::RefCell::new(Vec::new());
+        expr_calls(&expr, &|callee| {
+            callees.borrow_mut().push(callee.clone());
+            false
+        });
+        for callee in callees.into_inner() {
+            let name = match callee {
+                sv::ir::Callee::System(function) => {
+                    if function.reads_simulation_state() {
+                        return Some(function.name().to_string());
+                    }
+                    continue;
+                }
+                sv::ir::Callee::Subroutine(name) => name,
+            };
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if let Some(import) = pm.dpi_imports.get(&name) {
+                if !import.is_pure() {
+                    return Some(name);
+                }
+                continue;
+            }
+            let Some(subroutine) = pm.subroutine(&name) else {
+                return Some(name);
+            };
+            if subroutine.is_task
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.direction.is_written())
+            {
+                return Some(name);
+            }
+            pending.extend(
+                subroutine
+                    .params
+                    .iter()
+                    .filter_map(|param| param.default.clone()),
+            );
+            // Only the function's own variables may be written.
+            let local =
+                |lvalue: &sv::ir::LValue| pm.id(lvalue.name()).is_some_and(|id| pm.is_hidden(id));
+            let mut effect = false;
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| match stmt {
+                    sv::ir::Stmt::Assign { lhs, .. } => effect |= !local(lhs),
+                    sv::ir::Stmt::AssignConcat { parts, .. } => effect |= !parts.iter().all(local),
+                    sv::ir::Stmt::Call {
+                        name,
+                        args,
+                        arg_order,
+                    } => pending.push(sv::ir::Expr::Call {
+                        callee: sv::ir::Callee::Subroutine(name.clone()),
+                        args: args.clone(),
+                        arg_order: arg_order.clone(),
+                    }),
+                    sv::ir::Stmt::SystemTask { .. }
+                    | sv::ir::Stmt::Delay { .. }
+                    | sv::ir::Stmt::WaitEvent(_)
+                    | sv::ir::Stmt::Wait(_) => effect = true,
+                    _ => {}
+                });
+                stmt.clone().visit_mut(
+                    &mut |expr| pending.push(expr.clone()),
+                    &mut |_| {},
+                    &mut |_| {},
+                );
+            }
+            if effect {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// `expr` with the identifiers in `renames` replaced.
+fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
+    fn constant(expr: &sv::ir::ConstExpr, renames: &HashMap<String, String>) -> sv::ir::ConstExpr {
+        use sv::ir::ConstExpr;
+        let go = |expr: &ConstExpr| Box::new(constant(expr, renames));
+        match expr {
+            ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
+            ConstExpr::Literal(_) => expr.clone(),
+            ConstExpr::SelectRange {
+                expr,
+                msb,
+                lsb,
+                signed,
+            } => ConstExpr::SelectRange {
+                expr: go(expr),
+                msb: go(msb),
+                lsb: go(lsb),
+                signed: *signed,
+            },
+            ConstExpr::Select { expr, bit } => ConstExpr::Select {
+                expr: go(expr),
+                bit: go(bit),
+            },
+            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+                callee: callee.clone(),
+                site: *site,
+                args: args.iter().map(|arg| constant(arg, renames)).collect(),
+            },
+            ConstExpr::Resize {
+                expr,
+                width,
+                signed,
+            } => ConstExpr::Resize {
+                expr: go(expr),
+                width: *width,
+                signed: *signed,
+            },
+            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+                op: *op,
+                expr: go(expr),
+            },
+            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+                left: go(left),
+                op: *op,
+                right: go(right),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ConstExpr::Mux {
+                condition: go(condition),
+                then_expr: go(then_expr),
+                else_expr: go(else_expr),
+            },
+        }
+    }
+    use sv::ir::Expr;
+    let go = |expr: &Expr| Box::new(rename_idents(expr, renames));
+    match expr {
+        Expr::Ident(name) => Expr::Ident(renames.get(name).unwrap_or(name).clone()),
+        Expr::Literal(_) => expr.clone(),
+        Expr::Select {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => Expr::Select {
+            expr: go(expr),
+            msb: constant(msb, renames),
+            lsb: constant(lsb, renames),
+            signed: *signed,
+        },
+        Expr::Concat(parts) => Expr::Concat(
+            parts
+                .iter()
+                .map(|part| rename_idents(part, renames))
+                .collect(),
+        ),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count: constant(count, renames),
+            parts: parts
+                .iter()
+                .map(|part| rename_idents(part, renames))
+                .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        Expr::Binary { left, op, right } => Expr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+        Expr::Call {
+            callee,
+            args,
+            arg_order,
+        } => Expr::Call {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|arg| arg.as_ref().map(|arg| rename_idents(arg, renames)))
+                .collect(),
+            arg_order: arg_order.clone(),
+        },
+        Expr::Inside { expr, items } => Expr::Inside {
+            expr: go(expr),
+            items: items
+                .iter()
+                .map(|item| item.map(&mut |operand| rename_idents(operand, renames)))
+                .collect(),
+        },
     }
 }
 
