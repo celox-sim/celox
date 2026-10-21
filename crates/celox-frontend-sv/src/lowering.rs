@@ -741,9 +741,18 @@ fn validate_net_driver_ranges(
             .iter()
             .any(|(_, local_range)| net_driver_ranges_overlap(*child_range, *local_range))
     });
+    // Each concatenation operand is a continuous driver, even when two
+    // operands occur in the same authored assignment.
+    let overlapping_continuous = driver_ranges_overlap(&continuous_driver_ranges(
+        &module.source,
+        signal_name,
+        &module.constants,
+        &module.parameter_types,
+    ));
     if driver_ranges_overlap(child_driver_ranges)
         || child_local_overlap
         || overlapping_local_drivers
+        || overlapping_continuous
     {
         return Err(sv::AnalyzerError::Unsupported(format!(
             "multiple net drivers for `{signal_name}`"
@@ -940,10 +949,61 @@ fn driver_ranges_overlap(drivers: &[(usize, Option<(i128, i128)>)]) -> bool {
     })
 }
 
+/// Memories may have several edge-sensitive writers. Their NBA stores update
+/// selected elements; always_ff additionally requires a single writing process.
+fn shared_edge_memories(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> HashSet<String> {
+    let mut memories = HashSet::default();
+    let first_ff = module.comb_processes().len();
+    let end_ff = first_ff + module.ff_processes().len();
+    for signal in module
+        .signals()
+        .iter()
+        .filter(|s| !s.is_net() && !s.r#type().unpacked_ranges().is_empty())
+    {
+        let drivers = local_driver_ranges(module, signal.name(), constants, parameter_types);
+        if drivers
+            .iter()
+            .any(|(id, _)| !(first_ff..end_ff).contains(id))
+        {
+            continue;
+        }
+        let overlaps = drivers.iter().enumerate().any(|(i, a)| {
+            drivers[i + 1..]
+                .iter()
+                .any(|b| a.0 != b.0 && net_driver_ranges_overlap(a.1, b.1))
+        });
+        if !overlaps {
+            continue;
+        }
+        let mut restricted = false;
+        for (id, _) in drivers {
+            let process = &module.ff_processes()[id - first_ff];
+            restricted |= process.is_always_ff();
+        }
+        if restricted {
+            warnings.push((
+                crate::FrontendWarningKind::MultipleAlwaysFfDrivers {
+                    module: module.name().into(),
+                    signal: signal.name().into(),
+                },
+                None,
+            ));
+        }
+        memories.insert(signal.name().into());
+    }
+    memories
+}
+
 fn validate_variable_driver_ranges(
     module: &sv::ir::Module,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    shared_memories: &HashSet<String>,
 ) -> Result<(), sv::AnalyzerError> {
     for port in module
         .ports()
@@ -977,7 +1037,13 @@ fn validate_variable_driver_ranges(
                 .iter()
                 .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
         });
-        if has_overlap {
+        let overlapping_continuous = driver_ranges_overlap(&continuous_driver_ranges(
+            module,
+            signal_name,
+            constants,
+            parameter_types,
+        ));
+        if overlapping_continuous || (has_overlap && !shared_memories.contains(signal_name)) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "multiple variable drivers for `{signal_name}`"
             )));
@@ -2301,6 +2367,23 @@ fn lower_module_with_overrides(
             });
         }
     }
+    let parameter_types = module
+        .imported_parameters()
+        .iter()
+        .chain(module.parameters())
+        .filter_map(|parameter| {
+            Some((
+                parameter.name().to_string(),
+                (
+                    parameter.resolved_width()?,
+                    parameter.resolved_signed().unwrap_or(false),
+                ),
+            ))
+        })
+        .collect();
+    let constants = module_constants_with_overrides(module, parameter_overrides);
+    let shared_memories = shared_edge_memories(module, &constants, &parameter_types, warnings);
+    validate_variable_driver_ranges(module, &constants, &parameter_types, &shared_memories)?;
     let scheduled = module
         .ff_processes()
         .iter()
@@ -2318,22 +2401,6 @@ fn lower_module_with_overrides(
     let mut name_to_id = HashMap::default();
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
-    let parameter_types = module
-        .imported_parameters()
-        .iter()
-        .chain(module.parameters())
-        .filter_map(|parameter| {
-            Some((
-                parameter.name().to_string(),
-                (
-                    parameter.resolved_width()?,
-                    parameter.resolved_signed().unwrap_or(false),
-                ),
-            ))
-        })
-        .collect();
-    let constants = module_constants_with_overrides(module, parameter_overrides);
-    validate_variable_driver_ranges(module, &constants, &parameter_types)?;
 
     for port in module.ports() {
         if name_to_id.contains_key(port.name()) {
@@ -2598,7 +2665,8 @@ fn lower_module_with_overrides(
             four_state,
             warnings,
         );
-        let blocks = lower_ff_processes(module, &mut pm, ff_parts, &ff_event_roles)?;
+        let blocks =
+            lower_ff_processes(module, &mut pm, ff_parts, &ff_event_roles, &shared_memories)?;
         (
             blocks,
             std::mem::take(&mut pm.runtime_event_sites),
@@ -6562,6 +6630,32 @@ fn runtime_select_position(
             (i128::try_from(width).ok()?.checked_sub(1)?, 0)
         }
     };
+    runtime_select_position_in_range(
+        left,
+        right,
+        window,
+        whole_array,
+        msb,
+        lsb,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+    )
+}
+
+fn runtime_select_position_in_range(
+    left: i128,
+    right: i128,
+    window: Option<BitAccess>,
+    whole_array: bool,
+    msb: &sv::ir::ConstExpr,
+    lsb: &sv::ir::ConstExpr,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<RuntimePosition> {
     if right < 0 {
         return None;
     }
@@ -6635,20 +6729,33 @@ fn runtime_select_as_shift(
     parameter_types: &HashMap<String, (usize, bool)>,
     flat_arrays: bool,
 ) -> Option<sv::ir::Expr> {
-    let sv::ir::Expr::Ident(name) = expr else {
-        return None;
+    let position = if let sv::ir::Expr::Ident(name) = expr {
+        runtime_select_position(
+            name,
+            msb,
+            lsb,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            flat_arrays,
+            flat_arrays,
+        )?
+    } else {
+        let width = sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)?;
+        runtime_select_position_in_range(
+            i128::try_from(width).ok()?.checked_sub(1)?,
+            0,
+            None,
+            false,
+            msb,
+            lsb,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+        )?
     };
-    let position = runtime_select_position(
-        name,
-        msb,
-        lsb,
-        variables,
-        name_to_id,
-        constants,
-        parameter_types,
-        flat_arrays,
-        flat_arrays,
-    )?;
     let shift = |value: sv::ir::Expr, op, amount: sv::ir::Expr| sv::ir::Expr::Binary {
         left: Box::new(value),
         op,
@@ -6679,10 +6786,13 @@ fn runtime_select_as_shift(
     let moved = move_down(vector);
     // Shifting fills the missing bits with 0, which is what a two-state
     // vector (or a parameter) reads.
-    let four_state = name_to_id
-        .get(name)
-        .and_then(|id| variables.get(id))
-        .is_some_and(|variable| variable.is_4state);
+    let four_state = match expr {
+        sv::ir::Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .is_some_and(|variable| variable.is_4state),
+        _ => true,
+    };
     if !four_state {
         return Some(sv::ir::Expr::Select {
             expr: Box::new(moved),
@@ -7167,6 +7277,7 @@ fn lower_ff_processes(
     pm: &mut procedural::ProcModule<'_>,
     ff_parts: bool,
     ff_event_roles: &[FfEventRole],
+    shared_memories: &HashSet<String>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut parallel_ff_parts = HashMap::<_, Vec<_>>::default();
     let mut eval_only_ff_blocks = HashMap::default();
@@ -7276,7 +7387,9 @@ fn lower_ff_processes(
             active,
             nba,
             targets,
-        } = ff::Ff::new(pm, random_seeds[&(0, index)]).lower_process(process.body())?;
+        } = ff::Ff::new(pm, random_seeds[&(0, index)])
+            .with_sparse_memories(shared_memories)
+            .lower_process(process.body())?;
         // A process without writes still runs for its runtime events and
         // extern calls.
         let has_effects =
