@@ -1,0 +1,8 @@
+Revision history for #1662:
+
+rev 2 (content) 2026-10-21 01:04 UTC — Update retained sv-tests expectations from the official CI report: file-position, EOF and flush probes now pass in both state modes.
+rev 1 (initial) 2026-10-21 01:04 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1662,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"1710d9394aab392fc569a97ebfee9bb18649bead","timestamp_iso":"2026-10-21T01:04:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"1710d9394aab392fc569a97ebfee9bb18649bead","new_sha":"c87501d0b38e69f7363376f2496710a2b7a8ac4b","timestamp_iso":"2026-10-21T01:04:15Z","reason":"Update retained sv-tests expectations from the official CI report: file-position, EOF and flush probes now pass in both state modes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1710d9394aab392fc569a97ebfee9bb18649bead...c87501d0b38e69f7363376f2496710a2b7a8ac4b"}]} -->
+
+Rebase onto current master and resolve conflicts while preserving upstream scope randomization and interface fixes.

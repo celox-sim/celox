@@ -1,0 +1,8 @@
+Revision history for #1663:
+
+rev 2 (rebase) 2026-10-21 01:04 UTC — Rebase onto the corrected file-IO sv-tests expectations; the scanner stage has no additional verdict changes.
+rev 1 (initial) 2026-10-21 01:04 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1663,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"615a9b3593836c838b716d489649babb2f7097b5","timestamp_iso":"2026-10-21T01:04:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"615a9b3593836c838b716d489649babb2f7097b5","new_sha":"2f54d5b0cd40adf72056b6988117ec1bcfadf978","timestamp_iso":"2026-10-21T01:04:15Z","reason":"Rebase onto the corrected file-IO sv-tests expectations; the scanner stage has no additional verdict changes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/615a9b3593836c838b716d489649babb2f7097b5...2f54d5b0cd40adf72056b6988117ec1bcfadf978"}]} -->
+
+Rebase dependent stack member after resolving master conflicts in the file I/O layer.
