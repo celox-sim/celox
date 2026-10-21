@@ -1,1 +1,1 @@
-Sync after #1665 merged; resolve conflicts with current master while preserving FP behavior and the reviewed sv-tests gains.
+Fix the Lydite CI bridge failure by explicitly classifying unsupported FP proof operations and recording the existing Veryl constant-folding limitation; preserve existing proof evidence and validate the new coverage contract.
