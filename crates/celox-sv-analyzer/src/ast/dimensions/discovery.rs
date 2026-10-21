@@ -358,7 +358,14 @@ fn return_metadata(
             .and_then(|widths| widths.as_ref())
             .and_then(|widths| widths.first().copied())
             .or(width),
-        dimensions: ty.map(|ty| ty.packed_ranges().len() + ty.unpacked_ranges().len()),
+        dimensions: ty.map(|ty| {
+            ty.unpacked_ranges().len()
+                + if matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                    0
+                } else {
+                    ty.packed_ranges().len()
+                }
+        }),
         signed: ty.is_some_and(Type::is_signed),
         is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
     }

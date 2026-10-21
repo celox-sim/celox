@@ -647,14 +647,18 @@ impl SLTToSIRLowerer {
                     l = self.cast_reg_width_ext(builder, l, width, signed);
                     r = self.cast_reg_width_ext(builder, r, width, signed);
                 }
-                let dest = builder.alloc_logic(width);
+                let dest = if matches!(op, BinaryOp::Float { .. }) {
+                    builder.alloc_bit(width, false)
+                } else {
+                    builder.alloc_logic(width)
+                };
                 builder.emit(SIRInstruction::Binary(dest, l, *op, r));
                 dest
             }
             SLTNode::Unary(op, inner) => {
                 let i = self.lower_inner(builder, *inner, arena, cache, env, allow_cache);
                 let width = self.get_width(node, arena);
-                let dest = if matches!(op, UnaryOp::ToTwoState) {
+                let dest = if matches!(op, UnaryOp::ToTwoState | UnaryOp::Float { .. }) {
                     builder.alloc_bit(width, self.get_bound_signed(node, arena))
                 } else {
                     builder.alloc_logic(width)
@@ -760,6 +764,7 @@ impl SLTToSIRLowerer {
             SLTNode::Input { signed, .. } => *signed,
             SLTNode::Constant(_, _, _, signed) => *signed,
             SLTNode::Binary(lhs, op, rhs) => match op {
+                BinaryOp::Float { .. } => false,
                 BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::EqCase
@@ -789,6 +794,9 @@ impl SLTToSIRLowerer {
                     self.get_bound_signed(*lhs, arena) && self.get_bound_signed(*rhs, arena)
                 }
             },
+            SLTNode::Unary(UnaryOp::Float { op, .. }, _) => {
+                matches!(op, celox_design::FloatUnaryOp::ToSigned { .. })
+            }
             SLTNode::Unary(
                 UnaryOp::LogicNot
                 | UnaryOp::And

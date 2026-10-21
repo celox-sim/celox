@@ -50,6 +50,13 @@ impl Prefix<'_> {
     pub fn has_declared_type(&self) -> bool {
         !matches!(self.data.kind, DataTypeKind::Implicit)
     }
+    pub fn floating(&self) -> Option<TypeKind> {
+        self.alias
+            .as_ref()
+            .or(self.primitive.as_ref())
+            .map(|ty| ty.kind)
+            .filter(|kind| matches!(kind, TypeKind::Real | TypeKind::Shortreal))
+    }
     pub fn signed(&self) -> bool {
         self.primitive
             .as_ref()

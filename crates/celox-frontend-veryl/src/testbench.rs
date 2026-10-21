@@ -53,6 +53,7 @@ fn compile_assert_arg(
         width: ec.natural_width(expr),
         signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
+        float_precision: crate::float::precision(crate::float::type_of(expr)),
     }
 }
 
@@ -66,6 +67,7 @@ fn compile_component_arg(
         width: assert_arg_width(input),
         signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
+        float_precision: crate::float::precision(crate::float::type_of(expr)),
     }
 }
 
@@ -111,6 +113,10 @@ fn runtime_event_site_for_assert(
         arg_signed: value_args
             .iter()
             .map(|arg| expression_signed(&arg.0))
+            .collect(),
+        arg_float_precision: value_args
+            .iter()
+            .map(|arg| crate::float::precision(crate::float::type_of(&arg.0)))
             .collect(),
         arg_is_string: value_args
             .iter()
@@ -1170,7 +1176,9 @@ impl ExprCompiler<'_> {
     ) -> ValueContext {
         // A string's declared width is nominal; its runtime length must never
         // pass through integer context sizing or assignment truncation.
-        let context = if expr.comptime().r#type.is_string() {
+        let context = if expr.comptime().r#type.is_string()
+            || crate::float::precision(crate::float::type_of(expr)).is_some()
+        {
             None
         } else {
             context
@@ -1185,6 +1193,16 @@ impl ExprCompiler<'_> {
                 self.resize_result(ops, source, context)
             }
             Expression::Unary(op, inner, _) => {
+                if let Some(precision) = crate::float::precision(crate::float::type_of(inner)) {
+                    let operand = self.emit_in_context(inner, ops, None);
+                    if *op == VerylOp::Sub {
+                        ops.push(TbOpcode::FloatUnary {
+                            op: celox_design::FloatUnaryOp::Neg,
+                            precision,
+                        });
+                    }
+                    return operand;
+                }
                 let reduction = matches!(
                     op,
                     VerylOp::BitAnd
@@ -1233,6 +1251,23 @@ impl ExprCompiler<'_> {
             }
             Expression::Binary(lhs, op, rhs, _) => {
                 if matches!(op, VerylOp::As) {
+                    if let Some(celox_design::UnaryOp::Float { op, precision }) =
+                        crate::float::conversion(
+                            crate::float::type_of(lhs),
+                            crate::float::type_of(expr),
+                        )
+                    {
+                        self.emit_in_context(lhs, ops, None);
+                        ops.push(TbOpcode::FloatUnary { op, precision });
+                        return self.resize_result(
+                            ops,
+                            ValueContext {
+                                width: self.natural_width(expr),
+                                signed: expression_signed(expr),
+                            },
+                            context,
+                        );
+                    }
                     let cast = cast_semantics(lhs, rhs)
                         .expect("analyzed testbench cast must have a concrete target");
                     let source = self.emit_in_context(
@@ -1250,6 +1285,34 @@ impl ExprCompiler<'_> {
                     return self.resize_result(ops, casted, context);
                 }
 
+                if crate::float::precision(crate::float::type_of(lhs)).is_some()
+                    || crate::float::precision(crate::float::type_of(rhs)).is_some()
+                {
+                    let target = if matches!(
+                        crate::float::precision(crate::float::type_of(lhs)),
+                        Some(celox_design::FloatPrecision::F64)
+                    ) {
+                        crate::float::type_of(lhs)
+                    } else if crate::float::precision(crate::float::type_of(rhs)).is_some() {
+                        crate::float::type_of(rhs)
+                    } else {
+                        crate::float::type_of(lhs)
+                    };
+                    self.emit_in_context(&crate::float::converted(lhs, target), ops, None);
+                    self.emit_in_context(&crate::float::converted(rhs, target), ops, None);
+                    ops.push(TbOpcode::FloatBinary {
+                        op: crate::float::binary(*op).expect("validated float operator"),
+                        precision: crate::float::precision(target).unwrap(),
+                    });
+                    return self.resize_result(
+                        ops,
+                        ValueContext {
+                            width: self.natural_width(expr),
+                            signed: expression_signed(expr),
+                        },
+                        context,
+                    );
+                }
                 if lhs.comptime().r#type.is_string() && rhs.comptime().r#type.is_string() {
                     self.emit_in_context(lhs, ops, None);
                     self.emit_in_context(rhs, ops, None);
@@ -1316,6 +1379,11 @@ impl ExprCompiler<'_> {
                 self.resize_result(ops, result, context)
             }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
+                let target_type = crate::float::type_of(expr);
+                let then_value = crate::float::converted(then_expr, target_type);
+                let else_value = crate::float::converted(else_expr, target_type);
+                let then_expr = &then_value;
+                let else_expr = &else_value;
                 self.emit_in_context(cond, ops, None);
                 let branch_context = ValueContext {
                     width: self
@@ -1534,8 +1602,15 @@ impl ExprCompiler<'_> {
         for (arg_path, arg_expr) in &fc.inputs {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
                 if let Some(sig) = self.resolve_var(&arg_var_id) {
+                    let converted = func
+                        .args
+                        .iter()
+                        .flat_map(|arg| &arg.members)
+                        .find(|(path, _, _)| path == arg_path)
+                        .map(|(_, ct, _)| crate::float::converted(arg_expr, &ct.r#type))
+                        .unwrap_or(std::borrow::Cow::Borrowed(arg_expr));
                     self.emit_in_context(
-                        arg_expr,
+                        &converted,
                         ops,
                         Some(ValueContext {
                             width: sig.width,
@@ -1562,7 +1637,7 @@ impl ExprCompiler<'_> {
                 if let Some(first_dst) = a.dst.first() {
                     if let Some(dst_sig) = self.resolve_var(&first_dst.id) {
                         self.emit_in_context(
-                            &a.expr,
+                            &crate::float::converted(&a.expr, &first_dst.comptime.r#type),
                             ops,
                             Some(ValueContext {
                                 width: dst_sig.width,
@@ -2893,7 +2968,16 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 let dst_width = dst.width;
                 Some(GenericTestbenchStatement::Assign {
                     dst,
-                    expr: ec.compile_with_width(&a.expr, dst_width),
+                    expr: ec.compile_with_width(
+                        &crate::float::converted(
+                            &a.expr,
+                            a.hier_dst
+                                .as_ref()
+                                .map(|dst| &dst.comptime.r#type)
+                                .unwrap_or_else(|| &a.dst.first().unwrap().comptime.r#type),
+                        ),
+                        dst_width,
+                    ),
                 })
             }
             Statement::Break => Some(GenericTestbenchStatement::Break),
@@ -2930,7 +3014,16 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                             selection: None,
                             width: sig.width,
                         },
-                        expr: ec.compile_with_width(arg_expr, sig.width),
+                        expr: ec.compile_with_width(
+                            &func
+                                .args
+                                .iter()
+                                .flat_map(|arg| &arg.members)
+                                .find(|(path, _, _)| path == arg_path)
+                                .map(|(_, ct, _)| crate::float::converted(arg_expr, &ct.r#type))
+                                .unwrap_or(std::borrow::Cow::Borrowed(arg_expr)),
+                            sig.width,
+                        ),
                     });
                 }
             }

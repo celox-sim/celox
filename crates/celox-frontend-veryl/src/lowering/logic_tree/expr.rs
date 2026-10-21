@@ -70,7 +70,13 @@ fn eval_function_input_assignment_in_store(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     if target_type.array.is_empty() {
-        return eval_assignment_expression_in_store(module, store, expr, arena, target_width);
+        return eval_assignment_expression_in_store(
+            module,
+            store,
+            &crate::float::converted(expr, target_type),
+            arena,
+            target_width,
+        );
     }
 
     let element_width = target_type.total_width().ok_or_else(|| {
@@ -177,7 +183,7 @@ fn eval_array_literal_item_in_store(
         return finish_assignment_expression(expr, arena, target_width, value);
     }
 
-    let source_type = &expr.comptime().r#type;
+    let source_type = crate::float::type_of(expr);
 
     // A scalar leaf is assigned to one formal element, not concatenated at
     // its natural width and widened after the aggregate has been assembled.
@@ -2704,6 +2710,11 @@ pub(super) fn eval_expression_in_context(
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context = if crate::float::precision(crate::float::type_of(expr)).is_some() {
+        None
+    } else {
+        context
+    };
     let context_width = context.map(|context| context.width);
     // Short-circuit: compile-time constant compound expression → emit Constant node.
     // The folded value still participates in its enclosing width context.  Skipping
@@ -2711,7 +2722,10 @@ pub(super) fn eval_expression_in_context(
     // can also lose carry bits when a folded operand is widened by its parent.
     if !matches!(expr, Expression::Term(_)) {
         let ct = expr.comptime();
-        if ct.is_const {
+        if ct.is_const
+            && !crate::float::needs_numeric_lowering(expr)
+            && crate::float::type_of(expr).kind == ct.r#type.kind
+        {
             if let Some((celox_value, mask_xz, width, signed)) =
                 celox_value_from_comptime_in_context(ct, context_width)
             {
@@ -2731,6 +2745,15 @@ pub(super) fn eval_expression_in_context(
         Expression::Term(factor) => eval_factor(module, store, factor, arena, context),
         Expression::Binary(lhs, op, rhs, _) => {
             if matches!(op, Op::As) {
+                if let Some(conversion) = crate::float::conversion(
+                    crate::float::type_of(lhs),
+                    crate::float::type_of(expr),
+                ) {
+                    let ((node, sources), bounds) =
+                        eval_expression_in_context(module, store, lhs, arena, None)?;
+                    let node = arena.alloc(SLTNode::Unary(conversion, node))?;
+                    return Ok(((node, sources), bounds));
+                }
                 let Some(cast) = cast_semantics(lhs, rhs) else {
                     return Err(ParserError::internal(
                         "as cast target",
@@ -2785,6 +2808,36 @@ pub(super) fn eval_expression_in_context(
                     (result_node, l_sources),
                     merge_boundaries(l_bounds, r_bounds),
                 ));
+            }
+
+            if crate::float::precision(crate::float::type_of(lhs)).is_some()
+                || crate::float::precision(crate::float::type_of(rhs)).is_some()
+            {
+                let target = if matches!(
+                    crate::float::precision(crate::float::type_of(lhs)),
+                    Some(celox_design::FloatPrecision::F64)
+                ) {
+                    crate::float::type_of(lhs)
+                } else if crate::float::precision(crate::float::type_of(rhs)).is_some() {
+                    crate::float::type_of(rhs)
+                } else {
+                    crate::float::type_of(lhs)
+                };
+                let precision = crate::float::precision(target).unwrap();
+                let left = crate::float::converted(lhs, target);
+                let right = crate::float::converted(rhs, target);
+                let ((left, mut sources), lb) =
+                    eval_expression_in_context(module, store, &left, arena, None)?;
+                let ((right, rs), rb) =
+                    eval_expression_in_context(module, store, &right, arena, None)?;
+                sources.extend(rs);
+                let op = crate::float::binary(*op).expect("validated floating-point operator");
+                let node = arena.alloc(SLTNode::Binary(
+                    left,
+                    BinaryOp::Float { op, precision },
+                    right,
+                ))?;
+                return Ok(((node, sources), merge_boundaries(lb, rb)));
             }
 
             let lhs_width = get_expr_width(lhs)
@@ -2961,6 +3014,22 @@ pub(super) fn eval_expression_in_context(
             Ok(((result, total_sources), all_bounds))
         }
         Expression::Unary(op, expr, _) => {
+            if let Some(precision) = crate::float::precision(crate::float::type_of(expr)) {
+                let ((node, sources), bounds) =
+                    eval_expression_in_context(module, store, expr, arena, None)?;
+                let node = if *op == Op::Sub {
+                    arena.alloc(SLTNode::Unary(
+                        UnaryOp::Float {
+                            op: celox_design::FloatUnaryOp::Neg,
+                            precision,
+                        },
+                        node,
+                    ))?
+                } else {
+                    node
+                };
+                return Ok(((node, sources), bounds));
+            }
             let result_signed = expression_signed(expr);
             let operand_context = if matches!(
                 op,
@@ -3005,6 +3074,11 @@ pub(super) fn eval_expression_in_context(
             Ok(((result_node, sources), bounds))
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
+            let target_type = crate::float::type_of(expr);
+            let then_value = crate::float::converted(then_expr, target_type);
+            let else_value = crate::float::converted(else_expr, target_type);
+            let then_expr = &then_value;
+            let else_expr = &else_value;
             let branch_width = get_expr_width(then_expr)
                 .or_else(|| then_expr.comptime().r#type.total_width())
                 .unwrap_or(1)
@@ -3806,6 +3880,7 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
         SLTNode::Input { variable: id, .. } => module.variables[id].r#type.signed,
         SLTNode::Constant(_, _, _, signed) => *signed,
         SLTNode::Binary(lhs, op, rhs) => match op {
+            BinaryOp::Float { .. } => false,
             BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::EqCase
@@ -3833,6 +3908,9 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
             | BinaryOp::Or
             | BinaryOp::Xor => is_signed(module, *lhs, arena) && is_signed(module, *rhs, arena),
         },
+        SLTNode::Unary(UnaryOp::Float { op, .. }, _) => {
+            matches!(op, celox_design::FloatUnaryOp::ToSigned { .. })
+        }
         SLTNode::Unary(
             UnaryOp::LogicNot
             | UnaryOp::And

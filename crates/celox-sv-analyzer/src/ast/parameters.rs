@@ -229,7 +229,9 @@ impl<'a> ParameterEnvironment<'a> {
             // rank for following declarations even when an imported alias's
             // value is deferred; do not publish an inherited numeric value.
             if let Some(ty) = parameter.resolved_type(&self.types) {
-                let rank = if parameter.packed_ranges.is_empty() {
+                let rank = if parameter.floating.is_some() {
+                    0
+                } else if parameter.packed_ranges.is_empty() {
                     usize::from(!parameter.has_declared_type || ty.width > 1)
                 } else {
                     parameter.packed_ranges.len()
@@ -381,12 +383,14 @@ pub(super) fn parameters_from_native_with_environment(
                 &proof_context,
             )? {
                 Some(value)
-            } else if skipped::needs_selected(
-                &syntax_tree.state,
-                ownership::default(native)
-                    .ok_or_else(|| unsupported("native parameter default is missing"))?,
-                syntax_tree.declarations(),
-            ) {
+            } else if native_prefix.floating().is_none()
+                && skipped::needs_selected(
+                    &syntax_tree.state,
+                    ownership::default(native)
+                        .ok_or_else(|| unsupported("native parameter default is missing"))?,
+                    syntax_tree.declarations(),
+                )
+            {
                 let mut dimensions = PackedDimensions::new(
                     parameter_packed_dimensions_with_imported(parameters, &imported),
                     const_env,
@@ -418,14 +422,12 @@ pub(super) fn parameters_from_native_with_environment(
                     Err(_) => None,
                 }
             } else {
-                constant_binding::expression(
+                constant_binding::bind(
                     ownership::default(native).ok_or_else(|| {
                         AnalyzerError::Parse("native parameter default is missing".into())
                     })?,
-                    syntax_tree.declarations(),
                     syntax_tree,
-                    const_env,
-                    type_aliases,
+                    &proof_context,
                 )?
             }
         } else {
@@ -480,6 +482,7 @@ pub(super) fn parameters_from_native_with_environment(
             has_declared_type,
             is_local,
         );
+        parameter.floating = native_prefix.floating();
         parameter.packed_ranges = parameter_ranges.clone();
         parameter.members = parameter_members.clone();
         parameter.signed_element_depth = parameter_signed_element_depth;
@@ -695,7 +698,9 @@ pub(super) fn bind_parameter(
         if let Some(ty) = parameter.resolved_type(types) {
             types.insert(parameter.name().to_string(), ty);
             insert_parameter_type_markers(env, parameter.name(), ty);
-            let rank = if parameter.packed_ranges.is_empty() {
+            let rank = if parameter.floating.is_some() {
+                0
+            } else if parameter.packed_ranges.is_empty() {
                 usize::from(!parameter.has_declared_type || ty.width > 1)
             } else {
                 parameter.packed_ranges.len()
@@ -713,7 +718,9 @@ pub(super) fn bind_parameter(
     if let Some(ty) = parameter.resolved_type(types) {
         types.insert(parameter.name().to_string(), ty);
         insert_parameter_type_markers(env, parameter.name(), ty);
-        let rank = if parameter.packed_ranges.is_empty() {
+        let rank = if parameter.floating.is_some() {
+            0
+        } else if parameter.packed_ranges.is_empty() {
             usize::from(!parameter.has_declared_type || ty.width > 1)
         } else {
             parameter.packed_ranges.len()
@@ -1137,6 +1144,15 @@ fn parameter_value_env_filtered(
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
+        if let Some(kind) = parameter.floating {
+            if let Some(value) = parameter
+                .value()
+                .and_then(|value| real_literal(value, kind, const_env, &values))
+            {
+                values.insert(parameter.name.clone(), value);
+            }
+            continue;
+        }
         if parameter.value().is_none() {
             continue;
         }
@@ -1736,3 +1752,62 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+/// Resolve real parameter expressions without passing IEEE payloads through integer arithmetic.
+pub(super) fn real_literal(
+    expr: &ConstExpr,
+    kind: TypeKind,
+    constants: &HashMap<String, i128>,
+    literals: &HashMap<String, Expr>,
+) -> Option<Expr> {
+    fn evaluate(
+        expr: &ConstExpr,
+        constants: &HashMap<String, i128>,
+        literals: &HashMap<String, Expr>,
+    ) -> Option<f64> {
+        match expr {
+            ConstExpr::Literal(text) => text.replace('_', "").parse::<f64>().ok().or_else(|| {
+                typecheck::parse_integral_literal(text)
+                    .and_then(|_| eval_ast_const_expr(&AnalysisState::default(), expr, constants))
+                    .map(|value| value as f64)
+            }),
+            ConstExpr::Ident(name) => {
+                if let Some(Expr::Literal(text)) = literals.get(name) {
+                    text.parse::<f64>().ok()
+                } else {
+                    constants.get(name).map(|value| *value as f64)
+                }
+            }
+            ConstExpr::Unary {
+                op: UnaryOp::Plus,
+                expr,
+            } => evaluate(expr, constants, literals),
+            ConstExpr::Unary {
+                op: UnaryOp::Minus,
+                expr,
+            } => Some(-evaluate(expr, constants, literals)?),
+            ConstExpr::Binary { left, op, right } => {
+                let a = evaluate(left, constants, literals)?;
+                let b = evaluate(right, constants, literals)?;
+                Some(match op {
+                    BinaryOp::Add => a + b,
+                    BinaryOp::Sub => a - b,
+                    BinaryOp::Mul => a * b,
+                    BinaryOp::Div => a / b,
+                    BinaryOp::Pow => a.powf(b),
+                    _ => return None,
+                })
+            }
+            _ => None,
+        }
+    }
+    let value = evaluate(expr, constants, literals)?;
+    let value = if kind == TypeKind::Shortreal {
+        f64::from(value as f32)
+    } else {
+        value
+    };
+    value
+        .is_finite()
+        .then(|| Expr::Literal(format!("{value:?}")))
+}

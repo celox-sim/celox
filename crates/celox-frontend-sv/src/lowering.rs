@@ -39,6 +39,7 @@ use num_bigint::BigUint;
 
 mod comb;
 mod ff;
+mod floating;
 mod procedural;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
@@ -62,6 +63,7 @@ const FORCE_VALUE: &str = "@force-value:";
 
 #[derive(Clone)]
 struct SvVariable {
+    float: Option<celox_sir::FloatPrecision>,
     path: Vec<String>,
     width: usize,
     signed: bool,
@@ -1435,6 +1437,7 @@ fn prepare_external_hierarchy_collecting(
                 (
                     id,
                     SvVariable {
+                        float: None,
                         path: vec![variable.path.join("$")],
                         width: variable.metadata.width,
                         signed: variable.signed,
@@ -2417,6 +2420,7 @@ fn lower_module_with_overrides(
         let path = vec![port.name().to_string()];
         let kind = signal_kind_from_port_direction(port.direction())?;
         let variable = SvVariable {
+            float: type_info.float,
             path,
             width: type_info.width,
             signed: type_info.signed,
@@ -2498,6 +2502,7 @@ fn lower_module_with_overrides(
             package_variables.push((id, package.to_string(), variable.to_string()));
         }
         let variable = SvVariable {
+            float: type_info.float,
             path,
             width: type_info.width,
             signed: type_info.signed,
@@ -2571,6 +2576,7 @@ fn lower_module_with_overrides(
         variables.insert(
             id,
             SvVariable {
+                float: None,
                 path: vec![parameter.name().to_string()],
                 width,
                 signed,
@@ -3607,6 +3613,7 @@ fn lower_initial_processes(
                 variables.insert(
                     id,
                     SvVariable {
+                        float: None,
                         path: vec![format!("$initial[{index}]"), slot.to_string()],
                         width,
                         signed: false,
@@ -3957,6 +3964,7 @@ fn ensure_parent_output_signals(
         parent_signal_names.insert(actual.to_string(), next_id);
         implicit_output_signals.insert(actual.to_string());
         let variable = SvVariable {
+            float: None,
             path: vec![actual.to_string()],
             width: 1,
             signed: false,
@@ -4091,6 +4099,9 @@ fn build_instance_glue(
                 {
                     let actual_expr = expr_for_state_mode(actual_expr, four_state);
                     let actual = connection.map_or("", |item| item.actual.as_str());
+                    let from =
+                        floating::precision(&actual_expr, parent_variables, parent_signal_names);
+                    let to = child_var.float;
                     let (expr, sources, source_ids) = lower_glue_parent_expr(
                         &actual_expr,
                         parent_variables,
@@ -4098,7 +4109,11 @@ fn build_instance_glue(
                         parent_constants,
                         parent_parameter_types,
                         &mut arena,
-                        Some(width),
+                        if from.is_some() || to.is_some() {
+                            None
+                        } else {
+                            Some(width)
+                        },
                         Some(sv_glue_expr_is_signed(
                             &actual_expr,
                             parent_variables,
@@ -4112,6 +4127,34 @@ fn build_instance_glue(
                             LoweringPhase::SimulatorParser,
                             "systemverilog input port connection",
                             format!("{formal} -> {actual}"),
+                            None,
+                        )
+                    })?;
+                    let source_signed = sv_glue_expr_is_signed(
+                        &actual_expr,
+                        parent_variables,
+                        parent_signal_names,
+                        parent_parameter_types,
+                    );
+                    let expr = floating::convert(
+                        &mut arena,
+                        expr,
+                        from,
+                        to,
+                        width,
+                        if from.is_none() {
+                            source_signed
+                        } else {
+                            child_var.signed
+                        },
+                        true,
+                    )
+                    .ok_or_else(|| {
+                        ParserError::unsupported(
+                            sv::SV_FRONTEND_TRACKING_ISSUE,
+                            LoweringPhase::SimulatorParser,
+                            "real input port conversion",
+                            formal.clone(),
                             None,
                         )
                     })?;
@@ -4238,6 +4281,47 @@ fn build_instance_glue(
                     signed: child_var.signed,
                     index: Vec::new(),
                     access: BitAccess::new(0, width - 1),
+                })?;
+                let target_float = if let [target] = accesses.as_slice() {
+                    parent_variables[&target.signal].float
+                } else {
+                    None
+                };
+                if child_var.float.is_some() && accesses.len() != 1 {
+                    return Err(ParserError::unsupported(
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
+                        LoweringPhase::SimulatorParser,
+                        "real output port concatenation",
+                        formal.clone(),
+                        None,
+                    ));
+                }
+                let target_signed = if let [target] = accesses.as_slice() {
+                    parent_variables[&target.signal].signed
+                } else {
+                    child_var.signed
+                };
+                let child_input = floating::convert(
+                    &mut arena,
+                    child_input,
+                    child_var.float,
+                    target_float,
+                    target_width,
+                    if child_var.float.is_none() {
+                        child_var.signed
+                    } else {
+                        target_signed
+                    },
+                    true,
+                )
+                .ok_or_else(|| {
+                    ParserError::unsupported(
+                        sv::SV_FRONTEND_TRACKING_ISSUE,
+                        LoweringPhase::SimulatorParser,
+                        "real output port conversion",
+                        formal.clone(),
+                        None,
+                    )
                 })?;
                 let child_node = coerce_node_width(
                     &mut arena,
@@ -4419,6 +4503,36 @@ fn lower_glue_parent_expr(
     HashSet<VarAtomBase<GlueAddr>>,
     Vec<SourceVarId>,
 )> {
+    if floating::handles(expr, variables, name_to_id) {
+        let mut native_arena = SLTNodeArena::new();
+        let (node, sources) = floating::lower(
+            expr,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            &mut native_arena,
+        )?;
+        let mut cache = HashMap::default();
+        let mapped = native_arena
+            .get(node)
+            .map_addr(node, &native_arena, arena, &mut cache, &|id| {
+                GlueAddr::Parent(*id)
+            })
+            .ok()?;
+        let source_ids = sources.iter().map(|source| source.id).collect();
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                VarAtomBase::new(
+                    GlueAddr::Parent(source.id),
+                    source.access.lsb,
+                    source.access.msb,
+                )
+            })
+            .collect();
+        return Some((mapped, sources, source_ids));
+    }
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
@@ -4989,8 +5103,9 @@ fn lower_glue_parent_expr(
                         context_width.map_or(natural_width, |width| width.max(natural_width))
                     })
                     .or(context_width);
+            let float_condition = floating::condition(condition, variables, name_to_id);
             let (condition, mut sources, mut source_ids) = lower_glue_parent_expr(
-                condition,
+                &float_condition,
                 variables,
                 name_to_id,
                 constants,
@@ -5154,6 +5269,7 @@ fn signal_kind_from_port_direction(
 }
 
 struct SvSignalType {
+    float: Option<celox_sir::FloatPrecision>,
     width: usize,
     signed: bool,
     is_4state: bool,
@@ -5237,7 +5353,12 @@ fn signal_type_from_sv(
         .checked_mul(element_count)
         .ok_or_else(|| sv::AnalyzerError::Unsupported("signal width overflow".to_string()))?;
     let signed = typ.is_signed();
-    let is_4state = !matches!(typ.kind(), sv::ir::TypeKind::Bit);
+    let float = match typ.kind() {
+        sv::ir::TypeKind::Real => Some(celox_sir::FloatPrecision::F64),
+        sv::ir::TypeKind::Shortreal => Some(celox_sir::FloatPrecision::F32),
+        _ => None,
+    };
+    let is_4state = float.is_none() && !matches!(typ.kind(), sv::ir::TypeKind::Bit);
     let packed_ranges = typ
         .packed_ranges()
         .iter()
@@ -5256,12 +5377,15 @@ fn signal_type_from_sv(
         })
         .collect();
     let type_kind = match typ.kind() {
-        sv::ir::TypeKind::Bit => PortTypeKind::Bit,
+        sv::ir::TypeKind::Bit | sv::ir::TypeKind::Real | sv::ir::TypeKind::Shortreal => {
+            PortTypeKind::Bit
+        }
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
     };
     Ok(SvSignalType {
+        float,
         width,
         signed,
         is_4state,
@@ -5571,7 +5695,13 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         }
         // The random number and time functions need process state, and the
         // analyzer folds the other functions to constants.
-        SystemFunction::Time
+        SystemFunction::Rtoi
+        | SystemFunction::Itor
+        | SystemFunction::Realtobits
+        | SystemFunction::Bitstoreal
+        | SystemFunction::Shortrealtobits
+        | SystemFunction::Bitstoshortreal
+        | SystemFunction::Time
         | SystemFunction::Stime
         | SystemFunction::Random
         | SystemFunction::DistUniform
@@ -5631,6 +5761,16 @@ fn lower_expr_with_context(
     context_width: Option<usize>,
     context_signed: Option<bool>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
+    if floating::handles(expr, variables, name_to_id) {
+        return floating::lower(
+            expr,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+        );
+    }
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
@@ -6216,8 +6356,9 @@ fn lower_expr_with_context(
                         context_width.map_or(natural_width, |width| width.max(natural_width))
                     })
                     .or(context_width);
+            let float_condition = floating::condition(condition, variables, name_to_id);
             let (condition, mut sources) = lower_expr(
-                condition,
+                &float_condition,
                 variables,
                 name_to_id,
                 constants,

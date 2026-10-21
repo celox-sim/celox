@@ -474,3 +474,72 @@ Icarus 13.0 reports `Module instantiations are not allowed in interfaces` for
 interface. Verilator 5.052 executes the same emitted Veryl design successfully.
 The [retained diagnostic](verification/repros/interface_nested_icarus.json)
 records this compile limitation.
+
+## Veryl analyzer floating-point constant expressions
+
+Veryl analyzer 0.22 can fold negative `f32` casts and dependent floating-point
+constants or parameters incorrectly before Celox lowering. The Veryl consumers
+of `floating_point::integral_constants_from_float` are ignored with their
+assertions preserved; the emitted SystemVerilog consumer, Icarus, and Verilator
+pass. Celox's display tests retain additional ignored reproductions for inline
+negative constants, named constants, and hierarchical parameter overrides.
+Runtime floating-point display and assertion tests remain enabled.
+
+These upstream errors are deferred under
+[#1657](https://github.com/celox-sim/celox/issues/1657). The analyzer's default
+constant folding remains enabled: globally disabling it also breaks integer
+constant selects used in generate conditions, including existing linear SEC
+and LFSR regressions.
+
+## Veryl reference simulator floating-point values
+
+The Celox backend harness excludes Veryl 0.22.0's in-process reference simulator
+for six `floating_point` cases while preserving their assertions. A focused
+run on 2026-10-21 observed these mismatches:
+
+| Case | Expected | Veryl reference result |
+| --- | --- | --- |
+| `arithmetic_and_rounding` | integer conversion of 7.0 / 2.0 = 4 | 3 |
+| `f32_precision_and_conversion` | numeric integer result | IEEE f32 payload `0x40800000` |
+| `scalar_port_and_function_conversions` | implicit port conversion of 3.5 = 4 | 3 |
+| `sequential_float` | clocked integer conversion of 1.5 = 2 | 0 |
+| `unknown_integer_conversion` | unknown integer bits become zero, giving `0xa0` | unknown bits retained (`0xax`) |
+| `formatted_display_and_write` | numeric `%0.2f` output bytes | literal `%0.2f` text; in-process adapter has no output capture API |
+
+These exclusions concern the in-process Veryl simulator only. The Verilator and
+Icarus adapters have their own case-specific verification and tool limitations.
+
+### External floating-point observations
+
+Focused runs on 2026-10-21 with Verilator 5.052 and Icarus 13.0 observed:
+
+- Both tools return `16777217` where FP32 storage must round to `16777216`
+  in Veryl `floating_point::f32_precision_and_conversion` and SV
+  `floating_point::shortreal_storage_precision`. The FP64 comparisons pass.
+- Verilator rejects the real-output-to-integer-port connection in Veryl
+  `floating_point::scalar_port_and_function_conversions` and SV
+  `floating_point::real_ports_and_subroutines`. Icarus passes these cases.
+- Verilator reports the Veryl `unknown_integer_conversion` case unsupported
+  because its adapter does not execute four-state expectations; Icarus passes.
+
+The assertions remain enabled and the external runners continue reporting these
+failures/unsupported cases; no retained JSON baseline or exclusion manifest was
+changed. Other FP64 arithmetic, rounding, bit conversion, comparison and
+sequential cases passed both external tools in these focused runs.
+
+The additional SV conversion-function and zero-divisor cases pass Icarus.
+Verilator 5.052 instead interprets unsigned `32'hffffffff` passed to `$itor`
+as positive `4294967295.0` rather than the signed 32-bit integer `-1.0`, and
+returns false for the self-inequality check on `0.0 / 0.0`. Its positive and
+negative infinity checks pass. These differences remain visible in the
+external results for `real_conversion_functions` and `real_zero_divisor`.
+
+The SV `real_display_formats`, `real_display_negative_zero`, and
+`real_file_display_formats` cases pass Icarus 13.0, including real/shortreal
+arguments, numeric integer conversion, expressions, field width, precision,
+scientific/general output, negative zero, and file display/write formatting.
+Verilator 5.052 rejects the `+` formatting flag in `real_display_formats` as
+an unknown display format code. It prints a lowercase `e` for the uppercase
+`%E` conversion in `real_display_negative_zero`; the negative-zero value is
+otherwise correct. Its `real_file_display_formats` case passes. The shared
+assertions remain enabled, and these external differences are not exclusions.

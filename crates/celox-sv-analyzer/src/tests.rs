@@ -6313,3 +6313,211 @@ fn scope_randomize_respects_port_variable_kinds() {
         );
     }
 }
+
+#[test]
+fn analyzes_real_storage_literals_and_runtime_conversions() {
+    let ir = analyze_source(
+        r#"module Top(input logic [63:0] bits, output logic [63:0] result);
+            real value;
+            shortreal narrow_value;
+            realtime alias_value;
+            always_comb begin
+                value = $bitstoreal(bits) + 1.5;
+                narrow_value = shortreal'(value);
+                alias_value = real'(narrow_value);
+                result = $realtobits(alias_value);
+            end
+        endmodule"#,
+        Path::new("real.sv"),
+    )
+    .expect("real runtime expressions should analyze");
+    let module = &ir.modules()[0];
+    assert_eq!(module.signals()[0].r#type().kind(), ir::TypeKind::Real);
+    assert_eq!(module.signals()[1].r#type().kind(), ir::TypeKind::Shortreal);
+    assert_eq!(module.signals()[2].r#type().kind(), ir::TypeKind::Real);
+}
+
+#[test]
+fn rejects_integral_operators_and_packed_selects_on_real_values() {
+    for statement in [
+        "assign y = x & 1;",
+        "assign y = ~x;",
+        "assign y = x[0];",
+        "initial x[0] = 1;",
+    ] {
+        let source = format!("module Top(output logic y); real x; {statement} endmodule");
+        assert!(
+            analyze_source(&source, Path::new("real_invalid.sv")).is_err(),
+            "{statement}"
+        );
+    }
+}
+
+#[test]
+fn analyzes_real_parameter_arithmetic() {
+    analyze_source(
+        r#"module Top(output logic [63:0] bits);
+        localparam real A = 1.5;
+        localparam real B = A * 2.0;
+        assign bits = $realtobits(B);
+    endmodule"#,
+        Path::new("real_parameter.sv"),
+    )
+    .expect("real parameter arithmetic");
+}
+
+#[test]
+fn analyzes_sized_cast_of_negated_real_local() {
+    analyze_source(
+        r#"module Top(input logic signed [31:0] a, output logic signed [31:0] result);
+        always_comb begin
+            real value;
+            value = a;
+            result = $signed(32'(-value));
+        end
+    endmodule"#,
+        Path::new("real_local_cast.sv"),
+    )
+    .expect("real local signedness remains available in sized casts");
+}
+
+#[test]
+fn analyzes_real_type_casts_in_separate_always_comb_bodies() {
+    analyze_source(
+        r#"module Top (
+    input  var int   a       ,
+    input  var int   b       ,
+    output var int   sum     ,
+    output var int   diff    ,
+    output var int   product ,
+    output var int   quotient,
+    output var int   negative,
+    output var logic lt      ,
+    output var logic eq
+);
+    real x       ;
+    real y       ;
+    always_comb x        = real'(a);
+    always_comb y        = real'(b);
+    always_comb sum      = int'((x + y));
+    always_comb diff     = int'((x - y));
+    always_comb product  = int'((x * y));
+    always_comb quotient = int'((x / y));
+    always_comb negative = int'((-x));
+    always_comb lt       = x < y;
+    always_comb eq       = x == y;
+endmodule
+//# sourceMappingURL=float.sv.map
+"#,
+        Path::new("real_emitted.sv"),
+    )
+    .expect("real casts in module variables");
+}
+
+#[test]
+fn real_storage_widths_do_not_create_packed_dimensions() {
+    let ir = analyze_source(
+        r#"module Top;
+        real value;
+        shortreal narrow;
+        real array_value [0:2];
+        function automatic real real_result(); return 1.0; endfunction
+        localparam real REAL_PARAMETER = 1.5;
+        localparam DTYPE = $dimensions(real);
+        localparam DSHORT = $dimensions(shortreal);
+        localparam DVALUE = $dimensions(value);
+        localparam DNARROW = $dimensions(narrow);
+        localparam DARRAY = $dimensions(array_value);
+        localparam DPARAM = $dimensions(REAL_PARAMETER);
+        localparam DFUNC = $dimensions(real_result());
+        localparam BREAL = $bits(real);
+        localparam BSHORT = $bits(shortreal);
+    endmodule"#,
+        Path::new("real_dimensions.sv"),
+    )
+    .expect("real query metadata");
+    for (name, expected) in [
+        ("DTYPE", 0),
+        ("DSHORT", 0),
+        ("DVALUE", 0),
+        ("DNARROW", 0),
+        ("DARRAY", 1),
+        ("DPARAM", 0),
+        ("DFUNC", 0),
+        ("BREAL", 64),
+        ("BSHORT", 32),
+    ] {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|p| p.name() == name)
+            .unwrap();
+        assert_eq!(parameter.resolved_value(), Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn real_constant_casts_preserve_precision_and_integral_rounding() {
+    let ir = analyze_source(
+        r#"module Top;
+        localparam shortreal F = shortreal'(-2.25);
+        localparam int N = int'(F);
+        localparam int A = N + 5;
+        localparam int POS_HALF = int'(shortreal'(1.5));
+        localparam int NEG_HALF = int'(real'(-1.5));
+        localparam int NARROW_ROUND = int'(shortreal'(16777217.0));
+        localparam int UNSIGNED_BITS = 8'(real'(-1.5));
+    endmodule"#,
+        Path::new("real_constant_casts.sv"),
+    )
+    .expect("real constant casts");
+    for (name, expected) in [
+        ("N", -2),
+        ("A", 3),
+        ("POS_HALF", 2),
+        ("NEG_HALF", -2),
+        ("NARROW_ROUND", 16777216),
+        ("UNSIGNED_BITS", -2),
+    ] {
+        let parameter = ir.modules()[0]
+            .parameters()
+            .iter()
+            .find(|p| p.name() == name)
+            .unwrap();
+        assert_eq!(parameter.resolved_value(), Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn rejects_real_valued_select_indices() {
+    for (declaration, index) in [
+        ("real a = 0.5;", "a"),
+        ("shortreal a = 0.5;", "a"),
+        ("real a = 0.5;", "a + 1"),
+        ("", "0.5"),
+        ("localparam real a = 0.5;", "a"),
+        ("localparam shortreal a = 0.5;", "a"),
+        ("localparam real a = 0.5 + 1.0;", "a"),
+        ("localparam real a = 0.5;", "a + 1"),
+        ("function real a(); return 0.5; endfunction", "a()"),
+    ] {
+        let source = format!(
+            "module top(input wire [3:0] b, output wire c); {declaration} assign c = b[{index}]; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("real_index.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("real-valued select index"),
+            "{declaration} {index}: {error}"
+        );
+    }
+}
+
+#[test]
+fn accepts_integral_select_indices_including_real_conversion() {
+    for index in ["a", "a + 1", "int'(r)", "$rtoi(r)"] {
+        let source = format!(
+            "module top(input wire [3:0] b, input int a, input real r, output wire c); assign c = b[{index}]; endmodule"
+        );
+        analyze_source(&source, Path::new("integer_index.sv")).expect(index);
+    }
+}

@@ -1435,6 +1435,7 @@ const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
+    floating: Option<TypeKind>,
     name: String,
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
@@ -1462,6 +1463,7 @@ impl Parameter {
             name,
             value,
             declared_width,
+            floating: None,
             packed_ranges: Vec::new(),
             members: Vec::new(),
             declared_signed,
@@ -1486,6 +1488,9 @@ impl Parameter {
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
+        if self.floating.is_some() {
+            return None;
+        }
         let mut value =
             substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
         if self.declared_is_2state {
@@ -1539,6 +1544,9 @@ impl Parameter {
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> Option<Expr> {
+        if let Some(kind) = self.floating {
+            return parameters::real_literal(self.value()?, kind, constants, literals);
+        }
         #[cfg(test)]
         parameters::LITERAL_RESOLUTIONS.with(|calls| calls.set(calls.get() + 1));
         if self
@@ -1924,6 +1932,8 @@ impl Type {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeKind {
+    Real,
+    Shortreal,
     Bit,
     Logic,
     Reg,
@@ -2343,6 +2353,7 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    return_real: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -2582,6 +2593,7 @@ struct UnpackedDimension {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VariableDimensions {
     randomizable: bool,
+    real: bool,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,

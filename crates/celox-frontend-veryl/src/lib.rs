@@ -9,6 +9,7 @@ mod config;
 mod dynamic_for_check;
 mod error;
 mod file_dependencies;
+mod float;
 pub mod hierarchy;
 mod interface_captures;
 pub mod loop_provenance;

@@ -18,9 +18,13 @@ pub(super) fn expr_signedness_with_return_types(
 ) -> Option<bool> {
     match expr {
         Expr::Ident(name) => identifiers.signedness(name),
-        Expr::Literal(literal) => {
-            typecheck::integral_literal_type_metadata(literal).map(|(_, signed)| signed)
-        }
+        Expr::Literal(literal) => typecheck::integral_literal_type_metadata(literal)
+            .map(|(_, signed)| signed)
+            .or_else(|| {
+                (literal.contains(['.', 'e', 'E'])
+                    && literal.replace('_', "").parse::<f64>().is_ok())
+                .then_some(true)
+            }),
         Expr::Select { signed, .. } => Some(*signed),
         Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
         Expr::Resize { signed, .. } => Some(*signed),

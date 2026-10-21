@@ -4,12 +4,12 @@ This job executes **every case of the in-tree reusable suite**
 (the Veryl suite of `crates/celox-test-suite`) with reads backed by finite proofs, compiled by
 the in-tree Celox frontend and the workspace Veryl. Its acceptance contract is the
 reviewed `coverage-manifest.json` plus `case-exceptions.json`: currently
-**740 actual passes / 771** and 31 recorded exceptions. The raw test executable
+**742 actual passes / 780** and 38 recorded exceptions. The raw test executable
 still exits 1 and reports the exceptions as failed. The coverage gate accepts each
 exception only with its exact recorded failure and design identities; it never
 changes an expectation into an expected compiler rejection.
 
-The 740 passes comprise 729 observation-checked cases, three smoke-only cases and
+The 742 passes comprise 731 observation-checked cases, three smoke-only cases and
 eight genuine expected compilation rejections. These are test-suite results, not a
 claim of unbounded equivalence, complete Veryl support, or verification of all
 possible stimuli. The independent narrow `../veryl` job is retained.
@@ -116,15 +116,24 @@ and exact failure message:
   unsynthesizable (veryl-lang/veryl#2604).
 - `unsupported_by_proof_backend`: seventeen cases drive their design from a native
   Veryl testbench (`Backend::run_testbench`), which this backend does not run.
-- `known_celox_failure`: seven cases that Celox's own tests also ignore on its
+- `known_celox_failure`: eight cases that Celox's own tests also ignore on its
   native backends. Five depend on interface logic or nested instances that the
   Veryl analyzer IR drops; the others cover instance arrays and direct function
-  calls on selected interface array elements.
+  calls on selected interface array elements. The additional floating-point
+  integral-constant case exposes upstream Veryl negative f32 constant folding
+  (#1657), already ignored by Celox on every backend.
 - `celox_unsupported`: one case whose design the Celox frontend refuses with a
   typed `Unsupported` error (generic interface ports, #1088). The bridge reports
   it as `frontend_unsupported`, which is neither a source rejection nor a
   backend fault: a `CompilationError` case cannot pass through it, and the gate
   accepts it only under this exception kind.
+
+- `proof_backend_unsupported`: designs containing scalar floating-point SIR
+  operations are explicitly refused before proof execution. Six floating-point
+  cases remain catalogued as unproved limitations.
+  This compile-time model refusal is neither a source rejection nor a verified
+  result. Its typed marker, exact diagnostic, zero reads and absence of a proof
+  directory are required; other backend and transport errors remain fatal.
 
 A different failure, a legal-source mutation, or an unexpected success fails the
 stale exception, which must then be reviewed. There is no catch-all skip or

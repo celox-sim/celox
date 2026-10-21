@@ -378,7 +378,11 @@ impl WasmBackend {
                         }
                         // SAFETY: the module calls each import with the
                         // argument count of the DPI-C import it links to.
-                        let result = unsafe { extern_functions.call(func, args) };
+                        let result = if func == u32::MAX {
+                            celox_sir::float::evaluate(args[0], args[1], args[2])
+                        } else {
+                            unsafe { extern_functions.call(func, args) }
+                        };
                         results[0] = wasmtime::Val::I64(result as i64);
                         Ok(())
                     })

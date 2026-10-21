@@ -7,6 +7,143 @@ pub struct DisplayFormatArg<'a> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    /// Interpret the payload as IEEE bits rather than an integral value.
+    pub float_precision: Option<celox_design::FloatPrecision>,
+}
+
+fn integer_float_bits(arg: &DisplayFormatArg<'_>) -> BigUint {
+    BigUint::from(celox_design::eval_float_unary(
+        celox_design::FloatUnaryOp::ToSigned {
+            width: 64,
+            round: true,
+        },
+        arg.float_precision.unwrap(),
+        arg.value.to_u64().unwrap_or(0),
+    ))
+}
+fn numeric_float(arg: &DisplayFormatArg<'_>) -> f64 {
+    if let Some(precision) = arg.float_precision {
+        let bits = arg.value.to_u64().unwrap_or(0);
+        return match precision {
+            celox_design::FloatPrecision::F32 => f32::from_bits(bits as u32) as f64,
+            celox_design::FloatPrecision::F64 => f64::from_bits(bits),
+        };
+    }
+    let mut value = masked_value(arg.value, arg.width);
+    if let Some(mask) = arg.mask {
+        value &= ((BigUint::from(1u8) << arg.width) - BigUint::from(1u8))
+            ^ masked_value(mask, arg.width);
+    }
+    if arg.signed {
+        let value = value_to_signed_bigint(&value, arg.width);
+        value.to_f64().unwrap_or(if value.sign() == Sign::Minus {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        })
+    } else {
+        value.to_f64().unwrap_or(f64::INFINITY)
+    }
+}
+
+fn normalize_exponent(text: String, upper: bool) -> String {
+    let Some((body, exponent)) = text.split_once('e') else {
+        return text;
+    };
+    let exponent = exponent.parse::<i32>().expect("Rust float exponent");
+    format!("{body}{}{exponent:+03}", if upper { 'E' } else { 'e' })
+}
+fn trim_fraction(text: &str) -> String {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text.to_string()
+    }
+}
+// IEEE 1800-2023 21.2.1.1 gives real e/f/g the C formatting semantics.
+// Rust supplies decimal rounding; normalize its exponent and implement g's
+// significant-digit selection and trailing-zero rules explicitly.
+fn format_float(arg: &DisplayFormatArg<'_>, spec: char, field: FieldSpec) -> Vec<u8> {
+    let value = numeric_float(arg);
+    let upper = spec.is_ascii_uppercase();
+    let precision = field.precision.unwrap_or(6).min(MAX_FIELD_WIDTH);
+    let mut text = if value.is_nan() {
+        format!(
+            "{}{}",
+            if value.is_sign_negative() { "-" } else { "" },
+            if upper { "NAN" } else { "nan" }
+        )
+    } else if value.is_infinite() {
+        format!(
+            "{}{}",
+            if value.is_sign_negative() { "-" } else { "" },
+            if upper { "INF" } else { "inf" }
+        )
+    } else {
+        match spec.to_ascii_lowercase() {
+            'e' => {
+                let mut raw = format!("{value:.precision$e}");
+                if field.alternate && precision == 0 {
+                    let i = raw.find('e').unwrap();
+                    raw.insert(i, '.');
+                }
+                normalize_exponent(raw, upper)
+            }
+            'g' => {
+                let digits = precision.max(1);
+                let fractional = digits - 1;
+                let scientific = format!("{value:.fractional$e}");
+                let (mantissa, exponent) = scientific.split_once('e').unwrap();
+                let exponent = exponent.parse::<i32>().unwrap();
+                if exponent < -4 || exponent >= digits as i32 {
+                    let mut mantissa = if field.alternate {
+                        mantissa.to_string()
+                    } else {
+                        trim_fraction(mantissa)
+                    };
+                    if field.alternate && !mantissa.contains('.') {
+                        mantissa.push('.');
+                    }
+                    normalize_exponent(format!("{mantissa}e{exponent}"), upper)
+                } else {
+                    let fractional = (digits as i32 - 1 - exponent).max(0) as usize;
+                    let raw = format!("{value:.fractional$}");
+                    let mut text = if field.alternate {
+                        raw
+                    } else {
+                        trim_fraction(&raw)
+                    };
+                    if field.alternate && !text.contains('.') {
+                        text.push('.');
+                    }
+                    text
+                }
+            }
+            _ => {
+                let mut text = format!("{value:.precision$}");
+                if field.alternate && precision == 0 {
+                    text.push('.');
+                }
+                text
+            }
+        }
+    };
+    if !text.starts_with('-') {
+        if field.show_sign {
+            text.insert(0, '+');
+        } else if field.space_sign {
+            text.insert(0, ' ');
+        }
+    }
+    // C does not zero-pad infinities or NaNs.
+    pad_veryl_field(
+        text.into_bytes(),
+        spec,
+        FieldSpec {
+            zero_pad: field.zero_pad && value.is_finite(),
+            ..field
+        },
+    )
 }
 
 fn bit(value: &BigUint, bit: usize) -> bool {
@@ -60,6 +197,24 @@ fn packed_bytes(value: &BigUint, width: usize) -> Vec<u8> {
 
 /// Format an argument as bytes. Character conversions never decode UTF-8.
 pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> Vec<u8> {
+    if arg.float_precision.is_some() && spec.is_none() {
+        return format_float(arg, 'g', FieldSpec::default());
+    }
+    if matches!(spec, Some('f' | 'F' | 'e' | 'E' | 'g' | 'G')) {
+        return format_float(arg, spec.unwrap(), FieldSpec::default());
+    }
+    if arg.float_precision.is_some() {
+        let value = integer_float_bits(arg);
+        let integer = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 64,
+            signed: true,
+            is_string: false,
+            float_precision: None,
+        };
+        return format_display_arg(&integer, spec);
+    }
     if arg.is_string {
         return packed_bytes(arg.value, arg.width);
     }
@@ -209,6 +364,22 @@ pub fn format_sized_display_arg(
 /// by Icarus and Verilator. As in Icarus, decimal zero padding follows the sign;
 /// left justification takes precedence over zero padding.
 pub fn format_sv_display_arg(arg: &DisplayFormatArg<'_>, spec: char, field: FieldSpec) -> Vec<u8> {
+    if matches!(spec, 'f' | 'F' | 'e' | 'E' | 'g' | 'G') {
+        return format_float(arg, spec, field);
+    }
+    if arg.float_precision.is_some() {
+        let value = integer_float_bits(arg);
+        let integer = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 64,
+            signed: true,
+            is_string: false,
+            float_precision: None,
+        };
+        return format_sv_display_arg(&integer, spec, field);
+    }
+
     let field_width = field.width;
     // Table 21-1 gives each uppercase specifier the meaning of its lowercase
     // one, so `%H` prints lowercase digits like `%h`.
@@ -220,6 +391,7 @@ pub fn format_sv_display_arg(arg: &DisplayFormatArg<'_>, spec: char, field: Fiel
         width: arg.width,
         signed: arg.signed,
         is_string: arg.is_string && spec == 's',
+        float_precision: arg.float_precision,
     };
     if spec == 's' && !has_mask(arg) {
         // Integral %s is right-justified byte data; omit leading zero bytes
@@ -335,7 +507,7 @@ fn radix_digits(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> String {
 /// simulator caps its field widths the same way.
 pub const MAX_FIELD_WIDTH: usize = 1 << 16;
 
-/// The flags and field width between `%` and a conversion character.
+/// The flags, field width, and precision between `%` and a conversion character.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FieldSpec {
     pub width: Option<usize>,
@@ -343,6 +515,11 @@ pub struct FieldSpec {
     pub left_justify: bool,
     /// A leading `0` digit: pad numbers with zeros.
     pub zero_pad: bool,
+    /// Digits after the decimal point for f/e, significant digits for g.
+    pub precision: Option<usize>,
+    pub show_sign: bool,
+    pub space_sign: bool,
+    pub alternate: bool,
 }
 
 impl FieldSpec {
@@ -352,9 +529,26 @@ impl FieldSpec {
         chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
         c_flags: bool,
     ) -> Self {
-        let left_justify = c_flags && chars.next_if_eq(&'-').is_some();
-        let zero_pad = chars.peek() == Some(&'0');
-        let mut width = None;
+        let mut left_justify = false;
+        let mut zero_pad = false;
+        let mut show_sign = false;
+        let mut space_sign = false;
+        let mut alternate = false;
+        while let Some(&flag) = chars.peek() {
+            match flag {
+                '-' if c_flags => left_justify = true,
+                '+' if c_flags => show_sign = true,
+                ' ' if c_flags => space_sign = true,
+                '#' if c_flags => alternate = true,
+                '0' => zero_pad = true,
+                _ => break,
+            }
+            chars.next();
+            if !c_flags {
+                break;
+            }
+        }
+        let mut width = if zero_pad { Some(0) } else { None };
         while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
             chars.next();
             width = Some(
@@ -365,10 +559,26 @@ impl FieldSpec {
                     .min(MAX_FIELD_WIDTH),
             );
         }
+        let mut precision = None;
+        if chars.next_if_eq(&'.').is_some() {
+            let mut value = 0usize;
+            while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
+                chars.next();
+                value = value
+                    .saturating_mul(10)
+                    .saturating_add(digit as usize)
+                    .min(MAX_FIELD_WIDTH);
+            }
+            precision = Some(value);
+        }
         Self {
             width,
             left_justify,
             zero_pad,
+            precision,
+            show_sign,
+            space_sign,
+            alternate,
         }
     }
 }
@@ -382,6 +592,22 @@ pub fn format_veryl_display_arg(
     spec: char,
     field: FieldSpec,
 ) -> Vec<u8> {
+    if matches!(spec, 'f' | 'F' | 'e' | 'E' | 'g' | 'G') {
+        return format_float(arg, spec, field);
+    }
+    if arg.float_precision.is_some() {
+        let value = integer_float_bits(arg);
+        let integer = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 64,
+            signed: true,
+            is_string: false,
+            float_precision: None,
+        };
+        return format_veryl_display_arg(&integer, spec, field);
+    }
+
     let spec = spec.to_ascii_lowercase();
     let bits_per_digit = match spec {
         'b' => Some(1),
@@ -419,12 +645,15 @@ pub fn pad_veryl_field(mut body: Vec<u8>, spec: char, field: FieldSpec) -> Vec<u
         return body;
     }
     let count = width - body.len();
-    let numeric = matches!(spec.to_ascii_lowercase(), 'd' | 'i' | 'h' | 'x' | 'o' | 'b');
+    let numeric = matches!(
+        spec.to_ascii_lowercase(),
+        'd' | 'i' | 'h' | 'x' | 'o' | 'b' | 'f' | 'e' | 'g'
+    );
     if field.left_justify {
         body.extend(std::iter::repeat_n(b' ', count));
     } else {
         let zero = field.zero_pad && numeric;
-        let at = usize::from(zero && body.starts_with(b"-"));
+        let at = usize::from(zero && matches!(body.first(), Some(b'-' | b'+' | b' ')));
         body.splice(
             at..at,
             std::iter::repeat_n(if zero { b'0' } else { b' ' }, count),
@@ -460,6 +689,7 @@ mod tests {
             width: 24,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         assert_eq!(format_sized_display_arg(&arg, 's', None), [255, 0, 128]);
         assert_eq!(
@@ -478,6 +708,7 @@ mod tests {
             width: 65,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         assert_eq!(format_sized_display_arg(&arg, 'c', None), [254]);
         let value = BigUint::from(0u8);
@@ -487,6 +718,7 @@ mod tests {
             width: 0,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         assert_eq!(format_sized_display_arg(&arg, 's', Some(0)), []);
     }
@@ -499,6 +731,7 @@ mod tests {
             width,
             signed,
             is_string: false,
+            float_precision: None,
         };
         String::from_utf8(format_sized_display_arg(&arg, spec, field)).unwrap()
     }
@@ -524,6 +757,7 @@ mod tests {
             width: 16,
             signed: false,
             is_string: true,
+            float_precision: None,
         };
         assert_eq!(
             format_sized_display_arg(&arg, 's', Some(3)),
@@ -539,6 +773,7 @@ mod tests {
             width,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         String::from_utf8(format_sized_display_arg(&arg, spec, None)).unwrap()
     }
@@ -569,6 +804,7 @@ mod tests {
             width,
             signed,
             is_string: false,
+            float_precision: None,
         };
         let mut chars = spec.chars().peekable();
         let field = FieldSpec::parse(&mut chars, true);
@@ -607,6 +843,7 @@ mod tests {
             width: 8,
             signed: true,
             is_string: false,
+            float_precision: None,
         };
         // Icarus places zeros behind the sign; Verilator instead prints 00-42.
         for (format, expected) in [("05d", "-0042"), ("-05d", "-42  "), ("02d", "-42")] {
@@ -628,11 +865,13 @@ mod tests {
             width: 8,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         let field = FieldSpec {
             width: Some(5),
             left_justify: true,
             zero_pad: false,
+            ..FieldSpec::default()
         };
         assert_eq!(format_sv_display_arg(&arg, 'h', field), b"05   ");
         assert_eq!(format_sv_display_arg(&arg, 'b', field), b"00000101");
@@ -660,8 +899,122 @@ mod tests {
             width: 12,
             signed: false,
             is_string: false,
+            float_precision: None,
         };
         assert_eq!(format_sized_display_arg(&arg, 'h', None), b"0z0");
         assert_eq!(format_sized_display_arg(&arg, 'h', Some(0)), b"z0");
+    }
+}
+
+#[cfg(test)]
+mod floating_tests {
+    use super::*;
+    use celox_design::FloatPrecision;
+    fn real(value: f64, format: &str) -> String {
+        let bits = BigUint::from(value.to_bits());
+        let arg = DisplayFormatArg {
+            value: &bits,
+            mask: None,
+            width: 64,
+            signed: false,
+            is_string: false,
+            float_precision: Some(FloatPrecision::F64),
+        };
+        let mut chars = format.chars().peekable();
+        let field = FieldSpec::parse(&mut chars, true);
+        let spec = chars.next().unwrap();
+        assert!(chars.next().is_none());
+        String::from_utf8(format_sv_display_arg(&arg, spec, field)).unwrap()
+    }
+    #[test]
+    fn floating_formats_cover_precision_exponents_signs_and_padding() {
+        for (value, spec, expected) in [
+            (1.5, "f", "1.500000"),
+            (1.5, "+010.2f", "+000001.50"),
+            (-1.5, "010.2f", "-000001.50"),
+            (1.5, "-10.2f", "1.50      "),
+            (0.0, " .0f", " 0"),
+            (2.0, "#.0f", "2."),
+            (1.5, "e", "1.500000e+00"),
+            (12345.0, ".2E", "1.23E+04"),
+            (12345.0, ".3g", "1.23e+04"),
+            (0.0001234, ".3g", "0.000123"),
+            (0.00001234, ".3g", "1.23e-05"),
+            (999.5, ".3g", "1e+03"),
+            (1.0, "#.3g", "1.00"),
+            (1.5, "#g", "1.50000"),
+            (-0.0, ".2f", "-0.00"),
+            (f64::INFINITY, "08f", "     inf"),
+            (f64::NEG_INFINITY, "E", "-INF"),
+            (f64::NAN, "+G", "+NAN"),
+            (1.5, "0d", "2"),
+            (-1.5, "0d", "-2"),
+        ] {
+            assert_eq!(real(value, spec), expected, "{value} %{spec}");
+        }
+    }
+    #[test]
+    fn integer_arguments_convert_numerically_and_shortreal_keeps_its_precision() {
+        let value = BigUint::from(0xffff_ffd6u32);
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 32,
+            signed: true,
+            is_string: false,
+            float_precision: None,
+        };
+        assert_eq!(
+            format_sv_display_arg(&arg, 'f', FieldSpec::default()),
+            b"-42.000000"
+        );
+        let masked = BigUint::from(255u8);
+        let unknown = BigUint::from(240u8);
+        let masked_arg = DisplayFormatArg {
+            value: &masked,
+            mask: Some(&unknown),
+            width: 8,
+            signed: false,
+            is_string: false,
+            float_precision: None,
+        };
+        assert_eq!(
+            format_sv_display_arg(&masked_arg, 'f', FieldSpec::default()),
+            b"15.000000"
+        );
+        let wide = BigUint::from(1u8) << 4095usize;
+        let wide_arg = DisplayFormatArg {
+            value: &wide,
+            mask: None,
+            width: 4096,
+            signed: true,
+            is_string: false,
+            float_precision: None,
+        };
+        assert_eq!(
+            format_sv_display_arg(&wide_arg, 'f', FieldSpec::default()),
+            b"-inf"
+        );
+        let value = BigUint::from(1.1f32.to_bits());
+        let arg = DisplayFormatArg {
+            value: &value,
+            mask: None,
+            width: 32,
+            signed: false,
+            is_string: false,
+            float_precision: Some(FloatPrecision::F32),
+        };
+        assert_eq!(
+            format_veryl_display_arg(
+                &arg,
+                'f',
+                FieldSpec {
+                    precision: Some(9),
+                    ..Default::default()
+                }
+            ),
+            b"1.100000024"
+        );
+        assert_eq!(format_display_arg(&arg, None), b"1.1");
     }
 }

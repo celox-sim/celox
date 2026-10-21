@@ -59,6 +59,52 @@ pub(super) struct MemoryWord {
 }
 
 impl<'a> ProcModule<'a> {
+    pub fn expr_float_precision(&self, expr: &sv::ir::Expr) -> Option<celox_sir::FloatPrecision> {
+        use celox_sir::FloatPrecision as P;
+        use sv::ir::{BinaryOp, Expr};
+        let combine = |left, right| match (left, right) {
+            (Some(P::F64), _) | (_, Some(P::F64)) => Some(P::F64),
+            (Some(P::F32), _) | (_, Some(P::F32)) => Some(P::F32),
+            _ => None,
+        };
+        match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } => self
+                .subroutines
+                .get(name)?
+                .return_type
+                .as_ref()
+                .and_then(|ty| match ty.kind() {
+                    sv::ir::TypeKind::Real => Some(P::F64),
+                    sv::ir::TypeKind::Shortreal => Some(P::F32),
+                    _ => None,
+                }),
+            Expr::Binary {
+                left,
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow,
+                right,
+            } => combine(
+                self.expr_float_precision(left),
+                self.expr_float_precision(right),
+            ),
+            Expr::Unary {
+                op: sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::ToTwoState,
+                expr,
+            } => self.expr_float_precision(expr),
+            Expr::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => combine(
+                self.expr_float_precision(then_expr),
+                self.expr_float_precision(else_expr),
+            ),
+            _ => floating::precision(expr, self.variables, self.name_to_id),
+        }
+    }
+
     pub fn new(
         module: &sv::ir::Module,
         variables: &'a mut HashMap<SourceVarId, SvVariable>,
@@ -559,6 +605,7 @@ impl<'a> ProcModule<'a> {
         self.variables.insert(
             id,
             SvVariable {
+                float: None,
                 path: vec![name.clone()],
                 width: width.max(1),
                 signed,
@@ -626,6 +673,7 @@ impl<'a> ProcModule<'a> {
             last.push_str(suffix);
         }
         let variable = SvVariable {
+            float: None,
             path,
             width: 1,
             signed: false,
@@ -934,10 +982,16 @@ fn template_arguments(template: &str) -> usize {
         if ch != '%' {
             continue;
         }
-        chars.next_if_eq(&'-');
+        while chars
+            .next_if(|ch| matches!(ch, '-' | '+' | ' ' | '#' | '0'))
+            .is_some()
+        {}
         while chars.next_if(char::is_ascii_digit).is_some() {}
+        if chars.next_if_eq(&'.').is_some() {
+            while chars.next_if(char::is_ascii_digit).is_some() {}
+        }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStT".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
         {
             count += 1;
         }
@@ -951,6 +1005,7 @@ fn template_arguments(template: &str) -> usize {
 /// displayed in the task's radix, directly after the previous one (IEEE
 /// 1800-2023 21.2.1.1).
 pub(super) fn system_task_template(
+    module: &ProcModule<'_>,
     kind: &SystemTaskKind,
     args: &[sv::ir::SystemTaskArg<sv::ir::Expr>],
 ) -> (Option<String>, Vec<sv::ir::SystemTaskArg<sv::ir::Expr>>) {
@@ -978,11 +1033,17 @@ pub(super) fn system_task_template(
             let mut text = template.unwrap_or_default();
             for value in &values[converted..] {
                 text.push('%');
-                text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
-                    's'
+                if let sv::ir::SystemTaskArg::Expr(expr) = value
+                    && module.expr_float_precision(expr).is_some()
+                {
+                    text.push_str("#g");
                 } else {
-                    *radix
-                });
+                    text.push(if matches!(value, sv::ir::SystemTaskArg::Str(_)) {
+                        's'
+                    } else {
+                        *radix
+                    });
+                }
             }
             template = Some(text);
         }
@@ -1029,6 +1090,7 @@ pub(super) fn register_locals(
         variables.insert(
             id,
             SvVariable {
+                float: type_info.float,
                 path: vec![local.source_name.clone()],
                 width: type_info.width,
                 signed: type_info.signed,
@@ -1158,6 +1220,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             let (value, mask, inner_width) = child(*inner)?;
             let inner_all = mask_of(inner_width);
             match op {
+                UnaryOp::Float { .. } => return None,
                 UnaryOp::Ident => (value, mask, width),
                 UnaryOp::ToTwoState => (
                     (&value & (&inner_all ^ &mask)) & &all,

@@ -89,16 +89,26 @@ fn bind_in_context(
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                 ExprKind::Literal(text)
-                    if typecheck::integral_literal_type_metadata(text).is_some() =>
+                    if typecheck::integral_literal_type_metadata(text).is_some()
+                        || (text.contains(['.', 'e', 'E'])
+                            && text.replace('_', "").parse::<f64>().is_ok()) =>
                 {
                     values.push(ConstExpr::Literal(text.clone()))
                 }
                 ExprKind::Name(name) if name.spelling == "$" => {
                     values.push(ConstExpr::Literal("$".into()))
                 }
-                ExprKind::Name(name) if !name.spelling.starts_with('$') => values.push(
-                    ConstExpr::Ident(instances::normalize_identifier(&name.spelling)),
-                ),
+                ExprKind::Name(name) if !name.spelling.starts_with('$') => {
+                    let name = instances::normalize_identifier(&name.spelling);
+                    let literal = dimensions.parameter_values.get(&name).and_then(|value| {
+                        let Expr::Literal(text) = value else {
+                            return None;
+                        };
+                        (text.contains(['.', 'e', 'E']) && text.parse::<f64>().is_ok())
+                            .then(|| ConstExpr::Literal(text.clone()))
+                    });
+                    values.push(literal.unwrap_or(ConstExpr::Ident(name)));
+                }
                 ExprKind::Unary {
                     operator,
                     expression,

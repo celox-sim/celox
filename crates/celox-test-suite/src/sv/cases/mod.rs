@@ -12,6 +12,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("aggregate_regressions.vtest"),
     },
     Group {
+        file: "src/sv/cases/floating_point.vtest",
+        text: include_str!("floating_point.vtest"),
+    },
+    Group {
         file: "src/sv/cases/random_plusargs.vtest",
         text: include_str!("random_plusargs.vtest"),
     },

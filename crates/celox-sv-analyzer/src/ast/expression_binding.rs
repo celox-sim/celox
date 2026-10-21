@@ -8,7 +8,8 @@ mod lvalues;
 mod selected;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
-    arguments, bind_value, call_name as native_name, callable_name, cast_target_native, ungroup,
+    arguments, bind_value, call_name as native_name, callable_name, cast_target_native, real_value,
+    remove_real_division_guards, ungroup,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 fn disagreement() -> AnalyzerError {

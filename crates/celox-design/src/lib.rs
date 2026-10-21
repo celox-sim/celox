@@ -1,5 +1,8 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
+mod float;
+pub use float::{eval_float_binary, eval_float_unary};
+
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -94,6 +97,8 @@ pub struct RuntimeEventSite {
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
+    #[serde(default)]
+    pub arg_float_precision: Vec<Option<FloatPrecision>>,
 }
 
 /// A function in the host's C ABI that the design calls, such as a
@@ -329,6 +334,8 @@ pub struct HostRequestValue<A> {
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
+    #[serde(default)]
+    pub float_precision: Option<FloatPrecision>,
 }
 
 impl<A: Copy> HostRequestValue<A> {
@@ -338,6 +345,7 @@ impl<A: Copy> HostRequestValue<A> {
             width: self.width,
             signed: self.signed,
             is_string: self.is_string,
+            float_precision: self.float_precision,
         }
     }
 }
@@ -995,6 +1003,45 @@ impl<A: Copy + Eq + std::hash::Hash> ElaboratedDesign<A> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatPrecision {
+    F32,
+    F64,
+}
+impl FloatPrecision {
+    pub fn width(self) -> usize {
+        match self {
+            Self::F32 => 32,
+            Self::F64 => 64,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Pow,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatUnaryOp {
+    Neg,
+    ToBool,
+    FromSigned { width: usize },
+    FromUnsigned { width: usize },
+    ToSigned { width: usize, round: bool },
+    ToUnsigned { width: usize, round: bool },
+    Convert { to: FloatPrecision },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -1025,6 +1072,10 @@ pub enum BinaryOp {
     LogicOr,
     EqWildcard,
     NeWildcard,
+    Float {
+        op: FloatBinaryOp,
+        precision: FloatPrecision,
+    },
 }
 
 impl BinaryOp {
@@ -1050,6 +1101,7 @@ impl BinaryOp {
 impl fmt::Display for BinaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
+            BinaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             BinaryOp::Add => "Add",
             BinaryOp::Sub => "Sub",
             BinaryOp::Mul => "Mul",
@@ -1099,6 +1151,10 @@ pub enum UnaryOp {
     PopCount,
     CountLeadingZeros,
     CountTrailingZeros,
+    Float {
+        op: FloatUnaryOp,
+        precision: FloatPrecision,
+    },
 }
 
 impl UnaryOp {
@@ -1110,6 +1166,14 @@ impl UnaryOp {
     /// `usize::MAX`.
     pub fn result_width(self, operand_width: usize) -> usize {
         match self {
+            UnaryOp::Float { op, precision } => match op {
+                FloatUnaryOp::ToBool => 1,
+                FloatUnaryOp::ToSigned { width, .. } | FloatUnaryOp::ToUnsigned { width, .. } => {
+                    width
+                }
+                FloatUnaryOp::Convert { to } => to.width(),
+                _ => precision.width(),
+            },
             UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
                 operand_width
@@ -1124,6 +1188,7 @@ impl UnaryOp {
 impl fmt::Display for UnaryOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let op_str = match self {
+            UnaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             UnaryOp::Ident => "Ident",
             UnaryOp::ToTwoState => "ToTwoState",
             UnaryOp::Minus => "Minus",
@@ -1349,6 +1414,7 @@ mod tests {
             width: 17,
             signed: true,
             is_string: false,
+            float_precision: None,
         };
         let site = HostRequestSite {
             process: 2,
@@ -1439,6 +1505,7 @@ mod tests {
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
+            arg_float_precision: Vec::new(),
         });
         runtime.comb_observers.push(RuntimeCombObserver {
             site_id: 0,

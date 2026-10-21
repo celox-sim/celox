@@ -478,6 +478,9 @@ pub(super) fn lower_unary_mask(
     src_width: usize,
 ) -> VReg {
     match op {
+        UnaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         UnaryOp::ToTwoState => {
             let zero = ctx.alloc_vreg(SpillDesc::remat(0));
             block.push(MInst::LoadImm {
@@ -1490,6 +1493,9 @@ pub(super) fn lower_wide_unary_mask(
     let sm_chunks = get_wide_mask_chunks(ctx, block, &src, n_src);
 
     match op {
+        UnaryOp::Float { .. } => {
+            unreachable!("float operations are lowered before integer operations")
+        }
         UnaryOp::ToTwoState => {
             let n_dst = ISelContext::num_chunks(d_width);
             let mut dst_m_chunks = Vec::with_capacity(n_dst);
