@@ -179,7 +179,7 @@ pub trait SimBackend {
         if let Some(trace) = self.layout().trace.as_ref() {
             let len = signal.array_layout.map_or_else(
                 || celox_state_layout::get_byte_size(signal.width),
-                |array| array.plane_size,
+                |array| array.element_count * array.element_stride,
             );
             let (ptr, _) = self.memory_as_ptr();
             // SAFETY: layout homes and metadata fit in the writable state image.

@@ -143,7 +143,7 @@ fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
         .arg(&results)
         .current_dir(&fixture)
         .env("COCOTB_TESTCASE", "inherited_selector_must_be_cleared")
-        .env("PYTHONPATH", python_path)
+        .env("PYTHONPATH", &python_path)
         .output()
         .unwrap();
     assert!(
@@ -529,4 +529,10 @@ fn cocotb_uses_declared_force_targets_in_an_optimized_native_image() {
     assert_eq!(xml.matches("<testcase ").count(), 1, "{xml}");
     assert!(!xml.contains("<failure"), "{xml}");
     assert!(!xml.contains("<error"), "{xml}");
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
+fn cocotb_indexes_unpacked_arrays_and_observes_element_changes() {
+    check_cocotb_native_design(&["arrays.sv"], "test_arrays", "indexes_unpacked_arrays");
 }

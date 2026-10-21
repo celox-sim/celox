@@ -66,6 +66,8 @@ pub struct VariableInfo {
     /// arrays because that is the source-independent storage shape. The
     /// testbench adapter also needs packed shape for chained selects.
     pub packed_dims: Vec<usize>,
+    /// Declared unpacked bounds, in storage order; empty uses zero-based dimensions.
+    pub unpacked_ranges: Vec<(i128, i128)>,
 }
 
 impl std::ops::Deref for VariableInfo {

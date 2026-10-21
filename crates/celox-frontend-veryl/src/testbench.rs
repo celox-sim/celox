@@ -3821,6 +3821,7 @@ mod tests {
             path: path.clone(),
             var_kind: VariableKind::Variable,
             signed: false,
+            unpacked_ranges: Vec::new(),
             packed_dims: vec![8],
             metadata: VariableMetadata {
                 width: 8,

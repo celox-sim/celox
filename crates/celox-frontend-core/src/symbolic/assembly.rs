@@ -1690,6 +1690,7 @@ fn module_variables(
                     var_kind: variable.kind,
                     signed: variable.signed,
                     packed_dims: variable.packed_dims.clone(),
+                    unpacked_ranges: variable.unpacked_ranges.clone(),
                     metadata: variable.metadata.clone(),
                 },
             );

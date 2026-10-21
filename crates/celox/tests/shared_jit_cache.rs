@@ -674,6 +674,25 @@ fn native_program_image_rejects_v16_before_decoding_host_request_schema() {
     ));
 }
 
+/// Version 21 retains declared unpacked bounds in runtime and VPI metadata.
+#[test]
+fn native_program_image_rejects_v20_before_decoding_unpacked_bound_schema() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .to_container_bytes()
+        .unwrap();
+    let trailer_start = encoded.len() - NATIVE_IMAGE_TRAILER_SIZE;
+    encoded[trailer_start + NATIVE_IMAGE_VERSION_OFFSET
+        ..trailer_start + NATIVE_IMAGE_VERSION_OFFSET + 2]
+        .copy_from_slice(&20u16.to_le_bytes());
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::UnsupportedVersion(20))
+    ));
+}
+
 #[test]
 fn native_program_image_rejects_v3_before_decoding_changed_schema() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
