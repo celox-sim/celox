@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792542709749,
+  "lastUpdate": 1792542798890,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -393141,6 +393141,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-aarch64/heliodor_suite_66_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 5959694.060484
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "a496a29db0994b5d546c38142c090707bbfffe83",
+          "message": "chore(deps): update rust toolchain to v1.99.1 (#1527)",
+          "timestamp": "2026-10-19T07:40:25Z",
+          "url": "https://github.com/celox-sim/celox/commit/a496a29db0994b5d546c38142c090707bbfffe83"
+        },
+        "date": 1792542798890,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_66_smp_linux_boot_4hart_startup",
+            "unit": "ms",
+            "value": 27618.048382
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_66_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 6038571.363201
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_66_smp_linux_boot_4hart_end_to_end",
+            "unit": "ms",
+            "value": 6066189.412295
           }
         ]
       }
