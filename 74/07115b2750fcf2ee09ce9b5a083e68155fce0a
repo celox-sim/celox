@@ -1,3 +1,6 @@
-Correct the BASE-R coverage statement: upstream requests 1fs precision, which the current CLI harness does not apply; gearbox cases fail at Clock construction as well as the full run timing out. Message only, source unchanged.
+Revision history for #1659:
 
-Add the two missing retained Icarus exclusion rows required by CI, and record the completed crossbar_1s run.
+rev 2 (content) 2026-10-21 00:07 UTC — Correct the BASE-R coverage statement: upstream requests 1fs precision, which the current CLI harness does not apply; gearbox cases fail at Clock construction as well as the full run timing out. Message only, source unchanged.  Add the two missing retained Icarus exclusion rows required by CI, and record the completed crossbar_1s run.
+rev 1 (initial) 2026-10-21 00:07 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":1659,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"d922bbea1918e2b9b8d6db265e5f1948a5988c32","timestamp_iso":"2026-10-21T00:07:01Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"d922bbea1918e2b9b8d6db265e5f1948a5988c32","new_sha":"7407115b2750fcf2ee09ce9b5a083e68155fce0a","timestamp_iso":"2026-10-21T00:07:01Z","reason":"Correct the BASE-R coverage statement: upstream requests 1fs precision, which the current CLI harness does not apply; gearbox cases fail at Clock construction as well as the full run timing out. Message only, source unchanged.\n\nAdd the two missing retained Icarus exclusion rows required by CI, and record the completed crossbar_1s run.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/d922bbea1918e2b9b8d6db265e5f1948a5988c32...7407115b2750fcf2ee09ce9b5a083e68155fce0a"}]} -->
