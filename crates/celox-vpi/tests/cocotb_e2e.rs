@@ -155,6 +155,31 @@ fn check_cocotb_native_design(source: &[&str], module: &str, filter: &str) {
 
     assert!(results.is_file());
 
+    let unmatched = Command::new(&executable)
+        .args([
+            "--test-module",
+            module,
+            "--test-filter",
+            "^no_such_cocotb_test$",
+            "--python",
+            &python,
+        ])
+        .arg("--results-file")
+        .arg(&results)
+        .current_dir(&fixture)
+        .env("PYTHONPATH", &python_path)
+        .output()
+        .unwrap();
+    assert!(
+        !unmatched.status.success(),
+        "an empty test selection was reported as successful"
+    );
+    assert!(
+        String::from_utf8_lossy(&unmatched.stderr).contains("no cocotb tests were executed"),
+        "{}",
+        String::from_utf8_lossy(&unmatched.stderr)
+    );
+
     let failed_runtime = Command::new(&executable)
         .args(["--test-module", "missing_test_module", "--python", &python])
         .arg("--results-file")

@@ -571,7 +571,19 @@ fn discover_vpi(python: &Path) -> Result<PathBuf, String> {
 
 fn check_results(python: &Path, results_file: &Path) -> Result<(), String> {
     let output = Command::new(python)
-        .args([OsStr::new("-m"), OsStr::new("cocotb_tools.check_results")])
+        .args(["-c", r#"
+import sys
+from xml.etree import ElementTree
+
+cases = list(ElementTree.parse(sys.argv[1]).getroot().iter("testcase"))
+executed = [case for case in cases if case.find("skipped") is None]
+failed = [case for case in executed if case.find("failure") is not None or case.find("error") is not None]
+if not executed:
+    sys.exit("no cocotb tests were executed (check the test filter and skip settings)")
+if failed:
+    names = ", ".join(case.get("name", "<unnamed>") for case in failed[:8])
+    sys.exit(f"{len(failed)} cocotb test(s) failed: {names}")
+"#])
         .arg(results_file)
         .output()
         .map_err(|error| format!("failed to check cocotb results: {error}"))?;
